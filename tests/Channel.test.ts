@@ -3,6 +3,7 @@ import { Channel } from '../src/Channel'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
 import { EVENT_KIND, KeyType, Sender } from '../src/types';
 import { createMessageStream } from '../src/utils';
+import { bytesToHex } from '@noble/hashes/utils';
 
 describe('Channel', () => {
   const aliceSecretKey = generateSecretKey()
@@ -26,7 +27,8 @@ describe('Channel', () => {
 
     expect(event).toBeTruthy()
     expect(event.kind).toBe(EVENT_KIND)
-    expect(event.tags).toEqual([])
+    expect(event.tags[0][0]).toEqual("header")
+    expect(event.tags[0][1]).toBeTruthy()
     expect(event.content).toBeTruthy()
     expect(typeof event.created_at).toBe('number')
     expect(event.pubkey).toHaveLength(64)
@@ -34,40 +36,35 @@ describe('Channel', () => {
     expect(event.sig).toHaveLength(128)
   })
 
-  it('should create channels with correct receiving and sending chain keys', () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, 'alice')
-    const bob = Channel.init(dummySubscribe, getPublicKey(aliceSecretKey), bobSecretKey, 'bob')
+  it('should create channels with corresponding chain & root keys', () => {
+    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice')
+    const bob = Channel.init(dummySubscribe, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob')
     expect(alice.state.receivingChainKey).toEqual(bob.state.sendingChainKey)
     expect(alice.state.sendingChainKey).toEqual(bob.state.receivingChainKey)
     expect(alice.getNostrSenderKeypair(Sender.Us, KeyType.Current)).toEqual(bob.getNostrSenderKeypair(Sender.Them, KeyType.Current))
+    expect(alice.state.rootKey).toEqual(bob.state.rootKey)
   })
 
   it('should handle incoming events and update keys', async () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, 'alice')
+    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice')
+
     const event = alice.send('Hello, Bob!')
     
     const bob = Channel.init((filter, onEvent) => {
-      console.log('filter.authors', filter.authors, 'event.pubkey', event.pubkey)
       if (matchFilter(filter, event)) {
         onEvent(event)
       }
       return dummyUnsubscribe
-    }, getPublicKey(aliceSecretKey), bobSecretKey, 'bob')
+    }, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob')
+
+    const bobInitialNextPublicKey = bob.state.ourNextNostrKey.publicKey
 
     expect(event.pubkey).toBe(bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey)
-
-    const aliceInitialNextPublicKey = alice.state.ourNextNostrKey.publicKey
-    const bobInitialNextPublicKey = bob.state.ourNextNostrKey.publicKey
 
     const bobMessages = createMessageStream(bob);
 
     const bobFirstMessage = await bobMessages.next();
     expect(bobFirstMessage.value?.data).toBe('Hello, Bob!')
-    expect(bob.state.theirCurrentNostrPublicKey).toBe(aliceInitialNextPublicKey)
-    expect(bob.state.ourNextNostrKey.publicKey).toBe(bobInitialNextPublicKey)
-    expect(bob.state.ourCurrentNostrKey.publicKey).toBe(getPublicKey(bobSecretKey))
-    expect(alice.state.ourCurrentNostrKey.publicKey).toBe(getPublicKey(aliceSecretKey))
-    expect(alice.getNostrSenderKeypair(Sender.Them, KeyType.Next)).toEqual(bob.getNostrSenderKeypair(Sender.Us, KeyType.Current))
   })
 
   it('should handle multiple back-and-forth messages correctly', async () => {
@@ -85,29 +82,34 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe('Alice'), getPublicKey(bobSecretKey), aliceSecretKey, 'alice');
-    const bob = Channel.init(createSubscribe('Bob'), getPublicKey(aliceSecretKey), bobSecretKey, 'bob');
+    const alice = Channel.init(createSubscribe('Alice'), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice');
+    const bob = Channel.init(createSubscribe('Bob'), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob');
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);
 
-    const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string) => {
+    const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string, receiverChannel: Channel) => {
+      expect(bytesToHex(sender.state.sendingChainKey)).toEqual(bytesToHex(receiverChannel.state.receivingChainKey));
+      expect(bytesToHex(sender.state.receivingChainKey)).toEqual(bytesToHex(receiverChannel.state.sendingChainKey));
+
       messageQueue.push(sender.send(message));
       const receivedMessage = await receiver.next();
+
+      console.log(`${receiverChannel.name} got from ${sender.name}: ${receivedMessage.value.data}`)
       expect(receivedMessage.value?.data).toBe(message);
     };
 
     // Test conversation
-    await sendAndExpect(alice, bobMessages, 'Hello Bob!');
-    await sendAndExpect(bob, aliceMessages, 'Hi Alice!');
-    await sendAndExpect(alice, bobMessages, 'How are you?');
+    await sendAndExpect(alice, bobMessages, 'Hello Bob!', bob);
+    await sendAndExpect(bob, aliceMessages, 'Hi Alice!', alice);
+    await sendAndExpect(alice, bobMessages, 'How are you?', bob);
 
     // Test consecutive messages from Bob
-    await sendAndExpect(bob, aliceMessages, 'I am fine, thank you!');
-    await sendAndExpect(bob, aliceMessages, 'How about you?');
+    await sendAndExpect(bob, aliceMessages, 'I am fine, thank you!', alice);
+    await sendAndExpect(bob, aliceMessages, 'How about you?', alice);
 
     // Final message from Alice
-    await sendAndExpect(alice, bobMessages, "I'm doing great, thanks!");
+    await sendAndExpect(alice, bobMessages, "I'm doing great, thanks!", bob);
 
     // No remaining messagess
     expect(messageQueue.length).toBe(0);
