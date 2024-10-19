@@ -6,6 +6,7 @@ import { sha256 } from '@noble/hashes/sha256';
 
 export function serializeChannelState(state: ChannelState): string {
   return JSON.stringify({
+    rootKey: bytesToHex(state.rootKey),
     theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
     ourCurrentNostrKey: {
       publicKey: state.ourCurrentNostrKey.publicKey,
@@ -16,7 +17,6 @@ export function serializeChannelState(state: ChannelState): string {
       privateKey: bytesToHex(state.ourNextNostrKey.privateKey),
     },
     receivingChainKey: bytesToHex(state.receivingChainKey),
-    nextReceivingChainKey: bytesToHex(state.nextReceivingChainKey),
     sendingChainKey: bytesToHex(state.sendingChainKey),
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
@@ -33,6 +33,7 @@ export function serializeChannelState(state: ChannelState): string {
 export function deserializeChannelState(data: string): ChannelState {
   const state = JSON.parse(data);
   return {
+    rootKey: hexToBytes(state.rootKey),
     theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
     ourCurrentNostrKey: {
       publicKey: state.ourCurrentNostrKey.publicKey,
@@ -43,7 +44,6 @@ export function deserializeChannelState(data: string): ChannelState {
       privateKey: hexToBytes(state.ourNextNostrKey.privateKey),
     },
     receivingChainKey: hexToBytes(state.receivingChainKey),
-    nextReceivingChainKey: hexToBytes(state.nextReceivingChainKey),
     sendingChainKey: hexToBytes(state.sendingChainKey),
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
@@ -85,7 +85,12 @@ export async function* createMessageStream(channel: Channel): AsyncGenerator<Mes
   }
 }
 
-export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32)) {
-  const prk = hkdf_extract(sha256, input1, input2)
-  return hkdf_expand(sha256, prk, new Uint8Array([1]), 32)
+export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32), numOutputs: number = 1): Uint8Array[] {
+  const prk = hkdf_extract(sha256, input1, input2);
+  
+  const outputs: Uint8Array[] = [];
+  for (let i = 1; i <= numOutputs; i++) {
+    outputs.push(hkdf_expand(sha256, prk, new Uint8Array([i]), 32));
+  }
+  return outputs;
 }

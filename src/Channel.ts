@@ -2,7 +2,7 @@ import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent } 
 import { hexToBytes } from "@noble/hashes/utils";
 import {
   ChannelState,
-  RatchetMessage,
+  Header,
   Unsubscribe,
   NostrSubscribe,
   MessageCallback,
@@ -13,105 +13,62 @@ import {
 } from "./types";
 import { kdf } from "./utils";
 
+const MAX_SKIP = 1000;
+
 export class Channel {
-  nostrUnsubscribe: Unsubscribe | undefined
-  nostrNextUnsubscribe: Unsubscribe | undefined
-  currentInternalSubscriptionId = 0
-  internalSubscriptions = new Map<number, MessageCallback>()
-  name = Math.random().toString(36).substring(2, 6)
+  private nostrUnsubscribe?: Unsubscribe;
+  private nostrNextUnsubscribe?: Unsubscribe;
+  private internalSubscriptions = new Map<number, MessageCallback>();
+  private currentInternalSubscriptionId = 0;
+  public name: string;
 
   constructor(private nostrSubscribe: NostrSubscribe, public state: ChannelState) {
-    this.name = Math.random().toString(36).substring(2, 6)
+    this.name = Math.random().toString(36).substring(2, 6);
   }
 
   /**
-   * To preserve forward secrecy, do not use long-term keys for channel initialization. Use e.g. InviteLink to exchange session keys.
+   * 
+   * @param nostrSubscribe 
+   * @param theirCurrentNostrPublicKey 
+   * @param ourCurrentPrivateKey 
+   * @param sharedSecret optional, but useful to keep the first chain of messages secure. Unlike the Nostr keys, it can be forgotten after the 1st message in the chain.
+   * @param name
+   * @returns 
    */
-  static init(nostrSubscribe: NostrSubscribe, theirCurrentNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, name?: string): Channel {
-    const ourNextPrivateKey = generateSecretKey()
+  static init(nostrSubscribe: NostrSubscribe, theirCurrentNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, sharedSecret = new Uint8Array(), name?: string): Channel {
+    const ourNextPrivateKey = generateSecretKey();
     const state: ChannelState = {
+      rootKey: sharedSecret,
       theirCurrentNostrPublicKey,
       ourCurrentNostrKey: { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey },
       ourNextNostrKey: { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey },
       receivingChainKey: new Uint8Array(),
-      nextReceivingChainKey: new Uint8Array(),
       sendingChainKey: new Uint8Array(),
       sendingChainMessageNumber: 0,
       receivingChainMessageNumber: 0,
       previousSendingChainMessageCount: 0,
       skippedMessageKeys: {}
-    }
-    const channel = new Channel(nostrSubscribe, state)
-    channel.updateTheirCurrentNostrPublicKey(theirCurrentNostrPublicKey)
-    if (name) channel.name = name
-    return channel
+    };
+    const channel = new Channel(nostrSubscribe, state);
+    channel.updateTheirCurrentNostrPublicKey(theirCurrentNostrPublicKey);
+    if (name) channel.name = name;
+    return channel;
   }
 
-  updateTheirCurrentNostrPublicKey(theirNewPublicKey: string) {
-    this.state.theirCurrentNostrPublicKey = theirNewPublicKey
-    this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber
-    this.state.sendingChainMessageNumber = 0
-    this.state.receivingChainMessageNumber = 0
-    this.state.receivingChainKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Current).privateKey
-    this.state.nextReceivingChainKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Next).privateKey
-    this.state.sendingChainKey = this.getNostrSenderKeypair(Sender.Us, KeyType.Current).privateKey
-  }
+  send(data: string): VerifiedEvent {
+    const [header, encryptedData] = this.ratchetEncrypt(data);
+    
+    const sendingNostrPrivateKey = this.getNostrSenderKeypair(Sender.Us, KeyType.Current).privateKey;
+    const encryptedHeader = nip44.encrypt(JSON.stringify(header), sendingNostrPrivateKey);
+    
+    const nostrEvent = finalizeEvent({
+      content: encryptedData,
+      kind: EVENT_KIND,
+      tags: [["header", encryptedHeader]],
+      created_at: Math.floor(Date.now() / 1000)
+    }, sendingNostrPrivateKey);
 
-  private rotateOurCurrentNostrKey() {
-    this.state.ourCurrentNostrKey = this.state.ourNextNostrKey
-    const ourNextSecretKey = generateSecretKey()
-    this.state.ourNextNostrKey = {
-      publicKey: getPublicKey(ourNextSecretKey),
-      privateKey: ourNextSecretKey
-    }
-  }
-
-  getNostrSenderKeypair(sender: Sender, keyType: KeyType): KeyPair {
-    if (sender === Sender.Us && keyType === KeyType.Next) {
-      throw new Error("We don't have their next key")
-    }
-    const ourPrivate = keyType === KeyType.Current ? this.state.ourCurrentNostrKey.privateKey : this.state.ourNextNostrKey.privateKey
-    const theirPublic = this.state.theirCurrentNostrPublicKey
-    const senderPubKey = sender === Sender.Us ? getPublicKey(ourPrivate) : theirPublic
-    const privateKey = kdf(nip44.getConversationKey(ourPrivate, theirPublic), hexToBytes(senderPubKey))
-    return {
-      publicKey: getPublicKey(privateKey),
-      privateKey
-    }
-  }
-
-  private nostrSubscribeNext() {
-    const nextReceivingPublicKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Next).publicKey
-    const decryptKey = this.state.nextReceivingChainKey
-    this.nostrNextUnsubscribe = this.nostrSubscribe({authors: [nextReceivingPublicKey], kinds: [EVENT_KIND]}, (e) => {
-      // they acknowledged our next key and sent with the corresponding new nostr sender key
-      const msg = JSON.parse(nip44.decrypt(e.content, decryptKey)) as RatchetMessage
-      if (msg.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
-        this.rotateOurCurrentNostrKey()
-        this.updateTheirCurrentNostrPublicKey(msg.nextPublicKey)
-        this.nostrUnsubscribe?.()
-        this.nostrUnsubscribe = this.nostrNextUnsubscribe
-        this.nostrSubscribeNext()
-      }
-      this.internalSubscriptions.forEach(callback => callback({id: e.id, data: msg.data, pubkey: msg.nextPublicKey, time: msg.time}))
-    })
-  }
-
-  private subscribeToNostrEvents() {
-    if (this.nostrUnsubscribe) {
-      return
-    }
-    const receivingPublicKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey
-    const decryptKey = this.state.receivingChainKey
-    this.nostrUnsubscribe = this.nostrSubscribe({authors: [receivingPublicKey], kinds: [EVENT_KIND]}, (e) => {
-      const msg = JSON.parse(nip44.decrypt(e.content, decryptKey)) as RatchetMessage
-      if (msg.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
-        // they announced their next key: we will use it to derive the next nostr sender key
-        this.updateTheirCurrentNostrPublicKey(msg.nextPublicKey)
-      }
-      this.internalSubscriptions.forEach(callback => callback({id: e.id, data: msg.data, pubkey: msg.nextPublicKey, time: msg.time}))
-    })
-    this.nostrSubscribeNext()
+    return nostrEvent;
   }
 
   onMessage(callback: MessageCallback): Unsubscribe {
@@ -121,23 +78,127 @@ export class Channel {
     return () => this.internalSubscriptions.delete(id)
   }
 
-  send(data: string): VerifiedEvent {
-    const message: RatchetMessage = {
-      number: this.state.sendingChainMessageNumber,
-      data: data,
-      nextPublicKey: this.state.ourNextNostrKey.publicKey,
-      time: Date.now()
+  getNostrSenderKeypair(sender: Sender, keyType: KeyType): KeyPair {
+    if (sender === Sender.Us && keyType === KeyType.Next) {
+      throw new Error("We don't have their next key")
     }
-    this.state.sendingChainMessageNumber++
-    const sendingPrivateKey = this.getNostrSenderKeypair(Sender.Us, KeyType.Current).privateKey
-    const encryptedData = nip44.encrypt(JSON.stringify(message), this.state.sendingChainKey)
-    const nostrEvent = finalizeEvent({
-      content: encryptedData,
-      kind: EVENT_KIND,
-      tags: [],
-      created_at: Math.floor(Date.now() / 1000)
-    }, sendingPrivateKey)
+    const ourPrivate = keyType === KeyType.Current ? this.state.ourCurrentNostrKey.privateKey : this.state.ourNextNostrKey.privateKey
+    const theirPublic = this.state.theirCurrentNostrPublicKey
+    const senderPubKey = sender === Sender.Us ? getPublicKey(ourPrivate) : theirPublic
+    const [privateKey] = kdf(nip44.getConversationKey(ourPrivate, theirPublic), hexToBytes(senderPubKey))
+    return {
+      publicKey: getPublicKey(privateKey),
+      privateKey
+    }
+  }
 
-    return nostrEvent
+  private ratchetEncrypt(plaintext: string): [Header, string] {
+    const [newSendingChainKey, messageKey] = kdf(this.state.sendingChainKey, new Uint8Array([1]), 2);
+    this.state.sendingChainKey = newSendingChainKey;
+    const header: Header = {
+      number: this.state.sendingChainMessageNumber++,
+      nextPublicKey: this.state.ourNextNostrKey.publicKey,
+      time: Date.now(),
+      previousChainLength: this.state.previousSendingChainMessageCount
+    };
+    return [header, nip44.encrypt(plaintext, messageKey)];
+  }
+
+  private ratchetDecrypt(header: Header, ciphertext: string, first = false): string {
+    const plaintext = this.trySkippedMessageKeys(header, ciphertext);
+    if (plaintext) return plaintext;
+
+    this.skipMessageKeys(header.number);
+
+    if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
+      this.skipMessageKeys(header.previousChainLength);
+      if (!first) {
+        this.rotateOurCurrentNostrKey();
+        this.updateTheirCurrentNostrPublicKey(header.nextPublicKey);
+      }
+    }
+    
+    const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey, new Uint8Array([1]), 2);
+    this.state.receivingChainKey = newReceivingChainKey;
+    this.state.receivingChainMessageNumber++;
+
+    return nip44.decrypt(ciphertext, messageKey);
+  }
+
+  private updateTheirCurrentNostrPublicKey(theirNewPublicKey: string) {
+    this.state.theirCurrentNostrPublicKey = theirNewPublicKey;
+    this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber;
+    this.state.sendingChainMessageNumber = 0;
+    this.state.receivingChainMessageNumber = 0;
+    const conversationKey = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, theirNewPublicKey);
+    const [rootKey, chainKey] = kdf(this.state.rootKey, conversationKey, 2);
+    this.state.rootKey = rootKey;
+    this.state.receivingChainKey = chainKey;
+    this.state.sendingChainKey = chainKey;
+  }
+
+  private rotateOurCurrentNostrKey() {
+    this.state.ourCurrentNostrKey = this.state.ourNextNostrKey;
+    const ourNextSecretKey = generateSecretKey();
+    this.state.ourNextNostrKey = {
+      publicKey: getPublicKey(ourNextSecretKey),
+      privateKey: ourNextSecretKey
+    };
+  }
+
+  private skipMessageKeys(until: number) {
+    if (this.state.receivingChainMessageNumber + MAX_SKIP < until) {
+      throw new Error("Too many skipped messages");
+    }
+    while (this.state.receivingChainMessageNumber < until) {
+      console.log('skipping message key', this.state.receivingChainMessageNumber)
+      const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey, new Uint8Array([1]), 2);
+      this.state.receivingChainKey = newReceivingChainKey;
+      this.state.skippedMessageKeys[this.state.receivingChainMessageNumber] = messageKey;
+      this.state.receivingChainMessageNumber++;
+    }
+  }
+
+  private trySkippedMessageKeys(header: Header, ciphertext: string): string | null {
+    const key = header.number;
+    if (key in this.state.skippedMessageKeys) {
+      const mk = this.state.skippedMessageKeys[key];
+      delete this.state.skippedMessageKeys[key];
+      return nip44.decrypt(ciphertext, mk);
+    }
+    return null;
+  }
+
+  // Nostr event handling methods
+  private handleNostrEvent(e: any, receivingNostrKey: KeyPair, first: boolean) {
+    const header = JSON.parse(nip44.decrypt(e.tags[0][1], receivingNostrKey.privateKey)) as Header;
+    const data = this.ratchetDecrypt(header, e.content, first);
+    this.internalSubscriptions.forEach(callback => callback({id: e.id, data, pubkey: header.nextPublicKey, time: header.time}));
+    
+    if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
+      this.nostrUnsubscribe?.();
+      this.nostrUnsubscribe = this.nostrNextUnsubscribe;
+      this.subscribeToNextNostrEvents();
+    }
+  }
+
+  private subscribeToNostrEvents() {
+    if (this.nostrUnsubscribe) return;
+    
+    const receivingNostrKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Current);
+    this.nostrUnsubscribe = this.nostrSubscribe(
+      {authors: [receivingNostrKey.publicKey], kinds: [EVENT_KIND]},
+      (e) => this.handleNostrEvent(e, receivingNostrKey, true)
+    );
+    
+    this.subscribeToNextNostrEvents();
+  }
+
+  private subscribeToNextNostrEvents() {
+    const nextReceivingNostrKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Next);
+    this.nostrNextUnsubscribe = this.nostrSubscribe(
+      {authors: [nextReceivingNostrKey.publicKey], kinds: [EVENT_KIND]},
+      (e) => this.handleNostrEvent(e, nextReceivingNostrKey, false)
+    );
   }
 }

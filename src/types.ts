@@ -7,9 +7,9 @@ export type Message = {
   time: number; // unlike Nostr, we use milliseconds instead of seconds
 }
 
-export type RatchetMessage = {
+export type Header = {
   number: number;
-  data: string;
+  previousChainLength: number;
   nextPublicKey: string;
   time: number;
 }
@@ -25,11 +25,11 @@ export type KeyPair = {
 }
 
 export interface ChannelState {
+  rootKey: Uint8Array;
   theirCurrentNostrPublicKey: string;
   ourCurrentNostrKey: KeyPair;
   ourNextNostrKey: KeyPair;
   receivingChainKey: Uint8Array;
-  nextReceivingChainKey: Uint8Array;
   sendingChainKey: Uint8Array;
   sendingChainMessageNumber: number;
   receivingChainMessageNumber: number;
