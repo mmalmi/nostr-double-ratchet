@@ -34,7 +34,7 @@ export interface ChannelState {
   sendingChainMessageNumber: number;
   receivingChainMessageNumber: number;
   previousSendingChainMessageCount: number;
-  skippedMessageKeys: Record<number, Uint8Array>;
+  skippedMessageKeys: Record<string, Uint8Array>;
 }
 
 export type Unsubscribe = () => void;

@@ -11,7 +11,7 @@ import {
   Sender,
   KeyType,
 } from "./types";
-import { kdf } from "./utils";
+import { kdf, skippedMessageIndexKey } from "./utils";
 
 const MAX_SKIP = 1000;
 
@@ -27,13 +27,7 @@ export class Channel {
   }
 
   /**
-   * 
-   * @param nostrSubscribe 
-   * @param theirCurrentNostrPublicKey 
-   * @param ourCurrentPrivateKey 
    * @param sharedSecret optional, but useful to keep the first chain of messages secure. Unlike the Nostr keys, it can be forgotten after the 1st message in the chain.
-   * @param name
-   * @returns 
    */
   static init(nostrSubscribe: NostrSubscribe, theirCurrentNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, sharedSecret = new Uint8Array(), name?: string): Channel {
     const ourNextPrivateKey = generateSecretKey();
@@ -47,7 +41,7 @@ export class Channel {
       sendingChainMessageNumber: 0,
       receivingChainMessageNumber: 0,
       previousSendingChainMessageCount: 0,
-      skippedMessageKeys: {}
+      skippedMessageKeys: {},
     };
     const channel = new Channel(nostrSubscribe, state);
     channel.updateTheirCurrentNostrPublicKey(theirCurrentNostrPublicKey);
@@ -104,8 +98,8 @@ export class Channel {
     return [header, nip44.encrypt(plaintext, messageKey)];
   }
 
-  private ratchetDecrypt(header: Header, ciphertext: string, first = false): string {
-    const plaintext = this.trySkippedMessageKeys(header, ciphertext);
+  private ratchetDecrypt(header: Header, ciphertext: string, nostrSender: string, first = false): string {
+    const plaintext = this.trySkippedMessageKeys(header, ciphertext, nostrSender);
     if (plaintext) return plaintext;
 
     this.skipMessageKeys(header.number);
@@ -150,17 +144,19 @@ export class Channel {
     if (this.state.receivingChainMessageNumber + MAX_SKIP < until) {
       throw new Error("Too many skipped messages");
     }
+    const nostrSender = this.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey;
     while (this.state.receivingChainMessageNumber < until) {
       console.log('skipping message key', this.state.receivingChainMessageNumber)
       const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey, new Uint8Array([1]), 2);
       this.state.receivingChainKey = newReceivingChainKey;
-      this.state.skippedMessageKeys[this.state.receivingChainMessageNumber] = messageKey;
+      const key = skippedMessageIndexKey(nostrSender, this.state.receivingChainMessageNumber);
+      this.state.skippedMessageKeys[key] = messageKey;
       this.state.receivingChainMessageNumber++;
     }
   }
 
-  private trySkippedMessageKeys(header: Header, ciphertext: string): string | null {
-    const key = header.number;
+  private trySkippedMessageKeys(header: Header, ciphertext: string, nostrSender: string): string | null {
+    const key = skippedMessageIndexKey(nostrSender, header.number);
     if (key in this.state.skippedMessageKeys) {
       const mk = this.state.skippedMessageKeys[key];
       delete this.state.skippedMessageKeys[key];
@@ -172,7 +168,7 @@ export class Channel {
   // Nostr event handling methods
   private handleNostrEvent(e: any, receivingNostrKey: KeyPair, first: boolean) {
     const header = JSON.parse(nip44.decrypt(e.tags[0][1], receivingNostrKey.privateKey)) as Header;
-    const data = this.ratchetDecrypt(header, e.content, first);
+    const data = this.ratchetDecrypt(header, e.content, e.pubkey, first);
     this.internalSubscriptions.forEach(callback => callback({id: e.id, data, pubkey: header.nextPublicKey, time: header.time}));
     
     if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {

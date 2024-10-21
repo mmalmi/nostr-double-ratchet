@@ -94,3 +94,7 @@ export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32),
   }
   return outputs;
 }
+
+export function skippedMessageIndexKey(nostrSender: string, number: number): string {
+  return `${nostrSender}:${number}`;
+}
