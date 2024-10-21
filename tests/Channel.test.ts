@@ -70,7 +70,7 @@ describe('Channel', () => {
   it('should handle multiple back-and-forth messages correctly', async () => {
     const messageQueue: any[] = [];
 
-    const createSubscribe = (name: string) => (filter: any, onEvent: (event: any) => void) => {
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
       const checkQueue = () => {
         const index = messageQueue.findIndex(event => matchFilter(filter, event));
         if (index !== -1) {
@@ -82,8 +82,8 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe('Alice'), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice');
-    const bob = Channel.init(createSubscribe('Bob'), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob');
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice');
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob');
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);
@@ -114,4 +114,42 @@ describe('Channel', () => {
     // No remaining messagess
     expect(messageQueue.length).toBe(0);
   })
+
+  it('should handle out-of-order message delivery correctly', async () => {
+    const messageQueue: any[] = [];
+
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+        setTimeout(checkQueue, 100);
+      };
+      checkQueue();
+      return () => {};
+    };
+
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice');
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob');
+
+    const bobMessages = createMessageStream(bob);
+
+    messageQueue.push(alice.send('Message 1'));
+    const bobMessage1 = await bobMessages.next();
+    expect(bobMessage1.value?.data).toBe('Message 1');
+
+    const delayedMessage = alice.send('Message 2');
+
+    messageQueue.push(alice.send('Message 3'));
+    const bobMessage3 = await bobMessages.next();
+    expect(bobMessage3.value?.data).toBe('Message 3');
+
+    messageQueue.push(delayedMessage);
+
+    const bobMessage2 = await bobMessages.next();
+    expect(bobMessage2.value?.data).toBe('Message 2');
+
+    expect(messageQueue.length).toBe(0);
+  });
 })
