@@ -125,10 +125,11 @@ export class Channel {
     this.state.sendingChainMessageNumber = 0;
     this.state.receivingChainMessageNumber = 0;
     const conversationKey = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, theirNewPublicKey);
-    const [rootKey, chainKey] = kdf(this.state.rootKey, conversationKey, 2);
+    const [rootKey, chainKey1, chainKey2] = kdf(this.state.rootKey, conversationKey, 3);
     this.state.rootKey = rootKey;
-    this.state.receivingChainKey = chainKey;
-    this.state.sendingChainKey = chainKey;
+    const isOurKeyGreater = this.state.ourCurrentNostrKey.publicKey > theirNewPublicKey;
+    this.state.receivingChainKey = isOurKeyGreater ? chainKey1 : chainKey2;
+    this.state.sendingChainKey = isOurKeyGreater ? chainKey2 : chainKey1;
   }
 
   private rotateOurCurrentNostrKey() {
