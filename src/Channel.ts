@@ -98,23 +98,20 @@ export class Channel {
     return [header, nip44.encrypt(plaintext, messageKey)];
   }
 
-  private ratchetDecrypt(header: Header, ciphertext: string, nostrSender: string, first = false): string {
+  private ratchetDecrypt(header: Header, ciphertext: string, nostrSender: string): string {
     const plaintext = this.trySkippedMessageKeys(header, ciphertext, nostrSender);
     if (plaintext) return plaintext;
 
     this.skipMessageKeys(header.number);
-
-    if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
-      this.skipMessageKeys(header.previousChainLength);
-      if (!first) {
-        this.rotateOurCurrentNostrKey();
-        this.updateTheirCurrentNostrPublicKey(header.nextPublicKey);
-      }
-    }
     
     const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey, new Uint8Array([1]), 2);
     this.state.receivingChainKey = newReceivingChainKey;
     this.state.receivingChainMessageNumber++;
+
+    if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
+      this.skipMessageKeys(header.previousChainLength);
+      this.updateTheirCurrentNostrPublicKey(header.nextPublicKey);
+    }
 
     return nip44.decrypt(ciphertext, messageKey);
   }
@@ -133,6 +130,7 @@ export class Channel {
   }
 
   private rotateOurCurrentNostrKey() {
+    console.log('rotating our current nostr key')
     this.state.ourCurrentNostrKey = this.state.ourNextNostrKey;
     const ourNextSecretKey = generateSecretKey();
     this.state.ourNextNostrKey = {
@@ -167,16 +165,18 @@ export class Channel {
   }
 
   // Nostr event handling methods
-  private handleNostrEvent(e: any, receivingNostrKey: KeyPair, first: boolean) {
+  private handleNostrEvent(e: any, receivingNostrKey: KeyPair) {
     const header = JSON.parse(nip44.decrypt(e.tags[0][1], receivingNostrKey.privateKey)) as Header;
-    const data = this.ratchetDecrypt(header, e.content, e.pubkey, first);
-    this.internalSubscriptions.forEach(callback => callback({id: e.id, data, pubkey: header.nextPublicKey, time: header.time}));
-    
-    if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
+    const isNextKey = receivingNostrKey.publicKey === this.getNostrSenderKeypair(Sender.Them, KeyType.Next).publicKey;
+    const data = this.ratchetDecrypt(header, e.content, e.pubkey);
+    if (isNextKey) {
+      // they acknowledged our next key, so we can rotate it again
+      this.rotateOurCurrentNostrKey();
       this.nostrUnsubscribe?.();
       this.nostrUnsubscribe = this.nostrNextUnsubscribe;
       this.subscribeToNextNostrEvents();
     }
+    this.internalSubscriptions.forEach(callback => callback({id: e.id, data, pubkey: header.nextPublicKey, time: header.time}));  
   }
 
   private subscribeToNostrEvents() {
@@ -185,7 +185,7 @@ export class Channel {
     const receivingNostrKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Current);
     this.nostrUnsubscribe = this.nostrSubscribe(
       {authors: [receivingNostrKey.publicKey], kinds: [EVENT_KIND]},
-      (e) => this.handleNostrEvent(e, receivingNostrKey, true)
+      (e) => this.handleNostrEvent(e, receivingNostrKey)
     );
     
     this.subscribeToNextNostrEvents();
@@ -195,7 +195,7 @@ export class Channel {
     const nextReceivingNostrKey = this.getNostrSenderKeypair(Sender.Them, KeyType.Next);
     this.nostrNextUnsubscribe = this.nostrSubscribe(
       {authors: [nextReceivingNostrKey.publicKey], kinds: [EVENT_KIND]},
-      (e) => this.handleNostrEvent(e, nextReceivingNostrKey, false)
+      (e) => this.handleNostrEvent(e, nextReceivingNostrKey)
     );
   }
 }

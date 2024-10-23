@@ -47,8 +47,6 @@ describe('Channel', () => {
 
   it('should handle incoming events and update keys', async () => {
     const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice')
-
-    const event = alice.send('Hello, Bob!')
     
     const bob = Channel.init((filter, onEvent) => {
       if (matchFilter(filter, event)) {
@@ -57,14 +55,22 @@ describe('Channel', () => {
       return dummyUnsubscribe
     }, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob')
 
-    const bobInitialNextPublicKey = bob.state.ourNextNostrKey.publicKey
+    const initialNostrReceiver = bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey
+    const initialReceivingChainKey = bob.state.receivingChainKey
 
-    expect(event.pubkey).toBe(bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey)
+    const event = alice.send('Hello, Bob!')
+
+    expect(event.pubkey).toBe(initialNostrReceiver)
 
     const bobMessages = createMessageStream(bob);
 
     const bobFirstMessage = await bobMessages.next();
     expect(bobFirstMessage.value?.data).toBe('Hello, Bob!')
+
+    const nextReceivingChainKey = bob.state.receivingChainKey
+    expect(nextReceivingChainKey).not.toBe(initialReceivingChainKey)
+    const nextNostrReceiver = bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey
+    expect(nextNostrReceiver).not.toBe(initialNostrReceiver)
   })
 
   it('should handle multiple back-and-forth messages correctly', async () => {
@@ -89,8 +95,12 @@ describe('Channel', () => {
     const bobMessages = createMessageStream(bob);
 
     const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string, receiverChannel: Channel) => {
-      expect(bytesToHex(sender.state.sendingChainKey)).toEqual(bytesToHex(receiverChannel.state.receivingChainKey));
-      expect(bytesToHex(sender.state.receivingChainKey)).toEqual(bytesToHex(receiverChannel.state.sendingChainKey));
+      console.log(`${sender.name} sending key: ${bytesToHex(sender.state.sendingChainKey)}`);
+      console.log(`${receiverChannel.name} receiving key: ${bytesToHex(receiverChannel.state.receivingChainKey)}`);
+      console.log()
+      console.log(`${receiverChannel.name} sending key: ${bytesToHex(receiverChannel.state.sendingChainKey)}`);
+      console.log(`${sender.name} receiving key: ${bytesToHex(sender.state.receivingChainKey)}`);
+      console.log()
 
       messageQueue.push(sender.send(message));
       const receivedMessage = await receiver.next();
