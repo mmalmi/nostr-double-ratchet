@@ -181,7 +181,8 @@ export class InviteLink {
     
                 const inviteeSessionPublicKey = await innerDecrypt(innerEvent.content, innerEvent.pubkey);
 
-                const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!);
+                const name = event.id;
+                const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, name);
 
                 onChannel(channel, innerEvent.pubkey);
             } catch (error) {
