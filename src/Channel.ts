@@ -1,5 +1,5 @@
 import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent } from "nostr-tools";
-import { hexToBytes } from "@noble/hashes/utils";
+import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 import {
   ChannelState,
   Header,
@@ -28,8 +28,9 @@ export class Channel {
 
   /**
    * @param sharedSecret optional, but useful to keep the first chain of messages secure. Unlike the Nostr keys, it can be forgotten after the 1st message in the chain.
+   * @param isInitiator determines which chain key is used for sending vs receiving
    */
-  static init(nostrSubscribe: NostrSubscribe, theirCurrentNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, sharedSecret = new Uint8Array(), name?: string): Channel {
+  static init(nostrSubscribe: NostrSubscribe, theirCurrentNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, sharedSecret = new Uint8Array(), name?: string, isInitiator = true): Channel {
     const ourNextPrivateKey = generateSecretKey();
     const state: ChannelState = {
       rootKey: sharedSecret,
@@ -42,6 +43,7 @@ export class Channel {
       receivingChainMessageNumber: 0,
       previousSendingChainMessageCount: 0,
       skippedMessageKeys: {},
+      isInitiator,
     };
     const channel = new Channel(nostrSubscribe, state);
     channel.updateTheirCurrentNostrPublicKey(theirCurrentNostrPublicKey);
@@ -88,6 +90,7 @@ export class Channel {
 
   private ratchetEncrypt(plaintext: string): [Header, string] {
     const [newSendingChainKey, messageKey] = kdf(this.state.sendingChainKey, new Uint8Array([1]), 2);
+    console.log(this.name, 'ratchetEncrypt', 'newSendingChainKey', bytesToHex(newSendingChainKey).slice(0, 4), 'old sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4));
     this.state.sendingChainKey = newSendingChainKey;
     const header: Header = {
       number: this.state.sendingChainMessageNumber++,
@@ -105,6 +108,7 @@ export class Channel {
     this.skipMessageKeys(header.number);
     
     const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey, new Uint8Array([1]), 2);
+    console.log(this.name, 'ratchetDecrypt', 'newReceivingChainKey', bytesToHex(newReceivingChainKey).slice(0, 4), 'old receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4));
     this.state.receivingChainKey = newReceivingChainKey;
     this.state.receivingChainMessageNumber++;
 
@@ -113,7 +117,17 @@ export class Channel {
       this.updateTheirCurrentNostrPublicKey(header.nextPublicKey);
     }
 
-    return nip44.decrypt(ciphertext, messageKey);
+    try {
+      return nip44.decrypt(ciphertext, messageKey);
+    } catch (error) {
+      console.log(this.name, 'Decryption failed:', error, {
+        messageKey: bytesToHex(messageKey).slice(0, 4),
+        receivingChainKey: bytesToHex(this.state.receivingChainKey).slice(0, 4),
+        sendingChainKey: bytesToHex(this.state.sendingChainKey).slice(0, 4),
+        rootKey: bytesToHex(this.state.rootKey).slice(0, 4)
+      });
+      throw error;
+    }
   }
 
   private updateTheirCurrentNostrPublicKey(theirNewPublicKey: string) {
@@ -123,10 +137,12 @@ export class Channel {
     this.state.receivingChainMessageNumber = 0;
     const conversationKey = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, theirNewPublicKey);
     const [rootKey, chainKey1, chainKey2] = kdf(this.state.rootKey, conversationKey, 3);
+    console.log(this.name, 'updateTheirCurrentNostrPublicKey', 'old rootKey', bytesToHex(this.state.rootKey).slice(0, 4), 'new rootKey', bytesToHex(rootKey).slice(0, 4))
     this.state.rootKey = rootKey;
-    const isOurKeyGreater = this.state.ourCurrentNostrKey.publicKey > theirNewPublicKey;
-    this.state.receivingChainKey = isOurKeyGreater ? chainKey1 : chainKey2;
-    this.state.sendingChainKey = isOurKeyGreater ? chainKey2 : chainKey1;
+    this.state.receivingChainKey.length && console.log(this.name, 'updateTheirCurrentNostrPublicKey', 'old receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'old sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
+    this.state.receivingChainKey = this.state.isInitiator ? chainKey2 : chainKey1;
+    this.state.sendingChainKey = this.state.isInitiator ? chainKey1 : chainKey2;
+    console.log(this.name, 'updateTheirCurrentNostrPublicKey', 'new receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'new sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
   }
 
   private rotateOurCurrentNostrKey() {

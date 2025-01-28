@@ -37,8 +37,8 @@ describe('Channel', () => {
   })
 
   it('should create channels with corresponding chain & root keys', () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice')
-    const bob = Channel.init(dummySubscribe, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob')
+    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true)
+    const bob = Channel.init(dummySubscribe, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false)
     expect(alice.state.receivingChainKey).toEqual(bob.state.sendingChainKey)
     expect(alice.state.sendingChainKey).toEqual(bob.state.receivingChainKey)
     expect(alice.getNostrSenderKeypair(Sender.Us, KeyType.Current)).toEqual(bob.getNostrSenderKeypair(Sender.Them, KeyType.Current))
@@ -46,14 +46,14 @@ describe('Channel', () => {
   })
 
   it('should handle incoming events and update keys', async () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice')
+    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true)
     
     const bob = Channel.init((filter, onEvent) => {
       if (matchFilter(filter, event)) {
         onEvent(event)
       }
       return dummyUnsubscribe
-    }, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob')
+    }, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false)
 
     const initialNostrReceiver = bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey
     const initialReceivingChainKey = bob.state.receivingChainKey
@@ -88,20 +88,13 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice');
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob');
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true);
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false);
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);
 
     const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string, receiverChannel: Channel) => {
-      console.log(`${sender.name} sending key: ${bytesToHex(sender.state.sendingChainKey)}`);
-      console.log(`${receiverChannel.name} receiving key: ${bytesToHex(receiverChannel.state.receivingChainKey)}`);
-      console.log()
-      console.log(`${receiverChannel.name} sending key: ${bytesToHex(receiverChannel.state.sendingChainKey)}`);
-      console.log(`${sender.name} receiving key: ${bytesToHex(sender.state.receivingChainKey)}`);
-      console.log()
-
       messageQueue.push(sender.send(message));
       const receivedMessage = await receiver.next();
 
@@ -140,8 +133,8 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice');
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob');
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true);
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false);
 
     const bobMessages = createMessageStream(bob);
 
