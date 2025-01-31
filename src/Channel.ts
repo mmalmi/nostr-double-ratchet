@@ -142,6 +142,10 @@ export class Channel {
     this.state.receivingChainKey = this.state.isInitiator ? chainKey2 : chainKey1;
     this.state.sendingChainKey = this.state.isInitiator ? chainKey1 : chainKey2;
     console.log(this.name, 'updateRootKey', 'new receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'new sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
+
+    //this.nostrUnsubscribe?.();
+    this.nostrUnsubscribe = this.nostrNextUnsubscribe;
+    this.subscribeToNextNostrEvents();
   }
 
   private updateTheirNostrPublicKey(theirNewPublicKey: string) {
@@ -192,10 +196,8 @@ export class Channel {
     const isNextKey = receivingNostrKey.publicKey === this.getNostrSenderKeypair(Sender.Them, KeyType.Next).publicKey;
     if (isNextKey) {
       // they acknowledged our next key, so we can rotate it again
-      this.updateOurNostrKeys();
       this.nostrUnsubscribe?.();
-      this.nostrUnsubscribe = this.nostrNextUnsubscribe;
-      this.subscribeToNextNostrEvents();
+      this.updateOurNostrKeys();
     }
     const data = this.ratchetDecrypt(header, e.content, e.pubkey);
     this.internalSubscriptions.forEach(callback => callback({id: e.id, data, pubkey: header.nextPublicKey, time: header.time}));  

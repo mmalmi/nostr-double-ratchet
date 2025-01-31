@@ -47,6 +47,7 @@ describe('Channel', () => {
 
   it('should handle incoming events and update keys', async () => {
     const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true)
+    const event = alice.send('Hello, Bob!')
     
     const bob = Channel.init((filter, onEvent) => {
       if (matchFilter(filter, event)) {
@@ -57,8 +58,6 @@ describe('Channel', () => {
 
     const initialNostrReceiver = bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey
     const initialReceivingChainKey = bob.state.receivingChainKey
-
-    const event = alice.send('Hello, Bob!')
 
     expect(event.pubkey).toBe(initialNostrReceiver)
 
