@@ -46,7 +46,6 @@ export class Channel {
       isInitiator,
     };
     const channel = new Channel(nostrSubscribe, state);
-    channel.updateTheirNostrPublicKey(theirCurrentNostrPublicKey);
     if (name) channel.name = name;
     return channel;
   }
@@ -143,12 +142,6 @@ export class Channel {
     //this.nostrUnsubscribe?.();
     this.nostrUnsubscribe = this.nostrNextUnsubscribe;
     this.subscribeToNextNostrEvents();
-  }
-
-  private updateTheirNostrPublicKey(theirNewPublicKey: string) {
-    console.log(this.name, 'updateTheirNostrPublicKey')
-    this.state.theirCurrentNostrPublicKey = theirNewPublicKey;
-    this.updateRootKey();
   }
 
   private updateOurNostrKeys() {
