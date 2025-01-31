@@ -46,7 +46,7 @@ export class Channel {
       isInitiator,
     };
     const channel = new Channel(nostrSubscribe, state);
-    channel.updateTheirCurrentNostrPublicKey(theirCurrentNostrPublicKey);
+    channel.updateTheirNostrPublicKey(theirCurrentNostrPublicKey);
     if (name) channel.name = name;
     return channel;
   }
@@ -90,7 +90,7 @@ export class Channel {
 
   private ratchetEncrypt(plaintext: string): [Header, string] {
     const [newSendingChainKey, messageKey] = kdf(this.state.sendingChainKey, new Uint8Array([1]), 2);
-    console.log(this.name, 'ratchetEncrypt', 'newSendingChainKey', bytesToHex(newSendingChainKey).slice(0, 4), 'old sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4));
+    console.log(this.name, 'ratchetEncrypt', plaintext.slice(0,10), 'newSendingChainKey', bytesToHex(newSendingChainKey).slice(0, 4), 'old sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4));
     this.state.sendingChainKey = newSendingChainKey;
     const header: Header = {
       number: this.state.sendingChainMessageNumber++,
@@ -114,7 +114,7 @@ export class Channel {
 
     if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
       this.skipMessageKeys(header.previousChainLength);
-      this.updateTheirCurrentNostrPublicKey(header.nextPublicKey);
+      this.updateTheirNostrPublicKey(header.nextPublicKey);
     }
 
     try {
@@ -130,29 +130,35 @@ export class Channel {
     }
   }
 
-  private updateTheirCurrentNostrPublicKey(theirNewPublicKey: string) {
-    this.state.theirCurrentNostrPublicKey = theirNewPublicKey;
+  private updateRootKey() {
     this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber;
     this.state.sendingChainMessageNumber = 0;
     this.state.receivingChainMessageNumber = 0;
-    const conversationKey = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, theirNewPublicKey);
+    const conversationKey = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirCurrentNostrPublicKey);
     const [rootKey, chainKey1, chainKey2] = kdf(this.state.rootKey, conversationKey, 3);
-    console.log(this.name, 'updateTheirCurrentNostrPublicKey', 'old rootKey', bytesToHex(this.state.rootKey).slice(0, 4), 'new rootKey', bytesToHex(rootKey).slice(0, 4))
+    console.log(this.name, 'updateRootKey', 'old rootKey', bytesToHex(this.state.rootKey).slice(0, 4), 'new rootKey', bytesToHex(rootKey).slice(0, 4))
     this.state.rootKey = rootKey;
-    this.state.receivingChainKey.length && console.log(this.name, 'updateTheirCurrentNostrPublicKey', 'old receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'old sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
+    this.state.receivingChainKey.length && console.log(this.name, 'updateRootKey', 'old receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'old sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
     this.state.receivingChainKey = this.state.isInitiator ? chainKey2 : chainKey1;
     this.state.sendingChainKey = this.state.isInitiator ? chainKey1 : chainKey2;
-    console.log(this.name, 'updateTheirCurrentNostrPublicKey', 'new receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'new sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
+    console.log(this.name, 'updateRootKey', 'new receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'new sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
   }
 
-  private rotateOurCurrentNostrKey() {
-    console.log('rotating our current nostr key')
+  private updateTheirNostrPublicKey(theirNewPublicKey: string) {
+    console.log(this.name, 'updateTheirNostrPublicKey')
+    this.state.theirCurrentNostrPublicKey = theirNewPublicKey;
+    this.updateRootKey();
+  }
+
+  private updateOurNostrKeys() {
+    console.log(this.name, 'updateOurNostrKeys')
     this.state.ourCurrentNostrKey = this.state.ourNextNostrKey;
     const ourNextSecretKey = generateSecretKey();
     this.state.ourNextNostrKey = {
       publicKey: getPublicKey(ourNextSecretKey),
       privateKey: ourNextSecretKey
     };
+    this.updateRootKey();
   }
 
   private skipMessageKeys(until: number) {
@@ -184,14 +190,14 @@ export class Channel {
   private handleNostrEvent(e: any, receivingNostrKey: KeyPair) {
     const header = JSON.parse(nip44.decrypt(e.tags[0][1], receivingNostrKey.privateKey)) as Header;
     const isNextKey = receivingNostrKey.publicKey === this.getNostrSenderKeypair(Sender.Them, KeyType.Next).publicKey;
-    const data = this.ratchetDecrypt(header, e.content, e.pubkey);
     if (isNextKey) {
       // they acknowledged our next key, so we can rotate it again
-      this.rotateOurCurrentNostrKey();
+      this.updateOurNostrKeys();
       this.nostrUnsubscribe?.();
       this.nostrUnsubscribe = this.nostrNextUnsubscribe;
       this.subscribeToNextNostrEvents();
     }
+    const data = this.ratchetDecrypt(header, e.content, e.pubkey);
     this.internalSubscriptions.forEach(callback => callback({id: e.id, data, pubkey: header.nextPublicKey, time: header.time}));  
   }
 
