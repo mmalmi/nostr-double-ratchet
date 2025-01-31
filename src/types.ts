@@ -87,10 +87,5 @@ export enum Sender {
   Them
 }
 
-export enum KeyType {
-  Current,
-  Next
-}
-
 export type EncryptFunction = (plaintext: string, pubkey: string) => Promise<string>;
 export type DecryptFunction = (ciphertext: string, pubkey: string) => Promise<string>;

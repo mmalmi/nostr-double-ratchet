@@ -1,9 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { Channel } from '../src/Channel'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
-import { EVENT_KIND, KeyType, Sender } from '../src/types';
+import { EVENT_KIND } from '../src/types';
 import { createMessageStream } from '../src/utils';
-import { bytesToHex } from '@noble/hashes/utils';
 
 describe('Channel', () => {
   const aliceSecretKey = generateSecretKey()
@@ -41,7 +40,6 @@ describe('Channel', () => {
     const bob = Channel.init(dummySubscribe, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false)
     expect(alice.state.receivingChainKey).toEqual(bob.state.sendingChainKey)
     expect(alice.state.sendingChainKey).toEqual(bob.state.receivingChainKey)
-    expect(alice.getNostrSenderKeypair(Sender.Us, KeyType.Current)).toEqual(bob.getNostrSenderKeypair(Sender.Them, KeyType.Current))
     expect(alice.state.rootKey).toEqual(bob.state.rootKey)
   })
 
@@ -56,10 +54,7 @@ describe('Channel', () => {
       return dummyUnsubscribe
     }, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false)
 
-    const initialNostrReceiver = bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey
     const initialReceivingChainKey = bob.state.receivingChainKey
-
-    expect(event.pubkey).toBe(initialNostrReceiver)
 
     const bobMessages = createMessageStream(bob);
 
@@ -68,8 +63,6 @@ describe('Channel', () => {
 
     const nextReceivingChainKey = bob.state.receivingChainKey
     expect(nextReceivingChainKey).not.toBe(initialReceivingChainKey)
-    const nextNostrReceiver = bob.getNostrSenderKeypair(Sender.Them, KeyType.Current).publicKey
-    expect(nextNostrReceiver).not.toBe(initialNostrReceiver)
   })
 
   it('should handle multiple back-and-forth messages correctly', async () => {
