@@ -33,7 +33,10 @@ export interface ChannelState {
   
   /** The other party's current Nostr public key */
   theirCurrentNostrPublicKey: string;
-  
+
+  /** The other party's next Nostr public key (or current, if next not received yet) */
+  theirNextNostrPublicKey: string;
+
   /** Our current Nostr keypair used for this channel */
   ourCurrentNostrKey: KeyPair;
   

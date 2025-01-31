@@ -35,6 +35,7 @@ export class Channel {
     const state: ChannelState = {
       rootKey: sharedSecret,
       theirCurrentNostrPublicKey,
+      theirNextNostrPublicKey: theirCurrentNostrPublicKey,
       ourCurrentNostrKey: { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey },
       ourNextNostrKey: { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey },
       receivingChainKey: new Uint8Array(),
@@ -112,9 +113,11 @@ export class Channel {
     this.state.receivingChainKey = newReceivingChainKey;
     this.state.receivingChainMessageNumber++;
 
-    if (header.nextPublicKey !== this.state.theirCurrentNostrPublicKey) {
+    if (header.nextPublicKey !== this.state.theirNextNostrPublicKey) {
+      // TODO may be problem here if old message received
       this.skipMessageKeys(header.previousChainLength);
-      this.updateTheirNostrPublicKey(header.nextPublicKey);
+      this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
+      this.state.theirNextNostrPublicKey = header.nextPublicKey;
     }
 
     try {
