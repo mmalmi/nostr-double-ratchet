@@ -31,14 +31,15 @@ export class Channel {
    */
   static init(nostrSubscribe: NostrSubscribe, theirCurrentNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, sharedSecret = new Uint8Array(), name?: string, isInitiator = true): Channel {
     const ourNextPrivateKey = generateSecretKey();
+    const [rootKey, chainKey1, chainKey2] = kdf(sharedSecret, nip44.getConversationKey(ourCurrentPrivateKey, theirCurrentNostrPublicKey), 3);
     const state: ChannelState = {
-      rootKey: sharedSecret,
+      rootKey,
       theirCurrentNostrPublicKey,
       theirNextNostrPublicKey: theirCurrentNostrPublicKey,
       ourCurrentNostrKey: { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey },
       ourNextNostrKey: { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey },
-      receivingChainKey: new Uint8Array(),
-      sendingChainKey: new Uint8Array(),
+      receivingChainKey: isInitiator ? chainKey2 : chainKey1,
+      sendingChainKey: isInitiator ? chainKey1 : chainKey2,
       sendingChainMessageNumber: 0,
       receivingChainMessageNumber: 0,
       previousSendingChainMessageCount: 0,
