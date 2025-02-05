@@ -95,7 +95,7 @@ describe('Channel', () => {
       expect(receiverChannel.state.receivingChainKey).not.toBe(initialReceivingChainKey);
 
       // Check that the keys change when the first message of consecutive messages is received
-      if (receiverChannel.state.receivingChainMessageNumber === 0) {
+      if (receiverChannel.state.receivingChainMessageNumber === 1) {
         expect(receiverChannel.state.ourCurrentNostrKey.publicKey).not.toBe(initialOurCurrentNostrKey);
         expect(receiverChannel.state.theirNostrPublicKey).not.toBe(initialTheirNostrPublicKey);
       }
