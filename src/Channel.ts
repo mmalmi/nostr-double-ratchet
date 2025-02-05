@@ -136,7 +136,7 @@ export class Channel {
 
     this.state.theirNostrPublicKey = header.nextPublicKey;
 
-    this.nostrUnsubscribe?.();
+    this.nostrUnsubscribe?.(); // should we keep this open for a while? maybe as long as we have skipped messages?
     this.nostrUnsubscribe = this.nostrNextUnsubscribe;
     this.subscribeToNostrEvents();
   }

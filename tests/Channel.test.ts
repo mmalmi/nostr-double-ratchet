@@ -79,11 +79,26 @@ describe('Channel', () => {
     const bobMessages = createMessageStream(bob);
 
     const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string, receiverChannel: Channel) => {
+      const initialSendingChainKey = sender.state.sendingChainKey;
+      const initialReceivingChainKey = receiverChannel.state.receivingChainKey;
+      const initialOurCurrentNostrKey = receiverChannel.state.ourCurrentNostrKey.publicKey;
+      const initialTheirNostrPublicKey = receiverChannel.state.theirNostrPublicKey;
+
       messageQueue.push(sender.send(message));
       const receivedMessage = await receiver.next();
 
       console.log(`${receiverChannel.name} got from ${sender.name}: ${receivedMessage.value.data}`)
       expect(receivedMessage.value?.data).toBe(message);
+
+      // Check that the chain keys have changed
+      expect(sender.state.sendingChainKey).not.toBe(initialSendingChainKey);
+      expect(receiverChannel.state.receivingChainKey).not.toBe(initialReceivingChainKey);
+
+      // Check that the keys change when the first message of consecutive messages is received
+      if (receiverChannel.state.receivingChainMessageNumber === 0) {
+        expect(receiverChannel.state.ourCurrentNostrKey.publicKey).not.toBe(initialOurCurrentNostrKey);
+        expect(receiverChannel.state.theirNostrPublicKey).not.toBe(initialTheirNostrPublicKey);
+      }
     };
 
     // Test conversation
@@ -98,7 +113,7 @@ describe('Channel', () => {
     // Final message from Alice
     await sendAndExpect(alice, bobMessages, "I'm doing great, thanks!", bob);
 
-    // No remaining messagess
+    // No remaining messages
     expect(messageQueue.length).toBe(0);
   })
 
