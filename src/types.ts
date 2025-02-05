@@ -32,10 +32,7 @@ export interface ChannelState {
   rootKey: Uint8Array;
   
   /** The other party's current Nostr public key */
-  theirCurrentNostrPublicKey: string;
-
-  /** The other party's next Nostr public key (or current, if next not received yet) */
-  theirNextNostrPublicKey: string;
+  theirNostrPublicKey: string;
 
   /** Our current Nostr keypair used for this channel */
   ourCurrentNostrKey: KeyPair;

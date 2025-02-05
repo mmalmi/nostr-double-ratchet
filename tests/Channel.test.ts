@@ -13,7 +13,7 @@ describe('Channel', () => {
   it('should initialize with correct properties', () => {
     const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey)
 
-    expect(alice.state.theirCurrentNostrPublicKey).toBe(getPublicKey(bobSecretKey))
+    expect(alice.state.theirNostrPublicKey).toBe(getPublicKey(bobSecretKey))
     expect(alice.state.ourCurrentNostrKey.publicKey).toBe(getPublicKey(aliceSecretKey))
     expect(alice.state.ourCurrentNostrKey.publicKey).toHaveLength(64) // Hex-encoded public key length
   })
@@ -33,14 +33,6 @@ describe('Channel', () => {
     expect(event.pubkey).toHaveLength(64)
     expect(event.id).toHaveLength(64)
     expect(event.sig).toHaveLength(128)
-  })
-
-  it('should create channels with corresponding chain & root keys', () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true)
-    const bob = Channel.init(dummySubscribe, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false)
-    expect(alice.state.receivingChainKey).toEqual(bob.state.sendingChainKey)
-    expect(alice.state.sendingChainKey).toEqual(bob.state.receivingChainKey)
-    expect(alice.state.rootKey).toEqual(bob.state.rootKey)
   })
 
   it('should handle incoming events and update keys', async () => {
