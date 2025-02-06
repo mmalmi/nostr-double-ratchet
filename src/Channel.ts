@@ -32,7 +32,7 @@ export class Channel {
     const [rootKey, chainKey1, chainKey2] = kdf(sharedSecret, nip44.getConversationKey(ourCurrentPrivateKey, theirNostrPublicKey), 3);
     const state: ChannelState = {
       rootKey: isInitiator ? rootKey : sharedSecret,
-      theirNostrPublicKey,
+      theirNextNostrPublicKey: theirNostrPublicKey,
       ourCurrentNostrKey: { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey },
       ourNextNostrKey: { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey },
       receivingChainKey: isInitiator ? chainKey2 : chainKey1,
@@ -50,9 +50,13 @@ export class Channel {
   }
 
   send(data: string): VerifiedEvent {
+    if (!this.state.theirNextNostrPublicKey) {
+      throw new Error("we are not the initiator, so we can't send the first message");
+    }
+
     const [header, encryptedData] = this.ratchetEncrypt(data);
     
-    const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNostrPublicKey);
+    const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNextNostrPublicKey);
     const encryptedHeader = nip44.encrypt(JSON.stringify(header), sharedSecret);
 
     console.log(this.name, 'sending with', this.state.ourCurrentNostrKey.publicKey.slice(0, 4));
@@ -91,7 +95,7 @@ export class Channel {
     const plaintext = this.trySkippedMessageKeys(header, ciphertext, nostrSender);
     if (plaintext) return plaintext;
 
-    this.skipMessageKeys(header.number);
+    this.skipMessageKeys(header.number, nostrSender);
     
     const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey, new Uint8Array([1]), 2);
     console.log(this.name, 'ratchetDecrypt', 'newReceivingChainKey', bytesToHex(newReceivingChainKey).slice(0, 4), 'old receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4));
@@ -133,15 +137,9 @@ export class Channel {
       publicKey: getPublicKey(ourNextSecretKey),
       privateKey: ourNextSecretKey
     };
-
-    this.state.theirNostrPublicKey = header.nextPublicKey;
-
-    this.nostrUnsubscribe?.(); // should we keep this open for a while? maybe as long as we have skipped messages?
-    this.nostrUnsubscribe = this.nostrNextUnsubscribe;
-    this.subscribeToNostrEvents();
   }
 
-  private skipMessageKeys(until: number) {
+  private skipMessageKeys(until: number, nostrSender: string) {
     if (this.state.receivingChainMessageNumber + MAX_SKIP < until) {
       throw new Error("Too many skipped messages");
     }
@@ -149,7 +147,7 @@ export class Channel {
       console.log('skipping message key', this.state.receivingChainMessageNumber)
       const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey, new Uint8Array([1]), 2);
       this.state.receivingChainKey = newReceivingChainKey;
-      const key = skippedMessageIndexKey(this.state.theirNostrPublicKey, this.state.receivingChainMessageNumber);
+      const key = skippedMessageIndexKey(nostrSender, this.state.receivingChainMessageNumber);
       this.state.skippedMessageKeys[key] = messageKey;
       this.state.receivingChainMessageNumber++;
     }
@@ -165,8 +163,9 @@ export class Channel {
     return null;
   }
 
-  private decryptHeader(encryptedHeader: string): [Header, boolean] {
-    const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNostrPublicKey);
+  private decryptHeader(e: any): [Header, boolean] {
+    const encryptedHeader = e.tags[0][1];
+    const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, e.pubkey);
     try {
       const header = JSON.parse(nip44.decrypt(encryptedHeader, currentSecret)) as Header;
       return [header, false];
@@ -174,7 +173,7 @@ export class Channel {
       // Decryption with currentSecret failed, try with nextSecret
     }
 
-    const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNostrPublicKey);
+    const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, e.pubkey);
     try {
       const header = JSON.parse(nip44.decrypt(encryptedHeader, nextSecret)) as Header;
       return [header, true];
@@ -187,10 +186,25 @@ export class Channel {
 
   // Nostr event handling methods
   private handleNostrEvent(e: any) {
-    const [header, shouldRatchet] = this.decryptHeader(e.tags[0][1]);
+    const [header, shouldRatchet] = this.decryptHeader(e);
+
+    if (e.pubkey === this.state.theirNextNostrPublicKey) {
+      this.state.theirNostrPublicKey = this.state.theirNextNostrPublicKey!;
+    }
+
+    if (this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
+      this.state.theirNextNostrPublicKey = header.nextPublicKey;
+      this.nostrUnsubscribe?.(); // should we keep this open for a while? maybe as long as we have skipped messages?
+      this.nostrUnsubscribe = this.nostrNextUnsubscribe;
+      console.log(this.name, 'subscribing to Nostr events from', this.state.theirNextNostrPublicKey.slice(0, 4));
+      this.nostrNextUnsubscribe = this.nostrSubscribe(
+        {authors: [this.state.theirNextNostrPublicKey], kinds: [EVENT_KIND]},
+        (e) => this.handleNostrEvent(e)
+      );
+    }
 
     if (shouldRatchet) {
-      this.skipMessageKeys(header.previousChainLength);
+      this.skipMessageKeys(header.previousChainLength, e.pubkey);
       this.ratchetStep(header);
     }
 
@@ -200,11 +214,17 @@ export class Channel {
   }
 
   private subscribeToNostrEvents() {
-    if (!this.state.theirNostrPublicKey) return;
-    console.log(this.name, 'subscribing to Nostr events from', this.state.theirNostrPublicKey.slice(0, 4));
-    this.nostrUnsubscribe = this.nostrNextUnsubscribe;
+    if (this.nostrNextUnsubscribe) return;
+    if (this.state.theirNostrPublicKey) {
+      console.log(this.name, 'subscribing to Nostr events from', this.state.theirNostrPublicKey.slice(0, 4));
+      this.nostrUnsubscribe = this.nostrSubscribe(
+        {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
+        (e) => this.handleNostrEvent(e)
+      );
+    }
+    console.log(this.name, 'subscribing to Nostr events from', this.state.theirNextNostrPublicKey.slice(0, 4));
     this.nostrNextUnsubscribe = this.nostrSubscribe(
-      {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
+      {authors: [this.state.theirNextNostrPublicKey], kinds: [EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
     );
   }
