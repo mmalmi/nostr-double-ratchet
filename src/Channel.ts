@@ -30,11 +30,19 @@ export class Channel {
   static init(nostrSubscribe: NostrSubscribe, theirNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, sharedSecret = new Uint8Array(), name?: string, isInitiator = true): Channel {
     const ourNextPrivateKey = generateSecretKey();
     const [rootKey, chainKey1, chainKey2] = kdf(sharedSecret, nip44.getConversationKey(ourCurrentPrivateKey, theirNostrPublicKey), 3);
+    let ourCurrentNostrKey;
+    let ourNextNostrKey;
+    if (isInitiator) {
+      ourCurrentNostrKey = { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey };
+      ourNextNostrKey = { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey };
+    } else {
+      ourNextNostrKey = { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey };
+    }
     const state: ChannelState = {
       rootKey: isInitiator ? rootKey : sharedSecret,
       theirNextNostrPublicKey: theirNostrPublicKey,
-      ourCurrentNostrKey: { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey },
-      ourNextNostrKey: { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey },
+      ourCurrentNostrKey,
+      ourNextNostrKey,
       receivingChainKey: isInitiator ? chainKey2 : chainKey1,
       sendingChainKey: isInitiator ? chainKey1 : chainKey2,
       sendingChainMessageNumber: 0,
@@ -50,7 +58,7 @@ export class Channel {
   }
 
   send(data: string): VerifiedEvent {
-    if (!this.state.theirNextNostrPublicKey) {
+    if (!this.state.theirNextNostrPublicKey || !this.state.ourCurrentNostrKey) {
       throw new Error("we are not the initiator, so we can't send the first message");
     }
 
@@ -115,13 +123,20 @@ export class Channel {
     }
   }
 
-  private ratchetStep(header: Header) {
+  private ratchetStep() {
     console.log(this.name, 'ratchetStep')
     this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber;
     this.state.sendingChainMessageNumber = 0;
     this.state.receivingChainMessageNumber = 0;
 
-    const conversationKey = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNostrPublicKey);
+    this.state.ourCurrentNostrKey = this.state.ourNextNostrKey;
+    const ourNextSecretKey = generateSecretKey();
+    this.state.ourNextNostrKey = {
+      publicKey: getPublicKey(ourNextSecretKey),
+      privateKey: ourNextSecretKey
+    };
+
+    const conversationKey = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNostrPublicKey!);
     const [rootKey, chainKey1, chainKey2] = kdf(this.state.rootKey, conversationKey, 3);
 
     console.log(this.name, 'ratchetStep', 'old rootKey', bytesToHex(this.state.rootKey).slice(0, 4), 'new rootKey', bytesToHex(rootKey).slice(0, 4))
@@ -130,13 +145,6 @@ export class Channel {
     this.state.receivingChainKey = this.state.isInitiator ? chainKey2 : chainKey1;
     this.state.sendingChainKey = this.state.isInitiator ? chainKey1 : chainKey2;
     console.log(this.name, 'ratchetStep', 'new receivingChainKey', bytesToHex(this.state.receivingChainKey).slice(0, 4), 'new sendingChainKey', bytesToHex(this.state.sendingChainKey).slice(0, 4))
-
-    this.state.ourCurrentNostrKey = this.state.ourNextNostrKey;
-    const ourNextSecretKey = generateSecretKey();
-    this.state.ourNextNostrKey = {
-      publicKey: getPublicKey(ourNextSecretKey),
-      privateKey: ourNextSecretKey
-    };
   }
 
   private skipMessageKeys(until: number, nostrSender: string) {
@@ -165,12 +173,14 @@ export class Channel {
 
   private decryptHeader(e: any): [Header, boolean] {
     const encryptedHeader = e.tags[0][1];
-    const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, e.pubkey);
-    try {
-      const header = JSON.parse(nip44.decrypt(encryptedHeader, currentSecret)) as Header;
-      return [header, false];
-    } catch (error) {
-      // Decryption with currentSecret failed, try with nextSecret
+    if (this.state.ourCurrentNostrKey) {
+      const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, e.pubkey);
+      try {
+        const header = JSON.parse(nip44.decrypt(encryptedHeader, currentSecret)) as Header;
+        return [header, false];
+      } catch (error) {
+        // Decryption with currentSecret failed, try with nextSecret
+      }
     }
 
     const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, e.pubkey);
@@ -205,7 +215,7 @@ export class Channel {
 
     if (shouldRatchet) {
       this.skipMessageKeys(header.previousChainLength, e.pubkey);
-      this.ratchetStep(header);
+      this.ratchetStep();
     }
 
     const data = this.ratchetDecrypt(header, e.content, e.pubkey);

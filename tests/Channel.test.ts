@@ -14,8 +14,8 @@ describe('Channel', () => {
     const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey)
 
     expect(alice.state.theirNextNostrPublicKey).toBe(getPublicKey(bobSecretKey))
-    expect(alice.state.ourCurrentNostrKey.publicKey).toBe(getPublicKey(aliceSecretKey))
-    expect(alice.state.ourCurrentNostrKey.publicKey).toHaveLength(64) // Hex-encoded public key length
+    expect(alice.state.ourCurrentNostrKey!.publicKey).toBe(getPublicKey(aliceSecretKey))
+    expect(alice.state.ourCurrentNostrKey!.publicKey).toHaveLength(64) // Hex-encoded public key length
   })
 
   it('should create an event with correct properties', () => {
@@ -81,7 +81,7 @@ describe('Channel', () => {
     const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string, receiverChannel: Channel) => {
       const initialSendingChainKey = sender.state.sendingChainKey;
       const initialReceivingChainKey = receiverChannel.state.receivingChainKey;
-      const initialOurCurrentNostrKey = receiverChannel.state.ourCurrentNostrKey.publicKey;
+      const initialOurCurrentNostrKey = receiverChannel.state.ourCurrentNostrKey?.publicKey;
       const initialTheirNostrPublicKey = receiverChannel.state.theirNostrPublicKey;
 
       messageQueue.push(sender.send(message));

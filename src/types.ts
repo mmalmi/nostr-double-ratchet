@@ -37,7 +37,7 @@ export interface ChannelState {
   theirNextNostrPublicKey: string;
 
   /** Our current Nostr keypair used for this channel */
-  ourCurrentNostrKey: KeyPair;
+  ourCurrentNostrKey?: KeyPair;
   
   /** Our next Nostr keypair, used when ratcheting forward. It is advertised in messages we send. */
   ourNextNostrKey: KeyPair;
