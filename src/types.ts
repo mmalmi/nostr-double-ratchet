@@ -7,9 +7,9 @@ export type Message = {
   time: number; // unlike Nostr, we use milliseconds instead of seconds
 }
 
-export type RatchetMessage = {
+export type Header = {
   number: number;
-  data: string;
+  previousChainLength: number;
   nextPublicKey: string;
   time: number;
 }
@@ -24,17 +24,39 @@ export type KeyPair = {
   privateKey: Uint8Array;
 }
 
+/** 
+ * Represents the state of a Double Ratchet channel between two parties. Needed for persisting channels.
+ */
 export interface ChannelState {
-  theirCurrentNostrPublicKey: string;
-  ourCurrentNostrKey: KeyPair;
+  /** Root key used to derive new sending / receiving chain keys */
+  rootKey: Uint8Array;
+  
+  /** The other party's current Nostr public key */
+  theirNostrPublicKey: string;
+
+  /** Our current Nostr keypair used for this channel */
+  ourCurrentNostrKey?: KeyPair;
+  
+  /** Our next Nostr keypair, used when ratcheting forward. It is advertised in messages we send. */
   ourNextNostrKey: KeyPair;
-  receivingChainKey: Uint8Array;
-  nextReceivingChainKey: Uint8Array;
-  sendingChainKey: Uint8Array;
+  
+  /** Key for decrypting incoming messages in current chain */
+  receivingChainKey?: Uint8Array;
+  
+  /** Key for encrypting outgoing messages in current chain */
+  sendingChainKey?: Uint8Array;
+  
+  /** Number of messages sent in current sending chain */
   sendingChainMessageNumber: number;
+  
+  /** Number of messages received in current receiving chain */
   receivingChainMessageNumber: number;
+  
+  /** Number of messages sent in previous sending chain */
   previousSendingChainMessageCount: number;
-  skippedMessageKeys: Record<number, Uint8Array>;
+  
+  /** Cache of message keys for handling out-of-order messages */
+  skippedMessageKeys: Record<string, Uint8Array>;
 }
 
 export type Unsubscribe = () => void;
@@ -57,11 +79,6 @@ export type NostrEvent = {
 export enum Sender {
   Us,
   Them
-}
-
-export enum KeyType {
-  Current,
-  Next
 }
 
 export type EncryptFunction = (plaintext: string, pubkey: string) => Promise<string>;

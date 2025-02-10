@@ -6,18 +6,18 @@ import { sha256 } from '@noble/hashes/sha256';
 
 export function serializeChannelState(state: ChannelState): string {
   return JSON.stringify({
-    theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
-    ourCurrentNostrKey: {
+    rootKey: bytesToHex(state.rootKey),
+    theirNostrPublicKey: state.theirNostrPublicKey,
+    ourCurrentNostrKey: state.ourCurrentNostrKey ? {
       publicKey: state.ourCurrentNostrKey.publicKey,
       privateKey: bytesToHex(state.ourCurrentNostrKey.privateKey),
-    },
+    } : undefined,
     ourNextNostrKey: {
       publicKey: state.ourNextNostrKey.publicKey,
       privateKey: bytesToHex(state.ourNextNostrKey.privateKey),
     },
-    receivingChainKey: bytesToHex(state.receivingChainKey),
-    nextReceivingChainKey: bytesToHex(state.nextReceivingChainKey),
-    sendingChainKey: bytesToHex(state.sendingChainKey),
+    receivingChainKey: state.receivingChainKey ? bytesToHex(state.receivingChainKey) : undefined,
+    sendingChainKey: state.sendingChainKey ? bytesToHex(state.sendingChainKey) : undefined,
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
     previousSendingChainMessageCount: state.previousSendingChainMessageCount,
@@ -33,18 +33,18 @@ export function serializeChannelState(state: ChannelState): string {
 export function deserializeChannelState(data: string): ChannelState {
   const state = JSON.parse(data);
   return {
-    theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
-    ourCurrentNostrKey: {
+    rootKey: hexToBytes(state.rootKey),
+    theirNostrPublicKey: state.theirNostrPublicKey,
+    ourCurrentNostrKey: state.ourCurrentNostrKey ? {
       publicKey: state.ourCurrentNostrKey.publicKey,
       privateKey: hexToBytes(state.ourCurrentNostrKey.privateKey),
-    },
+    } : undefined,
     ourNextNostrKey: {
       publicKey: state.ourNextNostrKey.publicKey,
       privateKey: hexToBytes(state.ourNextNostrKey.privateKey),
     },
-    receivingChainKey: hexToBytes(state.receivingChainKey),
-    nextReceivingChainKey: hexToBytes(state.nextReceivingChainKey),
-    sendingChainKey: hexToBytes(state.sendingChainKey),
+    receivingChainKey: state.receivingChainKey ? hexToBytes(state.receivingChainKey) : undefined,
+    sendingChainKey: state.sendingChainKey ? hexToBytes(state.sendingChainKey) : undefined,
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
     previousSendingChainMessageCount: state.previousSendingChainMessageCount,
@@ -85,7 +85,16 @@ export async function* createMessageStream(channel: Channel): AsyncGenerator<Mes
   }
 }
 
-export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32)) {
-  const prk = hkdf_extract(sha256, input1, input2)
-  return hkdf_expand(sha256, prk, new Uint8Array([1]), 32)
+export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32), numOutputs: number = 1): Uint8Array[] {
+  const prk = hkdf_extract(sha256, input1, input2);
+  
+  const outputs: Uint8Array[] = [];
+  for (let i = 1; i <= numOutputs; i++) {
+    outputs.push(hkdf_expand(sha256, prk, new Uint8Array([i]), 32));
+  }
+  return outputs;
+}
+
+export function skippedMessageIndexKey(nostrSender: string, number: number): string {
+  return `${nostrSender}:${number}`;
 }

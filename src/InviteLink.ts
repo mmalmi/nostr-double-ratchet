@@ -127,7 +127,7 @@ export class InviteLink {
         const inviteeSessionPublicKey = getPublicKey(inviteeSessionKey);
         const inviterPublicKey = this.inviter || this.inviterSessionPublicKey;
 
-        const channel = Channel.init(nostrSubscribe, this.inviterSessionPublicKey, inviteeSessionKey);
+        const channel = Channel.init(nostrSubscribe, this.inviterSessionPublicKey, inviteeSessionKey, new Uint8Array(), undefined, true);
 
         // Create a random keypair for the envelope sender
         const randomSenderKey = generateSecretKey();
@@ -182,7 +182,7 @@ export class InviteLink {
                 const inviteeSessionPublicKey = await innerDecrypt(innerEvent.content, innerEvent.pubkey);
 
                 const name = event.id;
-                const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, name);
+                const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, new Uint8Array(), name, false);
 
                 onChannel(channel, innerEvent.pubkey);
             } catch (error) {
