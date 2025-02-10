@@ -65,7 +65,9 @@ export interface ChannelState {
   skippedMessageKeys: Record<string, Uint8Array>;
 }
 
-/** Function to unsubscribe from a Nostr subscription */
+/**
+ * Unsubscribe from a subscription or event listener.
+ */
 export type Unsubscribe = () => void;
 
 /** 

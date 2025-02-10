@@ -25,6 +25,7 @@ export class Channel {
   private currentInternalSubscriptionId = 0;
   public name: string;
 
+  // 1. CHANNEL PUBLIC INTERFACE
   constructor(private nostrSubscribe: NostrSubscribe, public state: ChannelState) {
     this.name = Math.random().toString(36).substring(2, 6);
   }
@@ -105,6 +106,7 @@ export class Channel {
     return () => this.internalSubscriptions.delete(id)
   }
 
+  // 2. RATCHET FUNCTIONS
   private ratchetEncrypt(plaintext: string): [Header, string] {
     const [newSendingChainKey, messageKey] = kdf(this.state.sendingChainKey!, new Uint8Array([1]), 2);
     this.state.sendingChainKey = newSendingChainKey;
@@ -147,7 +149,7 @@ export class Channel {
     this.state.theirNostrPublicKey = theirNostrPublicKey;
 
     const conversationKey1 = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNostrPublicKey!);
-    const [intermediateRootKey, receivingChainKey] = kdf(this.state.rootKey, conversationKey1, 3);
+    const [theirRootKey, receivingChainKey] = kdf(this.state.rootKey, conversationKey1, 2);
 
     this.state.receivingChainKey = receivingChainKey;
 
@@ -159,11 +161,12 @@ export class Channel {
     };
 
     const conversationKey2 = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNostrPublicKey!);
-    const [rootKey2, sendingChainKey] = kdf(intermediateRootKey, conversationKey2, 3);
-    this.state.rootKey = rootKey2;
+    const [rootKey, sendingChainKey] = kdf(theirRootKey, conversationKey2, 2);
+    this.state.rootKey = rootKey;
     this.state.sendingChainKey = sendingChainKey;
   }
 
+  // 3. MESSAGE KEY FUNCTIONS
   private skipMessageKeys(until: number, nostrSender: string) {
     if (this.state.receivingChainMessageNumber + MAX_SKIP < until) {
       throw new Error("Too many skipped messages");
@@ -187,10 +190,11 @@ export class Channel {
     return null;
   }
 
-  private decryptHeader(e: any): [Header, boolean] {
-    const encryptedHeader = e.tags[0][1];
+  // 4. NOSTR EVENT HANDLING
+  private decryptHeader(event: any): [Header, boolean] {
+    const encryptedHeader = event.tags[0][1];
     if (this.state.ourCurrentNostrKey) {
-      const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, e.pubkey);
+      const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, event.pubkey);
       try {
         const header = JSON.parse(nip44.decrypt(encryptedHeader, currentSecret)) as Header;
         return [header, false];
@@ -199,7 +203,7 @@ export class Channel {
       }
     }
 
-    const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, e.pubkey);
+    const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, event.pubkey);
     try {
       const header = JSON.parse(nip44.decrypt(encryptedHeader, nextSecret)) as Header;
       return [header, true];
