@@ -32,9 +32,7 @@ export interface ChannelState {
   rootKey: Uint8Array;
   
   /** The other party's current Nostr public key */
-  theirNostrPublicKey?: string;
-
-  theirNextNostrPublicKey: string;
+  theirNostrPublicKey: string;
 
   /** Our current Nostr keypair used for this channel */
   ourCurrentNostrKey?: KeyPair;
@@ -43,10 +41,10 @@ export interface ChannelState {
   ourNextNostrKey: KeyPair;
   
   /** Key for decrypting incoming messages in current chain */
-  receivingChainKey: Uint8Array;
+  receivingChainKey?: Uint8Array;
   
   /** Key for encrypting outgoing messages in current chain */
-  sendingChainKey: Uint8Array;
+  sendingChainKey?: Uint8Array;
   
   /** Number of messages sent in current sending chain */
   sendingChainMessageNumber: number;

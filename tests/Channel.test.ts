@@ -13,7 +13,7 @@ describe('Channel', () => {
   it('should initialize with correct properties', () => {
     const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey)
 
-    expect(alice.state.theirNextNostrPublicKey).toBe(getPublicKey(bobSecretKey))
+    expect(alice.state.theirNostrPublicKey).toBe(getPublicKey(bobSecretKey))
     expect(alice.state.ourCurrentNostrKey!.publicKey).toBe(getPublicKey(aliceSecretKey))
     expect(alice.state.ourCurrentNostrKey!.publicKey).toHaveLength(64) // Hex-encoded public key length
   })
@@ -95,12 +95,10 @@ describe('Channel', () => {
       expect(receiverChannel.state.receivingChainKey).not.toBe(initialReceivingChainKey);
 
       // Check that the keys change when the first message of consecutive messages is received
-      /*
       if (receiverChannel.state.receivingChainMessageNumber === 1) {
-        expect(receiverChannel.state.ourCurrentNostrKey.publicKey).not.toBe(initialOurCurrentNostrKey);
+        expect(receiverChannel.state.ourCurrentNostrKey?.publicKey).not.toBe(initialOurCurrentNostrKey);
         expect(receiverChannel.state.theirNostrPublicKey).not.toBe(initialTheirNostrPublicKey);
       }
-      */
     };
 
     // Test conversation
