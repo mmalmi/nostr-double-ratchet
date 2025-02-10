@@ -3,6 +3,7 @@ import { Channel } from '../src/Channel'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
 import { EVENT_KIND } from '../src/types';
 import { createMessageStream } from '../src/utils';
+import { serializeChannelState, deserializeChannelState } from '../src/utils';
 
 describe('Channel', () => {
   const aliceSecretKey = generateSecretKey()
@@ -151,6 +152,60 @@ describe('Channel', () => {
 
     const bobMessage2 = await bobMessages.next();
     expect(bobMessage2.value?.data).toBe('Message 2');
+
+    expect(messageQueue.length).toBe(0);
+  });
+
+  it('should maintain conversation state through serialization', async () => {
+    const messageQueue: any[] = [];
+
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+        setTimeout(checkQueue, 100);
+      };
+      checkQueue();
+      return () => {};
+    };
+
+    // Initialize channels
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true);
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false);
+
+    const aliceMessages = createMessageStream(alice);
+    const bobMessages = createMessageStream(bob);
+
+    // Send initial messages
+    messageQueue.push(alice.send('Hello Bob!'));
+    const bobFirstMessage = await bobMessages.next();
+    expect(bobFirstMessage.value?.data).toBe('Hello Bob!');
+
+    messageQueue.push(bob.send('Hi Alice!'));
+    const aliceFirstMessage = await aliceMessages.next();
+    expect(aliceFirstMessage.value?.data).toBe('Hi Alice!');
+
+    // Serialize both channel states
+    const serializedAlice = serializeChannelState(alice.state);
+    const serializedBob = serializeChannelState(bob.state);
+
+    // Create new channels with deserialized state
+    const aliceRestored = new Channel(createSubscribe(), deserializeChannelState(serializedAlice));
+    const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
+
+    const aliceRestoredMessages = createMessageStream(aliceRestored);
+    const bobRestoredMessages = createMessageStream(bobRestored);
+
+    // Continue conversation with restored channels
+    messageQueue.push(aliceRestored.send('How are you?'));
+    const bobSecondMessage = await bobRestoredMessages.next();
+    expect(bobSecondMessage.value?.data).toBe('How are you?');
+
+    messageQueue.push(bobRestored.send('Doing great!'));
+    const aliceSecondMessage = await aliceRestoredMessages.next();
+    expect(aliceSecondMessage.value?.data).toBe('Doing great!');
 
     expect(messageQueue.length).toBe(0);
   });

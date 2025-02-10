@@ -56,7 +56,6 @@ export class Channel {
     };
     const channel = new Channel(nostrSubscribe, state);
     if (name) channel.name = name;
-    console.log(channel.name, 'initial root key', bytesToHex(state.rootKey).slice(0,4))
     return channel;
   }
 
