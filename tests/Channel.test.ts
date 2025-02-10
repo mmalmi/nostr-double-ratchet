@@ -12,7 +12,7 @@ describe('Channel', () => {
   const dummySubscribe = () => dummyUnsubscribe
 
   it('should initialize with correct properties', () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey)
+    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array())
 
     expect(alice.state.theirNostrPublicKey).toBe(getPublicKey(bobSecretKey))
     expect(alice.state.ourCurrentNostrKey!.publicKey).toBe(getPublicKey(aliceSecretKey))
@@ -20,7 +20,7 @@ describe('Channel', () => {
   })
 
   it('should create an event with correct properties', () => {
-    const channel = Channel.init(() => dummyUnsubscribe, getPublicKey(bobSecretKey), aliceSecretKey)
+    const channel = Channel.init(() => dummyUnsubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
     const testData = 'Hello, world!'
 
     const event = channel.send(testData)
@@ -37,7 +37,7 @@ describe('Channel', () => {
   })
 
   it('should handle incoming events and update keys', async () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true)
+    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
     const event = alice.send('Hello, Bob!')
     
     const bob = Channel.init((filter, onEvent) => {
@@ -45,7 +45,7 @@ describe('Channel', () => {
         onEvent(event)
       }
       return dummyUnsubscribe
-    }, getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false)
+    }, getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob')
 
     const initialReceivingChainKey = bob.state.receivingChainKey
 
@@ -73,8 +73,8 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true);
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false);
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);
@@ -133,8 +133,8 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true);
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false);
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
     const bobMessages = createMessageStream(bob);
 
@@ -172,8 +172,8 @@ describe('Channel', () => {
     };
 
     // Initialize channels
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, undefined, 'alice', true);
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, undefined, 'bob', false);
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);

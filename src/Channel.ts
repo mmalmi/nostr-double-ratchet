@@ -13,7 +13,9 @@ import { kdf, skippedMessageIndexKey } from "./utils";
 const MAX_SKIP = 1000;
 
 /**
- * Similar to Signal's "Double Ratchet with header encryption"
+ * Double ratchet secure communication channel over Nostr
+ * 
+ * Very similar to Signal's "Double Ratchet with header encryption"
  * https://signal.org/docs/specifications/doubleratchet/
  */
 export class Channel {
@@ -28,10 +30,16 @@ export class Channel {
   }
 
   /**
-   * @param sharedSecret optional, but useful to keep the first chain of messages secure. Unlike the Nostr keys, it can be forgotten after the 1st message in the chain.
-   * @param isInitiator determines which chain key is used for sending vs receiving
+   * Initializes a new secure communication channel
+   * @param nostrSubscribe Function to subscribe to Nostr events
+   * @param theirNostrPublicKey The public key of the other party
+   * @param ourCurrentPrivateKey Our current private key for Nostr
+   * @param isInitiator Whether we are initiating the conversation (true) or responding (false)
+   * @param sharedSecret Initial shared secret for securing the first message chain
+   * @param name Optional name for the channel (for debugging)
+   * @returns A new Channel instance
    */
-  static init(nostrSubscribe: NostrSubscribe, theirNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, sharedSecret = new Uint8Array(), name?: string, isInitiator = true): Channel {
+  static init(nostrSubscribe: NostrSubscribe, theirNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, isInitiator: boolean, sharedSecret: Uint8Array, name?: string): Channel {
     const ourNextPrivateKey = generateSecretKey();
     const [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirNostrPublicKey), 2);
     let ourCurrentNostrKey;
@@ -59,6 +67,12 @@ export class Channel {
     return channel;
   }
 
+  /**
+   * Sends an encrypted message through the channel
+   * @param data The plaintext message to send
+   * @returns A verified Nostr event containing the encrypted message
+   * @throws Error if we are not the initiator and trying to send the first message
+   */
   send(data: string): VerifiedEvent {
     if (!this.state.theirNostrPublicKey || !this.state.ourCurrentNostrKey) {
       throw new Error("we are not the initiator, so we can't send the first message");
@@ -79,6 +93,11 @@ export class Channel {
     return nostrEvent;
   }
 
+  /**
+   * Subscribes to incoming messages on this channel
+   * @param callback Function to be called when a message is received
+   * @returns Unsubscribe function to stop receiving messages
+   */
   onMessage(callback: MessageCallback): Unsubscribe {
     const id = this.currentInternalSubscriptionId++
     this.internalSubscriptions.set(id, callback)

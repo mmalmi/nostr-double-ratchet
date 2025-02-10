@@ -1,5 +1,8 @@
 import { VerifiedEvent } from "nostr-tools";
 
+/**
+ * An event that has been verified to be from the Nostr network.
+ */
 export type Message = {
   id: string;
   data: string;
@@ -19,13 +22,16 @@ export type NostrFilter = {
   kinds?: number[];
 }
 
+/**
+ * A keypair used for encryption and decryption.
+ */
 export type KeyPair = {
   publicKey: string;
   privateKey: Uint8Array;
 }
 
 /** 
- * Represents the state of a Double Ratchet channel between two parties. Needed for persisting channels.
+ * State of a Double Ratchet channel between two parties. Needed for persisting channels.
  */
 export interface ChannelState {
   /** Root key used to derive new sending / receiving chain keys */
@@ -59,8 +65,18 @@ export interface ChannelState {
   skippedMessageKeys: Record<string, Uint8Array>;
 }
 
+/** Function to unsubscribe from a Nostr subscription */
 export type Unsubscribe = () => void;
+
+/** 
+ * Function that subscribes to Nostr events matching a filter and calls onEvent for each event.
+ */
 export type NostrSubscribe = (filter: NostrFilter, onEvent: (e: VerifiedEvent) => void) => Unsubscribe;
+
+/** 
+ * Callback function for handling decrypted messages
+ * @param message - The decrypted message object
+ */
 export type MessageCallback = (message: Message) => void;
 
 export const EVENT_KIND = 4;

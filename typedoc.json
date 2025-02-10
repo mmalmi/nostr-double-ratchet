@@ -1,3 +1,9 @@
 {
-  "entryPoints": ["src/index.ts"]
+  "entryPoints": ["src/index.ts"],
+  "out": "docs",
+  "excludeNotDocumented": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeInternal": true,
+  "readme": "README.md"
 }
