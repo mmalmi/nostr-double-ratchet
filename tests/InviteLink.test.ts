@@ -13,7 +13,7 @@ describe('InviteLink', () => {
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const inviteLink = InviteLink.createNew(alicePublicKey, 'Test Invite', 5)
     expect(inviteLink.inviterSessionPublicKey).toHaveLength(64)
-    expect(inviteLink.linkSecret).toHaveLength(32)
+    expect(inviteLink.linkSecret).toHaveLength(64)
     expect(inviteLink.inviter).toBe(alicePublicKey)
     expect(inviteLink.label).toBe('Test Invite')
     expect(inviteLink.maxUses).toBe(5)

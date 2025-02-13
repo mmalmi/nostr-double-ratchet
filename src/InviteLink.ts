@@ -1,10 +1,10 @@
 import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, nip19 } from "nostr-tools";
-import { base58 } from '@scure/base';
 import { NostrSubscribe, Unsubscribe } from "./types";
 import { getConversationKey } from "nostr-tools/nip44";
 import { Channel } from "./Channel";
 import { EVENT_KIND } from "./types";
 import { EncryptFunction, DecryptFunction } from "./types";
+import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 
 /**
  * Invite link is a safe way to exchange session keys and initiate secret channels.
@@ -31,7 +31,7 @@ export class InviteLink {
     static createNew(inviter: string, label?: string, maxUses?: number): InviteLink {
         const inviterSessionPrivateKey = generateSecretKey();
         const inviterSessionPublicKey = getPublicKey(inviterSessionPrivateKey);
-        const linkSecret = base58.encode(generateSecretKey()).slice(8, 40);
+        const linkSecret = bytesToHex(generateSecretKey());
         return new InviteLink(
             inviterSessionPublicKey,
             linkSecret,
@@ -127,7 +127,8 @@ export class InviteLink {
         const inviteeSessionPublicKey = getPublicKey(inviteeSessionKey);
         const inviterPublicKey = this.inviter || this.inviterSessionPublicKey;
 
-        const channel = Channel.init(nostrSubscribe, this.inviterSessionPublicKey, inviteeSessionKey, true, new Uint8Array(), undefined);
+        const sharedSecret = hexToBytes(this.linkSecret);
+        const channel = Channel.init(nostrSubscribe, this.inviterSessionPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
 
         // Create a random keypair for the envelope sender
         const randomSenderKey = generateSecretKey();
@@ -180,9 +181,10 @@ export class InviteLink {
                     (ciphertext: string, pubkey: string) => Promise.resolve(nip44.decrypt(ciphertext, getConversationKey(inviterSecretKey, pubkey)));
     
                 const inviteeSessionPublicKey = await innerDecrypt(innerEvent.content, innerEvent.pubkey);
+                const sharedSecret = hexToBytes(this.linkSecret);
 
                 const name = event.id;
-                const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, false, new Uint8Array(), name);
+                const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, false, sharedSecret, name);
 
                 onChannel(channel, innerEvent.pubkey);
             } catch (error) {
