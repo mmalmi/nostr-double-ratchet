@@ -239,15 +239,27 @@ export class Channel {
 
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
-    if (this.state.theirNostrPublicKey) {
-      this.nostrUnsubscribe = this.nostrSubscribe(
-        {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
-        (e) => this.handleNostrEvent(e)
-      );
-    }
     this.nostrNextUnsubscribe = this.nostrSubscribe(
       {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
     );
+    
+    // Subscribe to all public keys from skipped messages
+    const uniquePublicKeys = new Set<string>();
+    for (const key of Object.keys(this.state.skippedMessageKeys)) {
+      const [pubkey] = key.split(':');
+      if (pubkey !== this.state.theirNostrPublicKey) {
+        uniquePublicKeys.add(pubkey);
+      }
+    }
+
+    if (uniquePublicKeys.size > 0) {
+      // do we want this unsubscribed on rotation or should we keep it open
+      // in case more skipped messages are found by relays or peers?
+      this.nostrUnsubscribe = this.nostrSubscribe(
+        {authors: Array.from(uniquePublicKeys), kinds: [EVENT_KIND]},
+        (e) => this.handleNostrEvent(e)
+      );
+    }
   }
 }
