@@ -209,4 +209,66 @@ describe('Channel', () => {
 
     expect(messageQueue.length).toBe(0);
   });
+
+  it('should subscribe to public keys from skipped messages', async () => {
+    const messageQueue: any[] = [];
+
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+        setTimeout(checkQueue, 100);
+      };
+      checkQueue();
+      return () => {};
+    };
+
+    // Initialize channels
+    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+
+    const aliceMessages = createMessageStream(alice);
+    const bobMessages = createMessageStream(bob);
+
+    // Create some skipped messages by sending out of order
+    const message1 = alice.send('Message 1');
+    const message2 = alice.send('Message 2');
+    const message3 = alice.send('Message 3');
+
+    // Deliver messages out of order to create skipped messages
+    messageQueue.push(message3);
+    await bobMessages.next();
+
+    // At this point, message1 and message2 are skipped and stored in skippedMessageKeys
+
+    const message4 = bob.send('Message 4');
+    messageQueue.push(message4);
+    await aliceMessages.next();
+
+    const message5 = alice.send('Acknowledge message 4');
+    messageQueue.push(message5);
+    await bobMessages.next();
+    // Bob now has next key from Alice
+
+    // Old messages are delivered late
+    messageQueue.push(message1);
+    messageQueue.push(message2);
+
+    // Serialize bob's state and create a new channel
+    const serializedBob = serializeChannelState(bob.state);
+    
+    
+    // Create new channel with serialized state
+    const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
+    const bobMessages2 = createMessageStream(bobRestored); // This triggers subscriptions
+    // Deliver the skipped message
+
+    messageQueue.push(message2);
+    const skippedMessage1 = await bobMessages2.next();
+    expect(skippedMessage1.value?.data).toBe('Message 1');
+    const skippedMessage2 = await bobMessages2.next();
+    expect(skippedMessage2.value?.data).toBe('Message 2');
+  });
 })

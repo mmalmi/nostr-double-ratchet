@@ -212,6 +212,8 @@ export class Channel {
     }
 
     throw new Error("Failed to decrypt header with both current and next secrets");
+
+    // what if it was a skipped message? need to store our old private keys for that?
   }
 
   private handleNostrEvent(e: any) {
