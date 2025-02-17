@@ -26,6 +26,11 @@ export class Channel {
   public name: string;
 
   // 1. CHANNEL PUBLIC INTERFACE
+  /**
+   * Creates a new Channel instance
+   * @param nostrSubscribe Function to subscribe to Nostr events
+   * @param state Saved state of the channel. Get from deserializeChannelState, or use Channel.init instead to create a new channel.
+   */
   constructor(private nostrSubscribe: NostrSubscribe, public state: ChannelState) {
     this.name = Math.random().toString(36).substring(2, 6);
   }

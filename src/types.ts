@@ -30,6 +30,13 @@ export type KeyPair = {
   privateKey: Uint8Array;
 }
 
+export interface SkippedKeys {
+  [pubKey: string]: {
+    headerKeys: Uint8Array[],
+    messageKeys: {[msgIndex: number]: Uint8Array}
+  };
+}
+
 /** 
  * State of a Double Ratchet channel between two parties. Needed for persisting channels.
  */
@@ -63,13 +70,6 @@ export interface ChannelState {
   
   /** Cache of message & header keys for handling out-of-order messages */
   skippedKeys: SkippedKeys;
-}
-
-export interface SkippedKeys {
-  [pubKey: string]: {
-    headerKeys: Uint8Array[],
-    messageKeys: {[msgIndex: number]: Uint8Array}
-  };
 }
 
 /**

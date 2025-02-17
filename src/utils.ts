@@ -4,6 +4,9 @@ import { Channel } from "./Channel";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
 
+/**
+ * Serialize a channel state to a string.
+ */
 export function serializeChannelState(state: ChannelState): string {
   return JSON.stringify({
     rootKey: bytesToHex(state.rootKey),
@@ -38,6 +41,9 @@ export function serializeChannelState(state: ChannelState): string {
   });
 }
 
+/**
+ * Deserialize a channel state from a string.
+ */
 export function deserializeChannelState(data: string): ChannelState {
   const state = JSON.parse(data);
   return {
@@ -73,6 +79,9 @@ export function deserializeChannelState(data: string): ChannelState {
   };
 }
 
+/**
+ * Create an async generator that yields messages as they arrive on a channel.
+ */
 export async function* createMessageStream(channel: Channel): AsyncGenerator<Message, void, unknown> {
   const messageQueue: Message[] = [];
   let resolveNext: ((value: Message) => void) | null = null;
