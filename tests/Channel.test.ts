@@ -265,16 +265,16 @@ describe('Channel', () => {
 
     // Prevent old channel from capturing from the test message queue
     bob.close()
+   
+    // Old messages are delivered late
+    messageQueue.push(message1);
+    messageQueue.push(message2);
     
     // Create new channel with serialized state
     const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
     bobRestored.name = 'bobRestored';
     const bobMessages2 = createMessageStream(bobRestored); // This triggers subscriptions
     // Deliver the skipped message
-
-    // Old messages are delivered late
-    messageQueue.push(message1);
-    messageQueue.push(message2);
 
     const skippedMessage1 = await bobMessages2.next();
     expect(skippedMessage1.value?.data).toBe('Message 1');
