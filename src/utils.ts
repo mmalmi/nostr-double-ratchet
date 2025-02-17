@@ -27,6 +27,12 @@ export function serializeChannelState(state: ChannelState): string {
         bytesToHex(value),
       ])
     ),
+    skippedHeaderKeys: Object.fromEntries(
+      Object.entries(state.skippedHeaderKeys).map(([key, value]) => [
+        key,
+        value.map(bytes => bytesToHex(bytes))
+      ])
+    ),
   });
 }
 
@@ -52,6 +58,12 @@ export function deserializeChannelState(data: string): ChannelState {
       Object.entries(state.skippedMessageKeys).map(([key, value]) => [
         key,
         hexToBytes(value as string),
+      ])
+    ),
+    skippedHeaderKeys: Object.fromEntries(
+      Object.entries(state.skippedHeaderKeys || {}).map(([key, value]) => [
+        key,
+        (value as string[]).map(hex => hexToBytes(hex))
       ])
     ),
   };

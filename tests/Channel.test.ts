@@ -213,17 +213,25 @@ describe('Channel', () => {
   it('should subscribe to public keys from skipped messages', async () => {
     const messageQueue: any[] = [];
 
-    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
-      const checkQueue = () => {
-        const index = messageQueue.findIndex(event => matchFilter(filter, event));
-        if (index !== -1) {
-          onEvent(messageQueue.splice(index, 1)[0]);
+    function createSubscribe() {
+      let unsubscribed = false;
+    
+      return (filter: any, onEvent: (event: any) => void) => {
+        function checkQueue() {
+          if (unsubscribed) return;
+          const index = messageQueue.findIndex(event => matchFilter(filter, event));
+          if (index !== -1) {
+            onEvent(messageQueue.splice(index, 1)[0]);
+          }
+          setTimeout(checkQueue, 100);
         }
-        setTimeout(checkQueue, 100);
+        checkQueue();
+    
+        return () => {
+          unsubscribed = true;
+        };
       };
-      checkQueue();
-      return () => {};
-    };
+    }
 
     // Initialize channels
     const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
@@ -252,20 +260,22 @@ describe('Channel', () => {
     await bobMessages.next();
     // Bob now has next key from Alice
 
+    // Serialize bob's state and create a new channel
+    const serializedBob = serializeChannelState(bob.state);
+
+    // Prevent old channel from capturing from the test message queue
+    bob.close()
+    
+    // Create new channel with serialized state
+    const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
+    bobRestored.name = 'bobRestored';
+    const bobMessages2 = createMessageStream(bobRestored); // This triggers subscriptions
+    // Deliver the skipped message
+
     // Old messages are delivered late
     messageQueue.push(message1);
     messageQueue.push(message2);
 
-    // Serialize bob's state and create a new channel
-    const serializedBob = serializeChannelState(bob.state);
-    
-    
-    // Create new channel with serialized state
-    const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
-    const bobMessages2 = createMessageStream(bobRestored); // This triggers subscriptions
-    // Deliver the skipped message
-
-    messageQueue.push(message2);
     const skippedMessage1 = await bobMessages2.next();
     expect(skippedMessage1.value?.data).toBe('Message 1');
     const skippedMessage2 = await bobMessages2.next();

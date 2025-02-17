@@ -62,6 +62,7 @@ export class Channel {
       receivingChainMessageNumber: 0,
       previousSendingChainMessageCount: 0,
       skippedMessageKeys: {},
+      skippedHeaderKeys: {},
     };
     const channel = new Channel(nostrSubscribe, state);
     if (name) channel.name = name;
@@ -104,6 +105,14 @@ export class Channel {
     this.internalSubscriptions.set(id, callback)
     this.subscribeToNostrEvents()
     return () => this.internalSubscriptions.delete(id)
+  }
+
+  /**
+   * Stop listening to incoming messages
+   */
+  close() {
+    this.nostrUnsubscribe?.();
+    this.nostrNextUnsubscribe?.();
   }
 
   // 2. RATCHET FUNCTIONS
@@ -176,6 +185,18 @@ export class Channel {
       this.state.receivingChainKey = newReceivingChainKey;
       const key = skippedMessageIndexKey(nostrSender, this.state.receivingChainMessageNumber);
       this.state.skippedMessageKeys[key] = messageKey;
+      
+      if (!this.state.skippedHeaderKeys[nostrSender]) {
+        const secrets: Uint8Array[] = [];
+        if (this.state.ourCurrentNostrKey) {
+          const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, nostrSender);
+          secrets.push(currentSecret);
+        }
+        const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, nostrSender);
+        secrets.push(nextSecret);
+        this.state.skippedHeaderKeys[nostrSender] = secrets;
+      }
+      
       this.state.receivingChainMessageNumber++;
     }
   }
@@ -185,19 +206,29 @@ export class Channel {
     if (key in this.state.skippedMessageKeys) {
       const mk = this.state.skippedMessageKeys[key];
       delete this.state.skippedMessageKeys[key];
+      
+      // Check if we have any remaining skipped messages from this sender
+      const hasMoreSkippedMessages = Object.keys(this.state.skippedMessageKeys).some(k => k.startsWith(`${nostrSender}:`));
+      if (!hasMoreSkippedMessages) {
+        // Clean up header keys and unsubscribe as no more skipped messages from this sender
+        delete this.state.skippedHeaderKeys[nostrSender];
+        this.nostrUnsubscribe?.();
+        this.nostrUnsubscribe = undefined;
+      }
+      
       return nip44.decrypt(ciphertext, mk);
     }
     return null;
   }
 
   // 4. NOSTR EVENT HANDLING
-  private decryptHeader(event: any): [Header, boolean] {
+  private decryptHeader(event: any): [Header, boolean, boolean] {
     const encryptedHeader = event.tags[0][1];
     if (this.state.ourCurrentNostrKey) {
       const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, event.pubkey);
       try {
         const header = JSON.parse(nip44.decrypt(encryptedHeader, currentSecret)) as Header;
-        return [header, false];
+        return [header, false, false];
       } catch (error) {
         // Decryption with currentSecret failed, try with nextSecret
       }
@@ -206,32 +237,49 @@ export class Channel {
     const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, event.pubkey);
     try {
       const header = JSON.parse(nip44.decrypt(encryptedHeader, nextSecret)) as Header;
-      return [header, true];
+      return [header, true, false];
     } catch (error) {
       // Decryption with nextSecret also failed
     }
 
-    throw new Error("Failed to decrypt header with both current and next secrets");
+    const keys = this.state.skippedHeaderKeys[event.pubkey];
+    if (keys) {
+      for (const key of keys) {
+        try {
+          const header = JSON.parse(nip44.decrypt(encryptedHeader, key)) as Header;
+          return [header, false, true];
+        } catch (error) {
+          // Decryption failed, try next secret
+        }
+      }
+    }
 
-    // what if it was a skipped message? need to store our old private keys for that?
+    throw new Error("Failed to decrypt header with current and skipped header keys");
   }
 
   private handleNostrEvent(e: any) {
-    const [header, shouldRatchet] = this.decryptHeader(e);
+    const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
 
-    if (this.state.theirNostrPublicKey !== header.nextPublicKey) {
-      this.state.theirNostrPublicKey = header.nextPublicKey;
-      this.nostrUnsubscribe?.(); // should we keep this open for a while? maybe as long as we have skipped messages?
-      this.nostrUnsubscribe = this.nostrNextUnsubscribe;
-      this.nostrNextUnsubscribe = this.nostrSubscribe(
-        {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
-        (e) => this.handleNostrEvent(e)
-      );
-    }
-
-    if (shouldRatchet) {
-      this.skipMessageKeys(header.previousChainLength, e.pubkey);
-      this.ratchetStep(header.nextPublicKey);
+    if (!isSkipped) {
+      if (this.state.theirNostrPublicKey !== header.nextPublicKey) {
+        this.state.theirNostrPublicKey = header.nextPublicKey;
+        this.nostrUnsubscribe?.(); // should we keep this open for a while? maybe as long as we have skipped messages?
+        this.nostrUnsubscribe = this.nostrNextUnsubscribe;
+        this.nostrNextUnsubscribe = this.nostrSubscribe(
+          {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
+          (e) => this.handleNostrEvent(e)
+        );
+      }
+  
+      if (shouldRatchet) {
+        this.skipMessageKeys(header.previousChainLength, e.pubkey);
+        this.ratchetStep(header.nextPublicKey);
+      }
+    } else {
+      const key = skippedMessageIndexKey(e.pubkey, header.number);
+      if (!(key in this.state.skippedMessageKeys)) {
+        return // maybe we already processed this message
+      }
     }
 
     const data = this.ratchetDecrypt(header, e.content, e.pubkey);

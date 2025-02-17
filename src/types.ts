@@ -63,6 +63,9 @@ export interface ChannelState {
   
   /** Cache of message keys for handling out-of-order messages */
   skippedMessageKeys: Record<string, Uint8Array>;
+
+  /** Cache of header keys for handling out-of-order messages */
+  skippedHeaderKeys: Record<string, Uint8Array[]>;
 }
 
 /**
