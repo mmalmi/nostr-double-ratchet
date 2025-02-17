@@ -21,18 +21,20 @@ export function serializeChannelState(state: ChannelState): string {
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
     previousSendingChainMessageCount: state.previousSendingChainMessageCount,
-    skippedMessageKeys: Object.fromEntries(
-      Object.entries(state.skippedMessageKeys).map(([key, value]) => [
-        key,
-        bytesToHex(value),
+    skippedKeys: Object.fromEntries(
+      Object.entries(state.skippedKeys).map(([pubkey, value]) => [
+        pubkey,
+        {
+          headerKeys: value.headerKeys.map(bytes => bytesToHex(bytes)),
+          messageKeys: Object.fromEntries(
+            Object.entries(value.messageKeys).map(([index, bytes]) => [
+              index,
+              bytesToHex(bytes)
+            ])
+          )
+        }
       ])
-    ),
-    skippedHeaderKeys: Object.fromEntries(
-      Object.entries(state.skippedHeaderKeys).map(([key, value]) => [
-        key,
-        value.map(bytes => bytesToHex(bytes))
-      ])
-    ),
+    )
   });
 }
 
@@ -54,18 +56,20 @@ export function deserializeChannelState(data: string): ChannelState {
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
     previousSendingChainMessageCount: state.previousSendingChainMessageCount,
-    skippedMessageKeys: Object.fromEntries(
-      Object.entries(state.skippedMessageKeys).map(([key, value]) => [
-        key,
-        hexToBytes(value as string),
+    skippedKeys: Object.fromEntries(
+      Object.entries(state.skippedKeys || {}).map(([pubkey, value]: [string, any]) => [
+        pubkey,
+        {
+          headerKeys: value.headerKeys.map((hex: string) => hexToBytes(hex)),
+          messageKeys: Object.fromEntries(
+            Object.entries(value.messageKeys).map(([index, hex]) => [
+              index,
+              hexToBytes(hex as string)
+            ])
+          )
+        }
       ])
-    ),
-    skippedHeaderKeys: Object.fromEntries(
-      Object.entries(state.skippedHeaderKeys || {}).map(([key, value]) => [
-        key,
-        (value as string[]).map(hex => hexToBytes(hex))
-      ])
-    ),
+    )
   };
 }
 
@@ -105,8 +109,4 @@ export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32),
     outputs.push(hkdf_expand(sha256, prk, new Uint8Array([i]), 32));
   }
   return outputs;
-}
-
-export function skippedMessageIndexKey(nostrSender: string, number: number): string {
-  return `${nostrSender}:${number}`;
 }

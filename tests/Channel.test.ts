@@ -249,7 +249,10 @@ describe('Channel', () => {
     messageQueue.push(message3);
     await bobMessages.next();
 
-    // At this point, message1 and message2 are skipped and stored in skippedMessageKeys
+    // Verify skipped keys structure
+    expect(bob.state.skippedKeys[getPublicKey(aliceSecretKey)]).toBeDefined();
+    expect(Object.keys(bob.state.skippedKeys[getPublicKey(aliceSecretKey)].messageKeys)).toHaveLength(2);
+    expect(bob.state.skippedKeys[getPublicKey(aliceSecretKey)].headerKeys).toHaveLength(1);
 
     const message4 = bob.send('Message 4');
     messageQueue.push(message4);
@@ -258,7 +261,6 @@ describe('Channel', () => {
     const message5 = alice.send('Acknowledge message 4');
     messageQueue.push(message5);
     await bobMessages.next();
-    // Bob now has next key from Alice
 
     // Serialize bob's state and create a new channel
     const serializedBob = serializeChannelState(bob.state);
@@ -273,12 +275,20 @@ describe('Channel', () => {
     // Create new channel with serialized state
     const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
     bobRestored.name = 'bobRestored';
-    const bobMessages2 = createMessageStream(bobRestored); // This triggers subscriptions
-    // Deliver the skipped message
+    const bobMessages2 = createMessageStream(bobRestored);
+
+    // Verify skipped keys were properly serialized and deserialized
+    expect(bobRestored.state.skippedKeys[getPublicKey(aliceSecretKey)]).toBeDefined();
+    expect(Object.keys(bobRestored.state.skippedKeys[getPublicKey(aliceSecretKey)].messageKeys)).toHaveLength(2);
+    expect(bobRestored.state.skippedKeys[getPublicKey(aliceSecretKey)].headerKeys).toHaveLength(1);
 
     const skippedMessage1 = await bobMessages2.next();
     expect(skippedMessage1.value?.data).toBe('Message 1');
     const skippedMessage2 = await bobMessages2.next();
     expect(skippedMessage2.value?.data).toBe('Message 2');
+
+    // Verify skipped keys were cleaned up after processing
+    console.log(bobRestored.state.skippedKeys)
+    expect(Object.keys(bobRestored.state.skippedKeys)).toHaveLength(0);
   });
 })
