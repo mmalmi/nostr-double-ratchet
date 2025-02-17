@@ -44,19 +44,26 @@ export class InviteLink {
 
     static fromUrl(url: string): InviteLink {
         const parsedUrl = new URL(url);
-        const inviter = parsedUrl.pathname.slice(1);
-        const inviterSessionPublicKey = parsedUrl.searchParams.get('s');
-        const linkSecret = parsedUrl.hash.slice(1);
-        
-        if (!inviter) {
-            throw new Error("Inviter not found in the URL");
+        const rawHash = parsedUrl.hash.slice(1);
+        if (!rawHash) {
+            throw new Error("No invite data found in the URL hash.");
         }
-        if (!inviterSessionPublicKey) {
-            throw new Error("Session key not found in the URL");
+
+        const decodedHash = decodeURIComponent(rawHash);
+        let data: any;
+        try {
+            data = JSON.parse(decodedHash);
+        } catch (err) {
+            throw new Error("Invite data in URL hash is not valid JSON: " + err);
+        }
+
+        const { inviter, sessionKey, linkSecret } = data;
+        if (!inviter || !sessionKey || !linkSecret) {
+            throw new Error("Missing required fields (inviter, sessionKey, linkSecret) in invite data.");
         }
 
         const decodedInviter = nip19.decode(inviter);
-        const decodedSessionKey = nip19.decode(inviterSessionPublicKey);
+        const decodedSessionKey = nip19.decode(sessionKey);
 
         if (typeof decodedInviter.data !== 'string') {
             throw new Error("Decoded inviter is not a string");
@@ -65,10 +72,11 @@ export class InviteLink {
             throw new Error("Decoded session key is not a string");
         }
 
-        const inviterHexPub = decodedInviter.data;
-        const inviterSessionPublicKeyHex = decodedSessionKey.data;
-        
-        return new InviteLink(inviterSessionPublicKeyHex, linkSecret, inviterHexPub);
+        return new InviteLink(
+            decodedSessionKey.data,
+            linkSecret,
+            decodedInviter.data
+        );
     }
 
     static deserialize(json: string): InviteLink {
@@ -97,10 +105,15 @@ export class InviteLink {
     }
 
     getUrl(root = "https://iris.to") {
-        const url = new URL(`${root}/${nip19.npubEncode(this.inviter)}`)
-        url.searchParams.set('s', nip19.npubEncode(this.inviterSessionPublicKey))
-        url.hash = this.linkSecret
-        return url.toString()
+        const data = {
+            inviter: nip19.npubEncode(this.inviter),
+            sessionKey: nip19.npubEncode(this.inviterSessionPublicKey),
+            linkSecret: this.linkSecret
+        };
+        const url = new URL(root);
+        url.hash = encodeURIComponent(JSON.stringify(data));
+        console.log('url', url.toString())
+        return url.toString();
     }
 
     /**
