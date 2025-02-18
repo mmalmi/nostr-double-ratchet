@@ -1,8 +1,8 @@
-import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, nip19 } from "nostr-tools";
-import { NostrSubscribe, Unsubscribe } from "./types";
+import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, nip19, UnsignedEvent, verifyEvent } from "nostr-tools";
+import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types";
 import { getConversationKey } from "nostr-tools/nip44";
 import { Channel } from "./Channel";
-import { EVENT_KIND } from "./types";
+import { MESSAGE_EVENT_KIND } from "./types";
 import { EncryptFunction, DecryptFunction } from "./types";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 
@@ -92,6 +92,56 @@ export class InviteLink {
         );
     }
 
+    static fromEvent(event: VerifiedEvent): InviteLink {
+        if (!event.sig) {
+            throw new Error("Event is not signed");
+        }
+        if (!verifyEvent(event)) {
+            throw new Error("Event signature is invalid");
+        }
+        const { tags } = event;
+        const inviterSessionPublicKey = tags.find(([key]) => key === 'sessionKey')?.[1];
+        const linkSecret = tags.find(([key]) => key === 'linkSecret')?.[1];
+        const inviter = event.pubkey;
+
+        if (!inviterSessionPublicKey || !linkSecret) {
+            throw new Error("Invalid invite event: missing session key or link secret");
+        }
+
+        return new InviteLink(
+            inviterSessionPublicKey,
+            linkSecret,
+            inviter
+        );
+    }
+
+    static fromUser(user: string, subscribe: NostrSubscribe): Promise<InviteLink | undefined> {
+        const filter = {
+            kinds: [INVITE_EVENT_KIND],
+            pubkey: user,
+            limit: 1,
+            "#d": ["nostr-double-ratchet/invite"],
+        };
+        return new Promise((resolve) => {
+            const unsub = subscribe(filter, (event) => {
+                try {
+                    const inviteLink = InviteLink.fromEvent(event);
+                    unsub();
+                    resolve(inviteLink);
+                } catch (error) {
+                    unsub();
+                    resolve(undefined);
+                }
+            });
+
+            // Set timeout to unsubscribe and return undefined after 10 seconds
+            setTimeout(() => {
+                unsub();
+                resolve(undefined);
+            }, 10000);
+        });
+    }
+
     serialize(): string {
         return JSON.stringify({
             inviterSessionPublicKey: this.inviterSessionPublicKey,
@@ -114,6 +164,16 @@ export class InviteLink {
         url.hash = encodeURIComponent(JSON.stringify(data));
         console.log('url', url.toString())
         return url.toString();
+    }
+
+    getEvent(): UnsignedEvent {
+        return {
+            kind: INVITE_EVENT_KIND,
+            pubkey: this.inviter,
+            content: "",
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [['sessionKey', this.inviterSessionPublicKey], ['linkSecret', this.linkSecret], ['d', 'nostr-double-ratchet/invite']],
+        };
     }
 
     /**
@@ -159,7 +219,7 @@ export class InviteLink {
         };
 
         const envelope = {
-            kind: EVENT_KIND,
+            kind: MESSAGE_EVENT_KIND,
             pubkey: randomSenderPublicKey,
             content: nip44.encrypt(JSON.stringify(innerEvent), getConversationKey(randomSenderKey, this.inviterSessionPublicKey)),
             created_at: Math.floor(Date.now() / 1000),
@@ -175,7 +235,7 @@ export class InviteLink {
         }
         
         const filter = {
-            kinds: [EVENT_KIND],
+            kinds: [MESSAGE_EVENT_KIND],
             '#p': [this.inviterSessionPublicKey],
         };
 

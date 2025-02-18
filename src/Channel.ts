@@ -6,7 +6,7 @@ import {
   Unsubscribe,
   NostrSubscribe,
   MessageCallback,
-  EVENT_KIND,
+  MESSAGE_EVENT_KIND,
 } from "./types";
 import { kdf } from "./utils";
 
@@ -91,7 +91,7 @@ export class Channel {
     
     const nostrEvent = finalizeEvent({
       content: encryptedData,
-      kind: EVENT_KIND,
+      kind: MESSAGE_EVENT_KIND,
       tags: [["header", encryptedHeader]],
       created_at: Math.floor(Date.now() / 1000)
     }, this.state.ourCurrentNostrKey.privateKey);
@@ -270,7 +270,7 @@ export class Channel {
         this.nostrUnsubscribe?.();
         this.nostrUnsubscribe = this.nostrNextUnsubscribe;
         this.nostrNextUnsubscribe = this.nostrSubscribe(
-          {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
+          {authors: [this.state.theirNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
           (e) => this.handleNostrEvent(e)
         );
       }
@@ -293,7 +293,7 @@ export class Channel {
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
     this.nostrNextUnsubscribe = this.nostrSubscribe(
-      {authors: [this.state.theirNostrPublicKey], kinds: [EVENT_KIND]},
+      {authors: [this.state.theirNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
     );
 
@@ -302,7 +302,7 @@ export class Channel {
       // do we want this unsubscribed on rotation or should we keep it open
       // in case more skipped messages are found by relays or peers?
       this.nostrUnsubscribe = this.nostrSubscribe(
-        {authors: skippedSenders, kinds: [EVENT_KIND]},
+        {authors: skippedSenders, kinds: [MESSAGE_EVENT_KIND]},
         (e) => this.handleNostrEvent(e)
       );
     }

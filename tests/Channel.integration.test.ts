@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { Channel } from '../src/Channel'
-import { getPublicKey, generateSecretKey, VerifiedEvent } from 'nostr-tools'
+import { getPublicKey, generateSecretKey, VerifiedEvent, Filter } from 'nostr-tools'
 import { createMessageStream } from '../src/utils';
 import NDK, { NDKEvent } from '@nostr-dev-kit/ndk'
-import { NostrFilter } from '../src/types';
 
 describe('Channel', () => {
 	let ndk: NDK;
@@ -31,7 +30,7 @@ describe('Channel', () => {
 		})
 	})
 
-	const subscribe = (filter: NostrFilter, onEvent: (event: VerifiedEvent) => void) => {
+	const subscribe = (filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
 		const sub = ndk.subscribe(filter)
 		sub.on("event", (event) => {
 			console.log(event)
@@ -59,8 +58,8 @@ describe('Channel', () => {
 		console.log('Test started: multiple back-and-forth messages');
 
 		// Initialize Alice's and Bob's channels
-		const alice = Channel.init(subscribe, getPublicKey(bobSecretKey), aliceSecretKey, 'alice');
-		const bob = Channel.init(subscribe, getPublicKey(aliceSecretKey), bobSecretKey, 'bob');
+		const alice = Channel.init(subscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+		const bob = Channel.init(subscribe, getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
 		const aliceMessages = createMessageStream(alice);
 		const bobMessages = createMessageStream(bob);

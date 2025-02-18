@@ -1,4 +1,4 @@
-import { VerifiedEvent } from "nostr-tools";
+import { Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools";
 
 /**
  * An event that has been verified to be from the Nostr network.
@@ -15,11 +15,6 @@ export type Header = {
   previousChainLength: number;
   nextPublicKey: string;
   time: number;
-}
-
-export type NostrFilter = {
-  authors?: string[];
-  kinds?: number[];
 }
 
 /**
@@ -80,7 +75,7 @@ export type Unsubscribe = () => void;
 /** 
  * Function that subscribes to Nostr events matching a filter and calls onEvent for each event.
  */
-export type NostrSubscribe = (filter: NostrFilter, onEvent: (e: VerifiedEvent) => void) => Unsubscribe;
+export type NostrSubscribe = (filter: Filter, onEvent: (e: VerifiedEvent) => void) => Unsubscribe;
 
 /** 
  * Callback function for handling decrypted messages
@@ -88,7 +83,8 @@ export type NostrSubscribe = (filter: NostrFilter, onEvent: (e: VerifiedEvent) =
  */
 export type MessageCallback = (message: Message) => void;
 
-export const EVENT_KIND = 4;
+export const MESSAGE_EVENT_KIND = 4;
+export const INVITE_EVENT_KIND = 30078;
 export const MAX_SKIP = 100;
 
 export type NostrEvent = {
@@ -108,3 +104,4 @@ export enum Sender {
 
 export type EncryptFunction = (plaintext: string, pubkey: string) => Promise<string>;
 export type DecryptFunction = (ciphertext: string, pubkey: string) => Promise<string>;
+export type NostrPublish = (event: UnsignedEvent) => Promise<VerifiedEvent>;
