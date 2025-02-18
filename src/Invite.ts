@@ -17,7 +17,7 @@ import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
  * 
  * Also make sure to keep the session key safe.
  */
-export class InviteLink {
+export class Invite {
     constructor(
         public inviterSessionPublicKey: string,
         public linkSecret: string,
@@ -28,11 +28,11 @@ export class InviteLink {
         public usedBy: string[] = [],
     ) {}
 
-    static createNew(inviter: string, label?: string, maxUses?: number): InviteLink {
+    static createNew(inviter: string, label?: string, maxUses?: number): Invite {
         const inviterSessionPrivateKey = generateSecretKey();
         const inviterSessionPublicKey = getPublicKey(inviterSessionPrivateKey);
         const linkSecret = bytesToHex(generateSecretKey());
-        return new InviteLink(
+        return new Invite(
             inviterSessionPublicKey,
             linkSecret,
             inviter,
@@ -42,7 +42,7 @@ export class InviteLink {
         );
     }
 
-    static fromUrl(url: string): InviteLink {
+    static fromUrl(url: string): Invite {
         const parsedUrl = new URL(url);
         const rawHash = parsedUrl.hash.slice(1);
         if (!rawHash) {
@@ -72,16 +72,16 @@ export class InviteLink {
             throw new Error("Decoded session key is not a string");
         }
 
-        return new InviteLink(
+        return new Invite(
             decodedSessionKey.data,
             linkSecret,
             decodedInviter.data
         );
     }
 
-    static deserialize(json: string): InviteLink {
+    static deserialize(json: string): Invite {
         const data = JSON.parse(json);
-        return new InviteLink(
+        return new Invite(
             data.inviterSessionPublicKey,
             data.linkSecret,
             data.inviter,
@@ -92,7 +92,7 @@ export class InviteLink {
         );
     }
 
-    static fromEvent(event: VerifiedEvent): InviteLink {
+    static fromEvent(event: VerifiedEvent): Invite {
         if (!event.sig) {
             throw new Error("Event is not signed");
         }
@@ -108,14 +108,14 @@ export class InviteLink {
             throw new Error("Invalid invite event: missing session key or link secret");
         }
 
-        return new InviteLink(
+        return new Invite(
             inviterSessionPublicKey,
             linkSecret,
             inviter
         );
     }
 
-    static fromUser(user: string, subscribe: NostrSubscribe): Promise<InviteLink | undefined> {
+    static fromUser(user: string, subscribe: NostrSubscribe): Promise<Invite | undefined> {
         const filter = {
             kinds: [INVITE_EVENT_KIND],
             pubkey: user,
@@ -125,7 +125,7 @@ export class InviteLink {
         return new Promise((resolve) => {
             const unsub = subscribe(filter, (event) => {
                 try {
-                    const inviteLink = InviteLink.fromEvent(event);
+                    const inviteLink = Invite.fromEvent(event);
                     unsub();
                     resolve(inviteLink);
                 } catch (error) {
@@ -191,7 +191,7 @@ export class InviteLink {
      * Note: You need to publish the returned event on Nostr using NDK or another Nostr system of your choice,
      * so the inviter can create the channel on their side.
      */
-    async acceptInvite(
+    async accept(
         nostrSubscribe: NostrSubscribe,
         inviteePublicKey: string,
         inviteeSecretKey: Uint8Array | EncryptFunction,
