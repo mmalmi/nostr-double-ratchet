@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, nip19, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
+import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
 import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types";
 import { getConversationKey } from "nostr-tools/nip44";
 import { Channel } from "./Channel";
@@ -61,20 +61,10 @@ export class Invite {
             throw new Error("Missing required fields (inviter, sessionKey, linkSecret) in invite data.");
         }
 
-        const decodedInviter = nip19.decode(inviter);
-        const decodedSessionKey = nip19.decode(sessionKey);
-
-        if (typeof decodedInviter.data !== 'string') {
-            throw new Error("Decoded inviter is not a string");
-        }
-        if (typeof decodedSessionKey.data !== 'string') {
-            throw new Error("Decoded session key is not a string");
-        }
-
         return new Invite(
-            decodedSessionKey.data,
+            sessionKey,
             linkSecret,
-            decodedInviter.data
+            inviter
         );
     }
 
@@ -161,8 +151,8 @@ export class Invite {
      */
     getUrl(root = "https://iris.to") {
         const data = {
-            inviter: nip19.npubEncode(this.inviter),
-            sessionKey: nip19.npubEncode(this.inviterSessionPublicKey),
+            inviter: this.inviter,
+            sessionKey: this.inviterSessionPublicKey,
             linkSecret: this.linkSecret
         };
         const url = new URL(root);

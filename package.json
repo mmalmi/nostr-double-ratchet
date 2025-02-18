@@ -1,6 +1,6 @@
 {
   "name": "nostr-double-ratchet",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "description": "Nostr double ratchet library",
