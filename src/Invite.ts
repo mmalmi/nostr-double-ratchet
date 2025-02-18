@@ -28,6 +28,9 @@ export class Invite {
     ) {}
 
     static createNew(inviter: string, label?: string, maxUses?: number): Invite {
+        if (!inviter) {
+            throw new Error("Inviter public key is required");
+        }
         const inviterSessionPrivateKey = generateSecretKey();
         const inviterSessionPublicKey = getPublicKey(inviterSessionPrivateKey);
         const linkSecret = bytesToHex(generateSecretKey());
