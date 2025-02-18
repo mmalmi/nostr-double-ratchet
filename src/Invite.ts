@@ -107,31 +107,28 @@ export class Invite {
         );
     }
 
-    static fromUser(user: string, subscribe: NostrSubscribe): Promise<Invite | undefined> {
+    static fromUser(user: string, subscribe: NostrSubscribe, onInvite: (invite: Invite) => void): Unsubscribe {
         const filter: Filter = {
             kinds: [INVITE_EVENT_KIND],
             authors: [user],
             limit: 1,
             "#d": ["nostr-double-ratchet/invite"],
         };
-        return new Promise((resolve) => {
-            const unsub = subscribe(filter, (event) => {
-                try {
-                    const inviteLink = Invite.fromEvent(event);
-                    unsub();
-                    resolve(inviteLink);
-                } catch (error) {
-                    unsub();
-                    resolve(undefined);
-                }
-            });
-
-            // Set timeout to unsubscribe and return undefined after 10 seconds
-            setTimeout(() => {
-                unsub();
-                resolve(undefined);
-            }, 10000);
+        let latest = 0;
+        const unsub = subscribe(filter, (event) => {
+            if (!event.created_at || event.created_at <= latest) {
+                return;
+            }
+            latest = event.created_at;
+            try {
+                const inviteLink = Invite.fromEvent(event);
+                onInvite(inviteLink);
+            } catch (error) {
+                console.error("Error processing invite:", error);
+            }
         });
+
+        return unsub;
     }
 
     /**
