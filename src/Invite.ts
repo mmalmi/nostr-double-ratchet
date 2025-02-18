@@ -124,7 +124,7 @@ export class Invite {
                 const inviteLink = Invite.fromEvent(event);
                 onInvite(inviteLink);
             } catch (error) {
-                console.error("Error processing invite:", error);
+                console.error("Error processing invite:", error, "event:", event);
             }
         });
 
@@ -264,7 +264,7 @@ export class Invite {
 
                 onChannel(channel, inviteeIdentity);
             } catch (error) {
-                console.error("Error processing invite message:", error);
+                console.error("Error processing invite message:", error, "event", event);
             }
         });
     }
