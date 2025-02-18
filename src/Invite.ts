@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, nip19, UnsignedEvent, verifyEvent } from "nostr-tools";
+import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, nip19, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
 import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types";
 import { getConversationKey } from "nostr-tools/nip44";
 import { Channel } from "./Channel";
@@ -115,9 +115,9 @@ export class Invite {
     }
 
     static fromUser(user: string, subscribe: NostrSubscribe): Promise<Invite | undefined> {
-        const filter = {
+        const filter: Filter = {
             kinds: [INVITE_EVENT_KIND],
-            pubkey: user,
+            authors: [user],
             limit: 1,
             "#d": ["nostr-double-ratchet/invite"],
         };
