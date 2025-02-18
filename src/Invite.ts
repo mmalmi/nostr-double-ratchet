@@ -7,13 +7,12 @@ import { EncryptFunction, DecryptFunction } from "./types";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 
 /**
- * Invite link is a safe way to exchange session keys and initiate secret channels.
+ * Invite is a safe way to exchange session keys and initiate secret channels.
+ * 
+ * It can be shared privately as an URL (e.g. QR code) or published as a Nostr event.
  * 
  * Even if inviter's or invitee's long-term private key (identity key) and the shared secret (link) is compromised,
  * forward secrecy is preserved as long as the session keys are not compromised.
- * 
- * Shared secret Nostr channel: inviter listens to it and invitees can write to it. Outside observers don't know who are communicating over it.
- * It is vulnerable to spam, so the link should only be given to trusted invitees or used with a reasonable maxUses limit.
  * 
  * Also make sure to keep the session key safe.
  */
@@ -142,6 +141,9 @@ export class Invite {
         });
     }
 
+    /**
+     * Save Invite as JSON. Includes the inviter's session private key, so don't share this.
+     */
     serialize(): string {
         return JSON.stringify({
             inviterSessionPublicKey: this.inviterSessionPublicKey,
@@ -154,6 +156,9 @@ export class Invite {
         });
     }
 
+    /**
+     * Invite parameters are in the URL's hash so they are not sent to the server.
+     */
     getUrl(root = "https://iris.to") {
         const data = {
             inviter: nip19.npubEncode(this.inviter),
@@ -177,7 +182,7 @@ export class Invite {
     }
 
     /**
-     * Accepts the invite and creates a new channel with the inviter.
+     * Called by the invitee. Accepts the invite and creates a new channel with the inviter.
      * 
      * @param inviteeSecretKey - The invitee's secret key or a signing function
      * @param nostrSubscribe - A function to subscribe to Nostr events
@@ -241,6 +246,11 @@ export class Invite {
 
         return nostrSubscribe(filter, async (event) => {
             try {
+                if (this.maxUses && this.usedBy.length >= this.maxUses) {
+                    console.error("Invite has reached maximum number of uses");
+                    return;
+                }
+
                 const decrypted = await nip44.decrypt(event.content, getConversationKey(this.inviterSessionPrivateKey!, event.pubkey));
                 const innerEvent = JSON.parse(decrypted);
 
@@ -253,13 +263,16 @@ export class Invite {
                     inviterSecretKey :
                     (ciphertext: string, pubkey: string) => Promise.resolve(nip44.decrypt(ciphertext, getConversationKey(inviterSecretKey, pubkey)));
     
-                const inviteeSessionPublicKey = await innerDecrypt(innerEvent.content, innerEvent.pubkey);
+                const inviteeIdentity = innerEvent.pubkey;
+                this.usedBy.push(inviteeIdentity);
+
+                const inviteeSessionPublicKey = await innerDecrypt(innerEvent.content, inviteeIdentity);
                 const sharedSecret = hexToBytes(this.linkSecret);
 
                 const name = event.id;
                 const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, false, sharedSecret, name);
 
-                onChannel(channel, innerEvent.pubkey);
+                onChannel(channel, inviteeIdentity);
             } catch (error) {
                 console.error("Error processing invite message:", error);
             }
