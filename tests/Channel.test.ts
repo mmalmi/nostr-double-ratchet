@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { Channel } from '../src/Channel'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
-import { EVENT_KIND } from '../src/types';
+import { MESSAGE_EVENT_KIND } from '../src/types';
 import { createMessageStream } from '../src/utils';
 import { serializeChannelState, deserializeChannelState } from '../src/utils';
 
@@ -26,7 +26,7 @@ describe('Channel', () => {
     const event = channel.send(testData)
 
     expect(event).toBeTruthy()
-    expect(event.kind).toBe(EVENT_KIND)
+    expect(event.kind).toBe(MESSAGE_EVENT_KIND)
     expect(event.tags[0][0]).toEqual("header")
     expect(event.tags[0][1]).toBeTruthy()
     expect(event.content).toBeTruthy()

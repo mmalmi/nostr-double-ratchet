@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { InviteLink } from '../src/InviteLink'
-import { generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
-import { EVENT_KIND } from '../src/types'
+import { finalizeEvent, generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
+import { INVITE_EVENT_KIND, MESSAGE_EVENT_KIND } from '../src/types'
 import { Channel } from '../src/Channel'
 import { createMessageStream } from '../src/utils'
 
@@ -41,7 +41,7 @@ describe('InviteLink', () => {
     expect(channel).toBeDefined()
     expect(event).toBeDefined()
     expect(event.pubkey).not.toBe(bobPublicKey)
-    expect(event.kind).toBe(EVENT_KIND)
+    expect(event.kind).toBe(MESSAGE_EVENT_KIND)
     expect(event.tags).toEqual([['p', inviteLink.inviterSessionPublicKey]])
   })
 
@@ -57,7 +57,7 @@ describe('InviteLink', () => {
     const onChannel = vi.fn()
 
     const mockSubscribe = (filter: any, callback: (event: any) => void) => {
-      expect(filter.kinds).toEqual([EVENT_KIND])
+      expect(filter.kinds).toEqual([MESSAGE_EVENT_KIND])
       expect(filter['#p']).toEqual([inviteLink.inviterSessionPublicKey])
       callback(event)
       return () => {}
@@ -135,5 +135,25 @@ describe('InviteLink', () => {
 
     // No remaining messages
     expect(messageQueue.length).toBe(0)
+  })
+
+  it('should convert between event and InviteLink correctly', () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const inviteLink = InviteLink.createNew(alicePublicKey, 'Test Invite', 5)
+    
+    const event = inviteLink.getEvent()
+    expect(event.kind).toBe(INVITE_EVENT_KIND)
+    expect(event.pubkey).toBe(alicePublicKey)
+    expect(event.tags).toContainEqual(['sessionKey', inviteLink.inviterSessionPublicKey])
+    expect(event.tags).toContainEqual(['linkSecret', inviteLink.linkSecret])
+    expect(event.tags).toContainEqual(['d', 'nostr-double-ratchet/invite'])
+
+    const finalizedEvent = finalizeEvent(event, alicePrivateKey)
+    const parsedInviteLink = InviteLink.fromEvent(finalizedEvent)
+    
+    expect(parsedInviteLink.inviterSessionPublicKey).toBe(inviteLink.inviterSessionPublicKey)
+    expect(parsedInviteLink.linkSecret).toBe(inviteLink.linkSecret)
+    expect(parsedInviteLink.inviter).toBe(alicePublicKey)
   })
 })
