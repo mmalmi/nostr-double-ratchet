@@ -26,16 +26,16 @@ export type KeyPair = {
 }
 
 /** 
- * State of a Double Ratchet channel between two parties. Needed for persisting channels.
+ * State of a Double Ratchet session between two parties. Needed for persisting sessions.
  */
-export interface ChannelState {
+export interface SessionState {
   /** Root key used to derive new sending / receiving chain keys */
   rootKey: Uint8Array;
   
   /** The other party's current Nostr public key */
   theirNostrPublicKey: string;
 
-  /** Our current Nostr keypair used for this channel */
+  /** Our current Nostr keypair used for this session */
   ourCurrentNostrKey?: KeyPair;
   
   /** Our next Nostr keypair, used when ratcheting forward. It is advertised in messages we send. */

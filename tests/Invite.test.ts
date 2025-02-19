@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { Invite } from '../src/Invite'
 import { finalizeEvent, generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
 import { INVITE_EVENT_KIND, MESSAGE_EVENT_KIND } from '../src/types'
-import { Channel } from '../src/Channel'
+import { Session } from '../src/Session'
 import { createMessageStream } from '../src/utils'
 
 describe('Invite', () => {
@@ -29,16 +29,16 @@ describe('Invite', () => {
     expect(parsedInvite.linkSecret).toBe(invite.linkSecret)
   })
 
-  it('should accept invite and create channel', async () => {
+  it('should accept invite and create session', async () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
 
-    const { channel, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
+    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
 
-    expect(channel).toBeDefined()
+    expect(session).toBeDefined()
     expect(event).toBeDefined()
     expect(event.pubkey).not.toBe(bobPublicKey)
     expect(event.kind).toBe(MESSAGE_EVENT_KIND)
@@ -54,7 +54,7 @@ describe('Invite', () => {
 
     const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
 
-    const onChannel = vi.fn()
+    const onSession = vi.fn()
 
     const mockSubscribe = (filter: any, callback: (event: any) => void) => {
       expect(filter.kinds).toEqual([MESSAGE_EVENT_KIND])
@@ -66,15 +66,15 @@ describe('Invite', () => {
     invite.listen(
       alicePrivateKey,
       mockSubscribe, 
-      onChannel
+      onSession
     )
 
     // Wait for any asynchronous operations to complete
     await new Promise(resolve => setTimeout(resolve, 100))
 
-    expect(onChannel).toHaveBeenCalledTimes(1)
-    const [channel, identity] = onChannel.mock.calls[0]
-    expect(channel).toBeDefined()
+    expect(onSession).toHaveBeenCalledTimes(1)
+    const [session, identity] = onSession.mock.calls[0]
+    expect(session).toBeDefined()
     expect(identity).toBe(bobPublicKey)
   })
 
@@ -98,40 +98,40 @@ describe('Invite', () => {
       return () => {}
     }
 
-    let aliceChannel: Channel | undefined
+    let aliceSession: Session | undefined
 
-    const onChannel = (channel: Channel) => {
-      aliceChannel = channel
+    const onSession = (session: Session) => {
+      aliceSession = session
     }
 
     invite.listen(
       alicePrivateKey,
       createSubscribe('Alice'),
-      onChannel
+      onSession
     )
 
-    const { channel: bobChannel, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey)
+    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey)
     messageQueue.push(event)
 
-    // Wait for Alice's channel to be created
+    // Wait for Alice's session to be created
     await new Promise(resolve => setTimeout(resolve, 100))
 
-    expect(aliceChannel).toBeDefined()
+    expect(aliceSession).toBeDefined()
 
-    const aliceMessages = createMessageStream(aliceChannel!)
-    const bobMessages = createMessageStream(bobChannel)
+    const aliceMessages = createMessageStream(aliceSession!)
+    const bobMessages = createMessageStream(bobSession)
 
-    const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string) => {
+    const sendAndExpect = async (sender: Session, receiver: AsyncIterableIterator<any>, message: string) => {
       messageQueue.push(sender.send(message))
       const receivedMessage = await receiver.next()
       expect(receivedMessage.value?.data).toBe(message)
     }
 
     // Test conversation
-    await sendAndExpect(bobChannel, aliceMessages, 'Hello Alice!')
-    await sendAndExpect(aliceChannel!, bobMessages, 'Hi Bob!')
-    await sendAndExpect(bobChannel, aliceMessages, 'How are you?')
-    await sendAndExpect(aliceChannel!, bobMessages, "I'm doing great, thanks!")
+    await sendAndExpect(bobSession, aliceMessages, 'Hello Alice!')
+    await sendAndExpect(aliceSession!, bobMessages, 'Hi Bob!')
+    await sendAndExpect(bobSession, aliceMessages, 'How are you?')
+    await sendAndExpect(aliceSession!, bobMessages, "I'm doing great, thanks!")
 
     // No remaining messages
     expect(messageQueue.length).toBe(0)

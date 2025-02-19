@@ -1,10 +1,10 @@
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
-import { ChannelState, Message } from "./types";
-import { Channel } from "./Channel";
+import { SessionState, Message } from "./types";
+import { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
 
-export function serializeChannelState(state: ChannelState): string {
+export function serializeSessionState(state: SessionState): string {
   return JSON.stringify({
     rootKey: bytesToHex(state.rootKey),
     theirNostrPublicKey: state.theirNostrPublicKey,
@@ -36,7 +36,7 @@ export function serializeChannelState(state: ChannelState): string {
   });
 }
 
-export function deserializeChannelState(data: string): ChannelState {
+export function deserializeSessionState(data: string): SessionState {
   const state = JSON.parse(data);
   return {
     rootKey: hexToBytes(state.rootKey),
@@ -69,11 +69,11 @@ export function deserializeChannelState(data: string): ChannelState {
   };
 }
 
-export async function* createMessageStream(channel: Channel): AsyncGenerator<Message, void, unknown> {
+export async function* createMessageStream(session: Session): AsyncGenerator<Message, void, unknown> {
   const messageQueue: Message[] = [];
   let resolveNext: ((value: Message) => void) | null = null;
 
-  const unsubscribe = channel.onMessage((message) => {
+  const unsubscribe = session.onMessage((message) => {
     if (resolveNext) {
       resolveNext(message);
       resolveNext = null;

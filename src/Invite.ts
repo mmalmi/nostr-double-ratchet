@@ -1,13 +1,13 @@
 import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
 import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types";
 import { getConversationKey } from "nostr-tools/nip44";
-import { Channel } from "./Channel";
+import { Session } from "./Session.ts";
 import { MESSAGE_EVENT_KIND } from "./types";
 import { EncryptFunction, DecryptFunction } from "./types";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 
 /**
- * Invite is a safe way to exchange session keys and initiate secret channels.
+ * Invite is a safe way to exchange session keys and initiate secret sessions.
  * 
  * It can be shared privately as an URL (e.g. QR code) or published as a Nostr event.
  * 
@@ -172,11 +172,11 @@ export class Invite {
     }
 
     /**
-     * Called by the invitee. Accepts the invite and creates a new channel with the inviter.
+     * Called by the invitee. Accepts the invite and creates a new session with the inviter.
      * 
      * @param inviteeSecretKey - The invitee's secret key or a signing function
      * @param nostrSubscribe - A function to subscribe to Nostr events
-     * @returns An object containing the new channel and an event to be published
+     * @returns An object containing the new session and an event to be published
      * 
      * 1. Inner event: No signature, content encrypted with DH(inviter, invitee).
      *    Purpose: Authenticate invitee. Contains invitee session key.
@@ -184,19 +184,19 @@ export class Invite {
      *    Purpose: Contains inner event. Hides invitee from others who might have the shared Nostr key.
 
      * Note: You need to publish the returned event on Nostr using NDK or another Nostr system of your choice,
-     * so the inviter can create the channel on their side.
+     * so the inviter can create the session on their side.
      */
     async accept(
         nostrSubscribe: NostrSubscribe,
         inviteePublicKey: string,
         inviteeSecretKey: Uint8Array | EncryptFunction,
-    ): Promise<{ channel: Channel, event: VerifiedEvent }> {
+    ): Promise<{ session: Session, event: VerifiedEvent }> {
         const inviteeSessionKey = generateSecretKey();
         const inviteeSessionPublicKey = getPublicKey(inviteeSessionKey);
         const inviterPublicKey = this.inviter || this.inviterSessionPublicKey;
 
         const sharedSecret = hexToBytes(this.linkSecret);
-        const channel = Channel.init(nostrSubscribe, this.inviterSessionPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
+        const session = Session.init(nostrSubscribe, this.inviterSessionPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
 
         // Create a random keypair for the envelope sender
         const randomSenderKey = generateSecretKey();
@@ -221,10 +221,10 @@ export class Invite {
             tags: [['p', this.inviterSessionPublicKey]],
         };
 
-        return { channel, event: finalizeEvent(envelope, randomSenderKey) };
+        return { session, event: finalizeEvent(envelope, randomSenderKey) };
     }
 
-    listen(inviterSecretKey: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onChannel: (channel: Channel, identity?: string) => void): Unsubscribe {
+    listen(inviterSecretKey: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (session: Session, identity?: string) => void): Unsubscribe {
         if (!this.inviterSessionPrivateKey) {
             throw new Error("Inviter session key is not available");
         }
@@ -260,9 +260,9 @@ export class Invite {
                 const sharedSecret = hexToBytes(this.linkSecret);
 
                 const name = event.id;
-                const channel = Channel.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, false, sharedSecret, name);
+                const session = Session.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, false, sharedSecret, name);
 
-                onChannel(channel, inviteeIdentity);
+                onSession(session, inviteeIdentity);
             } catch (error) {
                 console.error("Error processing invite message:", error, "event", event);
             }

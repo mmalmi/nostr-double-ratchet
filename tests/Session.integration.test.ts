@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest'
-import { Channel } from '../src/Channel'
+import { Session } from '../src/Session'
 import { getPublicKey, generateSecretKey, VerifiedEvent, Filter } from 'nostr-tools'
 import { createMessageStream } from '../src/utils';
 import NDK, { NDKEvent } from '@nostr-dev-kit/ndk'
 
-describe('Channel', () => {
+describe('Session', () => {
 	let ndk: NDK;
 	const aliceSecretKey = generateSecretKey();
 	const bobSecretKey = generateSecretKey();
@@ -57,9 +57,9 @@ describe('Channel', () => {
 
 		console.log('Test started: multiple back-and-forth messages');
 
-		// Initialize Alice's and Bob's channels
-		const alice = Channel.init(subscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
-		const bob = Channel.init(subscribe, getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+		// Initialize Alice's and Bob's sessions
+		const alice = Session.init(subscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+		const bob = Session.init(subscribe, getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
 		const aliceMessages = createMessageStream(alice);
 		const bobMessages = createMessageStream(bob);

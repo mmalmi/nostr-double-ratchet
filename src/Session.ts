@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent } from "nostr-tools";
 import { bytesToHex } from "@noble/hashes/utils";
 import {
-  ChannelState,
+  SessionState,
   Header,
   Unsubscribe,
   NostrSubscribe,
@@ -13,12 +13,12 @@ import { kdf, skippedMessageIndexKey } from "./utils";
 const MAX_SKIP = 1000;
 
 /**
- * Double ratchet secure communication channel over Nostr
+ * Double ratchet secure communication session over Nostr
  * 
  * Very similar to Signal's "Double Ratchet with header encryption"
  * https://signal.org/docs/specifications/doubleratchet/
  */
-export class Channel {
+export class Session {
   private nostrUnsubscribe?: Unsubscribe;
   private nostrNextUnsubscribe?: Unsubscribe;
   private internalSubscriptions = new Map<number, MessageCallback>();
@@ -26,21 +26,21 @@ export class Channel {
   public name: string;
 
   // 1. CHANNEL PUBLIC INTERFACE
-  constructor(private nostrSubscribe: NostrSubscribe, public state: ChannelState) {
+  constructor(private nostrSubscribe: NostrSubscribe, public state: SessionState) {
     this.name = Math.random().toString(36).substring(2, 6);
   }
 
   /**
-   * Initializes a new secure communication channel
+   * Initializes a new secure communication session
    * @param nostrSubscribe Function to subscribe to Nostr events
    * @param theirNostrPublicKey The public key of the other party
    * @param ourCurrentPrivateKey Our current private key for Nostr
    * @param isInitiator Whether we are initiating the conversation (true) or responding (false)
    * @param sharedSecret Initial shared secret for securing the first message chain
-   * @param name Optional name for the channel (for debugging)
-   * @returns A new Channel instance
+   * @param name Optional name for the session (for debugging)
+   * @returns A new Session instance
    */
-  static init(nostrSubscribe: NostrSubscribe, theirNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, isInitiator: boolean, sharedSecret: Uint8Array, name?: string): Channel {
+  static init(nostrSubscribe: NostrSubscribe, theirNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, isInitiator: boolean, sharedSecret: Uint8Array, name?: string): Session {
     const ourNextPrivateKey = generateSecretKey();
     const [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirNostrPublicKey), 2);
     let ourCurrentNostrKey;
@@ -51,7 +51,7 @@ export class Channel {
     } else {
       ourNextNostrKey = { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey };
     }
-    const state: ChannelState = {
+    const state: SessionState = {
       rootKey: isInitiator ? rootKey : sharedSecret,
       theirNostrPublicKey,
       ourCurrentNostrKey,
@@ -64,13 +64,13 @@ export class Channel {
       skippedMessageKeys: {},
       skippedHeaderKeys: {},
     };
-    const channel = new Channel(nostrSubscribe, state);
-    if (name) channel.name = name;
-    return channel;
+    const session = new Session(nostrSubscribe, state);
+    if (name) session.name = name;
+    return session;
   }
 
   /**
-   * Sends an encrypted message through the channel
+   * Sends an encrypted message through the session
    * @param data The plaintext message to send
    * @returns A verified Nostr event containing the encrypted message
    * @throws Error if we are not the initiator and trying to send the first message
@@ -96,7 +96,7 @@ export class Channel {
   }
 
   /**
-   * Subscribes to incoming messages on this channel
+   * Subscribes to incoming messages on this session
    * @param callback Function to be called when a message is received
    * @returns Unsubscribe function to stop receiving messages
    */

@@ -1,18 +1,18 @@
 import { describe, it, expect } from 'vitest'
-import { Channel } from '../src/Channel'
+import { Session } from '../src/Session'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
 import { MESSAGE_EVENT_KIND } from '../src/types';
 import { createMessageStream } from '../src/utils';
-import { serializeChannelState, deserializeChannelState } from '../src/utils';
+import { serializeSessionState, deserializeSessionState } from '../src/utils';
 
-describe('Channel', () => {
+describe('Session', () => {
   const aliceSecretKey = generateSecretKey()
   const bobSecretKey = generateSecretKey()
   const dummyUnsubscribe = () => {}
   const dummySubscribe = () => dummyUnsubscribe
 
   it('should initialize with correct properties', () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array())
+    const alice = Session.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array())
 
     expect(alice.state.theirNostrPublicKey).toBe(getPublicKey(bobSecretKey))
     expect(alice.state.ourCurrentNostrKey!.publicKey).toBe(getPublicKey(aliceSecretKey))
@@ -20,10 +20,10 @@ describe('Channel', () => {
   })
 
   it('should create an event with correct properties', () => {
-    const channel = Channel.init(() => dummyUnsubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
+    const session = Session.init(() => dummyUnsubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
     const testData = 'Hello, world!'
 
-    const event = channel.send(testData)
+    const event = session.send(testData)
 
     expect(event).toBeTruthy()
     expect(event.kind).toBe(MESSAGE_EVENT_KIND)
@@ -37,10 +37,10 @@ describe('Channel', () => {
   })
 
   it('should handle incoming events and update keys', async () => {
-    const alice = Channel.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
+    const alice = Session.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
     const event = alice.send('Hello, Bob!')
     
-    const bob = Channel.init((filter, onEvent) => {
+    const bob = Session.init((filter, onEvent) => {
       if (matchFilter(filter, event)) {
         onEvent(event)
       }
@@ -73,32 +73,32 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);
 
-    const sendAndExpect = async (sender: Channel, receiver: AsyncIterableIterator<any>, message: string, receiverChannel: Channel) => {
+    const sendAndExpect = async (sender: Session, receiver: AsyncIterableIterator<any>, message: string, receiverSession: Session) => {
       const initialSendingChainKey = sender.state.sendingChainKey;
-      const initialReceivingChainKey = receiverChannel.state.receivingChainKey;
-      const initialOurCurrentNostrKey = receiverChannel.state.ourCurrentNostrKey?.publicKey;
-      const initialTheirNostrPublicKey = receiverChannel.state.theirNostrPublicKey;
+      const initialReceivingChainKey = receiverSession.state.receivingChainKey;
+      const initialOurCurrentNostrKey = receiverSession.state.ourCurrentNostrKey?.publicKey;
+      const initialTheirNostrPublicKey = receiverSession.state.theirNostrPublicKey;
 
       messageQueue.push(sender.send(message));
       const receivedMessage = await receiver.next();
 
-      console.log(`${receiverChannel.name} got from ${sender.name}: ${receivedMessage.value.data}`)
+      console.log(`${receiverSession.name} got from ${sender.name}: ${receivedMessage.value.data}`)
       expect(receivedMessage.value?.data).toBe(message);
 
       // Check that the chain keys have changed
       expect(sender.state.sendingChainKey).not.toBe(initialSendingChainKey);
-      expect(receiverChannel.state.receivingChainKey).not.toBe(initialReceivingChainKey);
+      expect(receiverSession.state.receivingChainKey).not.toBe(initialReceivingChainKey);
 
       // Check that the keys change when the first message of consecutive messages is received
-      if (receiverChannel.state.receivingChainMessageNumber === 1) {
-        expect(receiverChannel.state.ourCurrentNostrKey?.publicKey).not.toBe(initialOurCurrentNostrKey);
-        expect(receiverChannel.state.theirNostrPublicKey).not.toBe(initialTheirNostrPublicKey);
+      if (receiverSession.state.receivingChainMessageNumber === 1) {
+        expect(receiverSession.state.ourCurrentNostrKey?.publicKey).not.toBe(initialOurCurrentNostrKey);
+        expect(receiverSession.state.theirNostrPublicKey).not.toBe(initialTheirNostrPublicKey);
       }
     };
 
@@ -133,8 +133,8 @@ describe('Channel', () => {
       return () => {};
     };
 
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
     const bobMessages = createMessageStream(bob);
 
@@ -171,9 +171,9 @@ describe('Channel', () => {
       return () => {};
     };
 
-    // Initialize channels
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+    // Initialize sessions
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);
@@ -187,18 +187,18 @@ describe('Channel', () => {
     const aliceFirstMessage = await aliceMessages.next();
     expect(aliceFirstMessage.value?.data).toBe('Hi Alice!');
 
-    // Serialize both channel states
-    const serializedAlice = serializeChannelState(alice.state);
-    const serializedBob = serializeChannelState(bob.state);
+    // Serialize both session states
+    const serializedAlice = serializeSessionState(alice.state);
+    const serializedBob = serializeSessionState(bob.state);
 
-    // Create new channels with deserialized state
-    const aliceRestored = new Channel(createSubscribe(), deserializeChannelState(serializedAlice));
-    const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
+    // Create new sessions with deserialized state
+    const aliceRestored = new Session(createSubscribe(), deserializeSessionState(serializedAlice));
+    const bobRestored = new Session(createSubscribe(), deserializeSessionState(serializedBob));
 
     const aliceRestoredMessages = createMessageStream(aliceRestored);
     const bobRestoredMessages = createMessageStream(bobRestored);
 
-    // Continue conversation with restored channels
+    // Continue conversation with restored sessions
     messageQueue.push(aliceRestored.send('How are you?'));
     const bobSecondMessage = await bobRestoredMessages.next();
     expect(bobSecondMessage.value?.data).toBe('How are you?');
@@ -233,9 +233,9 @@ describe('Channel', () => {
       };
     }
 
-    // Initialize channels
-    const alice = Channel.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
-    const bob = Channel.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+    // Initialize sessions
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
 
     const aliceMessages = createMessageStream(alice);
     const bobMessages = createMessageStream(bob);
@@ -260,18 +260,18 @@ describe('Channel', () => {
     await bobMessages.next();
     // Bob now has next key from Alice
 
-    // Serialize bob's state and create a new channel
-    const serializedBob = serializeChannelState(bob.state);
+    // Serialize bob's state and create a new session
+    const serializedBob = serializeSessionState(bob.state);
 
-    // Prevent old channel from capturing from the test message queue
+    // Prevent old session from capturing from the test message queue
     bob.close()
    
     // Old messages are delivered late
     messageQueue.push(message1);
     messageQueue.push(message2);
     
-    // Create new channel with serialized state
-    const bobRestored = new Channel(createSubscribe(), deserializeChannelState(serializedBob));
+    // Create new session with serialized state
+    const bobRestored = new Session(createSubscribe(), deserializeSessionState(serializedBob));
     bobRestored.name = 'bobRestored';
     const bobMessages2 = createMessageStream(bobRestored); // This triggers subscriptions
     // Deliver the skipped message
