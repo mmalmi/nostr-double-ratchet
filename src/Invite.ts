@@ -1,9 +1,7 @@
 import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
-import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types";
+import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe, MESSAGE_EVENT_KIND, EncryptFunction, DecryptFunction } from "./types";
 import { getConversationKey } from "nostr-tools/nip44";
 import { Session } from "./Session.ts";
-import { MESSAGE_EVENT_KIND } from "./types";
-import { EncryptFunction, DecryptFunction } from "./types";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 
 /**
@@ -202,6 +200,8 @@ export class Invite {
         const randomSenderKey = generateSecretKey();
         const randomSenderPublicKey = getPublicKey(randomSenderKey);
 
+        // should we take only Encrypt / Decrypt functions, not keys, to make it simpler and with less imports here?
+        // common implementation problem: plaintext, pubkey params in different order
         const encrypt = typeof inviteeSecretKey === 'function' ?
             inviteeSecretKey :
             (plaintext: string, pubkey: string) => Promise.resolve(nip44.encrypt(plaintext, getConversationKey(inviteeSecretKey, pubkey)));
