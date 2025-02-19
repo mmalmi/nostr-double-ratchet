@@ -18,10 +18,10 @@ import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
  */
 export class Invite {
     constructor(
-        public inviterSessionPublicKey: string,
+        public inviterEphemeralPublicKey: string,
         public linkSecret: string,
         public inviter: string,
-        public inviterSessionPrivateKey?: Uint8Array,
+        public inviterEphemeralPrivateKey?: Uint8Array,
         public label?: string,
         public maxUses?: number,
         public usedBy: string[] = [],
@@ -31,14 +31,14 @@ export class Invite {
         if (!inviter) {
             throw new Error("Inviter public key is required");
         }
-        const inviterSessionPrivateKey = generateSecretKey();
-        const inviterSessionPublicKey = getPublicKey(inviterSessionPrivateKey);
+        const inviterEphemeralPrivateKey = generateSecretKey();
+        const inviterEphemeralPublicKey = getPublicKey(inviterEphemeralPrivateKey);
         const linkSecret = bytesToHex(generateSecretKey());
         return new Invite(
-            inviterSessionPublicKey,
+            inviterEphemeralPublicKey,
             linkSecret,
             inviter,
-            inviterSessionPrivateKey,
+            inviterEphemeralPrivateKey,
             label,
             maxUses
         );
@@ -59,13 +59,13 @@ export class Invite {
             throw new Error("Invite data in URL hash is not valid JSON: " + err);
         }
 
-        const { inviter, sessionKey, linkSecret } = data;
-        if (!inviter || !sessionKey || !linkSecret) {
-            throw new Error("Missing required fields (inviter, sessionKey, linkSecret) in invite data.");
+        const { inviter, ephemeralKey, linkSecret } = data;
+        if (!inviter || !ephemeralKey || !linkSecret) {
+            throw new Error("Missing required fields (inviter, ephemeralKey, linkSecret) in invite data.");
         }
 
         return new Invite(
-            sessionKey,
+            ephemeralKey,
             linkSecret,
             inviter
         );
@@ -74,10 +74,10 @@ export class Invite {
     static deserialize(json: string): Invite {
         const data = JSON.parse(json);
         return new Invite(
-            data.inviterSessionPublicKey,
+            data.inviterEphemeralPublicKey,
             data.linkSecret,
             data.inviter,
-            data.inviterSessionPrivateKey ? new Uint8Array(data.inviterSessionPrivateKey) : undefined,
+            data.inviterEphemeralPrivateKey ? new Uint8Array(data.inviterEphemeralPrivateKey) : undefined,
             data.label,
             data.maxUses,
             data.usedBy
@@ -92,16 +92,16 @@ export class Invite {
             throw new Error("Event signature is invalid");
         }
         const { tags } = event;
-        const inviterSessionPublicKey = tags.find(([key]) => key === 'sessionKey')?.[1];
+        const inviterEphemeralPublicKey = tags.find(([key]) => key === 'ephemeralKey')?.[1];
         const linkSecret = tags.find(([key]) => key === 'linkSecret')?.[1];
         const inviter = event.pubkey;
 
-        if (!inviterSessionPublicKey || !linkSecret) {
+        if (!inviterEphemeralPublicKey || !linkSecret) {
             throw new Error("Invalid invite event: missing session key or link secret");
         }
 
         return new Invite(
-            inviterSessionPublicKey,
+            inviterEphemeralPublicKey,
             linkSecret,
             inviter
         );
@@ -136,10 +136,10 @@ export class Invite {
      */
     serialize(): string {
         return JSON.stringify({
-            inviterSessionPublicKey: this.inviterSessionPublicKey,
+            inviterEphemeralPublicKey: this.inviterEphemeralPublicKey,
             linkSecret: this.linkSecret,
             inviter: this.inviter,
-            inviterSessionPrivateKey: this.inviterSessionPrivateKey ? Array.from(this.inviterSessionPrivateKey) : undefined,
+            inviterEphemeralPrivateKey: this.inviterEphemeralPrivateKey ? Array.from(this.inviterEphemeralPrivateKey) : undefined,
             label: this.label,
             maxUses: this.maxUses,
             usedBy: this.usedBy,
@@ -152,7 +152,7 @@ export class Invite {
     getUrl(root = "https://iris.to") {
         const data = {
             inviter: this.inviter,
-            sessionKey: this.inviterSessionPublicKey,
+            ephemeralKey: this.inviterEphemeralPublicKey,
             linkSecret: this.linkSecret
         };
         const url = new URL(root);
@@ -167,7 +167,7 @@ export class Invite {
             pubkey: this.inviter,
             content: "",
             created_at: Math.floor(Date.now() / 1000),
-            tags: [['sessionKey', this.inviterSessionPublicKey], ['linkSecret', this.linkSecret], ['d', 'nostr-double-ratchet/invite']],
+            tags: [['ephemeralKey', this.inviterEphemeralPublicKey], ['linkSecret', this.linkSecret], ['d', 'nostr-double-ratchet/invite']],
         };
     }
 
@@ -193,10 +193,10 @@ export class Invite {
     ): Promise<{ session: Session, event: VerifiedEvent }> {
         const inviteeSessionKey = generateSecretKey();
         const inviteeSessionPublicKey = getPublicKey(inviteeSessionKey);
-        const inviterPublicKey = this.inviter || this.inviterSessionPublicKey;
+        const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
 
         const sharedSecret = hexToBytes(this.linkSecret);
-        const session = Session.init(nostrSubscribe, this.inviterSessionPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
+        const session = Session.init(nostrSubscribe, this.inviterEphemeralPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
 
         // Create a random keypair for the envelope sender
         const randomSenderKey = generateSecretKey();
@@ -216,22 +216,22 @@ export class Invite {
         const envelope = {
             kind: MESSAGE_EVENT_KIND,
             pubkey: randomSenderPublicKey,
-            content: nip44.encrypt(JSON.stringify(innerEvent), getConversationKey(randomSenderKey, this.inviterSessionPublicKey)),
+            content: nip44.encrypt(JSON.stringify(innerEvent), getConversationKey(randomSenderKey, this.inviterEphemeralPublicKey)),
             created_at: Math.floor(Date.now() / 1000),
-            tags: [['p', this.inviterSessionPublicKey]],
+            tags: [['p', this.inviterEphemeralPublicKey]],
         };
 
         return { session, event: finalizeEvent(envelope, randomSenderKey) };
     }
 
     listen(inviterSecretKey: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (session: Session, identity?: string) => void): Unsubscribe {
-        if (!this.inviterSessionPrivateKey) {
+        if (!this.inviterEphemeralPrivateKey) {
             throw new Error("Inviter session key is not available");
         }
         
         const filter = {
             kinds: [MESSAGE_EVENT_KIND],
-            '#p': [this.inviterSessionPublicKey],
+            '#p': [this.inviterEphemeralPublicKey],
         };
 
         return nostrSubscribe(filter, async (event) => {
@@ -241,7 +241,7 @@ export class Invite {
                     return;
                 }
 
-                const decrypted = await nip44.decrypt(event.content, getConversationKey(this.inviterSessionPrivateKey!, event.pubkey));
+                const decrypted = await nip44.decrypt(event.content, getConversationKey(this.inviterEphemeralPrivateKey!, event.pubkey));
                 const innerEvent = JSON.parse(decrypted);
 
                 if (!innerEvent.tags || !innerEvent.tags.some(([key, value]: [string, string]) => key === 'secret' && value === this.linkSecret)) {
@@ -260,7 +260,7 @@ export class Invite {
                 const sharedSecret = hexToBytes(this.linkSecret);
 
                 const name = event.id;
-                const session = Session.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterSessionPrivateKey!, false, sharedSecret, name);
+                const session = Session.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterEphemeralPrivateKey!, false, sharedSecret, name);
 
                 onSession(session, inviteeIdentity);
             } catch (error) {

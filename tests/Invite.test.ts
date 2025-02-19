@@ -12,7 +12,7 @@ describe('Invite', () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey, 'Test Invite', 5)
-    expect(invite.inviterSessionPublicKey).toHaveLength(64)
+    expect(invite.inviterEphemeralPublicKey).toHaveLength(64)
     expect(invite.linkSecret).toHaveLength(64)
     expect(invite.inviter).toBe(alicePublicKey)
     expect(invite.label).toBe('Test Invite')
@@ -25,7 +25,7 @@ describe('Invite', () => {
     const invite = Invite.createNew(alicePublicKey, 'Test Invite')
     const url = invite.getUrl()
     const parsedInvite = Invite.fromUrl(url)
-    expect(parsedInvite.inviterSessionPublicKey).toBe(invite.inviterSessionPublicKey)
+    expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
     expect(parsedInvite.linkSecret).toBe(invite.linkSecret)
   })
 
@@ -42,7 +42,7 @@ describe('Invite', () => {
     expect(event).toBeDefined()
     expect(event.pubkey).not.toBe(bobPublicKey)
     expect(event.kind).toBe(MESSAGE_EVENT_KIND)
-    expect(event.tags).toEqual([['p', invite.inviterSessionPublicKey]])
+    expect(event.tags).toEqual([['p', invite.inviterEphemeralPublicKey]])
   })
 
   it('should listen for invite acceptances', async () => {
@@ -58,7 +58,7 @@ describe('Invite', () => {
 
     const mockSubscribe = (filter: any, callback: (event: any) => void) => {
       expect(filter.kinds).toEqual([MESSAGE_EVENT_KIND])
-      expect(filter['#p']).toEqual([invite.inviterSessionPublicKey])
+      expect(filter['#p']).toEqual([invite.inviterEphemeralPublicKey])
       callback(event)
       return () => {}
     }
@@ -145,14 +145,14 @@ describe('Invite', () => {
     const event = invite.getEvent()
     expect(event.kind).toBe(INVITE_EVENT_KIND)
     expect(event.pubkey).toBe(alicePublicKey)
-    expect(event.tags).toContainEqual(['sessionKey', invite.inviterSessionPublicKey])
+    expect(event.tags).toContainEqual(['ephemeralKey', invite.inviterEphemeralPublicKey])
     expect(event.tags).toContainEqual(['linkSecret', invite.linkSecret])
     expect(event.tags).toContainEqual(['d', 'nostr-double-ratchet/invite'])
 
     const finalizedEvent = finalizeEvent(event, alicePrivateKey)
     const parsedInvite = Invite.fromEvent(finalizedEvent)
     
-    expect(parsedInvite.inviterSessionPublicKey).toBe(invite.inviterSessionPublicKey)
+    expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
     expect(parsedInvite.linkSecret).toBe(invite.linkSecret)
     expect(parsedInvite.inviter).toBe(alicePublicKey)
   })
