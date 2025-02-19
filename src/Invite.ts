@@ -187,7 +187,7 @@ export class Invite {
     async accept(
         nostrSubscribe: NostrSubscribe,
         inviteePublicKey: string,
-        inviteeSecretKey: Uint8Array | EncryptFunction,
+        encryptor: Uint8Array | EncryptFunction,
     ): Promise<{ session: Session, event: VerifiedEvent }> {
         const inviteeSessionKey = generateSecretKey();
         const inviteeSessionPublicKey = getPublicKey(inviteeSessionKey);
@@ -202,9 +202,9 @@ export class Invite {
 
         // should we take only Encrypt / Decrypt functions, not keys, to make it simpler and with less imports here?
         // common implementation problem: plaintext, pubkey params in different order
-        const encrypt = typeof inviteeSecretKey === 'function' ?
-            inviteeSecretKey :
-            (plaintext: string, pubkey: string) => Promise.resolve(nip44.encrypt(plaintext, getConversationKey(inviteeSecretKey, pubkey)));
+        const encrypt = typeof encryptor === 'function' ?
+            encryptor :
+            (plaintext: string, pubkey: string) => Promise.resolve(nip44.encrypt(plaintext, getConversationKey(encryptor, pubkey)));
 
         const innerEvent = {
             pubkey: inviteePublicKey,
@@ -224,7 +224,7 @@ export class Invite {
         return { session, event: finalizeEvent(envelope, randomSenderKey) };
     }
 
-    listen(inviterSecretKey: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (session: Session, identity?: string) => void): Unsubscribe {
+    listen(decryptor: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (session: Session, identity?: string) => void): Unsubscribe {
         if (!this.inviterEphemeralPrivateKey) {
             throw new Error("Inviter session key is not available");
         }
@@ -249,9 +249,9 @@ export class Invite {
                     return;
                 }
 
-                const innerDecrypt = typeof inviterSecretKey === 'function' ?
-                    inviterSecretKey :
-                    (ciphertext: string, pubkey: string) => Promise.resolve(nip44.decrypt(ciphertext, getConversationKey(inviterSecretKey, pubkey)));
+                const innerDecrypt = typeof decryptor === 'function' ?
+                    decryptor :
+                    (ciphertext: string, pubkey: string) => Promise.resolve(nip44.decrypt(ciphertext, getConversationKey(decryptor, pubkey)));
     
                 const inviteeIdentity = innerEvent.pubkey;
                 this.usedBy.push(inviteeIdentity);
