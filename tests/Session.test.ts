@@ -281,4 +281,45 @@ describe('Session', () => {
     const skippedMessage2 = await bobMessages2.next();
     expect(skippedMessage2.value?.data).toBe('Message 2');
   });
+
+  it('should handle session reinitialization correctly', async () => {
+    const messageQueue: any[] = [];
+
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+        setTimeout(checkQueue, 100);
+      };
+      checkQueue();
+      return () => {};
+    };
+
+    // Initialize sessions
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    let bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+
+    const aliceMessages = createMessageStream(alice);
+    let bobMessages = createMessageStream(bob);
+
+    // Alice sends first message
+    messageQueue.push(alice.send('Message 1'));
+    const bobFirstMessage = await bobMessages.next();
+    expect(bobFirstMessage.value?.data).toBe('Message 1');
+
+    // Bob closes his session and reinitializes with serialized state
+    const serializedBobState = serializeSessionState(bob.state);
+    bob.close();
+    bob = new Session(createSubscribe(), deserializeSessionState(serializedBobState));
+    bobMessages = createMessageStream(bob);
+
+    // Alice sends second message
+    messageQueue.push(alice.send('Message 2'));
+    const bobSecondMessage = await bobMessages.next();
+    expect(bobSecondMessage.value?.data).toBe('Message 2');
+
+    expect(messageQueue.length).toBe(0);
+  });
 })

@@ -4,6 +4,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey, matchFilter } from 'nos
 import { INVITE_EVENT_KIND, MESSAGE_EVENT_KIND } from '../src/types'
 import { Session } from '../src/Session'
 import { createMessageStream } from '../src/utils'
+import { serializeSessionState, deserializeSessionState } from '../src/utils'
 
 describe('Invite', () => {
   const dummySubscribe = vi.fn()
@@ -155,5 +156,68 @@ describe('Invite', () => {
     expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
     expect(parsedInvite.linkSecret).toBe(invite.linkSecret)
     expect(parsedInvite.inviter).toBe(alicePublicKey)
+  })
+
+  it('should handle session reinitialization with serialization after invite acceptance', async () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey)
+    const bobSecretKey = generateSecretKey()
+    const bobPublicKey = getPublicKey(bobSecretKey)
+
+    const messageQueue: any[] = []
+    const createSubscribe = (name: string) => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event))
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0])
+        }
+        setTimeout(checkQueue, 100)
+      }
+      checkQueue()
+      return () => {}
+    }
+
+    let aliceSession: Session | undefined
+
+    const onSession = (session: Session) => {
+      aliceSession = session
+    }
+
+    invite.listen(
+      alicePrivateKey,
+      createSubscribe('Alice'),
+      onSession
+    )
+
+    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey)
+    messageQueue.push(event)
+
+    // Wait for Alice's session to be created
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(aliceSession).toBeDefined()
+
+    let aliceMessages = createMessageStream(aliceSession!)
+    const bobMessages = createMessageStream(bobSession)
+
+    // Bob sends first message
+    messageQueue.push(bobSession.send('Hello Alice!'))
+    const firstMessage = await aliceMessages.next()
+    expect(firstMessage.value?.data).toBe('Hello Alice!')
+
+    // Alice closes her session and reinitializes with serialized state
+    const serializedAliceState = serializeSessionState(aliceSession!.state)
+    aliceSession!.close()
+    aliceSession = new Session(createSubscribe('Alice'), deserializeSessionState(serializedAliceState))
+    aliceMessages = createMessageStream(aliceSession)
+
+    // Bob sends second message
+    messageQueue.push(bobSession.send('Can you still hear me?'))
+    const secondMessage = await aliceMessages.next()
+    expect(secondMessage.value?.data).toBe('Can you still hear me?')
+
+    // No remaining messages
+    expect(messageQueue.length).toBe(0)
   })
 })
