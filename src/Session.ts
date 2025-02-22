@@ -33,16 +33,16 @@ export class Session {
   /**
    * Initializes a new secure communication session
    * @param nostrSubscribe Function to subscribe to Nostr events
-   * @param theirNostrPublicKey The public key of the other party
+   * @param theirNextNostrPublicKey The public key of the other party
    * @param ourCurrentPrivateKey Our current private key for Nostr
    * @param isInitiator Whether we are initiating the conversation (true) or responding (false)
    * @param sharedSecret Initial shared secret for securing the first message chain
    * @param name Optional name for the session (for debugging)
    * @returns A new Session instance
    */
-  static init(nostrSubscribe: NostrSubscribe, theirNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, isInitiator: boolean, sharedSecret: Uint8Array, name?: string): Session {
+  static init(nostrSubscribe: NostrSubscribe, theirNextNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, isInitiator: boolean, sharedSecret: Uint8Array, name?: string): Session {
     const ourNextPrivateKey = generateSecretKey();
-    const [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirNostrPublicKey), 2);
+    const [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirNextNostrPublicKey), 2);
     let ourCurrentNostrKey;
     let ourNextNostrKey;
     if (isInitiator) {
@@ -53,7 +53,7 @@ export class Session {
     }
     const state: SessionState = {
       rootKey: isInitiator ? rootKey : sharedSecret,
-      theirNostrPublicKey,
+      theirNextNostrPublicKey,
       ourCurrentNostrKey,
       ourNextNostrKey,
       receivingChainKey: undefined,
@@ -76,13 +76,13 @@ export class Session {
    * @throws Error if we are not the initiator and trying to send the first message
    */
   send(data: string): VerifiedEvent {
-    if (!this.state.theirNostrPublicKey || !this.state.ourCurrentNostrKey) {
+    if (!this.state.theirNextNostrPublicKey || !this.state.ourCurrentNostrKey) {
       throw new Error("we are not the initiator, so we can't send the first message");
     }
 
     const [header, encryptedData] = this.ratchetEncrypt(data);
     
-    const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNostrPublicKey);
+    const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNextNostrPublicKey);
     const encryptedHeader = nip44.encrypt(JSON.stringify(header), sharedSecret);
     
     const nostrEvent = finalizeEvent({
@@ -151,13 +151,13 @@ export class Session {
     }
   }
 
-  private ratchetStep(theirNostrPublicKey: string) {
+  private ratchetStep(theirNextNostrPublicKey: string) {
     this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber;
     this.state.sendingChainMessageNumber = 0;
     this.state.receivingChainMessageNumber = 0;
-    this.state.theirNostrPublicKey = theirNostrPublicKey;
+    this.state.theirNextNostrPublicKey = theirNextNostrPublicKey;
 
-    const conversationKey1 = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNostrPublicKey!);
+    const conversationKey1 = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNextNostrPublicKey!);
     const [theirRootKey, receivingChainKey] = kdf(this.state.rootKey, conversationKey1, 2);
 
     this.state.receivingChainKey = receivingChainKey;
@@ -169,7 +169,7 @@ export class Session {
       privateKey: ourNextSecretKey
     };
 
-    const conversationKey2 = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNostrPublicKey!);
+    const conversationKey2 = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNextNostrPublicKey!);
     const [rootKey, sendingChainKey] = kdf(theirRootKey, conversationKey2, 2);
     this.state.rootKey = rootKey;
     this.state.sendingChainKey = sendingChainKey;
@@ -261,12 +261,13 @@ export class Session {
     const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
 
     if (!isSkipped) {
-      if (this.state.theirNostrPublicKey !== header.nextPublicKey) {
-        this.state.theirNostrPublicKey = header.nextPublicKey;
+      if (this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
+        this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
+        this.state.theirNextNostrPublicKey = header.nextPublicKey;
         this.nostrUnsubscribe?.(); // should we keep this open for a while? maybe as long as we have skipped messages?
         this.nostrUnsubscribe = this.nostrNextUnsubscribe;
         this.nostrNextUnsubscribe = this.nostrSubscribe(
-          {authors: [this.state.theirNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
+          {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
           (e) => this.handleNostrEvent(e)
         );
       }
@@ -290,18 +291,20 @@ export class Session {
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
     this.nostrNextUnsubscribe = this.nostrSubscribe(
-      {authors: [this.state.theirNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
+      {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
     );
 
-    const skippedSenders = Object.keys(this.state.skippedHeaderKeys);
-    if (skippedSenders.length > 0) {
-      // do we want this unsubscribed on rotation or should we keep it open
-      // in case more skipped messages are found by relays or peers?
-      this.nostrUnsubscribe = this.nostrSubscribe(
-        {authors: skippedSenders, kinds: [MESSAGE_EVENT_KIND]},
-        (e) => this.handleNostrEvent(e)
-      );
+    const authors = Object.keys(this.state.skippedHeaderKeys);
+    if (this.state.theirCurrentNostrPublicKey && !authors.includes(this.state.theirCurrentNostrPublicKey)) {
+      authors.push(this.state.theirCurrentNostrPublicKey)
     }
+    console.log('Subscribing to skipped messages from:', authors);
+    // do we want this unsubscribed on rotation or should we keep it open
+    // in case more skipped messages are found by relays or peers?
+    this.nostrUnsubscribe = this.nostrSubscribe(
+      {authors, kinds: [MESSAGE_EVENT_KIND]},
+      (e) => this.handleNostrEvent(e)
+    );
   }
 }

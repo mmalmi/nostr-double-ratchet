@@ -14,7 +14,7 @@ describe('Session', () => {
   it('should initialize with correct properties', () => {
     const alice = Session.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array())
 
-    expect(alice.state.theirNostrPublicKey).toBe(getPublicKey(bobSecretKey))
+    expect(alice.state.theirNextNostrPublicKey).toBe(getPublicKey(bobSecretKey))
     expect(alice.state.ourCurrentNostrKey!.publicKey).toBe(getPublicKey(aliceSecretKey))
     expect(alice.state.ourCurrentNostrKey!.publicKey).toHaveLength(64) // Hex-encoded public key length
   })
@@ -83,7 +83,7 @@ describe('Session', () => {
       const initialSendingChainKey = sender.state.sendingChainKey;
       const initialReceivingChainKey = receiverSession.state.receivingChainKey;
       const initialOurCurrentNostrKey = receiverSession.state.ourCurrentNostrKey?.publicKey;
-      const initialTheirNostrPublicKey = receiverSession.state.theirNostrPublicKey;
+      const initialTheirNostrPublicKey = receiverSession.state.theirNextNostrPublicKey;
 
       messageQueue.push(sender.send(message));
       const receivedMessage = await receiver.next();
@@ -98,7 +98,7 @@ describe('Session', () => {
       // Check that the keys change when the first message of consecutive messages is received
       if (receiverSession.state.receivingChainMessageNumber === 1) {
         expect(receiverSession.state.ourCurrentNostrKey?.publicKey).not.toBe(initialOurCurrentNostrKey);
-        expect(receiverSession.state.theirNostrPublicKey).not.toBe(initialTheirNostrPublicKey);
+        expect(receiverSession.state.theirNextNostrPublicKey).not.toBe(initialTheirNostrPublicKey);
       }
     };
 
@@ -312,6 +312,9 @@ describe('Session', () => {
     // Bob closes his session and reinitializes with serialized state
     const serializedBobState = serializeSessionState(bob.state);
     bob.close();
+
+    console.log('alice current key', alice.state.ourCurrentNostrKey)
+
     bob = new Session(createSubscribe(), deserializeSessionState(serializedBobState));
     bobMessages = createMessageStream(bob);
 

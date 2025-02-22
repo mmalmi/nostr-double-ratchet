@@ -7,7 +7,8 @@ import { sha256 } from '@noble/hashes/sha256';
 export function serializeSessionState(state: SessionState): string {
   return JSON.stringify({
     rootKey: bytesToHex(state.rootKey),
-    theirNostrPublicKey: state.theirNostrPublicKey,
+    theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
+    theirNextNostrPublicKey: state.theirNextNostrPublicKey,
     ourCurrentNostrKey: state.ourCurrentNostrKey ? {
       publicKey: state.ourCurrentNostrKey.publicKey,
       privateKey: bytesToHex(state.ourCurrentNostrKey.privateKey),
@@ -40,7 +41,8 @@ export function deserializeSessionState(data: string): SessionState {
   const state = JSON.parse(data);
   return {
     rootKey: hexToBytes(state.rootKey),
-    theirNostrPublicKey: state.theirNostrPublicKey,
+    theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
+    theirNextNostrPublicKey: state.theirNextNostrPublicKey,
     ourCurrentNostrKey: state.ourCurrentNostrKey ? {
       publicKey: state.ourCurrentNostrKey.publicKey,
       privateKey: hexToBytes(state.ourCurrentNostrKey.privateKey),

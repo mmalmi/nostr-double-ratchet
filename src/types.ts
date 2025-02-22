@@ -33,7 +33,10 @@ export interface SessionState {
   rootKey: Uint8Array;
   
   /** The other party's current Nostr public key */
-  theirNostrPublicKey: string;
+  theirCurrentNostrPublicKey?: string;
+
+  /** The other party's next Nostr public key */
+  theirNextNostrPublicKey: string;
 
   /** Our current Nostr keypair used for this session */
   ourCurrentNostrKey?: KeyPair;
