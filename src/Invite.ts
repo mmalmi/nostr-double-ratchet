@@ -17,7 +17,7 @@ import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 export class Invite {
     constructor(
         public inviterEphemeralPublicKey: string,
-        public linkSecret: string,
+        public sharedSecret: string,
         public inviter: string,
         public inviterEphemeralPrivateKey?: Uint8Array,
         public label?: string,
@@ -31,10 +31,10 @@ export class Invite {
         }
         const inviterEphemeralPrivateKey = generateSecretKey();
         const inviterEphemeralPublicKey = getPublicKey(inviterEphemeralPrivateKey);
-        const linkSecret = bytesToHex(generateSecretKey());
+        const sharedSecret = bytesToHex(generateSecretKey());
         return new Invite(
             inviterEphemeralPublicKey,
-            linkSecret,
+            sharedSecret,
             inviter,
             inviterEphemeralPrivateKey,
             label,
@@ -57,14 +57,14 @@ export class Invite {
             throw new Error("Invite data in URL hash is not valid JSON: " + err);
         }
 
-        const { inviter, ephemeralKey, linkSecret } = data;
-        if (!inviter || !ephemeralKey || !linkSecret) {
-            throw new Error("Missing required fields (inviter, ephemeralKey, linkSecret) in invite data.");
+        const { inviter, ephemeralKey, sharedSecret } = data;
+        if (!inviter || !ephemeralKey || !sharedSecret) {
+            throw new Error("Missing required fields (inviter, ephemeralKey, sharedSecret) in invite data.");
         }
 
         return new Invite(
             ephemeralKey,
-            linkSecret,
+            sharedSecret,
             inviter
         );
     }
@@ -73,7 +73,7 @@ export class Invite {
         const data = JSON.parse(json);
         return new Invite(
             data.inviterEphemeralPublicKey,
-            data.linkSecret,
+            data.sharedSecret,
             data.inviter,
             data.inviterEphemeralPrivateKey ? new Uint8Array(data.inviterEphemeralPrivateKey) : undefined,
             data.label,
@@ -91,16 +91,16 @@ export class Invite {
         }
         const { tags } = event;
         const inviterEphemeralPublicKey = tags.find(([key]) => key === 'ephemeralKey')?.[1];
-        const linkSecret = tags.find(([key]) => key === 'linkSecret')?.[1];
+        const sharedSecret = tags.find(([key]) => key === 'sharedSecret')?.[1];
         const inviter = event.pubkey;
 
-        if (!inviterEphemeralPublicKey || !linkSecret) {
-            throw new Error("Invalid invite event: missing session key or link secret");
+        if (!inviterEphemeralPublicKey || !sharedSecret) {
+            throw new Error("Invalid invite event: missing session key or sharedSecret");
         }
 
         return new Invite(
             inviterEphemeralPublicKey,
-            linkSecret,
+            sharedSecret,
             inviter
         );
     }
@@ -135,7 +135,7 @@ export class Invite {
     serialize(): string {
         return JSON.stringify({
             inviterEphemeralPublicKey: this.inviterEphemeralPublicKey,
-            linkSecret: this.linkSecret,
+            sharedSecret: this.sharedSecret,
             inviter: this.inviter,
             inviterEphemeralPrivateKey: this.inviterEphemeralPrivateKey ? Array.from(this.inviterEphemeralPrivateKey) : undefined,
             label: this.label,
@@ -151,11 +151,10 @@ export class Invite {
         const data = {
             inviter: this.inviter,
             ephemeralKey: this.inviterEphemeralPublicKey,
-            linkSecret: this.linkSecret
+            sharedSecret: this.sharedSecret
         };
         const url = new URL(root);
         url.hash = encodeURIComponent(JSON.stringify(data));
-        console.log('url', url.toString())
         return url.toString();
     }
 
@@ -165,7 +164,7 @@ export class Invite {
             pubkey: this.inviter,
             content: "",
             created_at: Math.floor(Date.now() / 1000),
-            tags: [['ephemeralKey', this.inviterEphemeralPublicKey], ['linkSecret', this.linkSecret], ['d', 'nostr-double-ratchet/invite']],
+            tags: [['ephemeralKey', this.inviterEphemeralPublicKey], ['sharedSecret', this.sharedSecret], ['d', 'nostr-double-ratchet/invite']],
         };
     }
 
@@ -193,7 +192,7 @@ export class Invite {
         const inviteeSessionPublicKey = getPublicKey(inviteeSessionKey);
         const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
 
-        const sharedSecret = hexToBytes(this.linkSecret);
+        const sharedSecret = hexToBytes(this.sharedSecret);
         const session = Session.init(nostrSubscribe, this.inviterEphemeralPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
 
         // Create a random keypair for the envelope sender
@@ -206,10 +205,12 @@ export class Invite {
             encryptor :
             (plaintext: string, pubkey: string) => Promise.resolve(nip44.encrypt(plaintext, getConversationKey(encryptor, pubkey)));
 
+        const dhEncrypted = await encrypt(inviteeSessionPublicKey, inviterPublicKey);
+
         const innerEvent = {
             pubkey: inviteePublicKey,
-            tags: [['secret', this.linkSecret]],
-            content: await encrypt(inviteeSessionPublicKey, inviterPublicKey),
+            tags: [['sharedSecret', this.sharedSecret]],
+            content: await nip44.encrypt(dhEncrypted, sharedSecret),
             created_at: Math.floor(Date.now() / 1000),
         };
 
@@ -241,23 +242,28 @@ export class Invite {
                     return;
                 }
 
+                // Decrypt the outer envelope first
                 const decrypted = await nip44.decrypt(event.content, getConversationKey(this.inviterEphemeralPrivateKey!, event.pubkey));
                 const innerEvent = JSON.parse(decrypted);
 
-                if (!innerEvent.tags || !innerEvent.tags.some(([key, value]: [string, string]) => key === 'secret' && value === this.linkSecret)) {
+                if (!innerEvent.tags || !innerEvent.tags.some(([key, value]: [string, string]) => key === 'sharedSecret' && value === this.sharedSecret)) {
                     console.error("Invalid secret from event", event);
                     return;
                 }
 
-                const innerDecrypt = typeof decryptor === 'function' ?
-                    decryptor :
-                    (ciphertext: string, pubkey: string) => Promise.resolve(nip44.decrypt(ciphertext, getConversationKey(decryptor, pubkey)));
-    
+                const sharedSecret = hexToBytes(this.sharedSecret);
                 const inviteeIdentity = innerEvent.pubkey;
                 this.usedBy.push(inviteeIdentity);
 
-                const inviteeSessionPublicKey = await innerDecrypt(innerEvent.content, inviteeIdentity);
-                const sharedSecret = hexToBytes(this.linkSecret);
+                // Decrypt the inner content using shared secret first
+                const dhEncrypted = await nip44.decrypt(innerEvent.content, sharedSecret);
+
+                // Then decrypt using DH key
+                const innerDecrypt = typeof decryptor === 'function' ?
+                    decryptor :
+                    (ciphertext: string, pubkey: string) => Promise.resolve(nip44.decrypt(ciphertext, getConversationKey(decryptor, pubkey)));
+
+                const inviteeSessionPublicKey = await innerDecrypt(dhEncrypted, inviteeIdentity);
 
                 const name = event.id;
                 const session = Session.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterEphemeralPrivateKey!, false, sharedSecret, name);

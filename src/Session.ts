@@ -299,7 +299,6 @@ export class Session {
     if (this.state.theirCurrentNostrPublicKey && !authors.includes(this.state.theirCurrentNostrPublicKey)) {
       authors.push(this.state.theirCurrentNostrPublicKey)
     }
-    console.log('Subscribing to skipped messages from:', authors);
     // do we want this unsubscribed on rotation or should we keep it open
     // in case more skipped messages are found by relays or peers?
     this.nostrUnsubscribe = this.nostrSubscribe(

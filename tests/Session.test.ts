@@ -37,25 +37,33 @@ describe('Session', () => {
   })
 
   it('should handle incoming events and update keys', async () => {
-    const alice = Session.init(dummySubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
-    const event = alice.send('Hello, Bob!')
-    
-    const bob = Session.init((filter, onEvent) => {
-      if (matchFilter(filter, event)) {
-        onEvent(event)
-      }
-      return dummyUnsubscribe
-    }, getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob')
+    // Create a message queue to simulate network events
+    const messageQueue: any[] = [];
 
-    const initialReceivingChainKey = bob.state.receivingChainKey
+    const subscribe = (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+      };
+      // Immediate check for test purposes
+      checkQueue();
+      return dummyUnsubscribe;
+    };
 
+    const alice = Session.init(subscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(subscribe, getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+
+    const initialReceivingChainKey = bob.state.receivingChainKey;
     const bobMessages = createMessageStream(bob);
 
-    const bobFirstMessage = await bobMessages.next();
-    expect(bobFirstMessage.value?.data).toBe('Hello, Bob!')
+    // Push the message to the queue
+    messageQueue.push(alice.send('Hello, Bob!'));
 
-    const nextReceivingChainKey = bob.state.receivingChainKey
-    expect(nextReceivingChainKey).not.toBe(initialReceivingChainKey)
+    const bobFirstMessage = await bobMessages.next();
+    expect(bobFirstMessage.value?.data).toBe('Hello, Bob!');
+    expect(bob.state.receivingChainKey).not.toBe(initialReceivingChainKey);
   })
 
   it('should handle multiple back-and-forth messages correctly', async () => {
@@ -312,8 +320,6 @@ describe('Session', () => {
     // Bob closes his session and reinitializes with serialized state
     const serializedBobState = serializeSessionState(bob.state);
     bob.close();
-
-    console.log('alice current key', alice.state.ourCurrentNostrKey)
 
     bob = new Session(createSubscribe(), deserializeSessionState(serializedBobState));
     bobMessages = createMessageStream(bob);

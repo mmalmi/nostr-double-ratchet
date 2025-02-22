@@ -14,7 +14,7 @@ describe('Invite', () => {
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey, 'Test Invite', 5)
     expect(invite.inviterEphemeralPublicKey).toHaveLength(64)
-    expect(invite.linkSecret).toHaveLength(64)
+    expect(invite.sharedSecret).toHaveLength(64)
     expect(invite.inviter).toBe(alicePublicKey)
     expect(invite.label).toBe('Test Invite')
     expect(invite.maxUses).toBe(5)
@@ -27,7 +27,7 @@ describe('Invite', () => {
     const url = invite.getUrl()
     const parsedInvite = Invite.fromUrl(url)
     expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
-    expect(parsedInvite.linkSecret).toBe(invite.linkSecret)
+    expect(parsedInvite.sharedSecret).toBe(invite.sharedSecret)
   })
 
   it('should accept invite and create session', async () => {
@@ -147,14 +147,14 @@ describe('Invite', () => {
     expect(event.kind).toBe(INVITE_EVENT_KIND)
     expect(event.pubkey).toBe(alicePublicKey)
     expect(event.tags).toContainEqual(['ephemeralKey', invite.inviterEphemeralPublicKey])
-    expect(event.tags).toContainEqual(['linkSecret', invite.linkSecret])
+    expect(event.tags).toContainEqual(['sharedSecret', invite.sharedSecret])
     expect(event.tags).toContainEqual(['d', 'nostr-double-ratchet/invite'])
 
     const finalizedEvent = finalizeEvent(event, alicePrivateKey)
     const parsedInvite = Invite.fromEvent(finalizedEvent)
     
     expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
-    expect(parsedInvite.linkSecret).toBe(invite.linkSecret)
+    expect(parsedInvite.sharedSecret).toBe(invite.sharedSecret)
     expect(parsedInvite.inviter).toBe(alicePublicKey)
   })
 
