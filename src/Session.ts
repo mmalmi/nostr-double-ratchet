@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, getEventHash } from "nostr-tools";
+import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, getEventHash, validateEvent } from "nostr-tools";
 import { bytesToHex } from "@noble/hashes/utils";
 import {
   SessionState,
@@ -88,7 +88,8 @@ export class Session {
   }
 
   /**
-   * Send a Nostr event through the encrypted session
+   * Send a partial Nostr event through the encrypted session.
+   * In addition to chat messages, it could be files, webrtc negotiation or many other types of messages.
    * @param event Partial Nostr event to send. Must be unsigned. Id and will be generated if not provided.
    * @returns A verified Nostr event containing the encrypted message
    * @throws Error if we are not the initiator and trying to send the first message
@@ -117,7 +118,7 @@ export class Session {
 
     rumor.id = getEventHash(rumor as Rumor);
 
-    const [header, encryptedData] = this.ratchetEncrypt(JSON.stringify(event));
+    const [header, encryptedData] = this.ratchetEncrypt(JSON.stringify(rumor));
     
     const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNextNostrPublicKey);
     const encryptedHeader = nip44.encrypt(JSON.stringify(header), sharedSecret);
@@ -321,6 +322,15 @@ export class Session {
 
     const text = this.ratchetDecrypt(header, e.content, e.pubkey);
     const innerEvent = JSON.parse(text);
+    if (!validateEvent(innerEvent)) {
+      console.error("Invalid event received", innerEvent);
+      return;
+    }
+
+    if (innerEvent.id !== getEventHash(innerEvent)) {
+      console.error("Event hash does not match", innerEvent);
+      return;
+    }
 
     this.internalSubscriptions.forEach(callback => callback(innerEvent, e));  
   }
