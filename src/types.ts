@@ -1,20 +1,9 @@
 import { Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools";
 
-/**
- * An event that has been verified to be from the Nostr network.
- */
-export type Message = {
-  id: string;
-  data: string;
-  pubkey: string;
-  time: number; // unlike Nostr, we use milliseconds instead of seconds
-}
-
 export type Header = {
   number: number;
   previousChainLength: number;
   nextPublicKey: string;
-  time: number;
 }
 
 /**
@@ -76,11 +65,13 @@ export type Unsubscribe = () => void;
  */
 export type NostrSubscribe = (filter: Filter, onEvent: (e: VerifiedEvent) => void) => Unsubscribe;
 
+export type Rumor = UnsignedEvent & { id: string }
+
 /** 
  * Callback function for handling decrypted messages
  * @param message - The decrypted message object
  */
-export type MessageCallback = (message: Message) => void;
+export type EventCallback = (event: Rumor, outerEvent: VerifiedEvent) => void;
 
 /**
  * Message event kind
@@ -92,7 +83,7 @@ export const MESSAGE_EVENT_KIND = 30078;
  */
 export const INVITE_EVENT_KIND = 30078;
 
-export const INNER_MESSAGE_KIND = 14;
+export const CHAT_MESSAGE_KIND = 14;
 
 export const MAX_SKIP = 100;
 

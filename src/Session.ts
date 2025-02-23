@@ -1,16 +1,21 @@
-import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent } from "nostr-tools";
+import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, getEventHash } from "nostr-tools";
 import { bytesToHex } from "@noble/hashes/utils";
 import {
   SessionState,
   Header,
   Unsubscribe,
   NostrSubscribe,
-  MessageCallback,
+  EventCallback,
   MESSAGE_EVENT_KIND,
+  Rumor,
+  CHAT_MESSAGE_KIND,
 } from "./types";
 import { kdf, skippedMessageIndexKey } from "./utils";
 
 const MAX_SKIP = 1000;
+
+// 64 zeros
+const DUMMY_PUBKEY = '0000000000000000000000000000000000000000000000000000000000000000'
 
 /**
  * Double ratchet secure communication session over Nostr
@@ -21,7 +26,7 @@ const MAX_SKIP = 1000;
 export class Session {
   private nostrUnsubscribe?: Unsubscribe;
   private nostrNextUnsubscribe?: Unsubscribe;
-  private internalSubscriptions = new Map<number, MessageCallback>();
+  private internalSubscriptions = new Map<number, EventCallback>();
   private currentInternalSubscriptionId = 0;
   public name: string;
 
@@ -70,17 +75,49 @@ export class Session {
   }
 
   /**
-   * Sends an encrypted message through the session
-   * @param data The plaintext message to send
+   * Sends a text message through the encrypted session
+   * @param text The plaintext message to send
    * @returns A verified Nostr event containing the encrypted message
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  send(data: string): VerifiedEvent {
+  send(text: string): VerifiedEvent {
+    return this.sendEvent({
+      content: text,
+      kind: CHAT_MESSAGE_KIND
+    });
+  }
+
+  /**
+   * Send a Nostr event through the encrypted session
+   * @param event Partial Nostr event to send. Must be unsigned. Id and will be generated if not provided.
+   * @returns A verified Nostr event containing the encrypted message
+   * @throws Error if we are not the initiator and trying to send the first message
+   */
+  sendEvent(event: Partial<UnsignedEvent>): VerifiedEvent {
     if (!this.state.theirNextNostrPublicKey || !this.state.ourCurrentNostrKey) {
       throw new Error("we are not the initiator, so we can't send the first message");
     }
 
-    const [header, encryptedData] = this.ratchetEncrypt(data);
+    if ("sig" in event) {
+      throw new Error("Event must be unsigned " + JSON.stringify(event));
+    }
+
+    const rumor: Partial<Rumor> = {
+      ...event,
+      content: event.content || "",
+      kind: event.kind || MESSAGE_EVENT_KIND,
+      created_at: event.created_at || Math.floor(Date.now() / 1000),
+      tags: event.tags || [],
+      pubkey: event.pubkey || DUMMY_PUBKEY,
+    }
+
+    if (!rumor.tags!.some(([k]) => k === "ms")) {
+      rumor.tags!.push(["ms", Date.now().toString()])
+    }
+
+    rumor.id = getEventHash(rumor as Rumor);
+
+    const [header, encryptedData] = this.ratchetEncrypt(JSON.stringify(event));
     
     const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNextNostrPublicKey);
     const encryptedHeader = nip44.encrypt(JSON.stringify(header), sharedSecret);
@@ -100,7 +137,7 @@ export class Session {
    * @param callback Function to be called when a message is received
    * @returns Unsubscribe function to stop receiving messages
    */
-  onMessage(callback: MessageCallback): Unsubscribe {
+  onEvent(callback: EventCallback): Unsubscribe {
     const id = this.currentInternalSubscriptionId++
     this.internalSubscriptions.set(id, callback)
     this.subscribeToNostrEvents()
@@ -122,7 +159,6 @@ export class Session {
     const header: Header = {
       number: this.state.sendingChainMessageNumber++,
       nextPublicKey: this.state.ourNextNostrKey.publicKey,
-      time: Date.now(),
       previousChainLength: this.state.previousSendingChainMessageCount
     };
     return [header, nip44.encrypt(plaintext, messageKey)];
@@ -283,9 +319,10 @@ export class Session {
       }
     }
 
-    const data = this.ratchetDecrypt(header, e.content, e.pubkey);
+    const text = this.ratchetDecrypt(header, e.content, e.pubkey);
+    const innerEvent = JSON.parse(text);
 
-    this.internalSubscriptions.forEach(callback => callback({id: e.id, data, pubkey: header.nextPublicKey, time: header.time}));  
+    this.internalSubscriptions.forEach(callback => callback(innerEvent, e));  
   }
 
   private subscribeToNostrEvents() {

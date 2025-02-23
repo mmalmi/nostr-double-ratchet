@@ -1,5 +1,5 @@
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
-import { SessionState, Message } from "./types";
+import { Rumor, SessionState } from "./types";
 import { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -71,16 +71,16 @@ export function deserializeSessionState(data: string): SessionState {
   };
 }
 
-export async function* createMessageStream(session: Session): AsyncGenerator<Message, void, unknown> {
-  const messageQueue: Message[] = [];
-  let resolveNext: ((value: Message) => void) | null = null;
+export async function* createEventStream(session: Session): AsyncGenerator<Rumor, void, unknown> {
+  const messageQueue: Rumor[] = [];
+  let resolveNext: ((value: Rumor) => void) | null = null;
 
-  const unsubscribe = session.onMessage((message) => {
+  const unsubscribe = session.onEvent((event) => {
     if (resolveNext) {
-      resolveNext(message);
+      resolveNext(event);
       resolveNext = null;
     } else {
-      messageQueue.push(message);
+      messageQueue.push(event);
     }
   });
 
@@ -89,7 +89,7 @@ export async function* createMessageStream(session: Session): AsyncGenerator<Mes
       if (messageQueue.length > 0) {
         yield messageQueue.shift()!;
       } else {
-        yield new Promise<Message>(resolve => {
+        yield new Promise<Rumor>(resolve => {
           resolveNext = resolve;
         });
       }

@@ -3,7 +3,7 @@ import { Invite } from '../src/Invite'
 import { finalizeEvent, generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
 import { INVITE_EVENT_KIND, MESSAGE_EVENT_KIND } from '../src/types'
 import { Session } from '../src/Session'
-import { createMessageStream } from '../src/utils'
+import { createEventStream } from '../src/utils'
 import { serializeSessionState, deserializeSessionState } from '../src/utils'
 
 describe('Invite', () => {
@@ -119,13 +119,13 @@ describe('Invite', () => {
 
     expect(aliceSession).toBeDefined()
 
-    const aliceMessages = createMessageStream(aliceSession!)
-    const bobMessages = createMessageStream(bobSession)
+    const aliceMessages = createEventStream(aliceSession!)
+    const bobMessages = createEventStream(bobSession)
 
     const sendAndExpect = async (sender: Session, receiver: AsyncIterableIterator<any>, message: string) => {
       messageQueue.push(sender.send(message))
       const receivedMessage = await receiver.next()
-      expect(receivedMessage.value?.data).toBe(message)
+      expect(receivedMessage.value?.content).toBe(message)
     }
 
     // Test conversation
@@ -198,24 +198,24 @@ describe('Invite', () => {
 
     expect(aliceSession).toBeDefined()
 
-    let aliceMessages = createMessageStream(aliceSession!)
-    const bobMessages = createMessageStream(bobSession)
+    let aliceMessages = createEventStream(aliceSession!)
+    const bobMessages = createEventStream(bobSession)
 
     // Bob sends first message
     messageQueue.push(bobSession.send('Hello Alice!'))
     const firstMessage = await aliceMessages.next()
-    expect(firstMessage.value?.data).toBe('Hello Alice!')
+    expect(firstMessage.value?.content).toBe('Hello Alice!')
 
     // Alice closes her session and reinitializes with serialized state
     const serializedAliceState = serializeSessionState(aliceSession!.state)
     aliceSession!.close()
     aliceSession = new Session(createSubscribe('Alice'), deserializeSessionState(serializedAliceState))
-    aliceMessages = createMessageStream(aliceSession)
+    aliceMessages = createEventStream(aliceSession)
 
     // Bob sends second message
     messageQueue.push(bobSession.send('Can you still hear me?'))
     const secondMessage = await aliceMessages.next()
-    expect(secondMessage.value?.data).toBe('Can you still hear me?')
+    expect(secondMessage.value?.content).toBe('Can you still hear me?')
 
     // No remaining messages
     expect(messageQueue.length).toBe(0)
