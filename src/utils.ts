@@ -114,7 +114,7 @@ export function skippedMessageIndexKey(nostrSender: string, number: number): str
 }
 
 export function getMillisecondTimestamp(event: Rumor) {
-  const msTag = event.tags.find(tag => tag[0] === "ms");
+  const msTag = event.tags?.find(tag => tag[0] === "ms");
   if (msTag) {
     return parseInt(msTag[1]);
   }

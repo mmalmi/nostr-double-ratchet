@@ -90,6 +90,11 @@ export class Invite {
             throw new Error("Event signature is invalid");
         }
         const { tags } = event;
+
+        if (!tags) {
+            throw new Error("Invalid invite event: missing tags");
+        }
+
         const inviterEphemeralPublicKey = tags.find(([key]) => key === 'ephemeralKey')?.[1];
         const sharedSecret = tags.find(([key]) => key === 'sharedSecret')?.[1];
         const inviter = event.pubkey;
