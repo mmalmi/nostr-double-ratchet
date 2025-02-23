@@ -103,17 +103,19 @@ export class Session {
       throw new Error("Event must be unsigned " + JSON.stringify(event));
     }
 
+    const now = Date.now()
+
     const rumor: Partial<Rumor> = {
       ...event,
       content: event.content || "",
       kind: event.kind || MESSAGE_EVENT_KIND,
-      created_at: event.created_at || Math.floor(Date.now() / 1000),
+      created_at: event.created_at || Math.floor(now / 1000),
       tags: event.tags || [],
       pubkey: event.pubkey || DUMMY_PUBKEY,
     }
 
     if (!rumor.tags!.some(([k]) => k === "ms")) {
-      rumor.tags!.push(["ms", Date.now().toString()])
+      rumor.tags!.push(["ms", String(now)])
     }
 
     rumor.id = getEventHash(rumor as Rumor);
