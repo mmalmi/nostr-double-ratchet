@@ -123,7 +123,7 @@ describe('Invite', () => {
     const bobMessages = createEventStream(bobSession)
 
     const sendAndExpect = async (sender: Session, receiver: AsyncIterableIterator<any>, message: string) => {
-      messageQueue.push(sender.send(message))
+      messageQueue.push(sender.send(message).event)
       const receivedMessage = await receiver.next()
       expect(receivedMessage.value?.content).toBe(message)
     }
@@ -202,7 +202,7 @@ describe('Invite', () => {
     const bobMessages = createEventStream(bobSession)
 
     // Bob sends first message
-    messageQueue.push(bobSession.send('Hello Alice!'))
+    messageQueue.push(bobSession.send('Hello Alice!').event)
     const firstMessage = await aliceMessages.next()
     expect(firstMessage.value?.content).toBe('Hello Alice!')
 
@@ -213,7 +213,7 @@ describe('Invite', () => {
     aliceMessages = createEventStream(aliceSession)
 
     // Bob sends second message
-    messageQueue.push(bobSession.send('Can you still hear me?'))
+    messageQueue.push(bobSession.send('Can you still hear me?').event)
     const secondMessage = await aliceMessages.next()
     expect(secondMessage.value?.content).toBe('Can you still hear me?')
 

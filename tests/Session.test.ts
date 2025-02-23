@@ -23,7 +23,7 @@ describe('Session', () => {
     const session = Session.init(() => dummyUnsubscribe, getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice')
     const testData = 'Hello, world!'
 
-    const event = session.send(testData)
+    const {event} = session.send(testData)
 
     expect(event).toBeTruthy()
     expect(event.kind).toBe(MESSAGE_EVENT_KIND)
@@ -59,7 +59,7 @@ describe('Session', () => {
     const bobMessages = createEventStream(bob);
 
     // Push the message to the queue
-    messageQueue.push(alice.send('Hello, Bob!'));
+    messageQueue.push(alice.send('Hello, Bob!').event);
 
     const bobFirstMessage = await bobMessages.next();
     expect(bobFirstMessage.value?.content).toBe('Hello, Bob!');
@@ -93,7 +93,7 @@ describe('Session', () => {
       const initialOurCurrentNostrKey = receiverSession.state.ourCurrentNostrKey?.publicKey;
       const initialTheirNostrPublicKey = receiverSession.state.theirNextNostrPublicKey;
 
-      messageQueue.push(sender.send(message));
+      messageQueue.push(sender.send(message).event);
       const receivedMessage = await receiver.next();
 
       console.log(`${receiverSession.name} got from ${sender.name}: ${receivedMessage.value.content}`)
@@ -146,13 +146,13 @@ describe('Session', () => {
 
     const bobMessages = createEventStream(bob);
 
-    messageQueue.push(alice.send('Message 1'));
+    messageQueue.push(alice.send('Message 1').event);
     const bobMessage1 = await bobMessages.next();
     expect(bobMessage1.value?.content).toBe('Message 1');
 
-    const delayedMessage = alice.send('Message 2');
+    const delayedMessage = alice.send('Message 2').event;
 
-    messageQueue.push(alice.send('Message 3'));
+    messageQueue.push(alice.send('Message 3').event);
     const bobMessage3 = await bobMessages.next();
     expect(bobMessage3.value?.content).toBe('Message 3');
 
@@ -187,11 +187,11 @@ describe('Session', () => {
     const bobMessages = createEventStream(bob);
 
     // Send initial messages
-    messageQueue.push(alice.send('Hello Bob!'));
+    messageQueue.push(alice.send('Hello Bob!').event);
     const bobFirstMessage = await bobMessages.next();
     expect(bobFirstMessage.value?.content).toBe('Hello Bob!');
 
-    messageQueue.push(bob.send('Hi Alice!'));
+    messageQueue.push(bob.send('Hi Alice!').event);
     const aliceFirstMessage = await aliceMessages.next();
     expect(aliceFirstMessage.value?.content).toBe('Hi Alice!');
 
@@ -207,11 +207,11 @@ describe('Session', () => {
     const bobRestoredMessages = createEventStream(bobRestored);
 
     // Continue conversation with restored sessions
-    messageQueue.push(aliceRestored.send('How are you?'));
+    messageQueue.push(aliceRestored.send('How are you?').event);
     const bobSecondMessage = await bobRestoredMessages.next();
     expect(bobSecondMessage.value?.content).toBe('How are you?');
 
-    messageQueue.push(bobRestored.send('Doing great!'));
+    messageQueue.push(bobRestored.send('Doing great!').event);
     const aliceSecondMessage = await aliceRestoredMessages.next();
     expect(aliceSecondMessage.value?.content).toBe('Doing great!');
 
@@ -249,9 +249,9 @@ describe('Session', () => {
     const bobMessages = createEventStream(bob);
 
     // Create some skipped messages by sending out of order
-    const message1 = alice.send('Message 1');
-    const message2 = alice.send('Message 2');
-    const message3 = alice.send('Message 3');
+    const message1 = alice.send('Message 1').event;
+    const message2 = alice.send('Message 2').event;
+    const message3 = alice.send('Message 3').event;
 
     // Deliver messages out of order to create skipped messages
     messageQueue.push(message3);
@@ -259,11 +259,11 @@ describe('Session', () => {
 
     // At this point, message1 and message2 are skipped and stored in skippedMessageKeys
 
-    const message4 = bob.send('Message 4');
+    const message4 = bob.send('Message 4').event;
     messageQueue.push(message4);
     await aliceMessages.next();
 
-    const message5 = alice.send('Acknowledge message 4');
+    const message5 = alice.send('Acknowledge message 4').event;
     messageQueue.push(message5);
     await bobMessages.next();
     // Bob now has next key from Alice
@@ -313,7 +313,7 @@ describe('Session', () => {
     let bobMessages = createEventStream(bob);
 
     // Alice sends first message
-    messageQueue.push(alice.send('Message 1'));
+    messageQueue.push(alice.send('Message 1').event);
     const bobFirstMessage = await bobMessages.next();
     expect(bobFirstMessage.value?.content).toBe('Message 1');
 
@@ -325,7 +325,7 @@ describe('Session', () => {
     bobMessages = createEventStream(bob);
 
     // Alice sends second message
-    messageQueue.push(alice.send('Message 2'));
+    messageQueue.push(alice.send('Message 2').event);
     const bobSecondMessage = await bobMessages.next();
     expect(bobSecondMessage.value?.content).toBe('Message 2');
 

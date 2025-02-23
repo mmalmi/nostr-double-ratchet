@@ -80,7 +80,7 @@ export class Session {
    * @returns A verified Nostr event containing the encrypted message
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  send(text: string): VerifiedEvent {
+  send(text: string): {event: VerifiedEvent, innerEvent: Rumor} {
     return this.sendEvent({
       content: text,
       kind: CHAT_MESSAGE_KIND
@@ -94,7 +94,7 @@ export class Session {
    * @returns A verified Nostr event containing the encrypted message
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  sendEvent(event: Partial<UnsignedEvent>): VerifiedEvent {
+  sendEvent(event: Partial<UnsignedEvent>): {event: VerifiedEvent, innerEvent: Rumor} {
     if (!this.state.theirNextNostrPublicKey || !this.state.ourCurrentNostrKey) {
       throw new Error("we are not the initiator, so we can't send the first message");
     }
@@ -130,7 +130,7 @@ export class Session {
       created_at: Math.floor(Date.now() / 1000)
     }, this.state.ourCurrentNostrKey.privateKey);
 
-    return nostrEvent;
+    return {event: nostrEvent, innerEvent: rumor as Rumor};
   }
 
   /**

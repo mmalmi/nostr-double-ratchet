@@ -112,3 +112,11 @@ export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32),
 export function skippedMessageIndexKey(nostrSender: string, number: number): string {
   return `${nostrSender}:${number}`;
 }
+
+export function getMillisecondTimestamp(event: Rumor) {
+  const msTag = event.tags.find(tag => tag[0] === "ms");
+  if (msTag) {
+    return parseInt(msTag[1]);
+  }
+  return event.created_at * 1000;
+}
