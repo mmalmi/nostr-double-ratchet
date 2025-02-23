@@ -82,8 +82,18 @@ export type NostrSubscribe = (filter: Filter, onEvent: (e: VerifiedEvent) => voi
  */
 export type MessageCallback = (message: Message) => void;
 
-export const MESSAGE_EVENT_KIND = 4;
+/**
+ * Message event kind
+ */
+export const MESSAGE_EVENT_KIND = 30078;
+
+/**
+ * Invite event kind
+ */
 export const INVITE_EVENT_KIND = 30078;
+
+export const INNER_MESSAGE_KIND = 14;
+
 export const MAX_SKIP = 100;
 
 export type NostrEvent = {
@@ -94,11 +104,6 @@ export type NostrEvent = {
   tags: string[][];
   content: string;
   sig: string;
-}
-
-export enum Sender {
-  Us,
-  Them
 }
 
 export type EncryptFunction = (plaintext: string, pubkey: string) => Promise<string>;
