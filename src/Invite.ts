@@ -115,7 +115,7 @@ export class Invite {
             kinds: [INVITE_EVENT_KIND],
             authors: [user],
             limit: 1,
-            "#d": ["nostr-double-ratchet/invites/public"],
+            "#d": ["double-ratchet/invites/public"],
         };
         let latest = 0;
         const unsub = subscribe(filter, (event) => {
@@ -172,8 +172,8 @@ export class Invite {
             tags: [
                 ['ephemeralKey', this.inviterEphemeralPublicKey],
                 ['sharedSecret', this.sharedSecret],
-                ['d', 'nostr-double-ratchet/invites/public'],
-                ['l', 'nostr-double-ratchet/invites']
+                ['d', 'double-ratchet/invites/public'],
+                ['l', 'double-ratchet/invites']
             ],
         };
     }
