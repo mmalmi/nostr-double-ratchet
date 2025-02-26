@@ -148,7 +148,8 @@ describe('Invite', () => {
     expect(event.pubkey).toBe(alicePublicKey)
     expect(event.tags).toContainEqual(['ephemeralKey', invite.inviterEphemeralPublicKey])
     expect(event.tags).toContainEqual(['sharedSecret', invite.sharedSecret])
-    expect(event.tags).toContainEqual(['d', 'nostr-double-ratchet/invite'])
+    expect(event.tags).toContainEqual(['d', 'nostr-double-ratchet/invites/public'])
+    expect(event.tags).toContainEqual(['l', 'nostr-double-ratchet/invites'])
 
     const finalizedEvent = finalizeEvent(event, alicePrivateKey)
     const parsedInvite = Invite.fromEvent(finalizedEvent)

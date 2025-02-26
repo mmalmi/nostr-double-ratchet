@@ -75,9 +75,10 @@ export class Session {
   }
 
   /**
-   * Sends a text message through the encrypted session
+   * Sends a text message through the encrypted session.
+   * Sent in a Nostr event with the kind CHAT_MESSAGE_KIND.
    * @param text The plaintext message to send
-   * @returns A verified Nostr event containing the encrypted message
+   * @returns A verified Nostr event containing the encrypted message. You need to publish this event to the Nostr network.
    * @throws Error if we are not the initiator and trying to send the first message
    */
   send(text: string): {event: VerifiedEvent, innerEvent: Rumor} {
@@ -91,7 +92,7 @@ export class Session {
    * Send a partial Nostr event through the encrypted session.
    * In addition to chat messages, it could be files, webrtc negotiation or many other types of messages.
    * @param event Partial Nostr event to send. Must be unsigned. Id and will be generated if not provided.
-   * @returns A verified Nostr event containing the encrypted message
+   * @returns A verified Nostr event containing the encrypted message. You need to publish this event to the Nostr network.
    * @throws Error if we are not the initiator and trying to send the first message
    */
   sendEvent(event: Partial<UnsignedEvent>): {event: VerifiedEvent, innerEvent: Rumor} {
