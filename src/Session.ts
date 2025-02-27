@@ -24,6 +24,7 @@ const DUMMY_PUBKEY = '0000000000000000000000000000000000000000000000000000000000
  * https://signal.org/docs/specifications/doubleratchet/
  */
 export class Session {
+  private skippedSubscription?: Unsubscribe;
   private nostrUnsubscribe?: Unsubscribe;
   private nostrNextUnsubscribe?: Unsubscribe;
   private internalSubscriptions = new Map<number, EventCallback>();
@@ -153,6 +154,8 @@ export class Session {
   close() {
     this.nostrUnsubscribe?.();
     this.nostrNextUnsubscribe?.();
+    this.skippedSubscription?.();
+    this.internalSubscriptions.clear();
   }
 
   // 2. RATCHET FUNCTIONS
@@ -348,7 +351,7 @@ export class Session {
 
     const skippedAuthors = Object.keys(this.state.skippedKeys);
     if (skippedAuthors.length) {
-      this.nostrSubscribe(
+      this.skippedSubscription = this.nostrSubscribe(
         {authors: skippedAuthors, kinds: [MESSAGE_EVENT_KIND]},
         (e) => this.handleNostrEvent(e)
       );  
