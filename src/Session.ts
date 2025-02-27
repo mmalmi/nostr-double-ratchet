@@ -255,8 +255,6 @@ export class Session {
     // Clean up if no more skipped messages
     if (Object.keys(skippedKeys.messageKeys).length === 0) {
       delete this.state.skippedKeys[nostrSender];
-      this.nostrUnsubscribe?.();
-      this.nostrUnsubscribe = undefined;
     }
     
     return nip44.decrypt(ciphertext, messageKey);
@@ -341,13 +339,19 @@ export class Session {
       (e) => this.handleNostrEvent(e)
     );
 
-    const authors = Object.keys(this.state.skippedKeys);
-    if (this.state.theirCurrentNostrPublicKey && !authors.includes(this.state.theirCurrentNostrPublicKey)) {
-      authors.push(this.state.theirCurrentNostrPublicKey)
+    if (this.state.theirCurrentNostrPublicKey) {
+      this.nostrUnsubscribe = this.nostrSubscribe(
+        {authors: [this.state.theirCurrentNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
+        (e) => this.handleNostrEvent(e)
+      );  
     }
-    this.nostrUnsubscribe = this.nostrSubscribe(
-      {authors, kinds: [MESSAGE_EVENT_KIND]},
-      (e) => this.handleNostrEvent(e)
-    );
+
+    const skippedAuthors = Object.keys(this.state.skippedKeys);
+    if (skippedAuthors.length) {
+      this.nostrSubscribe(
+        {authors: skippedAuthors, kinds: [MESSAGE_EVENT_KIND]},
+        (e) => this.handleNostrEvent(e)
+      );  
+    }
   }
 }
