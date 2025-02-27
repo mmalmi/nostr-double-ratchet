@@ -318,6 +318,11 @@ export class Session {
         this.skipMessageKeys(header.previousChainLength, e.pubkey);
         this.ratchetStep(header.nextPublicKey);
       }
+    } else {
+      if (!this.state.skippedKeys[e.pubkey]?.messageKeys[header.number]) {
+        // Maybe we already processed this message — no error
+        return
+      }
     }
 
     const text = this.ratchetDecrypt(header, e.content, e.pubkey);
