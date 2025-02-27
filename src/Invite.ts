@@ -223,6 +223,7 @@ export class Invite {
             content: await nip44.encrypt(dhEncrypted, sharedSecret),
             created_at: Math.floor(Date.now() / 1000),
         };
+        const innerJson = JSON.stringify(innerEvent);
 
         // Create a random keypair for the envelope sender
         const randomSenderKey = generateSecretKey();
@@ -231,7 +232,7 @@ export class Invite {
         const envelope = {
             kind: INVITE_RESPONSE_KIND,
             pubkey: randomSenderPublicKey,
-            content: nip44.encrypt(JSON.stringify(innerEvent), getConversationKey(randomSenderKey, this.inviterEphemeralPublicKey)),
+            content: nip44.encrypt(innerJson, getConversationKey(randomSenderKey, this.inviterEphemeralPublicKey)),
             created_at: randomNow(),
             tags: [['p', this.inviterEphemeralPublicKey]],
         };
