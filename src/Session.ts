@@ -46,20 +46,27 @@ export class Session {
    * @param name Optional name for the session (for debugging)
    * @returns A new Session instance
    */
-  static init(nostrSubscribe: NostrSubscribe, theirNextNostrPublicKey: string, ourCurrentPrivateKey: Uint8Array, isInitiator: boolean, sharedSecret: Uint8Array, name?: string): Session {
+  static init(
+    nostrSubscribe: NostrSubscribe,
+    theirEphemeralNostrPublicKey: string,
+    ourEphemeralNostrPrivateKey: Uint8Array,
+    isInitiator: boolean,
+    sharedSecret: Uint8Array,
+    name?: string
+  ): Session {
     const ourNextPrivateKey = generateSecretKey();
-    const [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirNextNostrPublicKey), 2);
+    const [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirEphemeralNostrPublicKey), 2);
     let ourCurrentNostrKey;
     let ourNextNostrKey;
     if (isInitiator) {
-      ourCurrentNostrKey = { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey };
+      ourCurrentNostrKey = { publicKey: getPublicKey(ourEphemeralNostrPrivateKey), privateKey: ourEphemeralNostrPrivateKey };
       ourNextNostrKey = { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey };
     } else {
-      ourNextNostrKey = { publicKey: getPublicKey(ourCurrentPrivateKey), privateKey: ourCurrentPrivateKey };
+      ourNextNostrKey = { publicKey: getPublicKey(ourEphemeralNostrPrivateKey), privateKey: ourEphemeralNostrPrivateKey };
     }
     const state: SessionState = {
       rootKey: isInitiator ? rootKey : sharedSecret,
-      theirNextNostrPublicKey,
+      theirNextNostrPublicKey: theirEphemeralNostrPublicKey,
       ourCurrentNostrKey,
       ourNextNostrKey,
       receivingChainKey: undefined,
