@@ -10,7 +10,7 @@ import {
   Rumor,
   CHAT_MESSAGE_KIND,
 } from "./types";
-import { kdf, skippedMessageIndexKey } from "./utils";
+import { kdf } from "./utils";
 
 const MAX_SKIP = 1000;
 
@@ -66,8 +66,7 @@ export class Session {
       sendingChainMessageNumber: 0,
       receivingChainMessageNumber: 0,
       previousSendingChainMessageCount: 0,
-      skippedMessageKeys: {},
-      skippedHeaderKeys: {},
+      skippedKeys: {},
     };
     const session = new Session(nostrSubscribe, state);
     if (name) session.name = name;
@@ -220,43 +219,47 @@ export class Session {
     if (this.state.receivingChainMessageNumber + MAX_SKIP < until) {
       throw new Error("Too many skipped messages");
     }
+
+    if (!this.state.skippedKeys[nostrSender]) {
+      this.state.skippedKeys[nostrSender] = {
+        headerKeys: [],
+        messageKeys: {}
+      };
+      
+      // Store header keys
+      if (this.state.ourCurrentNostrKey) {
+        const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, nostrSender);
+        this.state.skippedKeys[nostrSender].headerKeys.push(currentSecret);
+      }
+      const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, nostrSender);
+      this.state.skippedKeys[nostrSender].headerKeys.push(nextSecret);
+    }
+
     while (this.state.receivingChainMessageNumber < until) {
       const [newReceivingChainKey, messageKey] = kdf(this.state.receivingChainKey!, new Uint8Array([1]), 2);
       this.state.receivingChainKey = newReceivingChainKey;
-      const key = skippedMessageIndexKey(nostrSender, this.state.receivingChainMessageNumber);
-      this.state.skippedMessageKeys[key] = messageKey;
-      
-      if (!this.state.skippedHeaderKeys[nostrSender]) {
-        const secrets: Uint8Array[] = [];
-        if (this.state.ourCurrentNostrKey) {
-          const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, nostrSender);
-          secrets.push(currentSecret);
-        }
-        const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, nostrSender);
-        secrets.push(nextSecret);
-        this.state.skippedHeaderKeys[nostrSender] = secrets;
-      }
-      
+      this.state.skippedKeys[nostrSender].messageKeys[this.state.receivingChainMessageNumber] = messageKey;
       this.state.receivingChainMessageNumber++;
     }
   }
 
   private trySkippedMessageKeys(header: Header, ciphertext: string, nostrSender: string): string | null {
-    const key = skippedMessageIndexKey(nostrSender, header.number);
-    if (key in this.state.skippedMessageKeys) {
-      const mk = this.state.skippedMessageKeys[key];
-      delete this.state.skippedMessageKeys[key];
-      
-      // Check if we have any remaining skipped messages from this sender
-      const hasMoreSkippedMessages = Object.keys(this.state.skippedMessageKeys).some(k => k.startsWith(`${nostrSender}:`));
-      if (!hasMoreSkippedMessages) {
-        // Clean up header keys as no more skipped messages from this sender
-        delete this.state.skippedHeaderKeys[nostrSender];
-      }
-      
-      return nip44.decrypt(ciphertext, mk);
+    const skippedKeys = this.state.skippedKeys[nostrSender];
+    if (!skippedKeys) return null;
+
+    const messageKey = skippedKeys.messageKeys[header.number];
+    if (!messageKey) return null;
+
+    delete skippedKeys.messageKeys[header.number];
+    
+    // Clean up if no more skipped messages
+    if (Object.keys(skippedKeys.messageKeys).length === 0) {
+      delete this.state.skippedKeys[nostrSender];
+      this.nostrUnsubscribe?.();
+      this.nostrUnsubscribe = undefined;
     }
-    return null;
+    
+    return nip44.decrypt(ciphertext, messageKey);
   }
 
   // 4. NOSTR EVENT HANDLING
@@ -280,9 +283,9 @@ export class Session {
       // Decryption with nextSecret also failed
     }
 
-    const keys = this.state.skippedHeaderKeys[event.pubkey];
-    if (keys) {
-      for (const key of keys) {
+    const skippedKeys = this.state.skippedKeys[event.pubkey];
+    if (skippedKeys?.headerKeys) {
+      for (const key of skippedKeys.headerKeys) {
         try {
           const header = JSON.parse(nip44.decrypt(encryptedHeader, key)) as Header;
           return [header, false, true];
@@ -302,7 +305,7 @@ export class Session {
       if (this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
         this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
         this.state.theirNextNostrPublicKey = header.nextPublicKey;
-        this.nostrUnsubscribe?.(); // should we keep this open for a while? maybe as long as we have skipped messages?
+        this.nostrUnsubscribe?.();
         this.nostrUnsubscribe = this.nostrNextUnsubscribe;
         this.nostrNextUnsubscribe = this.nostrSubscribe(
           {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
@@ -313,11 +316,6 @@ export class Session {
       if (shouldRatchet) {
         this.skipMessageKeys(header.previousChainLength, e.pubkey);
         this.ratchetStep(header.nextPublicKey);
-      }
-    } else {
-      const key = skippedMessageIndexKey(e.pubkey, header.number);
-      if (!(key in this.state.skippedMessageKeys)) {
-        return // maybe we already processed this message
       }
     }
 
@@ -343,12 +341,10 @@ export class Session {
       (e) => this.handleNostrEvent(e)
     );
 
-    const authors = Object.keys(this.state.skippedHeaderKeys);
+    const authors = Object.keys(this.state.skippedKeys);
     if (this.state.theirCurrentNostrPublicKey && !authors.includes(this.state.theirCurrentNostrPublicKey)) {
       authors.push(this.state.theirCurrentNostrPublicKey)
     }
-    // do we want this unsubscribed on rotation or should we keep it open
-    // in case more skipped messages are found by relays or peers?
     this.nostrUnsubscribe = this.nostrSubscribe(
       {authors, kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)

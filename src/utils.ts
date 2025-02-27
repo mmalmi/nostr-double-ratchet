@@ -22,16 +22,18 @@ export function serializeSessionState(state: SessionState): string {
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
     previousSendingChainMessageCount: state.previousSendingChainMessageCount,
-    skippedMessageKeys: Object.fromEntries(
-      Object.entries(state.skippedMessageKeys).map(([key, value]) => [
-        key,
-        bytesToHex(value),
-      ])
-    ),
-    skippedHeaderKeys: Object.fromEntries(
-      Object.entries(state.skippedHeaderKeys).map(([key, value]) => [
-        key,
-        value.map(bytes => bytesToHex(bytes))
+    skippedKeys: Object.fromEntries(
+      Object.entries(state.skippedKeys).map(([pubKey, value]) => [
+        pubKey,
+        {
+          headerKeys: value.headerKeys.map(bytes => bytesToHex(bytes)),
+          messageKeys: Object.fromEntries(
+            Object.entries(value.messageKeys).map(([msgIndex, bytes]) => [
+              msgIndex,
+              bytesToHex(bytes)
+            ])
+          )
+        }
       ])
     ),
   });
@@ -56,16 +58,18 @@ export function deserializeSessionState(data: string): SessionState {
     sendingChainMessageNumber: state.sendingChainMessageNumber,
     receivingChainMessageNumber: state.receivingChainMessageNumber,
     previousSendingChainMessageCount: state.previousSendingChainMessageCount,
-    skippedMessageKeys: Object.fromEntries(
-      Object.entries(state.skippedMessageKeys).map(([key, value]) => [
-        key,
-        hexToBytes(value as string),
-      ])
-    ),
-    skippedHeaderKeys: Object.fromEntries(
-      Object.entries(state.skippedHeaderKeys || {}).map(([key, value]) => [
-        key,
-        (value as string[]).map(hex => hexToBytes(hex))
+    skippedKeys: Object.fromEntries(
+      Object.entries(state.skippedKeys || {}).map(([pubKey, value]) => [
+        pubKey,
+        {
+          headerKeys: (value as any).headerKeys.map((hex: string) => hexToBytes(hex)),
+          messageKeys: Object.fromEntries(
+            Object.entries((value as any).messageKeys).map(([msgIndex, hex]) => [
+              msgIndex,
+              hexToBytes(hex as string)
+            ])
+          )
+        }
       ])
     ),
   };

@@ -48,11 +48,13 @@ export interface SessionState {
   /** Number of messages sent in previous sending chain */
   previousSendingChainMessageCount: number;
   
-  /** Cache of message keys for handling out-of-order messages */
-  skippedMessageKeys: Record<string, Uint8Array>;
-
-  /** Cache of header keys for handling out-of-order messages */
-  skippedHeaderKeys: Record<string, Uint8Array[]>;
+  /** Cache of message & header keys for handling out-of-order messages */
+  skippedKeys: {
+    [pubKey: string]: {
+      headerKeys: Uint8Array[],
+      messageKeys: {[msgIndex: number]: Uint8Array}
+    };
+  };
 }
 
 /**
