@@ -4,8 +4,11 @@ import { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
 
+const VERSION_NUMBER = 1;
+
 export function serializeSessionState(state: SessionState): string {
   return JSON.stringify({
+    version: VERSION_NUMBER,
     rootKey: bytesToHex(state.rootKey),
     theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
     theirNextNostrPublicKey: state.theirNextNostrPublicKey,
@@ -41,6 +44,43 @@ export function serializeSessionState(state: SessionState): string {
 
 export function deserializeSessionState(data: string): SessionState {
   const state = JSON.parse(data);
+  
+  // Handle version 0 (legacy format)
+  if (!state.version) {
+    const skippedKeys: SessionState['skippedKeys'] = {};
+    
+    // Migrate old skipped keys format to new structure
+    if (state.skippedMessageKeys) {
+      Object.entries(state.skippedMessageKeys).forEach(([pubKey, messageKeys]: [string, any]) => {
+        skippedKeys[pubKey] = {
+          headerKeys: state.skippedHeaderKeys?.[pubKey] || [],
+          messageKeys: messageKeys
+        };
+      });
+    }
+    
+    return {
+      rootKey: hexToBytes(state.rootKey),
+      theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
+      theirNextNostrPublicKey: state.theirNextNostrPublicKey,
+      ourCurrentNostrKey: state.ourCurrentNostrKey ? {
+        publicKey: state.ourCurrentNostrKey.publicKey,
+        privateKey: hexToBytes(state.ourCurrentNostrKey.privateKey),
+      } : undefined,
+      ourNextNostrKey: {
+        publicKey: state.ourNextNostrKey.publicKey,
+        privateKey: hexToBytes(state.ourNextNostrKey.privateKey),
+      },
+      receivingChainKey: state.receivingChainKey ? hexToBytes(state.receivingChainKey) : undefined,
+      sendingChainKey: state.sendingChainKey ? hexToBytes(state.sendingChainKey) : undefined,
+      sendingChainMessageNumber: state.sendingChainMessageNumber,
+      receivingChainMessageNumber: state.receivingChainMessageNumber,
+      previousSendingChainMessageCount: state.previousSendingChainMessageCount,
+      skippedKeys
+    };
+  }
+  
+  // Handle current version
   return {
     rootKey: hexToBytes(state.rootKey),
     theirCurrentNostrPublicKey: state.theirCurrentNostrPublicKey,
