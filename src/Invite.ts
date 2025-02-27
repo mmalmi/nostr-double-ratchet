@@ -219,7 +219,6 @@ export class Invite {
 
         const innerEvent = {
             pubkey: inviteePublicKey,
-            tags: [['sharedSecret', this.sharedSecret]],
             content: await nip44.encrypt(dhEncrypted, sharedSecret),
             created_at: Math.floor(Date.now() / 1000),
         };
@@ -255,11 +254,6 @@ export class Invite {
                 // Decrypt the outer envelope first
                 const decrypted = await nip44.decrypt(event.content, getConversationKey(this.inviterEphemeralPrivateKey!, event.pubkey));
                 const innerEvent = JSON.parse(decrypted);
-
-                if (!innerEvent.tags || !innerEvent.tags.some(([key, value]: [string, string]) => key === 'sharedSecret' && value === this.sharedSecret)) {
-                    console.error("Invalid secret from event", event);
-                    return;
-                }
 
                 const sharedSecret = hexToBytes(this.sharedSecret);
                 const inviteeIdentity = innerEvent.pubkey;

@@ -250,10 +250,8 @@ export class Session {
       // Check if we have any remaining skipped messages from this sender
       const hasMoreSkippedMessages = Object.keys(this.state.skippedMessageKeys).some(k => k.startsWith(`${nostrSender}:`));
       if (!hasMoreSkippedMessages) {
-        // Clean up header keys and unsubscribe as no more skipped messages from this sender
+        // Clean up header keys as no more skipped messages from this sender
         delete this.state.skippedHeaderKeys[nostrSender];
-        this.nostrUnsubscribe?.();
-        this.nostrUnsubscribe = undefined;
       }
       
       return nip44.decrypt(ciphertext, mk);
