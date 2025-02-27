@@ -130,7 +130,7 @@ export class Session {
       content: encryptedData,
       kind: MESSAGE_EVENT_KIND,
       tags: [["header", encryptedHeader]],
-      created_at: Math.floor(Date.now() / 1000)
+      created_at: Math.floor(now / 1000)
     }, this.state.ourCurrentNostrKey.privateKey);
 
     return {event: nostrEvent, innerEvent: rumor as Rumor};

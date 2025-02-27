@@ -1,8 +1,13 @@
 import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
-import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe, MESSAGE_EVENT_KIND, EncryptFunction, DecryptFunction } from "./types";
+import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe, EncryptFunction, DecryptFunction, INVITE_RESPONSE_KIND } from "./types";
 import { getConversationKey } from "nostr-tools/nip44";
 import { Session } from "./Session.ts";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
+
+const TWO_DAYS = 2 * 24 * 60 * 60
+
+const now = () => Math.round(Date.now() / 1000)
+const randomNow = () => Math.round(now() - Math.random() * TWO_DAYS)
 
 /**
  * Invite is a safe way to exchange session keys and initiate secret sessions.
@@ -205,10 +210,6 @@ export class Invite {
         const sharedSecret = hexToBytes(this.sharedSecret);
         const session = Session.init(nostrSubscribe, this.inviterEphemeralPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
 
-        // Create a random keypair for the envelope sender
-        const randomSenderKey = generateSecretKey();
-        const randomSenderPublicKey = getPublicKey(randomSenderKey);
-
         // should we take only Encrypt / Decrypt functions, not keys, to make it simpler and with less imports here?
         // common implementation problem: plaintext, pubkey params in different order
         const encrypt = typeof encryptor === 'function' ?
@@ -223,11 +224,15 @@ export class Invite {
             created_at: Math.floor(Date.now() / 1000),
         };
 
+        // Create a random keypair for the envelope sender
+        const randomSenderKey = generateSecretKey();
+        const randomSenderPublicKey = getPublicKey(randomSenderKey);
+
         const envelope = {
-            kind: MESSAGE_EVENT_KIND,
+            kind: INVITE_RESPONSE_KIND,
             pubkey: randomSenderPublicKey,
             content: nip44.encrypt(JSON.stringify(innerEvent), getConversationKey(randomSenderKey, this.inviterEphemeralPublicKey)),
-            created_at: Math.floor(Date.now() / 1000),
+            created_at: randomNow(),
             tags: [['p', this.inviterEphemeralPublicKey]],
         };
 
@@ -240,7 +245,7 @@ export class Invite {
         }
         
         const filter = {
-            kinds: [MESSAGE_EVENT_KIND],
+            kinds: [INVITE_RESPONSE_KIND],
             '#p': [this.inviterEphemeralPublicKey],
         };
 

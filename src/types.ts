@@ -83,6 +83,8 @@ export const MESSAGE_EVENT_KIND = 30078;
  */
 export const INVITE_EVENT_KIND = 30078;
 
+export const INVITE_RESPONSE_KIND = 1059;
+
 export const CHAT_MESSAGE_KIND = 14;
 
 export const MAX_SKIP = 100;

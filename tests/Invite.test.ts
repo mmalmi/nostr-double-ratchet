@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Invite } from '../src/Invite'
 import { finalizeEvent, generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
-import { INVITE_EVENT_KIND, MESSAGE_EVENT_KIND } from '../src/types'
+import { INVITE_EVENT_KIND, INVITE_RESPONSE_KIND } from '../src/types'
 import { Session } from '../src/Session'
 import { createEventStream } from '../src/utils'
 import { serializeSessionState, deserializeSessionState } from '../src/utils'
@@ -42,7 +42,7 @@ describe('Invite', () => {
     expect(session).toBeDefined()
     expect(event).toBeDefined()
     expect(event.pubkey).not.toBe(bobPublicKey)
-    expect(event.kind).toBe(MESSAGE_EVENT_KIND)
+    expect(event.kind).toBe(INVITE_RESPONSE_KIND)
     expect(event.tags).toEqual([['p', invite.inviterEphemeralPublicKey]])
   })
 
@@ -58,7 +58,7 @@ describe('Invite', () => {
     const onSession = vi.fn()
 
     const mockSubscribe = (filter: any, callback: (event: any) => void) => {
-      expect(filter.kinds).toEqual([MESSAGE_EVENT_KIND])
+      expect(filter.kinds).toEqual([INVITE_RESPONSE_KIND])
       expect(filter['#p']).toEqual([invite.inviterEphemeralPublicKey])
       callback(event)
       return () => {}
