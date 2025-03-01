@@ -218,11 +218,10 @@ export class Session {
     }
   }
 
-  private ratchetStep(theirNextNostrPublicKey: string) {
+  private ratchetStep() {
     this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber;
     this.state.sendingChainMessageNumber = 0;
     this.state.receivingChainMessageNumber = 0;
-    this.state.theirNextNostrPublicKey = theirNextNostrPublicKey;
 
     const conversationKey1 = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, this.state.theirNextNostrPublicKey!);
     const [theirRootKey, receivingChainKey] = kdf(this.state.rootKey, conversationKey1, 2);
@@ -259,10 +258,14 @@ export class Session {
       // Store header keys
       if (this.state.ourCurrentNostrKey) {
         const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, nostrSender);
-        this.state.skippedKeys[nostrSender].headerKeys.push(currentSecret);
+        if (!this.state.skippedKeys[nostrSender].headerKeys.includes(currentSecret)) {
+          this.state.skippedKeys[nostrSender].headerKeys.push(currentSecret);
+        }
       }
       const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, nostrSender);
-      this.state.skippedKeys[nostrSender].headerKeys.push(nextSecret);
+      if (!this.state.skippedKeys[nostrSender].headerKeys.includes(nextSecret)) {
+        this.state.skippedKeys[nostrSender].headerKeys.push(nextSecret);
+      }
     }
 
     while (this.state.receivingChainMessageNumber < until) {
@@ -343,7 +346,7 @@ export class Session {
   
       if (shouldRatchet) {
         this.skipMessageKeys(header.previousChainLength, e.pubkey);
-        this.ratchetStep(header.nextPublicKey);
+        this.ratchetStep();
       }
     } else {
       if (!this.state.skippedKeys[e.pubkey]?.messageKeys[header.number]) {
