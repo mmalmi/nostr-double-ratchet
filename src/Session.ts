@@ -244,7 +244,9 @@ export class Session {
 
   // 3. MESSAGE KEY FUNCTIONS
   private skipMessageKeys(until: number, nostrSender: string) {
-    if (this.state.receivingChainMessageNumber + MAX_SKIP < until) {
+    if (until <= this.state.receivingChainMessageNumber) return
+
+    if (until > this.state.receivingChainMessageNumber + MAX_SKIP) {
       throw new Error("Too many skipped messages");
     }
 
