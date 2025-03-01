@@ -66,6 +66,9 @@ export type Unsubscribe = () => void;
  * Function that subscribes to Nostr events matching a filter and calls onEvent for each event.
  */
 export type NostrSubscribe = (filter: Filter, onEvent: (e: VerifiedEvent) => void) => Unsubscribe;
+export type EncryptFunction = (plaintext: string, pubkey: string) => Promise<string>;
+export type DecryptFunction = (ciphertext: string, pubkey: string) => Promise<string>;
+export type NostrPublish = (event: UnsignedEvent) => Promise<VerifiedEvent>;
 
 export type Rumor = UnsignedEvent & { id: string }
 
@@ -100,7 +103,3 @@ export type NostrEvent = {
   content: string;
   sig: string;
 }
-
-export type EncryptFunction = (plaintext: string, pubkey: string) => Promise<string>;
-export type DecryptFunction = (ciphertext: string, pubkey: string) => Promise<string>;
-export type NostrPublish = (event: UnsignedEvent) => Promise<VerifiedEvent>;

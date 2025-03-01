@@ -55,27 +55,45 @@ export class Session {
     name?: string
   ): Session {
     const ourNextPrivateKey = generateSecretKey();
-    const [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirEphemeralNostrPublicKey), 2);
-    let ourCurrentNostrKey;
-    let ourNextNostrKey;
+    
+    let rootKey: Uint8Array;
+    let sendingChainKey: Uint8Array | undefined;
+    let ourCurrentNostrKey: { publicKey: string, privateKey: Uint8Array } | undefined;
+    let ourNextNostrKey: { publicKey: string, privateKey: Uint8Array };
+    
     if (isInitiator) {
-      ourCurrentNostrKey = { publicKey: getPublicKey(ourEphemeralNostrPrivateKey), privateKey: ourEphemeralNostrPrivateKey };
-      ourNextNostrKey = { publicKey: getPublicKey(ourNextPrivateKey), privateKey: ourNextPrivateKey };
+      [rootKey, sendingChainKey] = kdf(sharedSecret, nip44.getConversationKey(ourNextPrivateKey, theirEphemeralNostrPublicKey), 2);
+      ourCurrentNostrKey = { 
+        publicKey: getPublicKey(ourEphemeralNostrPrivateKey), 
+        privateKey: ourEphemeralNostrPrivateKey 
+      };
+      ourNextNostrKey = { 
+        publicKey: getPublicKey(ourNextPrivateKey), 
+        privateKey: ourNextPrivateKey 
+      };
     } else {
-      ourNextNostrKey = { publicKey: getPublicKey(ourEphemeralNostrPrivateKey), privateKey: ourEphemeralNostrPrivateKey };
+      rootKey = sharedSecret;
+      sendingChainKey = undefined;
+      ourCurrentNostrKey = undefined;
+      ourNextNostrKey = { 
+        publicKey: getPublicKey(ourEphemeralNostrPrivateKey), 
+        privateKey: ourEphemeralNostrPrivateKey 
+      };
     }
+    
     const state: SessionState = {
-      rootKey: isInitiator ? rootKey : sharedSecret,
+      rootKey,
       theirNextNostrPublicKey: theirEphemeralNostrPublicKey,
       ourCurrentNostrKey,
       ourNextNostrKey,
       receivingChainKey: undefined,
-      sendingChainKey: isInitiator ? sendingChainKey : undefined,
+      sendingChainKey,
       sendingChainMessageNumber: 0,
       receivingChainMessageNumber: 0,
       previousSendingChainMessageCount: 0,
       skippedKeys: {},
     };
+    
     const session = new Session(nostrSubscribe, state);
     if (name) session.name = name;
     return session;
