@@ -13,7 +13,7 @@ if (typeof global.WebSocket === 'undefined') {
 
 // Same relays as iris-client
 const DEFAULT_RELAYS = [
-  "wss://strfry.iris.to",
+  "wss://temp.iris.to",
   "wss://relay.damus.io", 
   "wss://relay.nostr.band",
   "wss://relay.snort.social",
