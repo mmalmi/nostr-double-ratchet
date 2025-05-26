@@ -38,7 +38,7 @@ export class Session {
 
   /**
    * Initializes a new secure communication session
-   * @param nostrSubscribe Function to subscribe to Nostr events
+   * @param nostrSubscribe Function to subscribe to Nostr events. Make sure it deduplicates events (doesnt return the same event twice), otherwise you'll see decryption errors!
    * @param theirNextNostrPublicKey The public key of the other party
    * @param ourCurrentPrivateKey Our current private key for Nostr
    * @param isInitiator Whether we are initiating the conversation (true) or responding (false)
