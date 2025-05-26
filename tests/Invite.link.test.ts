@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Invite } from '../src/Invite'
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
 import { Session } from '../src/Session'
 import { createEventStream } from '../src/utils'
 
@@ -64,10 +64,7 @@ describe('Invite Link', () => {
     const messageQueue: any[] = []
     const createSubscribe = (name: string) => (filter: any, onEvent: (event: any) => void) => {
       const checkQueue = () => {
-        const index = messageQueue.findIndex(event => 
-          event.kind === filter.kinds?.[0] && 
-          (!filter['#p'] || filter['#p'].includes(event.tags.find((t: any) => t[0] === 'p')?.[1]))
-        )
+        const index = messageQueue.findIndex(event => matchFilter(filter, event))
         if (index !== -1) {
           onEvent(messageQueue.splice(index, 1)[0])
         }
