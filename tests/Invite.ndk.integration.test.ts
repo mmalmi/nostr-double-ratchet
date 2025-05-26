@@ -130,6 +130,18 @@ describe('Invite NDK Integration', () => {
     const invite = Invite.createNew(alicePublicKey, 'NDK Test Invite')
     console.log('Invite created with ephemeral key:', invite.inviterEphemeralPublicKey.substring(0, 8))
 
+    // Test invite link serialization/deserialization
+    console.log('Testing invite link serialization...')
+    const inviteUrl = invite.getUrl()
+    console.log('Generated invite URL:', inviteUrl)
+    const parsedInvite = Invite.fromUrl(inviteUrl)
+    console.log('Parsed invite ephemeral key:', parsedInvite.inviterEphemeralPublicKey.substring(0, 8))
+    expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
+    expect(parsedInvite.sharedSecret).toBe(invite.sharedSecret)
+    expect(parsedInvite.inviter).toBe(invite.inviter)
+    expect(parsedInvite.label).toBe(invite.label)
+    console.log('✓ Invite link serialization/deserialization verified')
+
     let aliceSession: Session | undefined
     const sessionPromise = new Promise<Session>((resolve) => {
       invite.listen(
@@ -143,9 +155,9 @@ describe('Invite NDK Integration', () => {
       )
     })
 
-    // Step 2: Bob accepts the invite
+    // Step 2: Bob accepts the invite using the parsed invite
     console.log('Bob accepting invite...')
-    const { session: bobSession, event: acceptanceEvent } = await invite.accept(
+    const { session: bobSession, event: acceptanceEvent } = await parsedInvite.accept(
       bobSubscribe,
       bobPublicKey,
       bobPrivateKey
