@@ -17,6 +17,15 @@ export class UserRecord {
   private deviceRecords: Map<string, DeviceRecord> = new Map();
   private isStale: boolean = false;
   private staleTimestamp?: number;
+  /**
+   * Temporary store for sessions when the corresponding deviceId is unknown.
+   *
+   * SessionManager currently operates at a per-user granularity (it is not
+   * yet aware of individual devices). Until full Sesame device handling is
+   * implemented we keep sessions in this simple list so that
+   * SessionManager.getActiveSessions / getAllSessions work as expected.
+   */
+  private extraSessions: Session[] = [];
 
   constructor(
     public _userId: string,
@@ -179,5 +188,53 @@ export class UserRecord {
       record.inactiveSessions.forEach(session => session.close());
     });
     this.deviceRecords.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helper methods used by SessionManager (WIP):
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a session without associating it with a specific device.
+   * This is mainly used by SessionManager which does not yet keep track of
+   * device identifiers. The session will be considered active.
+   */
+  public addSession(session: Session): void {
+    this.extraSessions.push(session);
+  }
+
+  /**
+   * Return all sessions that are currently considered *active*.
+   * For now this means any session in a non-stale device record as well as
+   * all sessions added through `addSession`.
+   */
+  public getActiveSessions(): Session[] {
+    const sessions: Session[] = [...this.extraSessions];
+
+    for (const record of this.deviceRecords.values()) {
+      if (!record.isStale && record.activeSession) {
+        sessions.push(record.activeSession);
+      }
+    }
+
+    return sessions;
+  }
+
+  /**
+   * Return *all* sessions — active or inactive — that we have stored for this
+   * user. This is required for `SessionManager.onEvent` so that it can attach
+   * listeners to existing sessions.
+   */
+  public getAllSessions(): Session[] {
+    const sessions: Session[] = [...this.extraSessions];
+
+    for (const record of this.deviceRecords.values()) {
+      if (record.activeSession) {
+        sessions.push(record.activeSession);
+      }
+      sessions.push(...record.inactiveSessions);
+    }
+
+    return sessions;
   }
 }

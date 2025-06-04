@@ -22,7 +22,7 @@ export default class SessionManager {
             kind: CHAT_MESSAGE_KIND,
             content: text,
         }
-        await this.sendEvent(recipientIdentityKey, event)
+        return await this.sendEvent(recipientIdentityKey, event)
     }
 
     async sendEvent(recipientIdentityKey: string, event: Partial<Rumor>) {
