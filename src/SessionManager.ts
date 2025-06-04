@@ -9,6 +9,7 @@ export default class SessionManager {
     private nostrPublish: NostrPublish
     private ourIdentityKey: Uint8Array
     private inviteUnsubscribes: Map<string, Unsubscribe> = new Map()
+    private ownDeviceInvites: Map<string, Invite | null> = new Map()
 
     constructor(ourIdentityKey: Uint8Array, nostrSubscribe: NostrSubscribe, nostrPublish: NostrPublish) {
         this.userRecords = new Map()
@@ -26,6 +27,9 @@ export default class SessionManager {
     }
 
     async sendEvent(recipientIdentityKey: string, event: Partial<Rumor>) {
+        const results = []
+        
+        // Send to recipient's devices
         const userRecord = this.userRecords.get(recipientIdentityKey)
         if (!userRecord) {
             // Listen for invites from recipient
@@ -33,12 +37,22 @@ export default class SessionManager {
             throw new Error("No active session with user. Listening for invites.")
         }
 
-        // Send to all active sessions
-        const results = []
-        for (const [, session] of userRecord.getActiveDevices()) {
+        // Send to all active sessions with recipient
+        for (const session of userRecord.getActiveSessions()) {
             const { event: encryptedEvent } = session.sendEvent(event)
             results.push(encryptedEvent)
         }
+
+        // Send to our own devices (for multi-device sync)
+        const ourPublicKey = getPublicKey(this.ourIdentityKey)
+        const ownUserRecord = this.userRecords.get(ourPublicKey)
+        if (ownUserRecord) {
+            for (const session of ownUserRecord.getActiveSessions()) {
+                const { event: encryptedEvent } = session.sendEvent(event)
+                results.push(encryptedEvent)
+            }
+        }
+
         return results
     }
 
@@ -61,7 +75,7 @@ export default class SessionManager {
                     userRecord = new UserRecord(userPubkey, this.nostrSubscribe)
                     this.userRecords.set(userPubkey, userRecord)
                 }
-                userRecord.insertSession('default', session)
+                userRecord.insertSession(event.id || 'unknown', session)
 
                 // Set up event handling for the new session
                 session.onEvent((_event) => {
@@ -93,7 +107,7 @@ export default class SessionManager {
 
         // Subscribe to existing sessions
         for (const userRecord of this.userRecords.values()) {
-            for (const [, session] of userRecord.getActiveDevices()) {
+            for (const session of userRecord.getActiveSessions()) {
                 session.onEvent((_event: Rumor) => {
                     callback(_event)
                 })
@@ -115,11 +129,37 @@ export default class SessionManager {
         
         // Close all sessions
         for (const userRecord of this.userRecords.values()) {
-            for (const [, session] of userRecord.getActiveDevices()) {
+            for (const session of userRecord.getActiveSessions()) {
                 session.close()
             }
         }
         this.userRecords.clear()
         this.internalSubscriptions.clear()
+        this.ownDeviceInvites.clear()
+    }
+
+    createOwnDeviceInvite(deviceName: string, label?: string, maxUses?: number): Invite {
+        const ourPublicKey = getPublicKey(this.ourIdentityKey)
+        const invite = Invite.createNew(ourPublicKey, label, maxUses)
+        this.ownDeviceInvites.set(deviceName, invite)
+        return invite
+    }
+
+    removeOwnDevice(deviceName: string): void {
+        this.ownDeviceInvites.set(deviceName, null)
+    }
+
+    getOwnDeviceInvites(): Map<string, Invite | null> {
+        return new Map(this.ownDeviceInvites)
+    }
+
+    getActiveOwnDeviceInvites(): Map<string, Invite> {
+        const active = new Map<string, Invite>()
+        for (const [deviceName, invite] of this.ownDeviceInvites) {
+            if (invite !== null) {
+                active.set(deviceName, invite)
+            }
+        }
+        return active
     }
 }

@@ -167,7 +167,10 @@ export class Invite {
         return url.toString();
     }
 
-    getEvent(name = "public"): UnsignedEvent {
+    getEvent(deviceName: string): UnsignedEvent {
+        if (!deviceName) {
+            throw new Error("Device name is required");
+        }
         return {
             kind: INVITE_EVENT_KIND,
             pubkey: this.inviter,
@@ -176,7 +179,7 @@ export class Invite {
             tags: [
                 ['ephemeralKey', this.inviterEphemeralPublicKey],
                 ['sharedSecret', this.sharedSecret],
-                ['d', 'double-ratchet/invites/' + name],
+                ['d', 'double-ratchet/invites/' + deviceName],
                 ['l', 'double-ratchet/invites']
             ],
         };

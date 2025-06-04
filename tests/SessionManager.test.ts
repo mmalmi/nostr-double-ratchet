@@ -76,4 +76,42 @@ describe('SessionManager', () => {
     expect(received).toHaveLength(1)
     expect(received[0]).toBe(testEvent)
   })
-}) 
+
+  it('should create and track own device invites', () => {
+    const manager = new SessionManager(ourIdentityKey, nostrSubscribe, nostrPublish)
+    
+    const invite = manager.createOwnDeviceInvite('device-1', 'Test Device')
+    expect(invite).toBeDefined()
+    expect(invite.label).toBe('Test Device')
+    
+    const ownInvites = manager.getOwnDeviceInvites()
+    expect(ownInvites.has('device-1')).toBe(true)
+    expect(ownInvites.get('device-1')).toBe(invite)
+  })
+
+  it('should remove own device by nulling invite', () => {
+    const manager = new SessionManager(ourIdentityKey, nostrSubscribe, nostrPublish)
+    
+    manager.createOwnDeviceInvite('device-1', 'Test Device')
+    manager.removeOwnDevice('device-1')
+    
+    const ownInvites = manager.getOwnDeviceInvites()
+    expect(ownInvites.get('device-1')).toBe(null)
+    
+    const activeInvites = manager.getActiveOwnDeviceInvites()
+    expect(activeInvites.has('device-1')).toBe(false)
+  })
+
+  it('should filter out nulled invites from active invites', () => {
+    const manager = new SessionManager(ourIdentityKey, nostrSubscribe, nostrPublish)
+    
+    manager.createOwnDeviceInvite('device-1', 'Device 1')
+    manager.createOwnDeviceInvite('device-2', 'Device 2')
+    manager.removeOwnDevice('device-1')
+    
+    const activeInvites = manager.getActiveOwnDeviceInvites()
+    expect(activeInvites.size).toBe(1)
+    expect(activeInvites.has('device-2')).toBe(true)
+    expect(activeInvites.has('device-1')).toBe(false)
+  })
+})   

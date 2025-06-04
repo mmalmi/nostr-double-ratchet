@@ -138,17 +138,25 @@ describe('Invite', () => {
     expect(messageQueue.length).toBe(0)
   })
 
+  it('should require device name for getEvent', () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey, 'Test Invite', 5)
+    
+    expect(() => invite.getEvent('')).toThrow('Device name is required')
+  })
+
   it('should convert between event and Invite correctly', () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey, 'Test Invite', 5)
     
-    const event = invite.getEvent()
+    const event = invite.getEvent('test-device')
     expect(event.kind).toBe(INVITE_EVENT_KIND)
     expect(event.pubkey).toBe(alicePublicKey)
     expect(event.tags).toContainEqual(['ephemeralKey', invite.inviterEphemeralPublicKey])
     expect(event.tags).toContainEqual(['sharedSecret', invite.sharedSecret])
-    expect(event.tags).toContainEqual(['d', 'double-ratchet/invites/public'])
+    expect(event.tags).toContainEqual(['d', 'double-ratchet/invites/test-device'])
     expect(event.tags).toContainEqual(['l', 'double-ratchet/invites'])
 
     const finalizedEvent = finalizeEvent(event, alicePrivateKey)
