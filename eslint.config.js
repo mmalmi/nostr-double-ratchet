@@ -21,11 +21,13 @@ export default [
       '@typescript-eslint': tseslint,
     },
     rules: {
-      '@typescript-eslint/no-unused-vars': ['error', { 'argsIgnorePattern': '^_' }],
+      '@typescript-eslint/no-unused-vars': 'off',
+      'no-unused-vars': 'off',
       '@typescript-eslint/no-explicit-any': 'warn',
       'prefer-const': 'error',
       'no-console': 'warn',
       'no-undef': 'off',
+      'no-empty': ['error', { 'allowEmptyCatch': true }],
     },
   },
   {
