@@ -1,5 +1,5 @@
 import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, getEventHash, validateEvent } from "nostr-tools";
-import { bytesToHex } from "@noble/hashes/utils";
+
 import {
   SessionState,
   Header,
@@ -205,17 +205,7 @@ export class Session {
     this.state.receivingChainKey = newReceivingChainKey;
     this.state.receivingChainMessageNumber++;
 
-    try {
-      return nip44.decrypt(ciphertext, messageKey);
-    } catch (error) {
-      console.error(this.name, 'Decryption failed:', error, {
-        messageKey: bytesToHex(messageKey).slice(0, 4),
-        receivingChainKey: bytesToHex(this.state.receivingChainKey).slice(0, 4),
-        sendingChainKey: this.state.sendingChainKey && bytesToHex(this.state.sendingChainKey).slice(0, 4),
-        rootKey: bytesToHex(this.state.rootKey).slice(0, 4)
-      });
-      throw error;
-    }
+    return nip44.decrypt(ciphertext, messageKey);
   }
 
   private ratchetStep() {
@@ -294,14 +284,14 @@ export class Session {
   }
 
   // 4. NOSTR EVENT HANDLING
-  private decryptHeader(event: any): [Header, boolean, boolean] {
+  private decryptHeader(event: { tags: string[][]; pubkey: string }): [Header, boolean, boolean] {
     const encryptedHeader = event.tags[0][1];
     if (this.state.ourCurrentNostrKey) {
       const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, event.pubkey);
       try {
         const header = JSON.parse(nip44.decrypt(encryptedHeader, currentSecret)) as Header;
         return [header, false, false];
-      } catch (error) {
+      } catch {
         // Decryption with currentSecret failed, try with nextSecret
       }
     }
@@ -310,7 +300,7 @@ export class Session {
     try {
       const header = JSON.parse(nip44.decrypt(encryptedHeader, nextSecret)) as Header;
       return [header, true, false];
-    } catch (error) {
+    } catch {
       // Decryption with nextSecret also failed
     }
 
@@ -320,7 +310,7 @@ export class Session {
         try {
           const header = JSON.parse(nip44.decrypt(encryptedHeader, key)) as Header;
           return [header, false, true];
-        } catch (error) {
+        } catch {
           // Decryption failed, try next secret
         }
       }
@@ -329,7 +319,7 @@ export class Session {
     throw new Error("Failed to decrypt header with current and skipped header keys");
   }
 
-  private handleNostrEvent(e: any) {
+  private handleNostrEvent(e: { tags: string[][]; pubkey: string; content: string }) {
     const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
 
     if (!isSkipped) {
@@ -358,16 +348,14 @@ export class Session {
     const text = this.ratchetDecrypt(header, e.content, e.pubkey);
     const innerEvent = JSON.parse(text);
     if (!validateEvent(innerEvent)) {
-      console.error("Invalid event received", innerEvent);
       return;
     }
 
     if (innerEvent.id !== getEventHash(innerEvent)) {
-      console.error("Event hash does not match", innerEvent);
       return;
     }
 
-    this.internalSubscriptions.forEach(callback => callback(innerEvent, e));  
+    this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));  
   }
 
   private subscribeToNostrEvents() {

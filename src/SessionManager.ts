@@ -1,7 +1,7 @@
 import { CHAT_MESSAGE_KIND, NostrPublish, NostrSubscribe, Rumor, Unsubscribe } from "./types"
 import { UserRecord } from "./UserRecord"
 import { Invite } from "./Invite"
-import { getPublicKey } from "./utils"
+import { getPublicKey } from "nostr-tools"
 
 export default class SessionManager {
     private userRecords: Map<string, UserRecord> = new Map()
@@ -35,7 +35,7 @@ export default class SessionManager {
 
         // Send to all active sessions
         const results = []
-        for (const session of userRecord.getActiveSessions()) {
+        for (const [, session] of userRecord.getActiveDevices()) {
             const { event: encryptedEvent } = session.sendEvent(event)
             results.push(encryptedEvent)
         }
@@ -46,9 +46,9 @@ export default class SessionManager {
         // Don't subscribe multiple times to the same user
         if (this.inviteUnsubscribes.has(userPubkey)) return
 
-        const unsubscribe = Invite.fromUser(userPubkey, this.nostrSubscribe, async (invite) => {
+        const unsubscribe = Invite.fromUser(userPubkey, this.nostrSubscribe, async (_invite) => {
             try {
-                const { session, event } = await invite.accept(
+                const { session, event } = await _invite.accept(
                     this.nostrSubscribe,
                     getPublicKey(this.ourIdentityKey),
                     this.ourIdentityKey
@@ -61,17 +61,16 @@ export default class SessionManager {
                     userRecord = new UserRecord(userPubkey, this.nostrSubscribe)
                     this.userRecords.set(userPubkey, userRecord)
                 }
-                userRecord.addSession(session)
+                userRecord.insertSession('default', session)
 
                 // Set up event handling for the new session
-                session.onEvent((event) => {
-                    this.internalSubscriptions.forEach(callback => callback(event))
+                session.onEvent((_event) => {
+                    this.internalSubscriptions.forEach(callback => callback(_event))
                 })
 
                 // Return the event to be published
                 return event
-            } catch (error) {
-                console.error('Error accepting invite:', error)
+            } catch {
             }
         })
 
@@ -87,16 +86,16 @@ export default class SessionManager {
     }
 
     // Update onEvent to include internalSubscriptions management
-    private internalSubscriptions: Set<(event: Rumor) => void> = new Set()
+    private internalSubscriptions: Set<(_event: Rumor) => void> = new Set()
 
-    onEvent(callback: (event: Rumor) => void) {
+    onEvent(callback: (_event: Rumor) => void) {
         this.internalSubscriptions.add(callback)
 
         // Subscribe to existing sessions
         for (const userRecord of this.userRecords.values()) {
-            for (const session of userRecord.getAllSessions()) {
-                session.onEvent((event) => {
-                    callback(event)
+            for (const [, session] of userRecord.getActiveDevices()) {
+                session.onEvent((_event: Rumor) => {
+                    callback(_event)
                 })
             }
         }
@@ -116,7 +115,7 @@ export default class SessionManager {
         
         // Close all sessions
         for (const userRecord of this.userRecords.values()) {
-            for (const session of userRecord.getAllSessions()) {
+            for (const [, session] of userRecord.getActiveDevices()) {
                 session.close()
             }
         }

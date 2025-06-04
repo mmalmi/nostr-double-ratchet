@@ -19,9 +19,10 @@ export class UserRecord {
   private staleTimestamp?: number;
 
   constructor(
-    public userId: string,
-    private nostrSubscribe: NostrSubscribe,
-  ) {}
+    public _userId: string,
+    private _nostrSubscribe: NostrSubscribe,
+  ) {
+  }
 
   /**
    * Adds or updates a device record for this user
@@ -109,7 +110,7 @@ export class UserRecord {
     if (this.isStale) return [];
 
     return Array.from(this.deviceRecords.entries())
-      .filter(([_, record]) => !record.isStale && record.activeSession)
+      .filter(([, record]) => !record.isStale && record.activeSession)
       .map(([deviceId, record]) => [deviceId, record.activeSession!]);
   }
 
@@ -129,7 +130,7 @@ export class UserRecord {
     }
 
     const session = Session.init(
-      this.nostrSubscribe,
+      this._nostrSubscribe,
       record.publicKey,
       ourCurrentPrivateKey,
       isInitiator,

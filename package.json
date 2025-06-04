@@ -14,7 +14,8 @@
     "build": "vite build && tsc",
     "examples": "cd examples && vite build && tsc",
     "examples-dev": "cd examples && vite && tsc",
-    "docs": "typedoc --out docs src/index.ts"
+    "docs": "typedoc --out docs src/index.ts",
+    "lint": "eslint src --ext .ts --fix"
   },
   "repository": {
     "type": "git",
@@ -35,9 +36,9 @@
     "@nostr-dev-kit/ndk": "2.14.23",
     "@types/lodash": "^4.17.17",
     "@types/node": "^22.15.21",
-    "@typescript-eslint/eslint-plugin": "^8.32.1",
-    "@typescript-eslint/parser": "^8.32.1",
-    "eslint": "^9.27.0",
+    "@typescript-eslint/eslint-plugin": "^8.33.1",
+    "@typescript-eslint/parser": "^8.33.1",
+    "eslint": "^9.28.0",
     "eslint-config-prettier": "^10.1.5",
     "eslint-plugin-prettier": "^5.4.0",
     "eslint-plugin-simple-import-sort": "^12.1.1",

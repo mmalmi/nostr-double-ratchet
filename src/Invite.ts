@@ -28,7 +28,8 @@ export class Invite {
         public label?: string,
         public maxUses?: number,
         public usedBy: string[] = [],
-    ) {}
+    ) {
+    }
 
     static createNew(inviter: string, label?: string, maxUses?: number): Invite {
         if (!inviter) {
@@ -55,7 +56,7 @@ export class Invite {
         }
 
         const decodedHash = decodeURIComponent(rawHash);
-        let data: any;
+        let data: { inviter?: string; ephemeralKey?: string; sharedSecret?: string };
         try {
             data = JSON.parse(decodedHash);
         } catch (err) {
@@ -115,7 +116,7 @@ export class Invite {
         );
     }
 
-    static fromUser(user: string, subscribe: NostrSubscribe, onInvite: (invite: Invite) => void): Unsubscribe {
+    static fromUser(user: string, subscribe: NostrSubscribe, onInvite: (_invite: Invite) => void): Unsubscribe {
         const filter: Filter = {
             kinds: [INVITE_EVENT_KIND],
             authors: [user],
@@ -130,8 +131,7 @@ export class Invite {
             try {
                 const inviteLink = Invite.fromEvent(event);
                 onInvite(inviteLink);
-            } catch (error) {
-                console.error("Error processing invite:", error, "event:", event);
+            } catch {
             }
         });
 
@@ -239,7 +239,7 @@ export class Invite {
         return { session, event: finalizeEvent(envelope, randomSenderKey) };
     }
 
-    listen(decryptor: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (session: Session, identity?: string) => void): Unsubscribe {
+    listen(decryptor: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (_session: Session, _identity?: string) => void): Unsubscribe {
         if (!this.inviterEphemeralPrivateKey) {
             throw new Error("Inviter session key is not available");
         }
@@ -252,7 +252,6 @@ export class Invite {
         return nostrSubscribe(filter, async (event) => {
             try {
                 if (this.maxUses && this.usedBy.length >= this.maxUses) {
-                    console.error("Invite has reached maximum number of uses");
                     return;
                 }
 
@@ -278,8 +277,7 @@ export class Invite {
                 const session = Session.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterEphemeralPrivateKey!, false, sharedSecret, name);
 
                 onSession(session, inviteeIdentity);
-            } catch (error) {
-                console.error("Error processing invite message:", error, "event", event);
+            } catch {
             }
         });
     }

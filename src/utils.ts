@@ -51,10 +51,10 @@ export function deserializeSessionState(data: string): SessionState {
     
     // Migrate old skipped keys format to new structure
     if (state.skippedMessageKeys) {
-      Object.entries(state.skippedMessageKeys).forEach(([pubKey, messageKeys]: [string, any]) => {
+      Object.entries(state.skippedMessageKeys).forEach(([pubKey, messageKeys]: [string, unknown]) => {
         skippedKeys[pubKey] = {
           headerKeys: state.skippedHeaderKeys?.[pubKey] || [],
-          messageKeys: messageKeys
+          messageKeys: messageKeys as { [msgIndex: number]: Uint8Array }
         };
       });
     }
@@ -102,9 +102,9 @@ export function deserializeSessionState(data: string): SessionState {
       Object.entries(state.skippedKeys || {}).map(([pubKey, value]) => [
         pubKey,
         {
-          headerKeys: (value as any).headerKeys.map((hex: string) => hexToBytes(hex)),
+          headerKeys: (value as { headerKeys: string[] }).headerKeys.map((hex: string) => hexToBytes(hex)),
           messageKeys: Object.fromEntries(
-            Object.entries((value as any).messageKeys).map(([msgIndex, hex]) => [
+            Object.entries((value as { messageKeys: Record<string, string> }).messageKeys).map(([msgIndex, hex]) => [
               msgIndex,
               hexToBytes(hex as string)
             ])
@@ -117,14 +117,14 @@ export function deserializeSessionState(data: string): SessionState {
 
 export async function* createEventStream(session: Session): AsyncGenerator<Rumor, void, unknown> {
   const messageQueue: Rumor[] = [];
-  let resolveNext: ((value: Rumor) => void) | null = null;
+  let resolveNext: ((_value: Rumor) => void) | null = null;
 
-  const unsubscribe = session.onEvent((event) => {
+  const unsubscribe = session.onEvent((_event) => {
     if (resolveNext) {
-      resolveNext(event);
+      resolveNext(_event);
       resolveNext = null;
     } else {
-      messageQueue.push(event);
+      messageQueue.push(_event);
     }
   });
 
@@ -153,12 +153,12 @@ export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32),
   return outputs;
 }
 
-export function skippedMessageIndexKey(nostrSender: string, number: number): string {
-  return `${nostrSender}:${number}`;
+export function skippedMessageIndexKey(_nostrSender: string, _number: number): string {
+  return `${_nostrSender}:${_number}`;
 }
 
 export function getMillisecondTimestamp(event: Rumor) {
-  const msTag = event.tags?.find(tag => tag[0] === "ms");
+  const msTag = event.tags?.find((tag: string[]) => tag[0] === "ms");
   if (msTag) {
     return parseInt(msTag[1]);
   }
