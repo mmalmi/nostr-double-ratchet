@@ -32,7 +32,7 @@ function createStubSession() {
 
 describe('SessionManager', () => {
   const nostrSubscribe = vi.fn().mockReturnValue(() => {})
-  const nostrPublish = vi.fn()
+  const nostrPublish = vi.fn().mockResolvedValue({} as any)
   const ourIdentityKey = generateSecretKey()
   const deviceId = 'test-device'
 
@@ -50,7 +50,7 @@ describe('SessionManager', () => {
     const recipient = 'recipientPubKey'
     const session = createStubSession()
     const userRecord = new UserRecord(recipient, nostrSubscribe)
-    userRecord.addSession(session)
+    userRecord.upsertSession(undefined, session)
     ;(manager as any).userRecords.set(recipient, userRecord)
 
     const results = await manager.sendText(recipient, 'hello')
@@ -66,7 +66,7 @@ describe('SessionManager', () => {
     const recipient = 'recipientPubKey'
     const session = createStubSession()
     const userRecord = new UserRecord(recipient, nostrSubscribe)
-    userRecord.addSession(session)
+    userRecord.upsertSession(undefined, session)
     ;(manager as any).userRecords.set(recipient, userRecord)
 
     const received: any[] = []
@@ -85,7 +85,7 @@ describe('SessionManager', () => {
     // Create a session for our own device
     const session = createStubSession()
     const userRecord = new UserRecord(ourPublicKey, nostrSubscribe)
-    userRecord.addSession(session)
+    userRecord.upsertSession(undefined, session)
     ;(manager as any).userRecords.set(ourPublicKey, userRecord)
 
     // Verify the session is tracked
@@ -101,7 +101,7 @@ describe('SessionManager', () => {
     // Create a session for our own device
     const session = createStubSession()
     const userRecord = new UserRecord(ourPublicKey, nostrSubscribe)
-    userRecord.addSession(session)
+    userRecord.upsertSession(undefined, session)
     ;(manager as any).userRecords.set(ourPublicKey, userRecord)
 
     // Close the session
@@ -115,19 +115,16 @@ describe('SessionManager', () => {
   it('should track multiple own device sessions', () => {
     const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
     const ourPublicKey = getPublicKey(ourIdentityKey)
-    
-    // Create sessions for our own devices
+
+    // Create sessions for two of our devices
     const session1 = createStubSession()
     const session2 = createStubSession()
     const userRecord = new UserRecord(ourPublicKey, nostrSubscribe)
-    userRecord.addSession(session1)
-    userRecord.addSession(session2)
+    userRecord.upsertSession('device-1', session1)
+    userRecord.upsertSession('device-2', session2)
     ;(manager as any).userRecords.set(ourPublicKey, userRecord)
 
-    // Close one session
-    session1.close()
-    
-    // Verify both sessions are still tracked (since they're in extraSessions)
+    // Verify both sessions are tracked as active (one per device)
     const record = (manager as any).userRecords.get(ourPublicKey)
     expect(record.getActiveSessions()).toContain(session1)
     expect(record.getActiveSessions()).toContain(session2)

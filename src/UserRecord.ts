@@ -17,15 +17,6 @@ export class UserRecord {
   private deviceRecords: Map<string, DeviceRecord> = new Map();
   private isStale: boolean = false;
   private staleTimestamp?: number;
-  /**
-   * Temporary store for sessions when the corresponding deviceId is unknown.
-   *
-   * SessionManager currently operates at a per-user granularity (it is not
-   * yet aware of individual devices). Until full Sesame device handling is
-   * implemented we keep sessions in this simple list so that
-   * SessionManager.getActiveSessions / getAllSessions work as expected.
-   */
-  private extraSessions: Session[] = [];
 
   constructor(
     public _userId: string,
@@ -53,18 +44,7 @@ export class UserRecord {
    * Inserts a new session for a device, making it the active session
    */
   public insertSession(deviceId: string, session: Session): void {
-    const record = this.deviceRecords.get(deviceId);
-    if (!record) {
-      throw new Error(`No device record found for ${deviceId}`);
-    }
-
-    // Move current active session to inactive list if it exists
-    if (record.activeSession) {
-      record.inactiveSessions.unshift(record.activeSession);
-    }
-
-    // Set new session as active
-    record.activeSession = session;
+    this.upsertSession(deviceId, session)
   }
 
   /**
@@ -195,21 +175,12 @@ export class UserRecord {
   // ---------------------------------------------------------------------------
 
   /**
-   * Add a session without associating it with a specific device.
-   * This is mainly used by SessionManager which does not yet keep track of
-   * device identifiers. The session will be considered active.
-   */
-  public addSession(session: Session): void {
-    this.extraSessions.push(session);
-  }
-
-  /**
    * Return all sessions that are currently considered *active*.
    * For now this means any session in a non-stale device record as well as
    * all sessions added through `addSession`.
    */
   public getActiveSessions(): Session[] {
-    const sessions: Session[] = [...this.extraSessions];
+    const sessions: Session[] = [];
 
     for (const record of this.deviceRecords.values()) {
       if (!record.isStale && record.activeSession) {
@@ -226,7 +197,7 @@ export class UserRecord {
    * listeners to existing sessions.
    */
   public getAllSessions(): Session[] {
-    const sessions: Session[] = [...this.extraSessions];
+    const sessions: Session[] = [];
 
     for (const record of this.deviceRecords.values()) {
       if (record.activeSession) {
@@ -236,5 +207,33 @@ export class UserRecord {
     }
 
     return sessions;
+  }
+
+  /**
+   * Unified helper that either associates the session with a device record
+   * (if deviceId provided **and** the record exists) or falls back to the
+   * legacy extraSessions list.
+   */
+  public upsertSession(deviceId: string | undefined, session: Session) {
+    if (!deviceId) {
+      deviceId = 'unknown'
+    }
+
+    let record = this.deviceRecords.get(deviceId)
+    if (!record) {
+      record = {
+        publicKey: session.state?.theirNextNostrPublicKey || '',
+        inactiveSessions: [],
+        isStale: false
+      }
+      this.deviceRecords.set(deviceId, record)
+    }
+
+    if (record.activeSession) {
+      record.inactiveSessions.unshift(record.activeSession)
+    }
+    // Ensure session name matches deviceId for easier identification
+    session.name = deviceId
+    record.activeSession = session
   }
 }

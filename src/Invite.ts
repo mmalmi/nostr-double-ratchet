@@ -105,6 +105,10 @@ export class Invite {
         const sharedSecret = tags.find(([key]) => key === 'sharedSecret')?.[1];
         const inviter = event.pubkey;
 
+        // Extract deviceId from the "d" tag (format: double-ratchet/invites/<deviceId>)
+        const deviceTag = tags.find(([key]) => key === 'd')?.[1]
+        const deviceId = deviceTag?.split('/')?.[2]
+
         if (!inviterEphemeralPublicKey || !sharedSecret) {
             throw new Error("Invalid invite event: missing session key or sharedSecret");
         }
@@ -112,7 +116,9 @@ export class Invite {
         return new Invite(
             inviterEphemeralPublicKey,
             sharedSecret,
-            inviter
+            inviter,
+            undefined, // inviterEphemeralPrivateKey not available when parsing from event
+            deviceId
         );
     }
 
@@ -122,12 +128,10 @@ export class Invite {
             authors: [user],
             "#l": ["double-ratchet/invites"]
         };
-        let latest = 0;
+        const seenIds = new Set<string>()
         const unsub = subscribe(filter, (event) => {
-            if (!event.created_at || event.created_at <= latest) {
-                return;
-            }
-            latest = event.created_at;
+            if (seenIds.has(event.id)) return
+            seenIds.add(event.id)
             try {
                 const inviteLink = Invite.fromEvent(event);
                 onInvite(inviteLink);
