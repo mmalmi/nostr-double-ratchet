@@ -25,13 +25,13 @@ export class Invite {
         public sharedSecret: string,
         public inviter: string,
         public inviterEphemeralPrivateKey?: Uint8Array,
-        public label?: string,
+        public deviceId?: string,
         public maxUses?: number,
         public usedBy: string[] = [],
     ) {
     }
 
-    static createNew(inviter: string, label?: string, maxUses?: number): Invite {
+    static createNew(inviter: string, deviceId?: string, maxUses?: number): Invite {
         if (!inviter) {
             throw new Error("Inviter public key is required");
         }
@@ -43,7 +43,7 @@ export class Invite {
             sharedSecret,
             inviter,
             inviterEphemeralPrivateKey,
-            label,
+            deviceId,
             maxUses
         );
     }
@@ -82,7 +82,7 @@ export class Invite {
             data.sharedSecret,
             data.inviter,
             data.inviterEphemeralPrivateKey ? new Uint8Array(data.inviterEphemeralPrivateKey) : undefined,
-            data.label,
+            data.deviceId,
             data.maxUses,
             data.usedBy
         );
@@ -147,7 +147,7 @@ export class Invite {
             sharedSecret: this.sharedSecret,
             inviter: this.inviter,
             inviterEphemeralPrivateKey: this.inviterEphemeralPrivateKey ? Array.from(this.inviterEphemeralPrivateKey) : undefined,
-            label: this.label,
+            deviceId: this.deviceId,
             maxUses: this.maxUses,
             usedBy: this.usedBy,
         });
@@ -167,9 +167,9 @@ export class Invite {
         return url.toString();
     }
 
-    getEvent(deviceName: string): UnsignedEvent {
-        if (!deviceName) {
-            throw new Error("Device name is required");
+    getEvent(): UnsignedEvent {
+        if (!this.deviceId) {
+            throw new Error("Device ID is required");
         }
         return {
             kind: INVITE_EVENT_KIND,
@@ -179,7 +179,7 @@ export class Invite {
             tags: [
                 ['ephemeralKey', this.inviterEphemeralPublicKey],
                 ['sharedSecret', this.sharedSecret],
-                ['d', 'double-ratchet/invites/' + deviceName],
+                ['d', 'double-ratchet/invites/' + this.deviceId],
                 ['l', 'double-ratchet/invites']
             ],
         };

@@ -12,20 +12,21 @@ describe('Invite', () => {
   it('should create a new invite link', () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
-    const invite = Invite.createNew(alicePublicKey, 'Test Invite', 5)
+    const invite = Invite.createNew(alicePublicKey, 'Test Device', 5)
     expect(invite.inviterEphemeralPublicKey).toHaveLength(64)
     expect(invite.sharedSecret).toHaveLength(64)
     expect(invite.inviter).toBe(alicePublicKey)
-    expect(invite.label).toBe('Test Invite')
+    expect(invite.deviceId).toBe('Test Device')
     expect(invite.maxUses).toBe(5)
   })
 
   it('should generate and parse URL correctly', () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
-    const invite = Invite.createNew(alicePublicKey, 'Test Invite')
+    const invite = Invite.createNew(alicePublicKey)
     const url = invite.getUrl()
     const parsedInvite = Invite.fromUrl(url)
+    expect(parsedInvite.inviter).toBe(invite.inviter)
     expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
     expect(parsedInvite.sharedSecret).toBe(invite.sharedSecret)
   })
@@ -138,20 +139,20 @@ describe('Invite', () => {
     expect(messageQueue.length).toBe(0)
   })
 
-  it('should require device name for getEvent', () => {
+  it('should require device ID for getEvent', () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
-    const invite = Invite.createNew(alicePublicKey, 'Test Invite', 5)
+    const invite = Invite.createNew(alicePublicKey)
     
-    expect(() => invite.getEvent('')).toThrow('Device name is required')
+    expect(() => invite.getEvent()).toThrow('Device ID is required')
   })
 
   it('should convert between event and Invite correctly', () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
-    const invite = Invite.createNew(alicePublicKey, 'Test Invite', 5)
+    const invite = Invite.createNew(alicePublicKey, 'test-device')
     
-    const event = invite.getEvent('test-device')
+    const event = invite.getEvent()
     expect(event.kind).toBe(INVITE_EVENT_KIND)
     expect(event.pubkey).toBe(alicePublicKey)
     expect(event.tags).toContainEqual(['ephemeralKey', invite.inviterEphemeralPublicKey])

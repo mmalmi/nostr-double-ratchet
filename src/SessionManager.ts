@@ -9,13 +9,70 @@ export default class SessionManager {
     private nostrPublish: NostrPublish
     private ourIdentityKey: Uint8Array
     private inviteUnsubscribes: Map<string, Unsubscribe> = new Map()
-    private ownDeviceInvites: Map<string, Invite | null> = new Map()
+    private deviceId: string
+    private invite: Invite
 
-    constructor(ourIdentityKey: Uint8Array, nostrSubscribe: NostrSubscribe, nostrPublish: NostrPublish) {
+    constructor(ourIdentityKey: Uint8Array, deviceId: string, nostrSubscribe: NostrSubscribe, nostrPublish: NostrPublish) {
         this.userRecords = new Map()
         this.nostrSubscribe = nostrSubscribe
         this.nostrPublish = nostrPublish
         this.ourIdentityKey = ourIdentityKey
+        this.deviceId = deviceId
+
+        // Create our invite
+        const ourPublicKey = getPublicKey(this.ourIdentityKey)
+        this.invite = Invite.createNew(ourPublicKey, this.deviceId)
+
+        // Publish invite to Nostr
+        const inviteEvent = this.invite.getEvent()
+        this.nostrPublish(inviteEvent)
+
+        // Subscribe to our own invites
+        Invite.fromUser(ourPublicKey, this.nostrSubscribe, async (invite) => {
+            try {
+                // Extract device name from invite event tags
+                const inviteDeviceId = invite.getEvent().tags.find(tag => tag[0] === 'd')?.[1]?.split('/')?.[2]
+                if (!inviteDeviceId || inviteDeviceId === this.deviceId) {
+                    return // Ignore invites without device name or from our own device
+                }
+
+                // Check if we already have a session with this device
+                const existingRecord = this.userRecords.get(ourPublicKey)
+                if (existingRecord?.getActiveSessions().some(session => session.name === inviteDeviceId)) {
+                    return // Ignore invites from devices we already have sessions with
+                }
+
+                const { session, event } = await invite.accept(
+                    this.nostrSubscribe,
+                    ourPublicKey,
+                    this.ourIdentityKey
+                )
+                this.nostrPublish(event)
+
+                // Store the new session
+                let userRecord = this.userRecords.get(ourPublicKey)
+                if (!userRecord) {
+                    userRecord = new UserRecord(ourPublicKey, this.nostrSubscribe)
+                    this.userRecords.set(ourPublicKey, userRecord)
+                }
+                userRecord.insertSession(inviteDeviceId, session)
+
+                // Set up event handling for the new session
+                session.onEvent((_event) => {
+                    this.internalSubscriptions.forEach(callback => callback(_event))
+                })
+            } catch {
+                // Ignore failed invites
+            }
+        })
+    }
+
+    getDeviceId(): string {
+        return this.deviceId
+    }
+
+    getInvite(): Invite {
+        return this.invite
     }
 
     async sendText(recipientIdentityKey: string, text: string) {
@@ -135,31 +192,5 @@ export default class SessionManager {
         }
         this.userRecords.clear()
         this.internalSubscriptions.clear()
-        this.ownDeviceInvites.clear()
-    }
-
-    createOwnDeviceInvite(deviceName: string, label?: string, maxUses?: number): Invite {
-        const ourPublicKey = getPublicKey(this.ourIdentityKey)
-        const invite = Invite.createNew(ourPublicKey, label, maxUses)
-        this.ownDeviceInvites.set(deviceName, invite)
-        return invite
-    }
-
-    removeOwnDevice(deviceName: string): void {
-        this.ownDeviceInvites.set(deviceName, null)
-    }
-
-    getOwnDeviceInvites(): Map<string, Invite | null> {
-        return new Map(this.ownDeviceInvites)
-    }
-
-    getActiveOwnDeviceInvites(): Map<string, Invite> {
-        const active = new Map<string, Invite>()
-        for (const [deviceName, invite] of this.ownDeviceInvites) {
-            if (invite !== null) {
-                active.set(deviceName, invite)
-            }
-        }
-        return active
     }
 }
