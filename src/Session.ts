@@ -38,9 +38,9 @@ export class Session {
 
   /**
    * Initializes a new secure communication session
-   * @param nostrSubscribe Function to subscribe to Nostr events. Make sure it deduplicates events (doesnt return the same event twice), otherwise you'll see decryption errors!
-   * @param theirNextNostrPublicKey The public key of the other party
-   * @param ourCurrentPrivateKey Our current private key for Nostr
+   * @param nostrSubscribe Function to subscribe to Nostr events. Make sure it deduplicates events (doesn't return the same event twice), otherwise you'll see decryption errors!
+   * @param theirEphemeralNostrPublicKey The ephemeral public key of the other party for the initial handshake
+   * @param ourEphemeralNostrPrivateKey Our ephemeral private key for the initial handshake
    * @param isInitiator Whether we are initiating the conversation (true) or responding (false)
    * @param sharedSecret Initial shared secret for securing the first message chain
    * @param name Optional name for the session (for debugging)

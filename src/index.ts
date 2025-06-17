@@ -1,4 +1,5 @@
-export * from "./Session.ts"
+export * from "./Session"
 export * from "./Invite"
 export * from "./types"
 export * from "./utils"
+export * from "./SessionManager"

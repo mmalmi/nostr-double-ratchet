@@ -3,7 +3,6 @@ import { InMemoryStorageAdapter } from '../src/StorageAdapter'
 import SessionManager from '../src/SessionManager'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
 import { makeSubscribe, publish } from './helpers/mockRelay'
-import { serializeSessionState } from '../src/utils'
 
 /**
  * End-to-end check that sessions persisted via StorageAdapter

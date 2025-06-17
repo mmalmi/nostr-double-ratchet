@@ -74,7 +74,8 @@ export type Rumor = UnsignedEvent & { id: string }
 
 /** 
  * Callback function for handling decrypted messages
- * @param message - The decrypted message object
+ * @param _event - The decrypted message object (Rumor)
+ * @param _outerEvent - The outer Nostr event (VerifiedEvent)
  */
 export type EventCallback = (_event: Rumor, _outerEvent: VerifiedEvent) => void;
 

@@ -191,11 +191,12 @@ export class Invite {
 
     /**
      * Called by the invitee. Accepts the invite and creates a new session with the inviter.
-     * 
-     * @param inviteeSecretKey - The invitee's secret key or a signing function
+     *
      * @param nostrSubscribe - A function to subscribe to Nostr events
+     * @param inviteePublicKey - The invitee's public key
+     * @param encryptor - The invitee's secret key or a signing/encrypt function
      * @returns An object containing the new session and an event to be published
-     * 
+     *
      * 1. Inner event: No signature, content encrypted with DH(inviter, invitee).
      *    Purpose: Authenticate invitee. Contains invitee session key.
      * 2. Envelope: No signature, content encrypted with DH(inviter, random key).

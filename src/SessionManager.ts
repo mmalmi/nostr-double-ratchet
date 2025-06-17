@@ -32,7 +32,7 @@ export default class SessionManager {
 
         // Kick off initialisation in background for backwards compatibility
         // Users that need to wait can call await manager.init()
-        this.init().catch(err => console.error('SessionManager init failed', err))
+        this.init()
     }
 
     private _initialised = false
@@ -82,7 +82,7 @@ export default class SessionManager {
                     userRecord.upsertSession(deviceKey, session)
                     this.saveSession(inviteePubkey, deviceKey, session)
 
-                    session.onEvent((_event: any) => {
+                    session.onEvent((_event: Rumor) => {
                         this.internalSubscriptions.forEach(cb => cb(_event))
                     })
                 } catch {/* ignore errors */}
@@ -97,15 +97,11 @@ export default class SessionManager {
                     return
                 }
 
-                // debug
-                console.log('['+this.deviceId+'] received invite from deviceId', inviteDeviceId)
-
                 const existingRecord = this.userRecords.get(ourPublicKey)
                 if (existingRecord?.getActiveSessions().some(session => session.name === inviteDeviceId)) {
                     return
                 }
 
-                console.log('['+this.deviceId+'] accepting invite from', inviteDeviceId)
                 const { session, event } = await invite.accept(
                     this.nostrSubscribe,
                     ourPublicKey,
@@ -113,7 +109,6 @@ export default class SessionManager {
                 )
                 this.nostrPublish(event)?.catch(() => {})
 
-                console.log('['+this.deviceId+'] saving session for', inviteDeviceId)
                 this.saveSession(ourPublicKey, inviteDeviceId, session)
 
                 let userRecord = this.userRecords.get(ourPublicKey)
@@ -125,7 +120,7 @@ export default class SessionManager {
                 userRecord.upsertSession(deviceId, session)
                 this.saveSession(ourPublicKey, deviceId, session)
 
-                session.onEvent((_event: any) => {
+                session.onEvent((_event: Rumor) => {
                     this.internalSubscriptions.forEach(cb => cb(_event))
                 })
             } catch (err) {
@@ -162,7 +157,7 @@ export default class SessionManager {
                 userRecord.upsertSession(deviceId, session)
                 this.saveSession(ownerPubKey, deviceId, session)
 
-                session.onEvent((_event: any) => {
+                session.onEvent((_event: Rumor) => {
                     this.internalSubscriptions.forEach(cb => cb(_event))
                 })
             } catch {
@@ -203,9 +198,10 @@ export default class SessionManager {
         // Send to recipient's devices
         const userRecord = this.userRecords.get(recipientIdentityKey)
         if (!userRecord) {
-            // Listen for invites from recipient
+            // Listen for invites from recipient and return without throwing; caller
+            // can await a subsequent session establishment.
             this.listenToUser(recipientIdentityKey)
-            throw new Error("No active session with user. Listening for invites.")
+            return []
         }
 
         // Send to all active sessions with recipient
@@ -233,7 +229,6 @@ export default class SessionManager {
 
         const unsubscribe = Invite.fromUser(userPubkey, this.nostrSubscribe, async (_invite) => {
             try {
-                console.log('listenToUser: accepting invite from user', userPubkey)
                 const { session, event } = await _invite.accept(
                     this.nostrSubscribe,
                     getPublicKey(this.ourIdentityKey),
@@ -247,12 +242,11 @@ export default class SessionManager {
                     userRecord = new UserRecord(userPubkey, this.nostrSubscribe)
                     this.userRecords.set(userPubkey, userRecord)
                 }
-                const deviceId = (_invite as any)['deviceId'] || event.id || 'unknown'
-                console.log('listenToUser: saving session for device', deviceId)
+                const deviceId = (_invite instanceof Invite && _invite.deviceId) ? _invite.deviceId : event.id || 'unknown'
                 this.saveSession(userPubkey, deviceId, session)
 
                 // Set up event handling for the new session
-                session.onEvent((_event: any) => {
+                session.onEvent((_event: Rumor) => {
                     this.internalSubscriptions.forEach(callback => callback(_event))
                 })
 
@@ -274,15 +268,15 @@ export default class SessionManager {
     }
 
     // Update onEvent to include internalSubscriptions management
-    private internalSubscriptions: Set<(_event: Rumor) => void> = new Set()
+    private internalSubscriptions: Set<(event: Rumor) => void> = new Set()
 
-    onEvent(callback: (_event: Rumor) => void) {
+    onEvent(callback: (event: Rumor) => void) {
         this.internalSubscriptions.add(callback)
 
         // Subscribe to existing sessions
         for (const userRecord of this.userRecords.values()) {
             for (const session of userRecord.getActiveSessions()) {
-                session.onEvent((_event: any) => {
+                session.onEvent((_event: Rumor) => {
                     callback(_event)
                 })
             }

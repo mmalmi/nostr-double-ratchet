@@ -40,7 +40,8 @@ describe('SessionManager', () => {
     const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
     const listenSpy = vi.spyOn(manager as any, 'listenToUser')
 
-    await expect(manager.sendText('recipient', 'hello')).rejects.toThrow('No active session with user')
+    const result = await manager.sendText('recipient', 'hello')
+    expect(result).toEqual([])
     expect(listenSpy).toHaveBeenCalledWith('recipient')
   })
 
