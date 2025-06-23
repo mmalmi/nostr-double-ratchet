@@ -89,7 +89,34 @@ export default class SessionManager {
             }
         )
 
-        // 3. Subscribe to our own invites from other devices
+        // 3. Subscribe to multi-device sync events from our own devices
+        this.nostrSubscribe(
+            { kinds: [1060], '#p': [ourPublicKey] },
+            (event) => {
+                if (event.pubkey === ourPublicKey) {
+                    const deviceTag = event.tags.find(tag => tag[0] === 'device')
+                    const senderDeviceId = deviceTag ? deviceTag[1] : null
+                    
+                    if (senderDeviceId && senderDeviceId !== this.deviceId) {
+                        try {
+                            const originalEvent = JSON.parse(event.content)
+                            // Propagate to internal subscribers (for multi-device sync)
+                            this.internalSubscriptions.forEach(callback => {
+                                try {
+                                    callback(originalEvent as Rumor)
+                                } catch {
+                                    // Ignore callback errors
+                                }
+                            })
+                        } catch {
+                            // Ignore parsing errors
+                        }
+                    }
+                }
+            }
+        )
+
+        // 4. Subscribe to our own invites from other devices
         Invite.fromUser(ourPublicKey, this.nostrSubscribe, async (invite) => {
             try {
                 const inviteDeviceId = invite['deviceId'] || 'unknown'
@@ -197,28 +224,37 @@ export default class SessionManager {
         
         // Send to recipient's devices
         const userRecord = this.userRecords.get(recipientIdentityKey)
-        if (!userRecord) {
-            // Listen for invites from recipient and return without throwing; caller
-            // can await a subsequent session establishment.
+        if (userRecord) {
+            // Send to all active sessions with recipient
+            for (const session of userRecord.getActiveSessions()) {
+                const { event: encryptedEvent } = session.sendEvent(event)
+                results.push(encryptedEvent)
+                this.nostrPublish(encryptedEvent)?.catch(() => {})
+            }
+        } else {
+            // Listen for invites from recipient for future session establishment
             this.listenToUser(recipientIdentityKey)
-            return []
         }
 
-        // Send to all active sessions with recipient
-        for (const session of userRecord.getActiveSessions()) {
-            const { event: encryptedEvent } = session.sendEvent(event)
-            results.push(encryptedEvent)
-        }
-
-        // Send to our own devices (for multi-device sync)
+        // Always send to our own devices (for multi-device sync)
         const ourPublicKey = getPublicKey(this.ourIdentityKey)
         const ownUserRecord = this.userRecords.get(ourPublicKey)
         if (ownUserRecord) {
             for (const session of ownUserRecord.getActiveSessions()) {
                 const { event: encryptedEvent } = session.sendEvent(event)
                 results.push(encryptedEvent)
+                this.nostrPublish(encryptedEvent)?.catch(() => {})
             }
         }
+
+        // This ensures that messages sent from one device appear on other devices of the same user
+        const multiDeviceEvent = {
+            kind: 1060, // Use a special kind for multi-device sync
+            content: JSON.stringify(event),
+            tags: [['p', ourPublicKey], ['device', this.deviceId]],
+            created_at: Math.floor(Date.now() / 1000)
+        }
+        this.nostrPublish(multiDeviceEvent)?.catch(() => {})
 
         return results
     }

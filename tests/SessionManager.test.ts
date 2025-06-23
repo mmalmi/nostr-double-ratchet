@@ -131,4 +131,97 @@ describe('SessionManager', () => {
     expect(record.getActiveSessions()).toContain(session2)
     expect(record.getActiveSessions()).toHaveLength(2)
   })
-})   
+
+  it('should send events to both recipient and own devices for multi-device sync', async () => {
+    const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
+    const ourPublicKey = getPublicKey(ourIdentityKey)
+    
+    const recipient = 'recipientPubKey'
+    const recipientSession = createStubSession()
+    const recipientRecord = new UserRecord(recipient, nostrSubscribe)
+    recipientRecord.upsertSession('recipient-device', recipientSession)
+    ;(manager as any).userRecords.set(recipient, recipientRecord)
+    
+    const ownSession1 = createStubSession()
+    const ownSession2 = createStubSession()
+    const ownRecord = new UserRecord(ourPublicKey, nostrSubscribe)
+    ownRecord.upsertSession('own-device-1', ownSession1)
+    ownRecord.upsertSession('own-device-2', ownSession2)
+    ;(manager as any).userRecords.set(ourPublicKey, ownRecord)
+    
+    const results = await manager.sendEvent(recipient, { content: 'test message' })
+    
+    expect(recipientSession.sendEvent).toHaveBeenCalledWith({ content: 'test message' })
+    
+    expect(ownSession1.sendEvent).toHaveBeenCalledWith({ content: 'test message' })
+    expect(ownSession2.sendEvent).toHaveBeenCalledWith({ content: 'test message' })
+    
+    expect(results).toHaveLength(3)
+  })
+
+  it('should establish sessions with own devices via invite acceptance', async () => {
+    const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
+    const ourPublicKey = getPublicKey(ourIdentityKey)
+    
+    // Simulate receiving an invite from our own device
+    const mockInvite = {
+      deviceId: 'other-device',
+      accept: vi.fn().mockResolvedValue({
+        session: createStubSession(),
+        event: { id: 'acceptance-event' }
+      })
+    }
+    
+    await manager.acceptOwnInvite(mockInvite as any)
+    
+    // Verify session was created and stored
+    const ownRecord = (manager as any).userRecords.get(ourPublicKey)
+    expect(ownRecord).toBeDefined()
+    expect(ownRecord.getActiveSessions()).toHaveLength(1)
+    expect(mockInvite.accept).toHaveBeenCalled()
+  })
+
+  it('should propagate messages between own devices', () => {
+    const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
+    const ourPublicKey = getPublicKey(ourIdentityKey)
+    
+    const ownSession1 = createStubSession()
+    const ownSession2 = createStubSession()
+    const ownRecord = new UserRecord(ourPublicKey, nostrSubscribe)
+    ownRecord.upsertSession('device-1', ownSession1)
+    ownRecord.upsertSession('device-2', ownSession2)
+    ;(manager as any).userRecords.set(ourPublicKey, ownRecord)
+    
+    const received: any[] = []
+    manager.onEvent((e) => received.push(e))
+    
+    // Simulate message from device-1
+    const testEvent = { content: 'message from device-1' }
+    ;(ownSession1 as any)._emit(testEvent)
+    
+    expect(received).toHaveLength(1)
+    expect(received[0]).toBe(testEvent)
+  })
+
+  it('should send to own devices even when no recipient session exists', async () => {
+    const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
+    const ourPublicKey = getPublicKey(ourIdentityKey)
+    const listenSpy = vi.spyOn(manager as any, 'listenToUser')
+    
+    const ownSession1 = createStubSession()
+    const ownSession2 = createStubSession()
+    const ownRecord = new UserRecord(ourPublicKey, nostrSubscribe)
+    ownRecord.upsertSession('own-device-1', ownSession1)
+    ownRecord.upsertSession('own-device-2', ownSession2)
+    ;(manager as any).userRecords.set(ourPublicKey, ownRecord)
+    
+    const results = await manager.sendEvent('nonexistent-recipient', { content: 'test message' })
+    
+    expect(listenSpy).toHaveBeenCalledWith('nonexistent-recipient')
+    
+    expect(ownSession1.sendEvent).toHaveBeenCalledWith({ content: 'test message' })
+    expect(ownSession2.sendEvent).toHaveBeenCalledWith({ content: 'test message' })
+    
+    expect(results).toHaveLength(2)
+  })
+})               
