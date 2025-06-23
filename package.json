@@ -52,7 +52,7 @@
     "ws": "^8.18.2"
   },
   "dependencies": {
-    "nostr-tools": "^2.13.0",
+    "nostr-tools": "^2.15.0",
     "react-blurhash": "^0.3.0"
   }
 }
