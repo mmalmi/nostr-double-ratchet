@@ -89,34 +89,7 @@ export default class SessionManager {
             }
         )
 
-        // 3. Subscribe to multi-device sync events from our own devices
-        this.nostrSubscribe(
-            { kinds: [1060], '#p': [ourPublicKey] },
-            (event) => {
-                if (event.pubkey === ourPublicKey) {
-                    const deviceTag = event.tags.find(tag => tag[0] === 'device')
-                    const senderDeviceId = deviceTag ? deviceTag[1] : null
-                    
-                    if (senderDeviceId && senderDeviceId !== this.deviceId) {
-                        try {
-                            const originalEvent = JSON.parse(event.content)
-                            // Propagate to internal subscribers (for multi-device sync)
-                            this.internalSubscriptions.forEach(callback => {
-                                try {
-                                    callback(originalEvent as Rumor)
-                                } catch {
-                                    // Ignore callback errors
-                                }
-                            })
-                        } catch {
-                            // Ignore parsing errors
-                        }
-                    }
-                }
-            }
-        )
-
-        // 4. Subscribe to our own invites from other devices
+        // 3. Subscribe to our own invites from other devices
         Invite.fromUser(ourPublicKey, this.nostrSubscribe, async (invite) => {
             try {
                 const inviteDeviceId = invite['deviceId'] || 'unknown'
@@ -241,21 +214,16 @@ export default class SessionManager {
         const ownUserRecord = this.userRecords.get(ourPublicKey)
         if (ownUserRecord) {
             for (const session of ownUserRecord.getActiveSessions()) {
+                if (session.name === this.deviceId) {
+                    continue
+                }
                 const { event: encryptedEvent } = session.sendEvent(event)
                 results.push(encryptedEvent)
                 this.nostrPublish(encryptedEvent)?.catch(() => {})
             }
         }
 
-        // This ensures that messages sent from one device appear on other devices of the same user
-        const multiDeviceEvent = {
-            kind: 1060, // Use a special kind for multi-device sync
-            content: JSON.stringify(event),
-            tags: [['p', ourPublicKey], ['device', this.deviceId]],
-            created_at: Math.floor(Date.now() / 1000),
-            pubkey: ourPublicKey
-        }
-        this.nostrPublish(multiDeviceEvent)?.catch(() => {})
+
 
         return results
     }
