@@ -252,7 +252,8 @@ export default class SessionManager {
             kind: 1060, // Use a special kind for multi-device sync
             content: JSON.stringify(event),
             tags: [['p', ourPublicKey], ['device', this.deviceId]],
-            created_at: Math.floor(Date.now() / 1000)
+            created_at: Math.floor(Date.now() / 1000),
+            pubkey: ourPublicKey
         }
         this.nostrPublish(multiDeviceEvent)?.catch(() => {})
 
