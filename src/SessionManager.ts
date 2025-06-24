@@ -16,6 +16,7 @@ export default class SessionManager {
     private invite?: Invite
     private storage: StorageAdapter
 
+
     constructor(
         ourIdentityKey: Uint8Array,
         deviceId: string,
@@ -79,6 +80,7 @@ export default class SessionManager {
                     }
 
                     const deviceKey = session.name || 'unknown'
+                    
                     userRecord.upsertSession(deviceKey, session)
                     this.saveSession(inviteePubkey, deviceKey, session)
 
@@ -107,6 +109,7 @@ export default class SessionManager {
                     ourPublicKey,
                     this.ourIdentityKey
                 )
+                
                 this.nostrPublish(event)?.catch(() => {})
 
                 this.saveSession(ourPublicKey, inviteDeviceId, session)
@@ -217,9 +220,14 @@ export default class SessionManager {
                 if (session.name === this.deviceId) {
                     continue
                 }
-                const { event: encryptedEvent } = session.sendEvent(event)
-                results.push(encryptedEvent)
-                this.nostrPublish(encryptedEvent)?.catch(() => {})
+                // For own devices, send encrypted events just like to recipients
+                try {
+                    const { event: encryptedEvent } = session.sendEvent(event)
+                    results.push(encryptedEvent)
+                    this.nostrPublish(encryptedEvent)?.catch(() => {})
+                } catch (e) {
+                    // Ignore errors for own device sync
+                }
             }
         }
 

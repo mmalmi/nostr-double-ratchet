@@ -82,7 +82,7 @@ export type EventCallback = (_event: Rumor, _outerEvent: VerifiedEvent) => void;
 /**
  * Message event kind
  */
-export const MESSAGE_EVENT_KIND = 1059;
+export const MESSAGE_EVENT_KIND = 1060;
 
 /**
  * Invite event kind

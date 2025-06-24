@@ -360,8 +360,16 @@ export class Session {
 
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
+    
+    const subscriptionAuthors = [this.state.theirNextNostrPublicKey];
+    
+    if (this.state.ourCurrentNostrKey?.publicKey && 
+        this.state.ourCurrentNostrKey.publicKey !== this.state.theirNextNostrPublicKey) {
+      subscriptionAuthors.push(this.state.ourCurrentNostrKey.publicKey);
+    }
+    
     this.nostrNextUnsubscribe = this.nostrSubscribe(
-      {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
+      {authors: subscriptionAuthors, kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
     );
 
