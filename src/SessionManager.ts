@@ -16,6 +16,7 @@ export default class SessionManager {
     private invite?: Invite
     private storage: StorageAdapter
 
+
     constructor(
         ourIdentityKey: Uint8Array,
         deviceId: string,
@@ -79,6 +80,7 @@ export default class SessionManager {
                     }
 
                     const deviceKey = session.name || 'unknown'
+                    
                     userRecord.upsertSession(deviceKey, session)
                     this.saveSession(inviteePubkey, deviceKey, session)
 
@@ -107,6 +109,7 @@ export default class SessionManager {
                     ourPublicKey,
                     this.ourIdentityKey
                 )
+                
                 this.nostrPublish(event)?.catch(() => {})
 
                 this.saveSession(ourPublicKey, inviteDeviceId, session)
@@ -197,28 +200,38 @@ export default class SessionManager {
         
         // Send to recipient's devices
         const userRecord = this.userRecords.get(recipientIdentityKey)
-        if (!userRecord) {
-            // Listen for invites from recipient and return without throwing; caller
-            // can await a subsequent session establishment.
+        if (userRecord) {
+            // Send to all active sessions with recipient
+            for (const session of userRecord.getActiveSessions()) {
+                const { event: encryptedEvent } = session.sendEvent(event)
+                results.push(encryptedEvent)
+                this.nostrPublish(encryptedEvent)?.catch(() => {})
+            }
+        } else {
+            // Listen for invites from recipient for future session establishment
             this.listenToUser(recipientIdentityKey)
-            return []
         }
 
-        // Send to all active sessions with recipient
-        for (const session of userRecord.getActiveSessions()) {
-            const { event: encryptedEvent } = session.sendEvent(event)
-            results.push(encryptedEvent)
-        }
-
-        // Send to our own devices (for multi-device sync)
+        // Always send to our own devices (for multi-device sync)
         const ourPublicKey = getPublicKey(this.ourIdentityKey)
         const ownUserRecord = this.userRecords.get(ourPublicKey)
         if (ownUserRecord) {
             for (const session of ownUserRecord.getActiveSessions()) {
-                const { event: encryptedEvent } = session.sendEvent(event)
-                results.push(encryptedEvent)
+                if (session.name === this.deviceId) {
+                    continue
+                }
+                // For own devices, send encrypted events just like to recipients
+                try {
+                    const { event: encryptedEvent } = session.sendEvent(event)
+                    results.push(encryptedEvent)
+                    this.nostrPublish(encryptedEvent)?.catch(() => {})
+                } catch (e) {
+                    // Ignore errors for own device sync
+                }
             }
         }
+
+
 
         return results
     }
