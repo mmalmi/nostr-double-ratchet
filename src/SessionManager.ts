@@ -296,7 +296,7 @@ export default class SessionManager {
                                 resolve(results)
                             }
                         }
-                    }, 500) // Increased delay to allow sessions to fully establish
+                    }, 1000) // Increased delay for CI compatibility
                 }
 
                 // Return the event to be published

@@ -320,42 +320,49 @@ export class Session {
   }
 
   private handleNostrEvent(e: { tags: string[][]; pubkey: string; content: string }) {
-    const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
+    try {
+      const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
 
-    if (!isSkipped) {
-      if (this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
-        this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
-        this.state.theirNextNostrPublicKey = header.nextPublicKey;
-        this.nostrUnsubscribe?.();
-        this.nostrUnsubscribe = this.nostrNextUnsubscribe;
-        this.nostrNextUnsubscribe = this.nostrSubscribe(
-          {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
-          (e) => this.handleNostrEvent(e)
-        );
+      if (!isSkipped) {
+        if (this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
+          this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
+          this.state.theirNextNostrPublicKey = header.nextPublicKey;
+          this.nostrUnsubscribe?.();
+          this.nostrUnsubscribe = this.nostrNextUnsubscribe;
+          this.nostrNextUnsubscribe = this.nostrSubscribe(
+            {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
+            (e) => this.handleNostrEvent(e)
+          );
+        }
+    
+        if (shouldRatchet) {
+          this.skipMessageKeys(header.previousChainLength, e.pubkey);
+          this.ratchetStep();
+        }
+      } else {
+        if (!this.state.skippedKeys[e.pubkey]?.messageKeys[header.number]) {
+          // Maybe we already processed this message — no error
+          return
+        }
       }
-  
-      if (shouldRatchet) {
-        this.skipMessageKeys(header.previousChainLength, e.pubkey);
-        this.ratchetStep();
+
+      const text = this.ratchetDecrypt(header, e.content, e.pubkey);
+      const innerEvent = JSON.parse(text);
+      if (!validateEvent(innerEvent)) {
+        return;
       }
-    } else {
-      if (!this.state.skippedKeys[e.pubkey]?.messageKeys[header.number]) {
-        // Maybe we already processed this message — no error
-        return
+
+      if (innerEvent.id !== getEventHash(innerEvent)) {
+        return;
       }
-    }
 
-    const text = this.ratchetDecrypt(header, e.content, e.pubkey);
-    const innerEvent = JSON.parse(text);
-    if (!validateEvent(innerEvent)) {
-      return;
+      this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));  
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Failed to decrypt header")) {
+        return;
+      }
+      throw error;
     }
-
-    if (innerEvent.id !== getEventHash(innerEvent)) {
-      return;
-    }
-
-    this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));  
   }
 
   private subscribeToNostrEvents() {
