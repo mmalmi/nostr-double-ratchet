@@ -1,127 +1,140 @@
-import { describe, it, expect, vi } from 'vitest'
-import { Invite } from '../src/Invite'
+import { describe, it, expect } from 'vitest'
+import SessionManager from '../src/SessionManager'
 import { generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
-import { Session } from '../src/Session'
 
-describe('MultiDevice Communication', () => {
-  it('should allow 2 users with 2 devices each to communicate via invites', async () => {
+/**
+ * Utilities --------------------------------------------------------------
+ */
+
+// Shared in-memory "network" for all simulated devices in this test run.
+const messageQueue: any[] = []
+
+/**
+ * Create a Nostr subscribe stub for a simulated device. It polls the shared
+ * messageQueue and emits any events that match the provided filter.
+ */
+function createSubscribe(name: string) {
+  return (filter: any, onEvent: (event: any) => void) => {
+    const tick = () => {
+      const idx = messageQueue.findIndex((ev) => matchFilter(filter, ev))
+      if (idx !== -1) {
+        const ev = messageQueue.splice(idx, 1)[0]
+        onEvent(ev)
+      }
+      setTimeout(tick, 10) // keep polling
+    }
+    tick()
+    // Unsubscribe stub (no-op for the polling implementation)
+    return () => {}
+  }
+}
+
+/**
+ * Very light wrapper around nostrPublish that immediately puts the event on
+ * the shared network and resolves to a VerifiedEvent-like object.
+ */
+async function nostrPublish(event: any) {
+  if (!event.id) {
+    event.id = 'id-' + Math.random().toString(36).slice(2)
+  }
+  if (!event.sig) {
+    event.sig = 'sig-' + Math.random().toString(36).slice(2)
+  }
+  messageQueue.push(event)
+  return event
+}
+
+/**
+ * ------------------------------------------------------------------------
+ * Test cases
+ * ------------------------------------------------------------------------
+ */
+
+describe('MultiDevice communication via SessionManager', () => {
+  it('establishes sessions automatically and syncs messages across own devices', async () => {
+    // Generate identities
     const aliceKey = generateSecretKey()
     const bobKey = generateSecretKey()
-    
     const alicePubKey = getPublicKey(aliceKey)
     const bobPubKey = getPublicKey(bobKey)
 
-    const messageQueue: any[] = []
-    const createSubscribe = (name: string) => (filter: any, onEvent: (event: any) => void) => {
-      const checkQueue = () => {
-        const index = messageQueue.findIndex(event => matchFilter(filter, event))
-        if (index !== -1) {
-          onEvent(messageQueue.splice(index, 1)[0])
+    // Create one SessionManager per simulated device
+    const alice1 = new SessionManager(aliceKey, 'Alice1', createSubscribe('Alice1'), nostrPublish)
+    const alice2 = new SessionManager(aliceKey, 'Alice2', createSubscribe('Alice2'), nostrPublish)
+    const bob1 = new SessionManager(bobKey, 'Bob1', createSubscribe('Bob1'), nostrPublish)
+    const bob2 = new SessionManager(bobKey, 'Bob2', createSubscribe('Bob2'), nostrPublish)
+
+    // Track received messages per device
+    const received: Record<string, any[]> = {
+      alice1: [],
+      alice2: [],
+      bob1: [],
+      bob2: [],
+    }
+
+    alice1.onEvent((e) => received.alice1.push(e))
+    alice2.onEvent((e) => received.alice2.push(e))
+    bob1.onEvent((e) => received.bob1.push(e))
+    bob2.onEvent((e) => received.bob2.push(e))
+
+    // Wait for SessionManager initialization to complete
+    await alice1.init()
+    await alice2.init()
+    await bob1.init()
+    await bob2.init()
+
+    // Give the managers some time to publish invites and accept their peer/own invites.
+    await new Promise((r) => setTimeout(r, 1000))
+
+    // Helper to keep trying to send until sessions are ready
+    async function sendWhenReady(manager: SessionManager, recipient: string, content: string) {
+      let attempts = 0
+      while (attempts < 20) {
+        const evs = await manager.sendText(recipient, content)
+        if (evs.length > 0) {
+          evs.forEach((ev) => messageQueue.push(ev))
+          return
         }
-        setTimeout(checkQueue, 100)
+        attempts++
+        await new Promise((r) => setTimeout(r, 200))
       }
-      checkQueue()
-      return () => {}
+      throw new Error('Unable to establish session to send message')
     }
 
-    const aliceInvite1 = Invite.createNew(alicePubKey, 'Alice Device 1')
-    const aliceInvite2 = Invite.createNew(alicePubKey, 'Alice Device 2')
-    const bobInvite1 = Invite.createNew(bobPubKey, 'Bob Device 1')
-    const bobInvite2 = Invite.createNew(bobPubKey, 'Bob Device 2')
+    // Alice1 sends a message to Bob (should reach Bob1, Bob2 and Alice2)
+    await sendWhenReady(alice1, bobPubKey, 'Hello from Alice1')
 
-    const sessions: { [key: string]: Session[] } = {
-      alice1: [],
-      alice2: [],
-      bob1: [],
-      bob2: []
-    }
+    // Bob1 replies (should reach Alice1, Alice2 and Bob2)
+    await sendWhenReady(bob1, alicePubKey, 'Hello from Bob1')
 
-    const receivedMessages: { [key: string]: any[] } = {
-      alice1: [],
-      alice2: [],
-      bob1: [],
-      bob2: []
-    }
+    // Allow time for propagation & decryption
+    await new Promise((r) => setTimeout(r, 2000))
 
-    aliceInvite1.listen(aliceKey, createSubscribe('Alice1'), (session, identity) => {
-      sessions.alice1.push(session)
-      session.onEvent((event) => receivedMessages.alice1.push(event))
-    })
+    // --- Assertions ------------------------------------------------------
 
-    aliceInvite2.listen(aliceKey, createSubscribe('Alice2'), (session, identity) => {
-      sessions.alice2.push(session)
-      session.onEvent((event) => receivedMessages.alice2.push(event))
-    })
+    // All devices should have received at least one chat message
+    expect(received.alice1.length).toBeGreaterThan(0)
+    expect(received.alice2.length).toBeGreaterThan(0)
+    expect(received.bob1.length).toBeGreaterThan(0)
+    expect(received.bob2.length).toBeGreaterThan(0)
 
-    bobInvite1.listen(bobKey, createSubscribe('Bob1'), (session, identity) => {
-      sessions.bob1.push(session)
-      session.onEvent((event) => receivedMessages.bob1.push(event))
-    })
+    // The specific contents should be routed as expected
+    const contains = (arr: any[], str: string) => arr.some((m) => m.content?.includes(str))
 
-    bobInvite2.listen(bobKey, createSubscribe('Bob2'), (session, identity) => {
-      sessions.bob2.push(session)
-      session.onEvent((event) => receivedMessages.bob2.push(event))
-    })
+    // Bob devices and Alice2 received Alice1's message
+    expect(contains(received.bob1, 'Alice1')).toBe(true)
+    expect(contains(received.bob2, 'Alice1')).toBe(true)
+    expect(contains(received.alice2, 'Alice1')).toBe(true)
 
-    // Bob devices accept Alice's invites
-    const { session: bob1ToAlice1, event: bob1ToAlice1Event } = await bobInvite1.accept(createSubscribe('Bob1ToAlice1'), bobPubKey, bobKey)
-    const { session: bob1ToAlice2, event: bob1ToAlice2Event } = await bobInvite2.accept(createSubscribe('Bob1ToAlice2'), bobPubKey, bobKey)
-    const { session: bob2ToAlice1, event: bob2ToAlice1Event } = await bobInvite1.accept(createSubscribe('Bob2ToAlice1'), bobPubKey, bobKey)
-    const { session: bob2ToAlice2, event: bob2ToAlice2Event } = await bobInvite2.accept(createSubscribe('Bob2ToAlice2'), bobPubKey, bobKey)
+    // Alice devices and Bob2 received Bob1's message
+    expect(contains(received.alice1, 'Bob1')).toBe(true)
+    expect(contains(received.alice2, 'Bob1')).toBe(true)
+    expect(contains(received.bob2, 'Bob1')).toBe(true)
 
-    // Alice devices accept Bob's invites
-    const { session: alice1ToBob1, event: alice1ToBob1Event } = await aliceInvite1.accept(createSubscribe('Alice1ToBob1'), alicePubKey, aliceKey)
-    const { session: alice1ToBob2, event: alice1ToBob2Event } = await aliceInvite2.accept(createSubscribe('Alice1ToBob2'), alicePubKey, aliceKey)
-    const { session: alice2ToBob1, event: alice2ToBob1Event } = await aliceInvite1.accept(createSubscribe('Alice2ToBob1'), alicePubKey, aliceKey)
-    const { session: alice2ToBob2, event: alice2ToBob2Event } = await aliceInvite2.accept(createSubscribe('Alice2ToBob2'), alicePubKey, aliceKey)
-
-    messageQueue.push(
-      bob1ToAlice1Event, bob1ToAlice2Event, bob2ToAlice1Event, bob2ToAlice2Event,
-      alice1ToBob1Event, alice1ToBob2Event, alice2ToBob1Event, alice2ToBob2Event
-    )
-
-    await new Promise(resolve => setTimeout(resolve, 500))
-
-    bob1ToAlice1.onEvent((event) => receivedMessages.bob1.push(event))
-    bob1ToAlice2.onEvent((event) => receivedMessages.bob1.push(event))
-    bob2ToAlice1.onEvent((event) => receivedMessages.bob2.push(event))
-    bob2ToAlice2.onEvent((event) => receivedMessages.bob2.push(event))
-    alice1ToBob1.onEvent((event) => receivedMessages.alice1.push(event))
-    alice1ToBob2.onEvent((event) => receivedMessages.alice1.push(event))
-    alice2ToBob1.onEvent((event) => receivedMessages.alice2.push(event))
-    alice2ToBob2.onEvent((event) => receivedMessages.alice2.push(event))
-
-    messageQueue.push(alice1ToBob1.send('Hello from Alice1').event)
-    messageQueue.push(alice2ToBob2.send('Hello from Alice2').event)
-    messageQueue.push(bob1ToAlice1.send('Hello from Bob1').event)
-    messageQueue.push(bob2ToAlice2.send('Hello from Bob2').event)
-
-    await new Promise(resolve => setTimeout(resolve, 1000))
-
-    expect(receivedMessages.alice1.length).toBeGreaterThan(0)
-    expect(receivedMessages.alice2.length).toBeGreaterThan(0)
-    expect(receivedMessages.bob1.length).toBeGreaterThan(0)
-    expect(receivedMessages.bob2.length).toBeGreaterThan(0)
-
-    const allMessages = [
-      ...receivedMessages.alice1,
-      ...receivedMessages.alice2,
-      ...receivedMessages.bob1,
-      ...receivedMessages.bob2
-    ]
-
-    expect(allMessages.some(msg => msg.content?.includes('Alice1'))).toBe(true)
-    expect(allMessages.some(msg => msg.content?.includes('Alice2'))).toBe(true)
-    expect(allMessages.some(msg => msg.content?.includes('Bob1'))).toBe(true)
-    expect(allMessages.some(msg => msg.content?.includes('Bob2'))).toBe(true)
-
-    bob1ToAlice1.close()
-    bob1ToAlice2.close()
-    bob2ToAlice1.close()
-    bob2ToAlice2.close()
-    alice1ToBob1.close()
-    alice1ToBob2.close()
-    alice2ToBob1.close()
-    alice2ToBob2.close()
-  }, 10000)
+    // Clean up
+    alice1.close()
+    alice2.close()
+    bob1.close()
+    bob2.close()
+  }, 30000)
 })
