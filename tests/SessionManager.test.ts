@@ -13,6 +13,10 @@ function createStubSession() {
   const callbacks: ((event: any) => void)[] = []
   const stub: any = {
     name: 'stub',
+    state: {
+      theirNextNostrPublicKey: 'mock-their-next-key',
+      ourCurrentNostrKey: { publicKey: 'mock-our-current-key' }
+    },
     sendEvent: vi.fn().mockImplementation((event: any) => {
       // Simulate returning an encrypted event wrapper
       return { event: { ...event, id: 'id-' + Math.random().toString(36).slice(2) } }
@@ -131,4 +135,4 @@ describe('SessionManager', () => {
     expect(record.getActiveSessions()).toContain(session2)
     expect(record.getActiveSessions()).toHaveLength(2)
   })
-})   
+})      
