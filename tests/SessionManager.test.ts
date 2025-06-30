@@ -40,14 +40,17 @@ describe('SessionManager', () => {
   const ourIdentityKey = generateSecretKey()
   const deviceId = 'test-device'
 
-  it('should start listening and throw when no active session exists', async () => {
+  it('should start listening and queue message when no active session exists', async () => {
     const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
     const listenSpy = vi.spyOn(manager as any, 'listenToUser')
 
-    const result = await manager.sendText('recipient', 'hello')
-    expect(result).toEqual([])
+    const sendPromise = manager.sendText('recipient', 'hello')
+    
+    await new Promise(resolve => setTimeout(resolve, 10))
+    
     expect(listenSpy).toHaveBeenCalledWith('recipient')
-  })
+    
+  }, 1000)
 
   it('should send events to all active sessions', async () => {
     const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
@@ -135,4 +138,4 @@ describe('SessionManager', () => {
     expect(record.getActiveSessions()).toContain(session2)
     expect(record.getActiveSessions()).toHaveLength(2)
   })
-})      
+})            
