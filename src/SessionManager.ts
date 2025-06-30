@@ -15,6 +15,7 @@ export default class SessionManager {
     private deviceId: string
     private invite?: Invite
     private storage: StorageAdapter
+    private messageQueue: Map<string, Array<{event: Partial<Rumor>, resolve: (results: any[]) => void}>> = new Map()
 
     constructor(
         ourIdentityKey: Uint8Array,
@@ -133,43 +134,6 @@ export default class SessionManager {
         })
 
 
-        const allInvitesFilter = {
-            kinds: [30078], // INVITE_EVENT_KIND
-            "#l": ["double-ratchet/invites"]
-        }
-        this.nostrSubscribe(allInvitesFilter, async (event) => {
-            try {
-                if (event.pubkey === ourPublicKey) return
-                
-                try {
-                    const invite = Invite.fromEvent(event)
-                    const { session, event: responseEvent } = await invite.accept(
-                        this.nostrSubscribe,
-                        ourPublicKey,
-                        this.ourIdentityKey
-                    )
-                    this.nostrPublish(responseEvent)?.catch(() => {})
-                    
-                    // Store the new session
-                    let userRecord = this.userRecords.get(event.pubkey)
-                    if (!userRecord) {
-                        userRecord = new UserRecord(event.pubkey, this.nostrSubscribe)
-                        this.userRecords.set(event.pubkey, userRecord)
-                    }
-                    const deviceId = invite.deviceId || responseEvent.id || 'unknown'
-                    userRecord.upsertSession(deviceId, session)
-                    this.saveSession(event.pubkey, deviceId, session)
-                    
-                    session.onEvent((_event: Rumor) => {
-                        this.internalSubscriptions.forEach(cb => cb(_event))
-                    })
-                } catch (acceptErr) {
-                }
-                
-                this.listenToUser(event.pubkey)
-            } catch (err) {
-            }
-        })
 
         this._initialised = true
         await this.nostrPublish(this.invite.getEvent()).catch(() => {})
@@ -236,63 +200,32 @@ export default class SessionManager {
 
     async sendEvent(recipientIdentityKey: string, event: Partial<Rumor>) {
         const results = []
-        
+
         // Send to recipient's devices
         const userRecord = this.userRecords.get(recipientIdentityKey)
         if (!userRecord) {
-            // Listen for invites from recipient and return without throwing; caller
-            // can await a subsequent session establishment.
-            this.listenToUser(recipientIdentityKey)
-            return []
+            return new Promise<any[]>((resolve) => {
+                if (!this.messageQueue.has(recipientIdentityKey)) {
+                    this.messageQueue.set(recipientIdentityKey, [])
+                }
+                this.messageQueue.get(recipientIdentityKey)!.push({event, resolve})
+                this.listenToUser(recipientIdentityKey)
+            })
         }
 
         const activeSessions = userRecord.getActiveSessions()
         const sendableSessions = activeSessions.filter(s => !!(s.state?.theirNextNostrPublicKey && s.state?.ourCurrentNostrKey))
         
         if (sendableSessions.length === 0) {
-            
-            const ourPublicKey = getPublicKey(this.ourIdentityKey)
-            const inviteFilter = {
-                kinds: [30078], // INVITE_EVENT_KIND
-                authors: [recipientIdentityKey],
-                "#l": ["double-ratchet/invites"]
-            }
-            
-            let foundInvite = false
-            this.nostrSubscribe(inviteFilter, async (event) => {
-                if (foundInvite) return // Only accept one invite
-                foundInvite = true
-                
-                try {
-                    const invite = Invite.fromEvent(event)
-                    const { session, event: responseEvent } = await invite.accept(
-                        this.nostrSubscribe,
-                        ourPublicKey,
-                        this.ourIdentityKey
-                    )
-                    this.nostrPublish(responseEvent)?.catch(() => {})
-                    
-                    // Store the new session
-                    let userRecord = this.userRecords.get(recipientIdentityKey)
-                    if (!userRecord) {
-                        userRecord = new UserRecord(recipientIdentityKey, this.nostrSubscribe)
-                        this.userRecords.set(recipientIdentityKey, userRecord)
-                    }
-                    const deviceId = invite.deviceId || responseEvent.id || 'unknown'
-                    userRecord.upsertSession(deviceId, session)
-                    this.saveSession(recipientIdentityKey, deviceId, session)
-                    
-                    session.onEvent((_event: Rumor) => {
-                        this.internalSubscriptions.forEach(cb => cb(_event))
-                    })
-                } catch (err) {
+            return new Promise<any[]>((resolve) => {
+                if (!this.messageQueue.has(recipientIdentityKey)) {
+                    this.messageQueue.set(recipientIdentityKey, [])
                 }
+                this.messageQueue.get(recipientIdentityKey)!.push({event, resolve})
+                this.listenToUser(recipientIdentityKey)
             })
-            
-            this.listenToUser(recipientIdentityKey)
-            return []
         }
-        
+
         // Send to all sendable sessions with recipient
         for (const session of sendableSessions) {
             const { event: encryptedEvent } = session.sendEvent(event)
@@ -319,6 +252,16 @@ export default class SessionManager {
 
         const unsubscribe = Invite.fromUser(userPubkey, this.nostrSubscribe, async (_invite) => {
             try {
+                const deviceId = (_invite instanceof Invite && _invite.deviceId) ? _invite.deviceId : 'unknown'
+                
+                const userRecord = this.userRecords.get(userPubkey)
+                if (userRecord) {
+                    const existingSessions = userRecord.getActiveSessions()
+                    if (existingSessions.some(session => session.name === deviceId)) {
+                        return // Already have session with this device
+                    }
+                }
+
                 const { session, event } = await _invite.accept(
                     this.nostrSubscribe,
                     getPublicKey(this.ourIdentityKey),
@@ -327,18 +270,34 @@ export default class SessionManager {
                 this.nostrPublish(event)?.catch(() => {})
 
                 // Store the new session
-                let userRecord = this.userRecords.get(userPubkey)
-                if (!userRecord) {
-                    userRecord = new UserRecord(userPubkey, this.nostrSubscribe)
-                    this.userRecords.set(userPubkey, userRecord)
+                let currentUserRecord = this.userRecords.get(userPubkey)
+                if (!currentUserRecord) {
+                    currentUserRecord = new UserRecord(userPubkey, this.nostrSubscribe)
+                    this.userRecords.set(userPubkey, currentUserRecord)
                 }
-                const deviceId = (_invite instanceof Invite && _invite.deviceId) ? _invite.deviceId : event.id || 'unknown'
+                currentUserRecord.upsertSession(deviceId, session)
                 this.saveSession(userPubkey, deviceId, session)
 
                 // Register all existing callbacks on the new session
                 session.onEvent((_event: Rumor) => {
                     this.internalSubscriptions.forEach(callback => callback(_event))
                 })
+
+                const queuedMessages = this.messageQueue.get(userPubkey)
+                if (queuedMessages && queuedMessages.length > 0) {
+                    setTimeout(async () => {
+                        const currentQueuedMessages = this.messageQueue.get(userPubkey)
+                        if (currentQueuedMessages && currentQueuedMessages.length > 0) {
+                            const messagesToProcess = [...currentQueuedMessages]
+                            this.messageQueue.delete(userPubkey)
+                            
+                            for (const {event: queuedEvent, resolve} of messagesToProcess) {
+                                const results = await this.sendEvent(userPubkey, queuedEvent)
+                                resolve(results)
+                            }
+                        }
+                    }, 1000) // Increased delay for CI compatibility
+                }
 
                 // Return the event to be published
                 return event
