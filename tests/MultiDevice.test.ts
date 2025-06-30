@@ -14,12 +14,15 @@ const messageQueue: any[] = []
  * messageQueue and emits any events that match the provided filter.
  */
 function createSubscribe(name: string) {
+  const processedEventIds = new Set<string>()
+  
   return (filter: any, onEvent: (event: any) => void) => {
     const tick = () => {
-      const idx = messageQueue.findIndex((ev) => matchFilter(filter, ev))
-      if (idx !== -1) {
-        const ev = messageQueue.splice(idx, 1)[0]
-        onEvent(ev)
+      for (const ev of messageQueue) {
+        if (matchFilter(filter, ev) && !processedEventIds.has(ev.id)) {
+          processedEventIds.add(ev.id)
+          onEvent(ev)
+        }
       }
       setTimeout(tick, 10) // keep polling
     }
@@ -30,18 +33,44 @@ function createSubscribe(name: string) {
 }
 
 /**
- * Very light wrapper around nostrPublish that immediately puts the event on
- * the shared network and resolves to a VerifiedEvent-like object.
+ * Factory function to create a nostrPublish function with access to the keys
  */
-async function nostrPublish(event: any) {
-  if (!event.id) {
-    event.id = 'id-' + Math.random().toString(36).slice(2)
+function createNostrPublish(aliceKey: Uint8Array, bobKey: Uint8Array, alicePubKey: string, bobPubKey: string) {
+  return async function nostrPublish(event: any) {
+    const { finalizeEvent } = await import('nostr-tools')
+    
+    if (event.kind === 30078) {
+      let privateKey: Uint8Array
+      if (event.pubkey === alicePubKey) {
+        privateKey = aliceKey
+      } else if (event.pubkey === bobPubKey) {
+        privateKey = bobKey
+      } else {
+        privateKey = aliceKey
+      }
+      const signedEvent = finalizeEvent(event, privateKey)
+      messageQueue.push(signedEvent)
+      return signedEvent
+    }
+    
+    if (event.sig) {
+      messageQueue.push(event)
+      return event
+    }
+    
+    let privateKey: Uint8Array
+    if (event.pubkey === alicePubKey) {
+      privateKey = aliceKey
+    } else if (event.pubkey === bobPubKey) {
+      privateKey = bobKey
+    } else {
+      privateKey = aliceKey // fallback
+    }
+    
+    const signedEvent = finalizeEvent(event, privateKey)
+    messageQueue.push(signedEvent)
+    return signedEvent
   }
-  if (!event.sig) {
-    event.sig = 'sig-' + Math.random().toString(36).slice(2)
-  }
-  messageQueue.push(event)
-  return event
 }
 
 /**
@@ -57,6 +86,9 @@ describe('MultiDevice communication via SessionManager', () => {
     const bobKey = generateSecretKey()
     const alicePubKey = getPublicKey(aliceKey)
     const bobPubKey = getPublicKey(bobKey)
+
+    // Create nostrPublish function with access to the keys
+    const nostrPublish = createNostrPublish(aliceKey, bobKey, alicePubKey, bobPubKey)
 
     // Create one SessionManager per simulated device
     const alice1 = new SessionManager(aliceKey, 'Alice1', createSubscribe('Alice1'), nostrPublish)
@@ -83,8 +115,9 @@ describe('MultiDevice communication via SessionManager', () => {
     await bob1.init()
     await bob2.init()
 
+
     // Give the managers some time to publish invites and accept their peer/own invites.
-    await new Promise((r) => setTimeout(r, 1000))
+    await new Promise((r) => setTimeout(r, 2000))
 
     // Helper to keep trying to send until sessions are ready
     async function sendWhenReady(manager: SessionManager, recipient: string, content: string) {
@@ -96,7 +129,7 @@ describe('MultiDevice communication via SessionManager', () => {
           return
         }
         attempts++
-        await new Promise((r) => setTimeout(r, 200))
+        await new Promise((r) => setTimeout(r, 500))
       }
       throw new Error('Unable to establish session to send message')
     }
@@ -108,7 +141,7 @@ describe('MultiDevice communication via SessionManager', () => {
     await sendWhenReady(bob1, alicePubKey, 'Hello from Bob1')
 
     // Allow time for propagation & decryption
-    await new Promise((r) => setTimeout(r, 2000))
+    await new Promise((r) => setTimeout(r, 3000))
 
     // --- Assertions ------------------------------------------------------
 

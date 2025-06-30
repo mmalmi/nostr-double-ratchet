@@ -178,6 +178,7 @@ export class UserRecord {
    * Return all sessions that are currently considered *active*.
    * For now this means any session in a non-stale device record as well as
    * all sessions added through `addSession`.
+   * Prioritizes initiator sessions (can send first message) over responder sessions.
    */
   public getActiveSessions(): Session[] {
     const sessions: Session[] = [];
@@ -187,6 +188,15 @@ export class UserRecord {
         sessions.push(record.activeSession);
       }
     }
+
+    sessions.sort((a, b) => {
+      const aCanSend = !!(a.state?.theirNextNostrPublicKey && a.state?.ourCurrentNostrKey);
+      const bCanSend = !!(b.state?.theirNextNostrPublicKey && b.state?.ourCurrentNostrKey);
+      
+      if (aCanSend && !bCanSend) return -1; // a comes first
+      if (!aCanSend && bCanSend) return 1;  // b comes first
+      return 0; // equal priority
+    });
 
     return sessions;
   }
