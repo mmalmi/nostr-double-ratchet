@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import SessionManager from '../src/SessionManager'
 import { generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
+import { CHAT_MESSAGE_KIND } from '../src/types'
 
 /**
  * Utilities --------------------------------------------------------------
@@ -14,14 +15,18 @@ const messageQueue: any[] = []
  * messageQueue and emits any events that match the provided filter.
  */
 function createSubscribe(name: string) {
-  const processedEventIds = new Set<string>()
+  const processedEvents = new Set<string>()
   
   return (filter: any, onEvent: (event: any) => void) => {
     const tick = () => {
       for (const ev of messageQueue) {
-        if (matchFilter(filter, ev) && !processedEventIds.has(ev.id)) {
-          processedEventIds.add(ev.id)
-          onEvent(ev)
+        if (matchFilter(filter, ev)) {
+          // Create unique key per device and event to allow same event to be processed by different devices
+          const eventKey = `${name}-${ev.id}`
+          if (!processedEvents.has(eventKey)) {
+            processedEvents.add(eventKey)
+            onEvent(ev)
+          }
         }
       }
       setTimeout(tick, 10) // keep polling
@@ -118,30 +123,24 @@ describe('MultiDevice communication via SessionManager', () => {
 
     // Give the managers some time to publish invites and accept their peer/own invites.
     await new Promise((r) => setTimeout(r, 2000))
+    
 
-    // Helper to keep trying to send until sessions are ready
-    async function sendWhenReady(manager: SessionManager, recipient: string, content: string) {
-      let attempts = 0
-      while (attempts < 20) {
-        const evs = await manager.sendText(recipient, content)
-        if (evs.length > 0) {
-          evs.forEach((ev) => messageQueue.push(ev))
-          return
-        }
-        attempts++
-        await new Promise((r) => setTimeout(r, 500))
-      }
-      throw new Error('Unable to establish session to send message')
-    }
+    // --- Send messages ---------------------------------------------------
 
-    // Alice1 sends a message to Bob (should reach Bob1, Bob2 and Alice2)
-    await sendWhenReady(alice1, bobPubKey, 'Hello from Alice1')
+    // Send messages - they will be queued and delivered when sessions are ready
+    const alice1Promise = alice1.sendEvent(bobPubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Alice1' }).then(results => {
+      results.forEach((ev) => messageQueue.push(ev))
+    })
 
-    // Bob1 replies (should reach Alice1, Alice2 and Bob2)
-    await sendWhenReady(bob1, alicePubKey, 'Hello from Bob1')
+    const bob1Promise = bob1.sendEvent(alicePubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Bob1' }).then(results => {
+      results.forEach((ev) => messageQueue.push(ev))
+    })
+
+    // Wait for both messages to be sent (either immediately or after queue processing)
+    await Promise.all([alice1Promise, bob1Promise])
 
     // Allow time for propagation & decryption
-    await new Promise((r) => setTimeout(r, 3000))
+    await new Promise((r) => setTimeout(r, 1000))
 
     // --- Assertions ------------------------------------------------------
 
