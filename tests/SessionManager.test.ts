@@ -138,4 +138,21 @@ describe('SessionManager', () => {
     expect(record.getActiveSessions()).toContain(session2)
     expect(record.getActiveSessions()).toHaveLength(2)
   })
+
+  it('should emit sent messages to onEvent listeners', async () => {
+    const manager = new SessionManager(ourIdentityKey, deviceId, nostrSubscribe, nostrPublish)
+
+    const recipient = 'recipientPubKey'
+    const session = createStubSession()
+    const userRecord = new UserRecord(recipient, nostrSubscribe)
+    userRecord.upsertSession(undefined, session)
+    ;(manager as any).userRecords.set(recipient, userRecord)
+
+    const received: any[] = []
+    manager.onEvent((e) => received.push(e))
+
+    await manager.sendText(recipient, 'hello-self')
+
+    expect(received.some((e) => e.content === 'hello-self')).toBe(true)
+  })
 })            

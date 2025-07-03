@@ -121,16 +121,14 @@ describe('MultiDevice communication via SessionManager', () => {
     await new Promise((r) => setTimeout(r, 2000))
 
     // Send messages - they will be queued and delivered when sessions are ready
-    const alice1Promise = alice1.sendEvent(bobPubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Alice1' }).then(results => {
-      results.forEach((ev) => messageQueue.push(ev))
-    })
+    const alice1Promise = alice1.sendEvent(bobPubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Alice1' })
 
-    const bob1Promise = bob1.sendEvent(alicePubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Bob1' }).then(results => {
-      results.forEach((ev) => messageQueue.push(ev))
-    })
+    const alice2Promise = alice2.sendEvent(bobPubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Alice2' })
 
-    // Wait for both messages to be sent (either immediately or after queue processing)
-    await Promise.all([alice1Promise, bob1Promise])
+    const bob1Promise = bob1.sendEvent(alicePubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Bob1' })
+
+    // Wait for messages to be sent (either immediately or after queue processing)
+    await Promise.all([alice1Promise, alice2Promise, bob1Promise])
 
     // Allow time for propagation & decryption
     await new Promise((r) => setTimeout(r, 1000))
@@ -146,10 +144,17 @@ describe('MultiDevice communication via SessionManager', () => {
     // The specific contents should be routed as expected
     const contains = (arr: any[], str: string) => arr.some((m) => m.content?.includes(str))
 
-    // Bob devices and Alice2 received Alice1's message
+    // Bob devices and Alice devices (including self) received Alice1's message
     expect(contains(received.bob1, 'Alice1')).toBe(true)
     expect(contains(received.bob2, 'Alice1')).toBe(true)
     expect(contains(received.alice2, 'Alice1')).toBe(true)
+    expect(contains(received.alice1, 'Alice1')).toBe(true) // self notification
+
+    // Bob devices and Alice devices received Alice2's message
+    expect(contains(received.bob1, 'Alice2')).toBe(true)
+    expect(contains(received.bob2, 'Alice2')).toBe(true)
+    expect(contains(received.alice1, 'Alice2')).toBe(true)
+    expect(contains(received.alice2, 'Alice2')).toBe(true) // self notification
 
     // Alice devices and Bob2 received Bob1's message
     expect(contains(received.alice1, 'Bob1')).toBe(true)

@@ -199,7 +199,12 @@ export default class SessionManager {
     }
 
     async sendEvent(recipientIdentityKey: string, event: Partial<Rumor>) {
+        console.log("Sending event to", recipientIdentityKey, event)
+        // Immediately notify local subscribers so that UI can render sent message optimistically
+        this.internalSubscriptions.forEach(cb => cb(event as Rumor))
+
         const results = []
+        const publishPromises: Promise<any>[] = []
 
         // Send to recipient's devices
         const userRecord = this.userRecords.get(recipientIdentityKey)
@@ -230,6 +235,7 @@ export default class SessionManager {
         for (const session of sendableSessions) {
             const { event: encryptedEvent } = session.sendEvent(event)
             results.push(encryptedEvent)
+            publishPromises.push(this.nostrPublish(encryptedEvent).catch(() => {}))
         }
 
         // Send to our own devices (for multi-device sync)
@@ -240,7 +246,13 @@ export default class SessionManager {
             for (const session of ownSendableSessions) {
                 const { event: encryptedEvent } = session.sendEvent(event)
                 results.push(encryptedEvent)
+                publishPromises.push(this.nostrPublish(encryptedEvent).catch(() => {}))
             }
+        }
+
+        // Ensure all publish operations settled before returning
+        if (publishPromises.length > 0) {
+            await Promise.all(publishPromises)
         }
 
         return results
