@@ -66,6 +66,9 @@ export default class SessionManager {
         }
         this.invite = invite
 
+        // Publish our own invite
+        this.nostrPublish(invite.getEvent())?.catch(() => {})
+
         // 2b. Listen for acceptances of *our* invite and create sessions
         this.invite.listen(
             this.ourIdentityKey,
