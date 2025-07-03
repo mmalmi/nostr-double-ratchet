@@ -6,6 +6,8 @@ import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { serializeSessionState, deserializeSessionState } from "./utils"
 import { Session } from "./Session"
 
+export type OnEventCallback = (event: Rumor, from: string) => void
+
 export default class SessionManager {
     private userRecords: Map<string, UserRecord> = new Map()
     private nostrSubscribe: NostrSubscribe
@@ -44,6 +46,7 @@ export default class SessionManager {
      * Can be awaited by callers that need deterministic readiness.
      */
     public async init(): Promise<void> {
+        console.log("Initialising SessionManager")
         if (this._initialised) return
 
         const ourPublicKey = getPublicKey(this.ourIdentityKey)
@@ -67,7 +70,11 @@ export default class SessionManager {
         this.invite = invite
 
         // Publish our own invite
-        this.nostrPublish(invite.getEvent())?.catch(() => {})
+        console.log("Publishing our own invite", invite)
+        const event = invite.getEvent()
+        this.nostrPublish(event).then((verifiedEvent) => {
+            console.log("Invite published", verifiedEvent)
+        }).catch((e) => console.error("Failed to publish our own invite", e))
 
         // 2b. Listen for acceptances of *our* invite and create sessions
         this.invite.listen(
@@ -90,7 +97,7 @@ export default class SessionManager {
                     this.saveSession(targetUserKey, deviceKey, session)
 
                     session.onEvent((_event: Rumor) => {
-                        this.internalSubscriptions.forEach(cb => cb(_event))
+                        this.internalSubscriptions.forEach(cb => cb(_event, targetUserKey))
                     })
                 } catch {/* ignore errors */}
             }
@@ -128,7 +135,7 @@ export default class SessionManager {
                 this.saveSession(ourPublicKey, deviceId, session)
 
                 session.onEvent((_event: Rumor) => {
-                    this.internalSubscriptions.forEach(cb => cb(_event))
+                    this.internalSubscriptions.forEach(cb => cb(_event, ourPublicKey))
                 })
             } catch (err) {
                 // eslint-disable-next-line no-console
@@ -167,7 +174,7 @@ export default class SessionManager {
                 this.saveSession(ownerPubKey, deviceId, session)
 
                 session.onEvent((_event: Rumor) => {
-                    this.internalSubscriptions.forEach(cb => cb(_event))
+                    this.internalSubscriptions.forEach(cb => cb(_event, ownerPubKey))
                 })
             } catch {
                 // corrupted entry — ignore
@@ -204,7 +211,7 @@ export default class SessionManager {
     async sendEvent(recipientIdentityKey: string, event: Partial<Rumor>) {
         console.log("Sending event to", recipientIdentityKey, event)
         // Immediately notify local subscribers so that UI can render sent message optimistically
-        this.internalSubscriptions.forEach(cb => cb(event as Rumor))
+        this.internalSubscriptions.forEach(cb => cb(event as Rumor, recipientIdentityKey))
 
         const results = []
         const publishPromises: Promise<any>[] = []
@@ -295,7 +302,7 @@ export default class SessionManager {
 
                 // Register all existing callbacks on the new session
                 session.onEvent((_event: Rumor) => {
-                    this.internalSubscriptions.forEach(callback => callback(_event))
+                    this.internalSubscriptions.forEach(callback => callback(_event, userPubkey))
                 })
 
                 const queuedMessages = this.messageQueue.get(userPubkey)
@@ -332,16 +339,16 @@ export default class SessionManager {
     }
 
     // Update onEvent to include internalSubscriptions management
-    private internalSubscriptions: Set<(event: Rumor) => void> = new Set()
+    private internalSubscriptions: Set<OnEventCallback> = new Set()
 
-    onEvent(callback: (event: Rumor) => void) {
+    onEvent(callback: OnEventCallback) {
         this.internalSubscriptions.add(callback)
 
         // Subscribe to existing sessions
-        for (const userRecord of this.userRecords.values()) {
+        for (const [pubkey, userRecord] of this.userRecords.entries()) {
             for (const session of userRecord.getActiveSessions()) {
-                session.onEvent((_event: Rumor) => {
-                    callback(_event)
+                session.onEvent((event: Rumor) => {
+                    callback(event, pubkey)
                 })
             }
         }
