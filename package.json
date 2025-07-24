@@ -27,7 +27,7 @@
     "url": "https://github.com/mmalmi/nostr-double-ratchet/issues"
   },
   "homepage": "https://github.com/mmalmi/nostr-double-ratchet",
-  "documentation": "https://nostr-double-ratchet.iris.to/",
+  "documentation": "https://mmalmi.github.io/nostr-double-ratchet/",
   "files": [
     "src",
     "dist"

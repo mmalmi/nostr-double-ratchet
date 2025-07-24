@@ -6,8 +6,8 @@
 * Invites for securely exchanging session keys
 * Breaking changes are likely
 * Stable version on [NPM](https://www.npmjs.com/package/nostr-double-ratchet)
-* check out [tests](https://github.com/mmalmi/nostr-double-ratchet/tree/master/tests) for usage
-* [Documentation](https://nostr-double-ratchet.iris.to/)
+* check out [tests](https://github.com/mmalmi/nostr-double-ratchet/tree/main/tests) for usage
+* [Documentation](https://mmalmi.github.io/nostr-double-ratchet/)
 * [Source code](https://github.com/mmalmi/nostr-double-ratchet)
 
 ## Installation
