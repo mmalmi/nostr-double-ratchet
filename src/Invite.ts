@@ -130,6 +130,10 @@ export class Invite {
         };
         const seenIds = new Set<string>()
         const unsub = subscribe(filter, (event) => {
+            if (event.pubkey !== user) {
+                console.error("Got invite event from wrong user", event.pubkey, "expected", user)
+                return;
+            }
             if (seenIds.has(event.id)) return
             seenIds.add(event.id)
             try {
@@ -185,6 +189,27 @@ export class Invite {
                 ['sharedSecret', this.sharedSecret],
                 ['d', 'double-ratchet/invites/' + this.deviceId],
                 ['l', 'double-ratchet/invites']
+            ],
+        };
+    }
+
+    /**
+     * Creates an "invite tombstone" event that clears the original content and removes the list tag.
+     * Used when the inviter logs out and wants to make the invite invisible to other devices.
+     */
+    getDeletionEvent(): UnsignedEvent {
+        if (!this.deviceId) {
+            throw new Error("Device ID is required");
+        }
+        return {
+            kind: INVITE_EVENT_KIND,
+            pubkey: this.inviter,
+            content: "", // deliberately empty
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+                ['ephemeralKey', this.inviterEphemeralPublicKey],
+                ['sharedSecret', this.sharedSecret],
+                ['d', 'double-ratchet/invites/' + this.deviceId], // same d tag
             ],
         };
     }

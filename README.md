@@ -1,3 +1,5 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mmalmi/nostr-double-ratchet)
+
 * Double ratchet on nostr
 - [x] 1-on-1 channel
 - [ ] group channel
