@@ -230,4 +230,151 @@ describe('Invite', () => {
     // No remaining messages
     expect(messageQueue.length).toBe(0)
   })
+
+  it('should accept invite with deviceId parameter', async () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey)
+    const bobSecretKey = generateSecretKey()
+    const bobPublicKey = getPublicKey(bobSecretKey)
+
+    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, 'device-1')
+
+    expect(session).toBeDefined()
+    expect(event).toBeDefined()
+    expect(event.pubkey).not.toBe(bobPublicKey)
+    expect(event.kind).toBe(INVITE_RESPONSE_KIND)
+    expect(event.tags).toEqual([['p', invite.inviterEphemeralPublicKey]])
+  })
+
+  it('should pass deviceId to onSession callback', async () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey)
+    const bobSecretKey = generateSecretKey()
+    const bobPublicKey = getPublicKey(bobSecretKey)
+
+    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, 'device-1')
+
+    const onSession = vi.fn()
+
+    const mockSubscribe = (filter: any, callback: (event: any) => void) => {
+      expect(filter.kinds).toEqual([INVITE_RESPONSE_KIND])
+      expect(filter['#p']).toEqual([invite.inviterEphemeralPublicKey])
+      callback(event)
+      return () => {}
+    }
+
+    invite.listen(
+      alicePrivateKey,
+      mockSubscribe, 
+      onSession
+    )
+
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(onSession).toHaveBeenCalledTimes(1)
+    const [session, identity, deviceId] = onSession.mock.calls[0]
+    expect(session).toBeDefined()
+    expect(identity).toBe(bobPublicKey)
+    expect(deviceId).toBe('device-1')
+  })
+
+  it('should use event.id as session name regardless of deviceId', async () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey)
+    const bobSecretKey = generateSecretKey()
+    const bobPublicKey = getPublicKey(bobSecretKey)
+
+    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, 'device-1')
+
+    const onSession = vi.fn()
+
+    const mockSubscribe = (filter: any, callback: (event: any) => void) => {
+      callback(event)
+      return () => {}
+    }
+
+    invite.listen(
+      alicePrivateKey,
+      mockSubscribe, 
+      onSession
+    )
+
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(onSession).toHaveBeenCalledTimes(1)
+    const [session] = onSession.mock.calls[0]
+    expect(session.name).toBe(event.id)
+  })
+
+  it('should maintain backward compatibility with invites without deviceId', async () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey)
+    const bobSecretKey = generateSecretKey()
+    const bobPublicKey = getPublicKey(bobSecretKey)
+
+    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
+
+    const onSession = vi.fn()
+
+    const mockSubscribe = (filter: any, callback: (event: any) => void) => {
+      callback(event)
+      return () => {}
+    }
+
+    invite.listen(
+      alicePrivateKey,
+      mockSubscribe, 
+      onSession
+    )
+
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(onSession).toHaveBeenCalledTimes(1)
+    const [session, identity, deviceId] = onSession.mock.calls[0]
+    expect(session).toBeDefined()
+    expect(identity).toBe(bobPublicKey)
+    expect(deviceId).toBeUndefined()
+    expect(session.name).toBe(event.id)
+  })
+
+  it('should handle mixed old and new format invitations', async () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey)
+    const bobSecretKey = generateSecretKey()
+    const bobPublicKey = getPublicKey(bobSecretKey)
+    const charlieSecretKey = generateSecretKey()
+    const charliePublicKey = getPublicKey(charlieSecretKey)
+
+    const { event: bobEvent } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
+    const { event: charlieEvent } = await invite.accept(dummySubscribe, charliePublicKey, charlieSecretKey, 'device-1')
+
+    const onSession = vi.fn()
+
+    const mockSubscribe = (filter: any, callback: (event: any) => void) => {
+      callback(bobEvent)
+      callback(charlieEvent)
+      return () => {}
+    }
+
+    invite.listen(alicePrivateKey, mockSubscribe, onSession)
+
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(onSession).toHaveBeenCalledTimes(2)
+    
+    const calls = onSession.mock.calls
+    const bobCall = calls.find(([, identity]) => identity === bobPublicKey)
+    const charlieCall = calls.find(([, identity]) => identity === charliePublicKey)
+    
+    expect(bobCall[2]).toBeUndefined() // no deviceId
+    expect(bobCall[0].name).toBe(bobEvent.id) // session name is event ID
+    
+    expect(charlieCall[2]).toBe('device-1') // has deviceId
+    expect(charlieCall[0].name).toBe(charlieEvent.id) // session name is event ID
+  })
 })
