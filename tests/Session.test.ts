@@ -290,6 +290,59 @@ describe('Session', () => {
     expect(skippedMessage2.value?.content).toBe('Message 2');
   });
 
+  it('should discard duplicate messages after restoring', async () => {
+    const messageQueue: any[] = [];
+
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+        setTimeout(checkQueue, 100);
+      };
+      checkQueue();
+      return () => {};
+    };
+
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+
+    const aliceMessages = createEventStream(alice);
+    const bobMessages = createEventStream(bob);
+
+    const sentEvents: any[] = [];
+    const messages = ['Message 1', 'Message 2', 'Message 3'];
+
+    for (const message of messages) {
+      const { event } = alice.send(message);
+      sentEvents.push(event);
+      messageQueue.push(event);
+      const received = await bobMessages.next();
+      expect(received.value?.content).toBe(message);
+    }
+
+    const serializedBob = serializeSessionState(bob.state);
+    bob.close();
+
+    const bobRestored = new Session(createSubscribe(), deserializeSessionState(serializedBob));
+    const initialReceivingCount = bobRestored.state.receivingChainMessageNumber;
+
+    for (const event of sentEvents) {
+      messageQueue.push(event);
+    }
+
+    // Give the restored session time to process and discard duplicate ciphertexts
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(bobRestored.state.receivingChainMessageNumber).toBe(initialReceivingCount);
+
+    const { event: bobReply } = bobRestored.send('Fresh message after duplicates');
+    messageQueue.push(bobReply);
+
+    const aliceReceived = await aliceMessages.next();
+    expect(aliceReceived.value?.content).toBe('Fresh message after duplicates');
+  });
+
   it('should handle session reinitialization correctly', async () => {
     const messageQueue: any[] = [];
 
