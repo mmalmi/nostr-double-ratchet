@@ -401,8 +401,16 @@ export class Session {
       this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));
     } catch (error) {
       this.state = snapshot;
-      if (error instanceof Error && error.message.includes("Failed to decrypt header")) {
-        return;
+      if (error instanceof Error) {
+        if (error.message.includes("Failed to decrypt header")) {
+          return;
+        }
+
+        if (error.message === "invalid MAC") {
+          // Duplicate or stale ciphertexts can hit decrypt() again after a state restore.
+          // nip44 throws "invalid MAC" in that case, but the message has already been handled.
+          return;
+        }
       }
       throw error;
     }
