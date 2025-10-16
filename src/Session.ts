@@ -319,45 +319,88 @@ export class Session {
     throw new Error("Failed to decrypt header with current and skipped header keys");
   }
 
+  private deepCopyState(): SessionState {
+    const s = this.state;
+    return {
+      rootKey: new Uint8Array(s.rootKey),
+      theirCurrentNostrPublicKey: s.theirCurrentNostrPublicKey,
+      theirNextNostrPublicKey: s.theirNextNostrPublicKey,
+      ourCurrentNostrKey: s.ourCurrentNostrKey
+        ? {
+            publicKey: s.ourCurrentNostrKey.publicKey,
+            privateKey: new Uint8Array(s.ourCurrentNostrKey.privateKey),
+          }
+        : undefined,
+      ourNextNostrKey: {
+        publicKey: s.ourNextNostrKey.publicKey,
+        privateKey: new Uint8Array(s.ourNextNostrKey.privateKey),
+      },
+      receivingChainKey: s.receivingChainKey ? new Uint8Array(s.receivingChainKey) : undefined,
+      sendingChainKey: s.sendingChainKey ? new Uint8Array(s.sendingChainKey) : undefined,
+      sendingChainMessageNumber: s.sendingChainMessageNumber,
+      receivingChainMessageNumber: s.receivingChainMessageNumber,
+      previousSendingChainMessageCount: s.previousSendingChainMessageCount,
+      skippedKeys: Object.fromEntries(
+        Object.entries(s.skippedKeys).map(([author, entry]: any) => [
+          author,
+          {
+            headerKeys: entry.headerKeys.map((hk: Uint8Array) => new Uint8Array(hk)),
+            messageKeys: Object.fromEntries(
+              Object.entries(entry.messageKeys).map(([n, mk]: any) => [n, new Uint8Array(mk)])
+            ),
+          },
+        ])
+      ),
+    };
+  }
+
   private handleNostrEvent(e: { tags: string[][]; pubkey: string; content: string }) {
+    const snapshot = this.deepCopyState();
+    let pendingSwitch = false;
+
     try {
       const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
+      if (!isSkipped && this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
+        this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
+        this.state.theirNextNostrPublicKey = header.nextPublicKey;
+        pendingSwitch = true;
+      }
 
       if (!isSkipped) {
-        if (this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
-          this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
-          this.state.theirNextNostrPublicKey = header.nextPublicKey;
-          this.nostrUnsubscribe?.();
-          this.nostrUnsubscribe = this.nostrNextUnsubscribe;
-          this.nostrNextUnsubscribe = this.nostrSubscribe(
-            {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
-            (e) => this.handleNostrEvent(e)
-          );
-        }
-    
         if (shouldRatchet) {
           this.skipMessageKeys(header.previousChainLength, e.pubkey);
           this.ratchetStep();
         }
       } else {
         if (!this.state.skippedKeys[e.pubkey]?.messageKeys[header.number]) {
-          // Maybe we already processed this message — no error
-          return
+          return;
         }
       }
 
       const text = this.ratchetDecrypt(header, e.content, e.pubkey);
       const innerEvent = JSON.parse(text);
+
       if (!validateEvent(innerEvent)) {
+        this.state = snapshot;
         return;
       }
-
       if (innerEvent.id !== getEventHash(innerEvent)) {
+        this.state = snapshot;
         return;
       }
 
-      this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));  
+      if (pendingSwitch) {
+        this.nostrUnsubscribe?.();
+        this.nostrUnsubscribe = this.nostrNextUnsubscribe;
+        this.nostrNextUnsubscribe = this.nostrSubscribe(
+          { authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND] },
+          (ev) => this.handleNostrEvent(ev)
+        );
+      }
+
+      this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));
     } catch (error) {
+      this.state = snapshot;
       if (error instanceof Error && error.message.includes("Failed to decrypt header")) {
         return;
       }
