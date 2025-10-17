@@ -10,7 +10,7 @@ import {
   Rumor,
   CHAT_MESSAGE_KIND,
 } from "./types";
-import { kdf } from "./utils";
+import { kdf, deepCopyState } from "./utils";
 
 const MAX_SKIP = 1000;
 
@@ -319,43 +319,9 @@ export class Session {
     throw new Error("Failed to decrypt header with current and skipped header keys");
   }
 
-  private deepCopyState(): SessionState {
-    const s = this.state;
-    return {
-      rootKey: new Uint8Array(s.rootKey),
-      theirCurrentNostrPublicKey: s.theirCurrentNostrPublicKey,
-      theirNextNostrPublicKey: s.theirNextNostrPublicKey,
-      ourCurrentNostrKey: s.ourCurrentNostrKey
-        ? {
-            publicKey: s.ourCurrentNostrKey.publicKey,
-            privateKey: new Uint8Array(s.ourCurrentNostrKey.privateKey),
-          }
-        : undefined,
-      ourNextNostrKey: {
-        publicKey: s.ourNextNostrKey.publicKey,
-        privateKey: new Uint8Array(s.ourNextNostrKey.privateKey),
-      },
-      receivingChainKey: s.receivingChainKey ? new Uint8Array(s.receivingChainKey) : undefined,
-      sendingChainKey: s.sendingChainKey ? new Uint8Array(s.sendingChainKey) : undefined,
-      sendingChainMessageNumber: s.sendingChainMessageNumber,
-      receivingChainMessageNumber: s.receivingChainMessageNumber,
-      previousSendingChainMessageCount: s.previousSendingChainMessageCount,
-      skippedKeys: Object.fromEntries(
-        Object.entries(s.skippedKeys).map(([author, entry]: any) => [
-          author,
-          {
-            headerKeys: entry.headerKeys.map((hk: Uint8Array) => new Uint8Array(hk)),
-            messageKeys: Object.fromEntries(
-              Object.entries(entry.messageKeys).map(([n, mk]: any) => [n, new Uint8Array(mk)])
-            ),
-          },
-        ])
-      ),
-    };
-  }
 
   private handleNostrEvent(e: { tags: string[][]; pubkey: string; content: string }) {
-    const snapshot = this.deepCopyState();
+    const snapshot = deepCopyState(this.state);
     let pendingSwitch = false;
 
     try {
