@@ -115,6 +115,41 @@ export function deserializeSessionState(data: string): SessionState {
   };
 }
 
+export function deepCopyState(s: SessionState): SessionState {
+  return {
+    rootKey: new Uint8Array(s.rootKey),
+    theirCurrentNostrPublicKey: s.theirCurrentNostrPublicKey,
+    theirNextNostrPublicKey: s.theirNextNostrPublicKey,
+    ourCurrentNostrKey: s.ourCurrentNostrKey
+      ? {
+          publicKey: s.ourCurrentNostrKey.publicKey,
+          privateKey: new Uint8Array(s.ourCurrentNostrKey.privateKey),
+        }
+      : undefined,
+    ourNextNostrKey: {
+      publicKey: s.ourNextNostrKey.publicKey,
+      privateKey: new Uint8Array(s.ourNextNostrKey.privateKey),
+    },
+    receivingChainKey: s.receivingChainKey ? new Uint8Array(s.receivingChainKey) : undefined,
+    sendingChainKey: s.sendingChainKey ? new Uint8Array(s.sendingChainKey) : undefined,
+    sendingChainMessageNumber: s.sendingChainMessageNumber,
+    receivingChainMessageNumber: s.receivingChainMessageNumber,
+    previousSendingChainMessageCount: s.previousSendingChainMessageCount,
+    skippedKeys: Object.fromEntries(
+      Object.entries(s.skippedKeys).map(([author, entry]: any) => [
+        author,
+        {
+          headerKeys: entry.headerKeys.map((hk: Uint8Array) => new Uint8Array(hk)),
+          messageKeys: Object.fromEntries(
+            Object.entries(entry.messageKeys).map(([n, mk]: any) => [n, new Uint8Array(mk)])
+          ),
+        },
+      ])
+    ),
+  };
+}
+
+
 export async function* createEventStream(session: Session): AsyncGenerator<Rumor, void, unknown> {
   const messageQueue: Rumor[] = [];
   let resolveNext: ((_value: Rumor) => void) | null = null;
