@@ -28,6 +28,7 @@ export class Invite {
         public deviceId?: string,
         public maxUses?: number,
         public usedBy: string[] = [],
+        public createdAt: number = now(),
     ) {
     }
 
@@ -84,7 +85,8 @@ export class Invite {
             data.inviterEphemeralPrivateKey ? new Uint8Array(data.inviterEphemeralPrivateKey) : undefined,
             data.deviceId,
             data.maxUses,
-            data.usedBy
+            data.usedBy,
+            data.createdAt,
         );
     }
 
@@ -158,6 +160,7 @@ export class Invite {
             deviceId: this.deviceId,
             maxUses: this.maxUses,
             usedBy: this.usedBy,
+            createdAt: this.createdAt,
         });
     }
 
@@ -183,7 +186,7 @@ export class Invite {
             kind: INVITE_EVENT_KIND,
             pubkey: this.inviter,
             content: "",
-            created_at: Math.floor(Date.now() / 1000),
+            created_at: this.createdAt,
             tags: [
                 ['ephemeralKey', this.inviterEphemeralPublicKey],
                 ['sharedSecret', this.sharedSecret],
