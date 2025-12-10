@@ -1,8 +1,6 @@
-import { describe, it, expect, vi } from 'vitest'
-import { InMemoryStorageAdapter } from '../src/StorageAdapter'
-import SessionManager from '../src/SessionManager'
-import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
-import { makeSubscribe, publish } from './helpers/mockRelay'
+import { describe, it, expect } from 'vitest'
+import { createMockSessionManager } from './helpers/mockSessionManager'
+import { MockRelay } from './helpers/mockRelay'
 
 /**
  * End-to-end check that sessions persisted via StorageAdapter
@@ -11,49 +9,50 @@ import { makeSubscribe, publish } from './helpers/mockRelay'
 
 describe('Persistence via multi-device flow', () => {
   it('restores own-device session after restart', async () => {
-    // ── shared plumbing ───────────────────────────────────────────────
-    const storage = new InMemoryStorageAdapter()
-    const subscribe = makeSubscribe() as any
+    const sharedRelay = new MockRelay()
 
-    // ── keys & devices ────────────────────────────────────────────────
-    const alicePriv = generateSecretKey()
-    const alicePub  = getPublicKey(alicePriv)
+    // Create first device for Alice
+    const {
+      manager: aliceMgr1,
+      secretKey: aliceSecretKey,
+      publicKey: alicePubKey,
+      mockStorage: storage,
+    } = await createMockSessionManager('alice-device-1', sharedRelay)
 
-    // Device 2 (same user)
-    const device2Id = 'alice-device-2'
-
-    // Wrap mock relay publish with signing so that invites are signed and pass verifyEvent
-    const signAndPublish = vi.fn((unsigned: any) => {
-      const priv = alicePriv
-      const signed = finalizeEvent(unsigned, priv)
-      return publish(signed as any) as any
-    })
-
-    const aliceMgr1 = new SessionManager(alicePriv, 'alice-device-1', subscribe, signAndPublish, storage)
-    await aliceMgr1.init()
     console.log('After device1 init invites in relay length:', (await storage.list()).length)
 
-    const aliceMgrDevice2 = new SessionManager(alicePriv, device2Id, subscribe, signAndPublish, storage)
-    await aliceMgrDevice2.init()
+    // Create second device for Alice (same secret key, same storage)
+    const { manager: aliceMgrDevice2 } = await createMockSessionManager(
+      'alice-device-2',
+      sharedRelay,
+      aliceSecretKey,
+      storage
+    )
 
     // debug
-    console.log('After device2 init keys:', await storage.list('session/'))
+    console.log('After device2 init keys:', await storage.list('v1/session/'))
     console.log('Device2 userRecords:', (aliceMgrDevice2 as any).userRecords)
 
     // Wait for SessionManager(s) to process the invite from device1 and establish
     // a session with device2. This happens asynchronously via Invite.fromUser.
     await new Promise(r => setTimeout(r, 300))
 
-    console.log('After wait keys:', await storage.list('session/'))
+    console.log('After wait keys:', await storage.list('v1/session/'))
 
-    const aliceMgr1Restarted = new SessionManager(alicePriv, 'alice-device-1',
-                                                  subscribe, signAndPublish, storage)
-    await aliceMgr1Restarted.init()
+    // Close the first manager and restart it
+    aliceMgr1.close()
 
-    const rec = (aliceMgr1Restarted as any).userRecords.get(alicePub)
+    const { manager: aliceMgr1Restarted } = await createMockSessionManager(
+      'alice-device-1',
+      sharedRelay,
+      aliceSecretKey,
+      storage
+    )
+
+    const rec = (aliceMgr1Restarted as any).userRecords.get(alicePubKey)
     expect(rec).toBeDefined()
-    // Check for the session for device2Id
-    const sessions = rec.getActiveSessions();
-    expect(sessions.length).toBeGreaterThan(0)
+    // Check for devices
+    const devices = Array.from(rec?.devices?.values() || [])
+    expect(devices.length).toBeGreaterThan(0)
   })
-}) 
+})

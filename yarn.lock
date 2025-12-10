@@ -1595,9 +1595,9 @@ natural-compare@^1.4.0:
   integrity sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==
 
 nostr-tools@^2.15.2:
-  version "2.15.2"
-  resolved "https://registry.yarnpkg.com/nostr-tools/-/nostr-tools-2.15.2.tgz#44c76c1f31ee442eda5481ba28ca823a3d27389b"
-  integrity sha512-utmqVVS4HMDiwhIgI6Cr+KqA4aUhF3Sb755iO/qCiqxc5H9JW/9Z3N1RO/jKWpjP6q/Vx0lru7IYuiPvk+2/ng==
+  version "2.19.3"
+  resolved "https://registry.yarnpkg.com/nostr-tools/-/nostr-tools-2.19.3.tgz#0570f3940cf3f390ecf5451615ce3cac3dac3aac"
+  integrity sha512-IJ1fcTYAfVVUbS8S/FtDopdPHCDh/34aHXnyppUzXDYGWlJMv2y1phomvOADZrMAQ6Z28iOIBEyGY256w1492Q==
   dependencies:
     "@noble/ciphers" "^0.5.1"
     "@noble/curves" "1.2.0"

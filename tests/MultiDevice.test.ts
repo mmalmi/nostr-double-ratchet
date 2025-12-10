@@ -1,78 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import SessionManager from '../src/SessionManager'
-import { generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
+import { createMockSessionManager } from './helpers/mockSessionManager'
+import { MockRelay } from './helpers/mockRelay'
 import { CHAT_MESSAGE_KIND } from '../src/types'
-
-/**
- * Utilities --------------------------------------------------------------
- */
-
-// Shared in-memory "network" for all simulated devices in this test run.
-const messageQueue: any[] = []
-
-/**
- * Create a Nostr subscribe stub for a simulated device. It polls the shared
- * messageQueue and emits any events that match the provided filter.
- */
-function createSubscribe(name: string) {
-  const processedEventIds = new Set<string>()
-  
-  return (filter: any, onEvent: (event: any) => void) => {
-    const tick = () => {
-      for (const ev of messageQueue) {
-        if (matchFilter(filter, ev) && !processedEventIds.has(ev.id)) {
-          processedEventIds.add(ev.id)
-          onEvent(ev)
-        }
-      }
-      setTimeout(tick, 10) // keep polling
-    }
-    tick()
-    // Unsubscribe stub (no-op for the polling implementation)
-    return () => {}
-  }
-}
-
-/**
- * Factory function to create a nostrPublish function with access to the keys
- */
-function createNostrPublish(aliceKey: Uint8Array, bobKey: Uint8Array, alicePubKey: string, bobPubKey: string) {
-  return async function nostrPublish(event: any) {
-    const { finalizeEvent } = await import('nostr-tools')
-    
-    if (event.kind === 30078) {
-      let privateKey: Uint8Array
-      if (event.pubkey === alicePubKey) {
-        privateKey = aliceKey
-      } else if (event.pubkey === bobPubKey) {
-        privateKey = bobKey
-      } else {
-        privateKey = aliceKey
-      }
-      const signedEvent = finalizeEvent(event, privateKey)
-      messageQueue.push(signedEvent)
-      return signedEvent
-    }
-    
-    if (event.sig) {
-      messageQueue.push(event)
-      return event
-    }
-    
-    let privateKey: Uint8Array
-    if (event.pubkey === alicePubKey) {
-      privateKey = aliceKey
-    } else if (event.pubkey === bobPubKey) {
-      privateKey = bobKey
-    } else {
-      privateKey = aliceKey // fallback
-    }
-    
-    const signedEvent = finalizeEvent(event, privateKey)
-    messageQueue.push(signedEvent)
-    return signedEvent
-  }
-}
 
 /**
  * ------------------------------------------------------------------------
@@ -82,20 +11,19 @@ function createNostrPublish(aliceKey: Uint8Array, bobKey: Uint8Array, alicePubKe
 
 describe('MultiDevice communication via SessionManager', () => {
   it('establishes sessions automatically and syncs messages across own devices', async () => {
-    // Generate identities
-    const aliceKey = generateSecretKey()
-    const bobKey = generateSecretKey()
-    const alicePubKey = getPublicKey(aliceKey)
-    const bobPubKey = getPublicKey(bobKey)
+    const sharedRelay = new MockRelay()
 
-    // Create nostrPublish function with access to the keys
-    const nostrPublish = createNostrPublish(aliceKey, bobKey, alicePubKey, bobPubKey)
+    // Create Alice's devices (same secret key)
+    const { manager: alice1, secretKey: aliceSecretKey, publicKey: alicePubKey } =
+      await createMockSessionManager('Alice1', sharedRelay)
+    const { manager: alice2 } =
+      await createMockSessionManager('Alice2', sharedRelay, aliceSecretKey)
 
-    // Create one SessionManager per simulated device
-    const alice1 = new SessionManager(aliceKey, 'Alice1', createSubscribe('Alice1'), nostrPublish)
-    const alice2 = new SessionManager(aliceKey, 'Alice2', createSubscribe('Alice2'), nostrPublish)
-    const bob1 = new SessionManager(bobKey, 'Bob1', createSubscribe('Bob1'), nostrPublish)
-    const bob2 = new SessionManager(bobKey, 'Bob2', createSubscribe('Bob2'), nostrPublish)
+    // Create Bob's devices (same secret key)
+    const { manager: bob1, secretKey: bobSecretKey, publicKey: bobPubKey } =
+      await createMockSessionManager('Bob1', sharedRelay)
+    const { manager: bob2 } =
+      await createMockSessionManager('Bob2', sharedRelay, bobSecretKey)
 
     // Track received messages per device
     const received: Record<string, any[]> = {
@@ -110,21 +38,12 @@ describe('MultiDevice communication via SessionManager', () => {
     bob1.onEvent((e) => received.bob1.push(e))
     bob2.onEvent((e) => received.bob2.push(e))
 
-    // Wait for SessionManager initialization to complete
-    await alice1.init()
-    await alice2.init()
-    await bob1.init()
-    await bob2.init()
-
-
     // Give the managers some time to publish invites and accept their peer/own invites.
-    await new Promise((r) => setTimeout(r, 2000))
+    await new Promise((r) => setTimeout(r, 500))
 
     // Send messages - they will be queued and delivered when sessions are ready
     const alice1Promise = alice1.sendEvent(bobPubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Alice1' })
-
     const alice2Promise = alice2.sendEvent(bobPubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Alice2' })
-
     const bob1Promise = bob1.sendEvent(alicePubKey, { kind: CHAT_MESSAGE_KIND, content: 'Hello from Bob1' })
 
     // Wait for messages to be sent (either immediately or after queue processing)

@@ -32,6 +32,9 @@
     "src",
     "dist"
   ],
+  "dependencies": {
+    "nostr-tools": "^2.15.2"
+  },
   "devDependencies": {
     "@nostr-dev-kit/ndk": "2.14.23",
     "@types/lodash": "^4.17.17",
@@ -51,8 +54,5 @@
     "vite": "^6.3.5",
     "vitest": "^3.1.4",
     "ws": "^8.18.2"
-  },
-  "dependencies": {
-    "nostr-tools": "^2.15.2"
   }
 }
