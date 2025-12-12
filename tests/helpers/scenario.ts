@@ -1,6 +1,6 @@
 import { MockRelay } from "./mockRelay"
 import { createMockSessionManager } from "./mockSessionManager"
-import SessionManager from "../../src/SessionManager"
+import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { generateSecretKey, getPublicKey } from "nostr-tools"

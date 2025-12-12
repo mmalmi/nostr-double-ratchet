@@ -43,7 +43,7 @@ interface StoredUserRecord {
   devices: StoredDeviceRecord[]
 }
 
-export default class SessionManager {
+export class SessionManager {
   // Versioning
   private readonly storageVersion = "1"
   private readonly versionPrefix: string

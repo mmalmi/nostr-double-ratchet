@@ -1,5 +1,5 @@
 import { vi } from "vitest"
-import SessionManager from "../../src/SessionManager"
+import { SessionManager } from "../../src/SessionManager"
 import {
   Filter,
   generateSecretKey,
