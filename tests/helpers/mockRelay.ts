@@ -1,55 +1,128 @@
-import { matchFilter, VerifiedEvent, UnsignedEvent } from 'nostr-tools'
-
-// In-memory relay that supports replay to new subscribers and push-based
-// delivery to all subscribers without relying on polling timeouts.
-
-const relay: (UnsignedEvent & { sig?: string; id?: string })[] = []
+import { matchFilter, VerifiedEvent, UnsignedEvent, Filter } from "nostr-tools"
+import { NDKEvent, NDKPrivateKeySigner } from "@nostr-dev-kit/ndk"
 
 type Subscriber = {
-  filter: any
+  id: string
+  filter: Filter
   onEvent: (e: VerifiedEvent) => void
-  delivered: Set<object> // track events already sent to this subscriber
+  delivered: Set<string>
 }
 
-const subscribers: Subscriber[] = []
+export class MockRelay {
+  private events: VerifiedEvent[] = []
+  private subscribers: Map<string, Subscriber> = new Map()
+  private subscriptionCounter = 0
+  private debug: boolean = false
 
-function deliverToSubscriber(sub: Subscriber, event: UnsignedEvent) {
-  if (!sub.delivered.has(event) && matchFilter(sub.filter, event as any)) {
-    sub.delivered.add(event)
-    sub.onEvent(event as any)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-export function publish(event: UnsignedEvent) {
-  relay.push(event as any)
-
-  // Push to existing subscribers immediately
-  for (const sub of subscribers) {
-    deliverToSubscriber(sub, event)
+  constructor(debug: boolean = false) {
+    this.debug = debug
   }
 
-  return Promise.resolve(event)
-}
+  getEvents(): VerifiedEvent[] {
+    return [...this.events]
+  }
 
-export function makeSubscribe() {
-  return (filter: any, onEvent: (e: VerifiedEvent) => void) => {
-    const subscriber: Subscriber = { filter, onEvent, delivered: new Set() }
+  getSubscriptions(): Map<string, Subscriber> {
+    return new Map(this.subscribers)
+  }
 
-    // Replay history
-    for (const e of relay) {
-      deliverToSubscriber(subscriber, e)
+  async publish(
+    event: UnsignedEvent,
+    signerSecretKey?: Uint8Array
+  ): Promise<VerifiedEvent> {
+    const ndkEvent = new NDKEvent()
+    ndkEvent.kind = event.kind
+    ndkEvent.content = event.content
+    ndkEvent.tags = event.tags || []
+    ndkEvent.created_at = event.created_at
+    ndkEvent.pubkey = event.pubkey
+
+    if (signerSecretKey) {
+      const signer = new NDKPrivateKeySigner(signerSecretKey)
+      await ndkEvent.sign(signer)
     }
 
-    subscribers.push(subscriber)
+    const verifiedEvent = {
+      ...event,
+      id: ndkEvent.id!,
+      sig: ndkEvent.sig!,
+      tags: ndkEvent.tags || [],
+    } as VerifiedEvent
 
-    // Unsubscribe fn
+    this.events.push(verifiedEvent)
+
+    for (const sub of this.subscribers.values()) {
+      this.deliverToSubscriber(sub, verifiedEvent)
+    }
+
+    return verifiedEvent
+  }
+
+  subscribe(filter: Filter, onEvent: (event: VerifiedEvent) => void): () => void {
+    this.subscriptionCounter++
+    const subId = `sub-${this.subscriptionCounter}`
+
+    const subscriber: Subscriber = {
+      id: subId,
+      filter,
+      onEvent,
+      delivered: new Set(),
+    }
+
+    this.subscribers.set(subId, subscriber)
+
+    if (this.debug) {
+      console.log("MockRelay: new subscription", subId, "with filter", filter)
+      console.log(
+        "MockRelay: delivering",
+        this.events.length,
+        "existing events to new subscriber"
+      )
+    }
+    for (const event of this.events) {
+      this.deliverToSubscriber(subscriber, event)
+    }
+
     return () => {
-      const idx = subscribers.indexOf(subscriber)
-      if (idx !== -1) subscribers.splice(idx, 1)
+      this.subscribers.delete(subId)
     }
   }
-} 
+
+  private deliverToSubscriber(subscriber: Subscriber, event: VerifiedEvent): void {
+    if (!subscriber.delivered.has(event.id) && matchFilter(subscriber.filter, event)) {
+      if (this.debug) {
+        console.log("Delivering event", event.id, "to subscriber", subscriber.id)
+      }
+      subscriber.delivered.add(event.id)
+      try {
+        subscriber.onEvent(event)
+      } catch (error) {
+        if (this.shouldIgnoreDecryptionError(error)) {
+          console.warn("MockRelay: ignored decrypt error", error)
+          return
+        }
+        throw error
+      }
+    }
+  }
+
+  private shouldIgnoreDecryptionError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false
+    const message = error.message?.toLowerCase()
+    if (!message) return false
+    return message.includes("invalid mac") || message.includes("failed to decrypt header")
+  }
+
+  clearEvents(): void {
+    this.events = []
+    for (const sub of this.subscribers.values()) {
+      sub.delivered.clear()
+    }
+  }
+
+  reset(): void {
+    this.events = []
+    this.subscribers.clear()
+    this.subscriptionCounter = 0
+  }
+}
