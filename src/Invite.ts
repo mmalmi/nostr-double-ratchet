@@ -1,13 +1,15 @@
-import { generateSecretKey, getPublicKey, nip44, finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
+import { finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent, Filter } from "nostr-tools";
 import { INVITE_EVENT_KIND, NostrSubscribe, Unsubscribe, EncryptFunction, DecryptFunction, INVITE_RESPONSE_KIND } from "./types";
-import { getConversationKey } from "nostr-tools/nip44";
 import { Session } from "./Session.ts";
-import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
-
-const TWO_DAYS = 2 * 24 * 60 * 60
+import {
+    generateEphemeralKeypair,
+    generateSharedSecret,
+    encryptInviteResponse,
+    decryptInviteResponse,
+    createSessionFromAccept,
+} from "./inviteUtils";
 
 const now = () => Math.round(Date.now() / 1000)
-const randomNow = () => Math.round(now() - Math.random() * TWO_DAYS)
 
 /**
  * Invite is a safe way to exchange session keys and initiate secret sessions.
@@ -36,14 +38,13 @@ export class Invite {
         if (!inviter) {
             throw new Error("Inviter public key is required");
         }
-        const inviterEphemeralPrivateKey = generateSecretKey();
-        const inviterEphemeralPublicKey = getPublicKey(inviterEphemeralPrivateKey);
-        const sharedSecret = bytesToHex(generateSecretKey());
+        const ephemeralKeypair = generateEphemeralKeypair();
+        const sharedSecret = generateSharedSecret();
         return new Invite(
-            inviterEphemeralPublicKey,
+            ephemeralKeypair.publicKey,
             sharedSecret,
             inviter,
-            inviterEphemeralPrivateKey,
+            ephemeralKeypair.privateKey,
             deviceId,
             maxUses
         );
@@ -240,52 +241,39 @@ export class Invite {
         encryptor: Uint8Array | EncryptFunction,
         deviceId?: string,
     ): Promise<{ session: Session, event: VerifiedEvent }> {
-        const inviteeSessionKey = generateSecretKey();
-        const inviteeSessionPublicKey = getPublicKey(inviteeSessionKey);
+        const inviteeSessionKeypair = generateEphemeralKeypair();
         const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
 
-        const sharedSecret = hexToBytes(this.sharedSecret);
-        const session = Session.init(nostrSubscribe, this.inviterEphemeralPublicKey, inviteeSessionKey, true, sharedSecret, undefined);
-
-        // should we take only Encrypt / Decrypt functions, not keys, to make it simpler and with less imports here?
-        // common implementation problem: plaintext, pubkey params in different order
-        const encrypt = typeof encryptor === 'function' ?
-            encryptor :
-            (plaintext: string, pubkey: string) => Promise.resolve(nip44.encrypt(plaintext, getConversationKey(encryptor, pubkey)));
-
-        const payload = JSON.stringify({
-            sessionKey: inviteeSessionPublicKey,
-            deviceId: deviceId
+        const session = createSessionFromAccept({
+            nostrSubscribe,
+            theirPublicKey: this.inviterEphemeralPublicKey,
+            ourSessionPrivateKey: inviteeSessionKeypair.privateKey,
+            sharedSecret: this.sharedSecret,
+            isSender: true,
         });
-        const dhEncrypted = await encrypt(payload, inviterPublicKey);
 
-        const innerEvent = {
-            pubkey: inviteePublicKey,
-            content: await nip44.encrypt(dhEncrypted, sharedSecret),
-            created_at: Math.floor(Date.now() / 1000),
-        };
-        const innerJson = JSON.stringify(innerEvent);
+        const encrypt = typeof encryptor === 'function' ? encryptor : undefined;
+        const inviteePrivateKey = typeof encryptor === 'function' ? undefined : encryptor;
 
-        // Create a random keypair for the envelope sender
-        const randomSenderKey = generateSecretKey();
-        const randomSenderPublicKey = getPublicKey(randomSenderKey);
+        const encrypted = await encryptInviteResponse({
+            inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
+            inviteePublicKey,
+            inviteePrivateKey,
+            inviterPublicKey,
+            inviterEphemeralPublicKey: this.inviterEphemeralPublicKey,
+            sharedSecret: this.sharedSecret,
+            deviceId,
+            encrypt,
+        });
 
-        const envelope = {
-            kind: INVITE_RESPONSE_KIND,
-            pubkey: randomSenderPublicKey,
-            content: nip44.encrypt(innerJson, getConversationKey(randomSenderKey, this.inviterEphemeralPublicKey)),
-            created_at: randomNow(),
-            tags: [['p', this.inviterEphemeralPublicKey]],
-        };
-
-        return { session, event: finalizeEvent(envelope, randomSenderKey) };
+        return { session, event: finalizeEvent(encrypted.envelope, encrypted.randomSenderPrivateKey) };
     }
 
     listen(decryptor: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (_session: Session, _identity: string, _deviceId?: string) => void): Unsubscribe {
         if (!this.inviterEphemeralPrivateKey) {
             throw new Error("Inviter session key is not available");
         }
-        
+
         const filter = {
             kinds: [INVITE_RESPONSE_KIND],
             '#p': [this.inviterEphemeralPublicKey],
@@ -297,39 +285,30 @@ export class Invite {
                     return;
                 }
 
-                // Decrypt the outer envelope first
-                const decrypted = await nip44.decrypt(event.content, getConversationKey(this.inviterEphemeralPrivateKey!, event.pubkey));
-                const innerEvent = JSON.parse(decrypted);
+                const decrypt = typeof decryptor === 'function' ? decryptor : undefined;
+                const inviterPrivateKey = typeof decryptor === 'function' ? undefined : decryptor;
 
-                const sharedSecret = hexToBytes(this.sharedSecret);
-                const inviteeIdentity = innerEvent.pubkey;
-                this.usedBy.push(inviteeIdentity);
+                const decrypted = await decryptInviteResponse({
+                    envelopeContent: event.content,
+                    envelopeSenderPubkey: event.pubkey,
+                    inviterEphemeralPrivateKey: this.inviterEphemeralPrivateKey!,
+                    inviterPrivateKey,
+                    sharedSecret: this.sharedSecret,
+                    decrypt,
+                });
 
-                // Decrypt the inner content using shared secret first
-                const dhEncrypted = await nip44.decrypt(innerEvent.content, sharedSecret);
+                this.usedBy.push(decrypted.inviteeIdentity);
 
-                // Then decrypt using DH key
-                const innerDecrypt = typeof decryptor === 'function' ?
-                    decryptor :
-                    (ciphertext: string, pubkey: string) => Promise.resolve(nip44.decrypt(ciphertext, getConversationKey(decryptor, pubkey)));
+                const session = createSessionFromAccept({
+                    nostrSubscribe,
+                    theirPublicKey: decrypted.inviteeSessionPublicKey,
+                    ourSessionPrivateKey: this.inviterEphemeralPrivateKey!,
+                    sharedSecret: this.sharedSecret,
+                    isSender: false,
+                    name: event.id,
+                });
 
-                const decryptedPayload = await innerDecrypt(dhEncrypted, inviteeIdentity);
-
-                let inviteeSessionPublicKey: string;
-                let deviceId: string | undefined;
-
-                try {
-                    const parsed = JSON.parse(decryptedPayload);
-                    inviteeSessionPublicKey = parsed.sessionKey;
-                    deviceId = parsed.deviceId;
-                } catch {
-                    inviteeSessionPublicKey = decryptedPayload;
-                }
-
-                const name = event.id;
-                const session = Session.init(nostrSubscribe, inviteeSessionPublicKey, this.inviterEphemeralPrivateKey!, false, sharedSecret, name);
-
-                onSession(session, inviteeIdentity, deviceId);
+                onSession(session, decrypted.inviteeIdentity, decrypted.deviceId);
             } catch {
             }
         });
