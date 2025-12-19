@@ -59,14 +59,10 @@ export class InviteList {
     devices: DeviceEntry[] = [],
     removedDeviceIds: string[] = [],
   ) {
-    for (const deviceId of removedDeviceIds) {
-      this.removedDeviceIds.add(deviceId)
-    }
-    for (const device of devices) {
-      if (!this.removedDeviceIds.has(device.deviceId)) {
-        this.devices.set(device.deviceId, device)
-      }
-    }
+    this.removedDeviceIds = new Set(removedDeviceIds)
+    devices
+      .filter((device) => !this.removedDeviceIds.has(device.deviceId))
+      .forEach((device) => this.devices.set(device.deviceId, device))
   }
 
   /**
@@ -139,34 +135,31 @@ export class InviteList {
    * Creates an unsigned event representing this invite list.
    */
   getEvent(): UnsignedEvent {
-    const tags: string[][] = [
-      ["d", "double-ratchet/invite-list"],
-      ["version", "1"],
-    ]
+    const deviceTags = this.getAllDevices().map((device) => [
+      "device",
+      device.ephemeralPublicKey,
+      device.sharedSecret,
+      device.deviceId,
+      device.deviceLabel,
+      String(device.createdAt),
+    ])
 
-    // Add device tags
-    for (const device of this.devices.values()) {
-      tags.push([
-        "device",
-        device.ephemeralPublicKey,
-        device.sharedSecret,
-        device.deviceId,
-        device.deviceLabel,
-        String(device.createdAt),
-      ])
-    }
-
-    // Add removed device tags
-    for (const deviceId of this.removedDeviceIds) {
-      tags.push(["removed", deviceId])
-    }
+    const removedTags = this.getRemovedDeviceIds().map((deviceId) => [
+      "removed",
+      deviceId,
+    ])
 
     return {
       kind: INVITE_LIST_EVENT_KIND,
       pubkey: this.ownerPublicKey,
       content: "",
       created_at: now(),
-      tags,
+      tags: [
+        ["d", "double-ratchet/invite-list"],
+        ["version", "1"],
+        ...deviceTags,
+        ...removedTags,
+      ],
     }
   }
 
@@ -181,22 +174,19 @@ export class InviteList {
       throw new Error("Event signature is invalid")
     }
 
-    const devices: DeviceEntry[] = []
-    const removedDeviceIds: string[] = []
+    const devices = event.tags
+      .filter((tag) => tag[0] === "device" && tag.length >= 5)
+      .map((tag) => ({
+        ephemeralPublicKey: tag[1],
+        sharedSecret: tag[2],
+        deviceId: tag[3],
+        deviceLabel: tag[4],
+        createdAt: tag[5] ? parseInt(tag[5], 10) : event.created_at,
+      }))
 
-    for (const tag of event.tags) {
-      if (tag[0] === "device" && tag.length >= 5) {
-        devices.push({
-          ephemeralPublicKey: tag[1],
-          sharedSecret: tag[2],
-          deviceId: tag[3],
-          deviceLabel: tag[4],
-          createdAt: tag[5] ? parseInt(tag[5], 10) : event.created_at,
-        })
-      } else if (tag[0] === "removed" && tag.length >= 2) {
-        removedDeviceIds.push(tag[1])
-      }
-    }
+    const removedDeviceIds = event.tags
+      .filter((tag) => tag[0] === "removed" && tag.length >= 2)
+      .map((tag) => tag[1])
 
     return new InviteList(event.pubkey, devices, removedDeviceIds)
   }
@@ -244,42 +234,24 @@ export class InviteList {
    * - Private keys are preserved from the list that has them
    */
   merge(other: InviteList): InviteList {
-    // Union removed device IDs
     const mergedRemovedIds = new Set([
       ...this.removedDeviceIds,
       ...other.removedDeviceIds,
     ])
 
-    // Union all devices, preserving private keys
-    const mergedDevices = new Map<string, DeviceEntry>()
+    // Union all devices, preserving private keys from either list
+    const mergedDevices = [...this.devices.values(), ...other.devices.values()]
+      .reduce((map, device) => {
+        const existing = map.get(device.deviceId)
+        map.set(device.deviceId, existing
+          ? { ...device, ephemeralPrivateKey: existing.ephemeralPrivateKey || device.ephemeralPrivateKey }
+          : device
+        )
+        return map
+      }, new Map<string, DeviceEntry>())
 
-    // Add devices from this list
-    for (const device of this.devices.values()) {
-      mergedDevices.set(device.deviceId, device)
-    }
-
-    // Add/merge devices from other list
-    for (const device of other.devices.values()) {
-      const existing = mergedDevices.get(device.deviceId)
-      if (existing) {
-        // Preserve private key from whichever has it
-        mergedDevices.set(device.deviceId, {
-          ...device,
-          ephemeralPrivateKey:
-            existing.ephemeralPrivateKey || device.ephemeralPrivateKey,
-        })
-      } else {
-        mergedDevices.set(device.deviceId, device)
-      }
-    }
-
-    // Filter out removed devices
-    const activeDevices: DeviceEntry[] = []
-    for (const device of mergedDevices.values()) {
-      if (!mergedRemovedIds.has(device.deviceId)) {
-        activeDevices.push(device)
-      }
-    }
+    const activeDevices = Array.from(mergedDevices.values())
+      .filter((device) => !mergedRemovedIds.has(device.deviceId))
 
     return new InviteList(
       this.ownerPublicKey,
@@ -361,19 +333,17 @@ export class InviteList {
     const devices = this.getAllDevices()
 
     // Verify all devices have private keys
-    for (const device of devices) {
-      if (!device.ephemeralPrivateKey) {
-        throw new Error(
-          `Device ${device.deviceId} does not have ephemeral private key. Cannot listen for responses.`
-        )
-      }
+    const missingKeyDevice = devices.find((d) => !d.ephemeralPrivateKey)
+    if (missingKeyDevice) {
+      throw new Error(
+        `Device ${missingKeyDevice.deviceId} does not have ephemeral private key. Cannot listen for responses.`
+      )
     }
 
     if (devices.length === 0) {
       return () => {}
     }
 
-    // Subscribe to responses for all device ephemeral keys
     const ephemeralPubkeys = devices.map((d) => d.ephemeralPublicKey)
 
     const filter = {
