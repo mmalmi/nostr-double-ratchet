@@ -20,6 +20,27 @@ import {
 
 const now = () => Math.round(Date.now() / 1000)
 
+type DeviceTag = [
+  type: "device",
+  ephemeralPublicKey: string,
+  sharedSecret: string,
+  deviceId: string,
+  deviceLabel: string,
+  createdAt: string
+]
+
+type RemovedTag = [type: "removed", deviceId: string]
+
+const isDeviceTag = (tag: string[]): tag is DeviceTag =>
+  tag.length >= 6 &&
+  tag[0] === "device" &&
+  tag.slice(1, 6).every((v) => typeof v === "string")
+
+const isRemovedTag = (tag: string[]): tag is RemovedTag =>
+  tag.length >= 2 &&
+  tag[0] === "removed" &&
+  typeof tag[1] === "string"
+
 /**
  * A device entry in the invite list.
  */
@@ -175,18 +196,18 @@ export class InviteList {
     }
 
     const devices = event.tags
-      .filter((tag) => tag[0] === "device" && tag.length >= 5)
-      .map((tag) => ({
-        ephemeralPublicKey: tag[1],
-        sharedSecret: tag[2],
-        deviceId: tag[3],
-        deviceLabel: tag[4],
-        createdAt: tag[5] ? parseInt(tag[5], 10) : event.created_at,
+      .filter(isDeviceTag)
+      .map(([, ephemeralPublicKey, sharedSecret, deviceId, deviceLabel, createdAt]) => ({
+        ephemeralPublicKey,
+        sharedSecret,
+        deviceId,
+        deviceLabel,
+        createdAt: parseInt(createdAt, 10) || event.created_at,
       }))
 
     const removedDeviceIds = event.tags
-      .filter((tag) => tag[0] === "removed" && tag.length >= 2)
-      .map((tag) => tag[1])
+      .filter(isRemovedTag)
+      .map(([, deviceId]) => deviceId)
 
     return new InviteList(event.pubkey, devices, removedDeviceIds)
   }
