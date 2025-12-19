@@ -43,9 +43,10 @@ Each device publishes its own replaceable event:
   "created_at": 1234567890,
   "tags": [
     ["d", "double-ratchet/invite-list"],
-    ["device", "<ephemeralPubkey1>", "<sharedSecret1>", "<deviceId1>", "<deviceLabel1>"],
-    ["device", "<ephemeralPubkey2>", "<sharedSecret2>", "<deviceId2>", "<deviceLabel2>"],
-    ["version", "1"]
+    ["version", "1"],
+    ["device", "<ephemeralPubkey1>", "<sharedSecret1>", "<deviceId1>", "<deviceLabel1>", "<createdAt1>"],
+    ["device", "<ephemeralPubkey2>", "<sharedSecret2>", "<deviceId2>", "<deviceLabel2>", "<createdAt2>"],
+    ["removed", "<deviceId3>"]
   ],
   "content": "",
   "sig": "<signature with main nsec>"
@@ -61,6 +62,7 @@ Each device publishes its own replaceable event:
 | **Shared secret** | Per-device secret for initial handshake encryption |
 | **Device ID** | Unique identifier for the device |
 | **Device label** | Human-readable name (e.g., "iPhone", "Laptop") |
+| **Created at** | Unix timestamp when the device was added |
 
 ---
 
@@ -181,6 +183,7 @@ The secondary device generates its own keys; the main device only authorizes:
 | sharedSecret | ✓ | ✓ | ✓ |
 | deviceId | ✓ | ✓ | ✓ |
 | deviceLabel | ✓ | ✓ | ✓ |
+| createdAt | ✓ | ✓ | ✓ |
 | main nsec | ✓ (iris-client) | ✓ | ✗ |
 
 Note: In current iris-client, all devices have the main nsec. Future invite-only apps would not.
