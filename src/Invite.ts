@@ -198,8 +198,9 @@ export class Invite {
     }
 
     /**
-     * Creates an "invite tombstone" event that clears the original content and removes the list tag.
-     * Used when the inviter logs out and wants to make the invite invisible to other devices.
+     * Creates a tombstone event that replaces the invite, signaling device revocation.
+     * The tombstone has the same d-tag but no keys, making it invalid as an invite.
+     * Used during migration to InviteList or when revoking a device.
      */
     getDeletionEvent(): UnsignedEvent {
         if (!this.deviceId) {
@@ -208,12 +209,11 @@ export class Invite {
         return {
             kind: INVITE_EVENT_KIND,
             pubkey: this.inviter,
-            content: "", // deliberately empty
+            content: "",
             created_at: Math.floor(Date.now() / 1000),
             tags: [
-                ['ephemeralKey', this.inviterEphemeralPublicKey],
-                ['sharedSecret', this.sharedSecret],
-                ['d', 'double-ratchet/invites/' + this.deviceId], // same d tag
+                ['d', 'double-ratchet/invites/' + this.deviceId],
+                ['l', 'double-ratchet/invites'],
             ],
         };
     }
