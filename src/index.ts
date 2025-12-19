@@ -1,5 +1,6 @@
 export * from "./Session"
 export * from "./Invite"
+export * from "./InviteList"
 export * from "./types"
 export * from "./utils"
 export * from "./SessionManager"

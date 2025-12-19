@@ -1,5 +1,4 @@
 import { finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
-import { hexToBytes, bytesToHex } from "@noble/hashes/utils"
 import {
   NostrSubscribe,
   Unsubscribe,
