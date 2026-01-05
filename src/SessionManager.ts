@@ -521,6 +521,68 @@ export class SessionManager {
     return this.userRecords
   }
 
+  /**
+   * Returns all devices from the InviteList (our own devices).
+   * Returns empty array if InviteList is not initialized.
+   */
+  getOwnDevices(): DeviceEntry[] {
+    if (!this.inviteList) {
+      return []
+    }
+    return this.inviteList.getAllDevices()
+  }
+
+  /**
+   * Returns the current device's entry from the InviteList.
+   * Returns undefined if InviteList is not initialized or device not found.
+   */
+  getOwnDevice(): DeviceEntry | undefined {
+    if (!this.inviteList) {
+      return undefined
+    }
+    return this.inviteList.getDevice(this.deviceId)
+  }
+
+  /**
+   * Adds a device to the InviteList from a device payload.
+   * Used by main device when scanning QR or entering code from secondary device.
+   *
+   * @param payload - The device payload (ephemeralPubkey, sharedSecret, deviceId, deviceLabel)
+   */
+  async addDevice(payload: {
+    ephemeralPubkey: string
+    sharedSecret: string
+    deviceId: string
+    deviceLabel: string
+  }): Promise<void> {
+    await this.init()
+
+    await this.modifyInviteList((list) => {
+      const device: DeviceEntry = {
+        ephemeralPublicKey: payload.ephemeralPubkey,
+        sharedSecret: payload.sharedSecret,
+        deviceId: payload.deviceId,
+        deviceLabel: payload.deviceLabel,
+        createdAt: Math.floor(Date.now() / 1000),
+      }
+      list.addDevice(device)
+    })
+  }
+
+  /**
+   * Updates a device's label in the InviteList.
+   *
+   * @param deviceId - The device ID to update
+   * @param label - The new label
+   */
+  async updateDeviceLabel(deviceId: string, label: string): Promise<void> {
+    await this.init()
+
+    await this.modifyInviteList((list) => {
+      list.updateDeviceLabel(deviceId, label)
+    })
+  }
+
   close() {
     for (const unsubscribe of this.inviteSubscriptions.values()) {
       unsubscribe()
