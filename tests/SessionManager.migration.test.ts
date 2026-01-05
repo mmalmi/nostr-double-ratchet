@@ -49,7 +49,7 @@ describe('SessionManager Migration v1→v2', () => {
   })
 
   describe('storage key patterns', () => {
-    it('should use v1 prefix for device invite in version 1', async () => {
+    it('should use v2 prefix for InviteList', async () => {
       const manager = new SessionManager(
         publicKey,
         secretKey,
@@ -61,15 +61,15 @@ describe('SessionManager Migration v1→v2', () => {
 
       await manager.init()
 
-      // Current v1 behavior: stores device invite with v1 prefix
-      const keys = await storage.list('v1/')
-      const deviceInviteKey = keys.find(k => k.includes('device-invite'))
-      expect(deviceInviteKey).toBeDefined()
+      // v2 behavior: stores InviteList with v2 prefix
+      const keys = await storage.list('v2/')
+      const inviteListKey = keys.find(k => k.includes('invite-list'))
+      expect(inviteListKey).toBeDefined()
     })
   })
 
   describe('publishing behavior', () => {
-    it('should publish per-device invite (kind 30078) in v1', async () => {
+    it('should publish InviteList (kind 10078) in v2', async () => {
       const manager = new SessionManager(
         publicKey,
         secretKey,
@@ -84,11 +84,11 @@ describe('SessionManager Migration v1→v2', () => {
       // Wait for async publish to complete
       await new Promise(resolve => setTimeout(resolve, 50))
 
-      // Check that kind 30078 was published
+      // Check that kind 10078 (InviteList) was published
       const publishedEvents = mockRelay.getEvents()
-      const inviteEvent = publishedEvents.find(e => e.kind === INVITE_EVENT_KIND)
-      expect(inviteEvent).toBeDefined()
-      expect(inviteEvent?.kind).toBe(30078)
+      const inviteListEvent = publishedEvents.find(e => e.kind === INVITE_LIST_EVENT_KIND)
+      expect(inviteListEvent).toBeDefined()
+      expect(inviteListEvent?.kind).toBe(10078)
     })
   })
 

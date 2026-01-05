@@ -87,14 +87,16 @@ export class InviteList {
 
   /**
    * Creates a new device entry with generated keys.
+   * @param label - Human-readable label for the device
+   * @param deviceId - Optional device ID (generates random if not provided)
    */
-  createDevice(label: string): DeviceEntry {
+  createDevice(label: string, deviceId?: string): DeviceEntry {
     const keypair = generateEphemeralKeypair()
     return {
       ephemeralPublicKey: keypair.publicKey,
       ephemeralPrivateKey: keypair.privateKey,
       sharedSecret: generateSharedSecret(),
-      deviceId: generateDeviceId(),
+      deviceId: deviceId || generateDeviceId(),
       deviceLabel: label,
       createdAt: now(),
     }
