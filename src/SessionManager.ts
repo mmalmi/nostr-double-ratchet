@@ -100,6 +100,8 @@ export class SessionManager {
     if (this.initialized) return
     this.initialized = true
 
+    console.warn("[SessionManager] init() called")
+
     await this.runMigrations().catch((error) => {
       console.error("Failed to run migrations:", error)
     })
@@ -141,6 +143,28 @@ export class SessionManager {
     }
 
     // Listen for invite responses using InviteList
+    this.restartOurInviteListSubscription(inviteList)
+
+    if (!this.ourDeviceIntiveTombstoneSubscription) {
+      this.ourDeviceIntiveTombstoneSubscription = this.createInviteTombstoneSubscription(
+        this.ourPublicKey
+      )
+    }
+
+    // Publish InviteList (kind 10078)
+    const inviteListEvent = inviteList.getEvent()
+    this.nostrPublish(inviteListEvent).catch((error) => {
+      console.error("Failed to publish our InviteList:", error)
+    })
+  }
+
+  private restartOurInviteListSubscription(inviteList: InviteList | null = this.inviteList) {
+    // Tear down previous subscription
+    this.ourInviteListSubscription?.()
+    this.ourInviteListSubscription = null
+
+    if (!inviteList) return
+
     this.ourInviteListSubscription = inviteList.listen(
       this.ourIdentityKey,
       this.nostrSubscribe,
@@ -163,18 +187,6 @@ export class SessionManager {
         this.attachSessionSubscription(inviteePubkey, deviceRecord, session, true)
       }
     )
-
-    if (!this.ourDeviceIntiveTombstoneSubscription) {
-      this.ourDeviceIntiveTombstoneSubscription = this.createInviteTombstoneSubscription(
-        this.ourPublicKey
-      )
-    }
-
-    // Publish InviteList (kind 10078)
-    const inviteListEvent = inviteList.getEvent()
-    this.nostrPublish(inviteListEvent).catch((error) => {
-      console.error("Failed to publish our InviteList:", error)
-    })
   }
 
   // -------------------
@@ -828,6 +840,9 @@ export class SessionManager {
     await this.saveInviteList(merged)
 
     this.inviteList = merged
+
+    // Refresh our invite list listener so it tracks any device set changes
+    this.restartOurInviteListSubscription(merged)
   }
 
   private async publishDeviceTombstone(deviceId: string): Promise<void> {

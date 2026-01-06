@@ -353,20 +353,14 @@ export class InviteList {
     ) => void
   ): Unsubscribe {
     const devices = this.getAllDevices()
+    const decryptableDevices = devices.filter((d) => !!d.ephemeralPrivateKey)
 
-    // Verify all devices have private keys
-    const missingKeyDevice = devices.find((d) => !d.ephemeralPrivateKey)
-    if (missingKeyDevice) {
-      throw new Error(
-        `Device ${missingKeyDevice.deviceId} does not have ephemeral private key. Cannot listen for responses.`
-      )
-    }
-
-    if (devices.length === 0) {
+    // If we don't have any devices we can decrypt for, do nothing gracefully
+    if (decryptableDevices.length === 0) {
       return () => {}
     }
 
-    const ephemeralPubkeys = devices.map((d) => d.ephemeralPublicKey)
+    const ephemeralPubkeys = decryptableDevices.map((d) => d.ephemeralPublicKey)
 
     const filter = {
       kinds: [INVITE_RESPONSE_KIND],
@@ -379,7 +373,7 @@ export class InviteList {
     return nostrSubscribe(filter, async (event) => {
       // Find which device this response is for
       const targetPubkey = event.tags.find((t) => t[0] === "p")?.[1]
-      const device = devices.find((d) => d.ephemeralPublicKey === targetPubkey)
+      const device = decryptableDevices.find((d) => d.ephemeralPublicKey === targetPubkey)
 
       if (!device || !device.ephemeralPrivateKey) {
         return
