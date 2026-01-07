@@ -100,8 +100,6 @@ export class SessionManager {
     if (this.initialized) return
     this.initialized = true
 
-    console.warn("[SessionManager] init() called")
-
     await this.runMigrations().catch((error) => {
       console.error("Failed to run migrations:", error)
     })
@@ -110,20 +108,32 @@ export class SessionManager {
       console.error("Failed to load user records:", error)
     })
 
-    // Load or create InviteList
-    let inviteList = await this.loadInviteList()
+    // Fetch-merge-publish pattern to achieve eventual consistency
+    // 1. Load from local storage (has our private keys)
+    const local = await this.loadInviteList()
 
-    if (!inviteList) {
-      // Create new InviteList with our device
+    // 2. Fetch from relay (has other devices' entries)
+    const remote = await this.fetchUserInviteList(this.ourPublicKey)
+
+    // 3. Merge local + remote
+    let inviteList: InviteList
+    if (local && remote) {
+      inviteList = local.merge(remote)
+    } else if (local) {
+      inviteList = local
+    } else if (remote) {
+      inviteList = remote
+    } else {
       inviteList = new InviteList(this.ourPublicKey)
-      const device = inviteList.createDevice(this.deviceId, this.deviceId)
-      inviteList.addDevice(device)
-    } else if (!inviteList.getDevice(this.deviceId)) {
-      // InviteList exists but doesn't have our device - add it
+    }
+
+    // 4. Add our device if not present
+    if (!inviteList.getDevice(this.deviceId)) {
       const device = inviteList.createDevice(this.deviceId, this.deviceId)
       inviteList.addDevice(device)
     }
 
+    // 5. Save and publish
     this.inviteList = inviteList
     await this.saveInviteList(inviteList)
 
@@ -151,7 +161,7 @@ export class SessionManager {
       )
     }
 
-    // Publish InviteList (kind 10078)
+    // Publish merged InviteList (kind 10078)
     const inviteListEvent = inviteList.getEvent()
     this.nostrPublish(inviteListEvent).catch((error) => {
       console.error("Failed to publish our InviteList:", error)
@@ -304,12 +314,19 @@ export class SessionManager {
   private fetchUserInviteList(pubkey: string, timeoutMs: number = 500): Promise<InviteList | null> {
     return new Promise((resolve) => {
       let found: InviteList | null = null
+      let resolved = false
+
       const timeout = setTimeout(() => {
-        unsub()
+        if (resolved) return
+        resolved = true
+        unsubscribe()
         resolve(found)
       }, timeoutMs)
 
-      const unsub = this.nostrSubscribe(
+      // Initialize to no-op to avoid "Cannot access before initialization" error
+      // when events are delivered synchronously during subscribe()
+      let unsubscribe: () => void = () => {}
+      unsubscribe = this.nostrSubscribe(
         {
           kinds: [INVITE_LIST_EVENT_KIND],
           authors: [pubkey],
@@ -317,16 +334,22 @@ export class SessionManager {
           limit: 1,
         },
         (event) => {
+          if (resolved) return
           try {
             found = InviteList.fromEvent(event)
+            resolved = true
             clearTimeout(timeout)
-            unsub()
             resolve(found)
           } catch {
             // Invalid event, ignore
           }
         }
       )
+
+      // If we found the event synchronously, unsubscribe now
+      if (resolved) {
+        unsubscribe()
+      }
     })
   }
 

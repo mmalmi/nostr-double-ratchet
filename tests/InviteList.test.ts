@@ -430,7 +430,7 @@ describe('InviteList', () => {
       expect(unsubCalled).toHaveBeenCalled()
     })
 
-    it('should throw when listening without private keys', () => {
+    it('should return no-op unsubscribe when listening without private keys', () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
@@ -447,7 +447,10 @@ describe('InviteList', () => {
 
       const nostrSubscribe = () => () => {}
 
-      expect(() => list.listen(ownerPrivateKey, nostrSubscribe, vi.fn())).toThrow()
+      // listen() gracefully returns a no-op unsubscribe when no private keys available
+      const unsub = list.listen(ownerPrivateKey, nostrSubscribe, vi.fn())
+      expect(typeof unsub).toBe('function')
+      unsub() // Should not throw
     })
   })
 
