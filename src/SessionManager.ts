@@ -115,6 +115,10 @@ export class SessionManager {
     // 2. Fetch from relay (has other devices' entries)
     const remote = await this.fetchUserInviteList(this.ourPublicKey)
 
+    const localDevices = local?.getAllDevices().map(d => d.deviceId) || []
+    const remoteDevices = remote?.getAllDevices().map(d => d.deviceId) || []
+    console.log(`[InviteList] init: local=[${localDevices}] remote=[${remoteDevices}]`)
+
     // 3. Merge local + remote
     let inviteList: InviteList
     if (local && remote) {
@@ -128,14 +132,27 @@ export class SessionManager {
     }
 
     // 4. Add our device if not present
-    if (!inviteList.getDevice(this.deviceId)) {
+    const needsAdd = !inviteList.getDevice(this.deviceId)
+    if (needsAdd) {
       const device = inviteList.createDevice(this.deviceId, this.deviceId)
       inviteList.addDevice(device)
+      console.log(`[InviteList] init: added our device ${this.deviceId}`)
     }
+
+    const mergedDevices = inviteList.getAllDevices().map(d => d.deviceId)
+    console.log(`[InviteList] init: merged=[${mergedDevices}], publishing`)
 
     // 5. Save and publish
     this.inviteList = inviteList
     await this.saveInviteList(inviteList)
+
+    // 6. Setup sessions with our own other devices
+    // First, add only our current device to prevent accepting our own invite
+    const ourUserRecord = this.getOrCreateUserRecord(this.ourPublicKey)
+    this.upsertDeviceRecord(ourUserRecord, this.deviceId)
+    // Then call setupUser to accept invites from our other devices
+    this.setupUser(this.ourPublicKey)
+    console.log(`[InviteList] init: setting up sessions with own devices`)
 
     // Also keep a reference as Invite for backwards compatibility
     const ourDevice = inviteList.getDevice(this.deviceId)
@@ -188,6 +205,8 @@ export class SessionManager {
         if (nostrEventIdInStorage) {
           return
         }
+
+        console.log(`[InviteList] received accept from ${inviteePubkey.slice(0, 8)}:${deviceId} on our device ${ourDeviceId}`)
 
         await this.storage.put(acceptanceKey, "1")
 
@@ -416,12 +435,15 @@ export class SessionManager {
       if (!alreadyTracked) {
         dr.inactiveSessions.push(session)
         dr.inactiveSessions = dr.inactiveSessions.slice(-1)
+        console.log(`[Session] attached INACTIVE session for ${userPubkey.slice(0, 8)}:${deviceRecord.deviceId}`)
       }
     } else {
       rotateSession(session)
+      console.log(`[Session] attached ACTIVE session for ${userPubkey.slice(0, 8)}:${deviceRecord.deviceId}`)
     }
 
     const unsub = session.onEvent((event) => {
+      console.log(`[Session] received message from ${userPubkey.slice(0, 8)}:${deviceRecord.deviceId}`)
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       rotateSession(session)
       this.storeUserRecord(userPubkey).catch(console.error)
@@ -485,6 +507,7 @@ export class SessionManager {
       inviteList: InviteList,
       deviceId: string
     ) => {
+      console.log(`[InviteList] accepting invite from ${userPubkey.slice(0, 8)}:${deviceId}`)
       const { session, event } = await inviteList.accept(
         deviceId,
         this.nostrSubscribe,
@@ -493,7 +516,10 @@ export class SessionManager {
         this.deviceId
       )
       return this.nostrPublish(event)
-        .then(() => this.upsertDeviceRecord(userRecord, deviceId))
+        .then(() => {
+          console.log(`[InviteList] sent accept to ${userPubkey.slice(0, 8)}:${deviceId}`)
+          return this.upsertDeviceRecord(userRecord, deviceId)
+        })
         .then((dr) => this.attachSessionSubscription(userPubkey, dr, session))
         .then(() => this.sendMessageHistory(userPubkey, deviceId))
         .catch(console.error)
@@ -518,7 +544,10 @@ export class SessionManager {
 
     // Subscribe to InviteList (kind 10078) - new format
     this.attachInviteListSubscription(userPubkey, async (inviteList) => {
-      for (const device of inviteList.getAllDevices()) {
+      const devices = inviteList.getAllDevices()
+      const deviceIds = devices.map(d => d.deviceId)
+      console.log(`[InviteList] received list from ${userPubkey.slice(0, 8)}: devices=[${deviceIds}]`)
+      for (const device of devices) {
         if (!userRecord.devices.has(device.deviceId)) {
           await acceptInviteFromDevice(inviteList, device.deviceId)
         }
@@ -728,6 +757,9 @@ export class SessionManager {
     if (device.staleAt !== undefined) {
       return
     }
+    if (history.length > 0) {
+      console.log(`[SendHistory] sending ${history.length} messages to ${recipientPublicKey.slice(0, 8)}:${deviceId}`)
+    }
     for (const event of history) {
       const { activeSession } = device
 
@@ -744,6 +776,9 @@ export class SessionManager {
   ): Promise<Rumor | undefined> {
     await this.init()
 
+    const isSelfMessage = recipientIdentityKey === this.ourPublicKey
+    console.log(`[SendEvent] to ${recipientIdentityKey.slice(0, 8)} (self=${isSelfMessage}) from device ${this.deviceId}`)
+
     // Add to message history queue (will be sent when session is established)
     const completeEvent = event as Rumor
     const historyTargets = new Set([recipientIdentityKey, this.ourPublicKey])
@@ -758,16 +793,23 @@ export class SessionManager {
     this.setupUser(recipientIdentityKey)
     this.setupUser(this.ourPublicKey)
 
-    const devices = [
-      ...Array.from(userRecord.devices.values()),
-      ...Array.from(ourUserRecord.devices.values()),
-    ].filter((device) => device.staleAt === undefined)
+    const recipientDevices = Array.from(userRecord.devices.values()).filter(d => d.staleAt === undefined)
+    const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
+
+    console.log(`[SendEvent] recipient devices: [${recipientDevices.map(d => `${d.deviceId}(session=${!!d.activeSession})`).join(', ')}]`)
+    console.log(`[SendEvent] own devices: [${ownDevices.map(d => `${d.deviceId}(session=${!!d.activeSession})`).join(', ')}]`)
+
+    const devices = [...recipientDevices, ...ownDevices]
 
     // Send to all devices in background (if sessions exist)
     Promise.allSettled(
       devices.map(async (device) => {
         const { activeSession } = device
-        if (!activeSession) return
+        if (!activeSession) {
+          console.log(`[SendEvent] skipping ${device.deviceId} - no active session`)
+          return
+        }
+        console.log(`[SendEvent] sending to ${device.deviceId}`)
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         await this.nostrPublish(verifiedEvent).catch(console.error)
       })
@@ -841,6 +883,10 @@ export class SessionManager {
     // 1. Fetch latest from relay
     const remote = await this.fetchUserInviteList(this.ourPublicKey)
 
+    const localDevices = this.inviteList?.getAllDevices().map(d => d.deviceId) || []
+    const remoteDevices = remote?.getAllDevices().map(d => d.deviceId) || []
+    console.log(`[InviteList] modify: local=[${localDevices}] remote=[${remoteDevices}]`)
+
     // 2. Merge with local (preserves private keys)
     let merged: InviteList
     if (this.inviteList && remote) {
@@ -854,8 +900,13 @@ export class SessionManager {
       merged = new InviteList(this.ourPublicKey)
     }
 
+    const beforeChange = merged.getAllDevices().map(d => d.deviceId)
+
     // 3. Apply the change
     change(merged)
+
+    const afterChange = merged.getAllDevices().map(d => d.deviceId)
+    console.log(`[InviteList] modify: before=[${beforeChange}] after=[${afterChange}], publishing`)
 
     // 4. Publish and save
     const event = merged.getEvent()
