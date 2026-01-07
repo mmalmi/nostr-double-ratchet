@@ -61,7 +61,6 @@ export class SessionManager {
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
   private messageHistory: Map<string, Rumor[]> = new Map()
-  private currentDeviceInvite: Invite | null = null
   private inviteList: InviteList | null = null
 
   // Subscriptions
@@ -116,16 +115,7 @@ export class SessionManager {
     const remote = await this.fetchUserInviteList(this.ourPublicKey)
 
     // 3. Merge local + remote
-    let inviteList: InviteList
-    if (local && remote) {
-      inviteList = local.merge(remote)
-    } else if (local) {
-      inviteList = local
-    } else if (remote) {
-      inviteList = remote
-    } else {
-      inviteList = new InviteList(this.ourPublicKey)
-    }
+    const inviteList = this.mergeInviteLists(local, remote)
 
     // 4. Add our device if not present
     const needsAdd = !inviteList.getDevice(this.deviceId)
@@ -144,21 +134,6 @@ export class SessionManager {
     this.upsertDeviceRecord(ourUserRecord, this.deviceId)
     // Then call setupUser to accept invites from our other devices
     this.setupUser(this.ourPublicKey)
-
-    // Also keep a reference as Invite for backwards compatibility
-    const ourDevice = inviteList.getDevice(this.deviceId)
-    if (ourDevice) {
-      this.currentDeviceInvite = new Invite(
-        ourDevice.ephemeralPublicKey,
-        ourDevice.sharedSecret,
-        this.ourPublicKey,
-        ourDevice.ephemeralPrivateKey,
-        ourDevice.deviceId,
-        undefined,
-        [],
-        ourDevice.createdAt
-      )
-    }
 
     // Listen for invite responses using InviteList
     this.restartOurInviteListSubscription(inviteList)
@@ -305,6 +280,13 @@ export class SessionManager {
   // -------------------
   // InviteList helpers
   // -------------------
+  private mergeInviteLists(local: InviteList | null, remote: InviteList | null): InviteList {
+    if (local && remote) return local.merge(remote)
+    if (local) return local
+    if (remote) return remote
+    return new InviteList(this.ourPublicKey)
+  }
+
   private async loadInviteList(): Promise<InviteList | null> {
     const data = await this.storage.get<string>(this.inviteListKey())
     if (!data) return null
@@ -557,7 +539,7 @@ export class SessionManager {
   }
 
   getDeviceInviteEphemeralKey(): string | null {
-    return this.currentDeviceInvite?.inviterEphemeralPublicKey || null
+    return this.getOwnDevice()?.ephemeralPublicKey ?? null
   }
 
   getUserRecords(): Map<string, UserRecord> {
@@ -849,17 +831,7 @@ export class SessionManager {
     const remote = await this.fetchUserInviteList(this.ourPublicKey)
 
     // 2. Merge with local (preserves private keys)
-    let merged: InviteList
-    if (this.inviteList && remote) {
-      merged = this.inviteList.merge(remote)
-    } else if (this.inviteList) {
-      merged = this.inviteList
-    } else if (remote) {
-      merged = remote
-    } else {
-      // No list exists yet
-      merged = new InviteList(this.ourPublicKey)
-    }
+    const merged = this.mergeInviteLists(this.inviteList, remote)
 
     // 3. Apply the change
     change(merged)
