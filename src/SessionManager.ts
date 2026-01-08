@@ -8,7 +8,6 @@ import {
   INVITE_LIST_EVENT_KIND,
   CHAT_MESSAGE_KIND,
 } from "./types"
-import { runMigrations, migrations } from "./migrations"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { Invite } from "./Invite"
 import { InviteList, DeviceEntry } from "./InviteList"
@@ -100,16 +99,7 @@ export class SessionManager {
     if (this.initialized) return
     this.initialized = true
 
-    await runMigrations(
-      {
-        storage: this.storage,
-        deviceId: this.deviceId,
-        ourPublicKey: this.ourPublicKey,
-        nostrSubscribe: this.nostrSubscribe,
-        nostrPublish: this.nostrPublish,
-      },
-      migrations
-    ).catch((error) => {
+    await this.runMigrations().catch((error) => {
       console.error("Failed to run migrations:", error)
     })
 
@@ -280,7 +270,9 @@ export class SessionManager {
   private userRecordKeyPrefix() {
     return `${this.versionPrefix}/user/`
   }
-
+  private versionKey() {
+    return `storage-version`
+  }
   private inviteListKey() {
     return `${this.versionPrefix}/invite-list`
   }
@@ -1007,5 +999,150 @@ export class SessionManager {
         })
       )
     })
+  }
+
+  private async runMigrations() {
+    // Run migrations sequentially
+    let version = await this.storage.get<string>(this.versionKey())
+
+    // First migration
+    if (!version) {
+      // Fetch all existing invites
+      // Assume no version prefix
+      // Deserialize and serialize to start using persistent createdAt
+      // Re-save invites with proper keys
+      const oldInvitePrefix = "invite/"
+      const inviteKeys = await this.storage.list(oldInvitePrefix)
+      await Promise.all(
+        inviteKeys.map(async (key) => {
+          try {
+            const publicKey = key.slice(oldInvitePrefix.length)
+            const inviteData = await this.storage.get<string>(key)
+            if (inviteData) {
+              const newKey = this.userInviteKey(publicKey)
+              const invite = Invite.deserialize(inviteData)
+              const serializedInvite = invite.serialize()
+              await this.storage.put(newKey, serializedInvite)
+              await this.storage.del(key)
+            }
+          } catch (e) {
+            console.error("Migration error for invite:", e)
+          }
+        })
+      )
+
+      // Fetch all existing user records
+      // Assume no version prefix
+      // Remove all old sessions as these may have key issues
+      // Re-save user records without sessions with proper keys
+      const oldUserRecordPrefix = "user/"
+      const sessionKeys = await this.storage.list(oldUserRecordPrefix)
+      await Promise.all(
+        sessionKeys.map(async (key) => {
+          try {
+            const publicKey = key.slice(oldUserRecordPrefix.length)
+            const userRecordData = await this.storage.get<StoredUserRecord>(key)
+            if (userRecordData) {
+              const newKey = this.userRecordKey(publicKey)
+              const newUserRecordData: StoredUserRecord = {
+                publicKey: userRecordData.publicKey,
+                devices: userRecordData.devices.map((device) => ({
+                  deviceId: device.deviceId,
+                  activeSession: null,
+                  createdAt: device.createdAt,
+                  inactiveSessions: [],
+                })),
+              }
+              await this.storage.put(newKey, newUserRecordData)
+              await this.storage.del(key)
+            }
+          } catch (e) {
+            console.error("Migration error for user record:", e)
+          }
+        })
+      )
+
+      // Set version to 1 so next migration can run
+      version = "1"
+      await this.storage.put(this.versionKey(), version)
+
+      return
+    }
+
+    // Migration v1 → v2: Per-device invites to InviteList
+    if (version === "1") {
+      await this.migrateV1ToV2()
+      version = "2"
+      await this.storage.put(this.versionKey(), version)
+    }
+  }
+
+  /**
+   * Migrates from per-device invites (kind 30078) to consolidated InviteList (kind 10078).
+   *
+   * Each device only migrates itself. Old devices continue working until they upgrade.
+   */
+  private async migrateV1ToV2(): Promise<void> {
+    // 1. Load our device invite from v1 storage
+    const v1DeviceInviteKey = `v1/device-invite/${this.deviceId}`
+    const inviteData = await this.storage.get<string>(v1DeviceInviteKey)
+    if (!inviteData) {
+      // Nothing to migrate - this device never had a v1 invite
+      return
+    }
+
+    let ourInvite: Invite
+    try {
+      ourInvite = Invite.deserialize(inviteData)
+    } catch {
+      console.error("Failed to deserialize v1 invite during migration")
+      return
+    }
+
+    // Convert invite to device entry
+    const deviceEntry: DeviceEntry = {
+      ephemeralPublicKey: ourInvite.inviterEphemeralPublicKey,
+      ephemeralPrivateKey: ourInvite.inviterEphemeralPrivateKey,
+      sharedSecret: ourInvite.sharedSecret,
+      deviceId: ourInvite.deviceId || this.deviceId,
+      deviceLabel: ourInvite.deviceId || this.deviceId,
+      createdAt: ourInvite.createdAt,
+    }
+
+    // 2. Fetch existing InviteList from relay (another device may have already migrated)
+    const remoteList = await this.fetchUserInviteList(this.ourPublicKey)
+
+    // 3. Build InviteList
+    let inviteList: InviteList
+    if (remoteList) {
+      // Merge our device into existing list
+      const localList = new InviteList(this.ourPublicKey, [deviceEntry])
+      inviteList = remoteList.merge(localList)
+    } else {
+      // Create new list with just our device
+      inviteList = new InviteList(this.ourPublicKey, [deviceEntry])
+    }
+
+    // 4. Publish InviteList (kind 10078)
+    const inviteListEvent = inviteList.getEvent()
+    await this.nostrPublish(inviteListEvent).catch((error) => {
+      console.error("Failed to publish InviteList during migration:", error)
+    })
+
+    // 5. Publish tombstone for our old per-device invite (kind 30078)
+    if (ourInvite.deviceId) {
+      const tombstone = ourInvite.getDeletionEvent()
+      await this.nostrPublish(tombstone).catch((error) => {
+        console.error("Failed to publish tombstone during migration:", error)
+      })
+    }
+
+    // 6. Save InviteList to local storage (with v2 prefix)
+    await this.saveInviteList(inviteList)
+
+    // 7. Delete old v1 storage key
+    await this.storage.del(v1DeviceInviteKey)
+
+    // Note: Version is updated by caller
   }
 }
