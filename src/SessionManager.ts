@@ -999,7 +999,37 @@ export class SessionManager {
 
   private loadAllUserRecords() {
     const prefix = this.userRecordKeyPrefix()
-    return this.storage.list(prefix).then((keys) => {
+    return this.storage.list(prefix).then(async (keys) => {
+      // Fallback recovery: if no v2 user records exist but v1 do, self-migrate them.
+      if (!keys.length) {
+        try {
+          const v1Prefix = `v1/user/`
+          const v1Keys = await this.storage.list(v1Prefix)
+          if (v1Keys.length) {
+            for (const v1Key of v1Keys) {
+              try {
+                const publicKey = v1Key.slice(v1Prefix.length)
+                const data = await this.storage.get<any>(v1Key)
+                if (data) {
+                  const v2Key = `${prefix}${data.publicKey || publicKey}`
+                  const existingV2 = await this.storage.get(v2Key)
+                  if (!existingV2) {
+                    await this.storage.put(v2Key, data)
+                  }
+                  await this.storage.del(v1Key)
+                }
+              } catch (e) {
+                console.error("Self-migrate v1→v2 user record failed:", e)
+              }
+            }
+            // Refresh v2 keys after migration
+            keys = await this.storage.list(prefix)
+          }
+        } catch (e) {
+          console.error("Failed scanning v1 user records for fallback migration:", e)
+        }
+      }
+
       return Promise.all(
         keys.map((key) => {
           const publicKey = key.slice(prefix.length)
