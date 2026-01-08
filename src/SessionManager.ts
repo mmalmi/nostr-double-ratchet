@@ -62,11 +62,11 @@ export class SessionManager {
   private userRecords: Map<string, UserRecord> = new Map()
   private messageHistory: Map<string, Rumor[]> = new Map()
   private inviteList: InviteList | null = null
+  private userInviteLists: Map<string, InviteList> = new Map()
 
   // Subscriptions
   private ourDeviceInviteSubscription: Unsubscribe | null = null
   private ourInviteListSubscription: Unsubscribe | null = null
-  private ourDeviceIntiveTombstoneSubscription: Unsubscribe | null = null
   private inviteSubscriptions: Map<string, Unsubscribe> = new Map()
   private sessionSubscriptions: Map<string, Unsubscribe> = new Map()
   private inviteTombstoneSubscriptions: Map<string, Unsubscribe> = new Map()
@@ -138,11 +138,8 @@ export class SessionManager {
     // Listen for invite responses using InviteList
     this.restartOurInviteListSubscription(inviteList)
 
-    if (!this.ourDeviceIntiveTombstoneSubscription) {
-      this.ourDeviceIntiveTombstoneSubscription = this.createInviteTombstoneSubscription(
-        this.ourPublicKey
-      )
-    }
+    // Note: We don't subscribe to our own tombstones because we always have InviteList
+    // which is the source of truth. Tombstones are only for legacy (v1) users.
 
     // Publish merged InviteList (kind 10078)
     const inviteListEvent = inviteList.getEvent()
@@ -221,6 +218,13 @@ export class SessionManager {
       },
       (event: VerifiedEvent) => {
         try {
+          // If user has an InviteList, use that as source of truth - ignore tombstones
+          const hasInviteList =
+            authorPublicKey === this.ourPublicKey
+              ? this.inviteList !== null
+              : this.userInviteLists.has(authorPublicKey)
+          if (hasInviteList) return
+
           const isTombstone = !event.tags?.some(
             ([key]) => key === "ephemeralKey" || key === "sharedSecret"
           )
@@ -449,6 +453,8 @@ export class SessionManager {
     const unsubscribe = this.subscribeToUserInviteList(
       userPubkey,
       async (inviteList) => {
+        // Cache the InviteList - if user has one, we use it as source of truth
+        this.userInviteLists.set(userPubkey, inviteList)
         if (onInviteList) await onInviteList(inviteList)
       }
     )
@@ -623,7 +629,6 @@ export class SessionManager {
 
     this.ourDeviceInviteSubscription?.()
     this.ourInviteListSubscription?.()
-    this.ourDeviceIntiveTombstoneSubscription?.()
   }
 
   deactivateCurrentSessions(publicKey: string) {
