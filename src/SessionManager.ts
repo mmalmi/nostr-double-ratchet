@@ -1143,15 +1143,16 @@ export class SessionManager {
     // 7. Delete old v1 storage key
     await this.storage.del(v1DeviceInviteKey)
 
-    // 8. Update version number of arbitrary records
+    // 8. Migrate remaining v1/ records to v2/ and clean up
     const anyRecordKey = await this.storage.list("v1/")
     const records = await Promise.all(
       anyRecordKey.map((key) => this.storage.get<any>(key))
     )
     await Promise.all(
-      records.map((record, index) => {
+      records.map(async (record, index) => {
         const key = anyRecordKey[index]
-        return this.storage.put(key.replace("v1/", "v2/"), record)
+        await this.storage.put(key.replace("v1/", "v2/"), record)
+        await this.storage.del(key)
       })
     )
 
