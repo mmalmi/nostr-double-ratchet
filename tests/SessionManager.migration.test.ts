@@ -7,7 +7,7 @@ import { InviteList } from '../src/InviteList'
 import { INVITE_LIST_EVENT_KIND, INVITE_EVENT_KIND } from '../src/types'
 import { MockRelay } from './helpers/mockRelay'
 
-describe('SessionManager Migration v1→v2', () => {
+describe('SessionManager Storage and InviteList', () => {
   let secretKey: Uint8Array
   let publicKey: string
   let storage: InMemoryStorageAdapter
@@ -49,7 +49,7 @@ describe('SessionManager Migration v1→v2', () => {
   })
 
   describe('storage key patterns', () => {
-    it('should use v2 prefix for InviteList', async () => {
+    it('should use v1 prefix for InviteList', async () => {
       const manager = new SessionManager(
         publicKey,
         secretKey,
@@ -61,15 +61,15 @@ describe('SessionManager Migration v1→v2', () => {
 
       await manager.init()
 
-      // v2 behavior: stores InviteList with v2 prefix
-      const keys = await storage.list('v2/')
+      // v1 behavior: stores InviteList with v1 prefix
+      const keys = await storage.list('v1/')
       const inviteListKey = keys.find(k => k.includes('invite-list'))
       expect(inviteListKey).toBeDefined()
     })
   })
 
   describe('publishing behavior', () => {
-    it('should publish InviteList (kind 10078) in v2', async () => {
+    it('should publish InviteList (kind 10078)', async () => {
       const manager = new SessionManager(
         publicKey,
         secretKey,
@@ -159,18 +159,18 @@ describe('SessionManager Migration v1→v2', () => {
   })
 })
 
-describe('SessionManager Migration - Future v2 Behavior', () => {
-  // These tests document expected v2 behavior after migration is implemented
+describe('SessionManager InviteList Behavior', () => {
+  // These tests document expected InviteList behavior
 
-  describe('v2 storage keys', () => {
-    it('should expect v2/invite-list storage key format for InviteList', () => {
-      // Document expected v2 storage key
-      const expectedKey = 'v2/invite-list'
-      expect(expectedKey).toBe('v2/invite-list')
+  describe('v1 storage keys', () => {
+    it('should expect v1/invite-list storage key format for InviteList', () => {
+      // Document expected v1 storage key
+      const expectedKey = 'v1/invite-list'
+      expect(expectedKey).toBe('v1/invite-list')
     })
   })
 
-  describe('v2 event kinds', () => {
+  describe('event kinds', () => {
     it('should use kind 10078 for InviteList', () => {
       expect(INVITE_LIST_EVENT_KIND).toBe(10078)
     })
