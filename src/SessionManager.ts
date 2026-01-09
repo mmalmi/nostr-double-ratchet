@@ -4,14 +4,15 @@ import {
   NostrPublish,
   Rumor,
   Unsubscribe,
-  INVITE_EVENT_KIND,
+  INVITE_LIST_EVENT_KIND,
   CHAT_MESSAGE_KIND,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { Invite } from "./Invite"
+import { InviteList, DeviceEntry } from "./InviteList"
 import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
-import { getEventHash, VerifiedEvent } from "nostr-tools"
+import { getEventHash } from "nostr-tools"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
 
@@ -59,14 +60,14 @@ export class SessionManager {
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
   private messageHistory: Map<string, Rumor[]> = new Map()
-  private currentDeviceInvite: Invite | null = null
+  private inviteList: InviteList | null = null
+  private userInviteLists: Map<string, InviteList> = new Map()
 
   // Subscriptions
   private ourDeviceInviteSubscription: Unsubscribe | null = null
-  private ourDeviceIntiveTombstoneSubscription: Unsubscribe | null = null
+  private ourInviteListSubscription: Unsubscribe | null = null
   private inviteSubscriptions: Map<string, Unsubscribe> = new Map()
   private sessionSubscriptions: Map<string, Unsubscribe> = new Map()
-  private inviteTombstoneSubscriptions: Map<string, Unsubscribe> = new Map()
 
   // Callbacks
   private internalSubscriptions: Set<OnEventCallback> = new Set()
@@ -104,29 +105,61 @@ export class SessionManager {
       console.error("Failed to load user records:", error)
     })
 
-    const ourInviteFromStorage: Invite | null = await this.storage
-      .get<string>(this.deviceInviteKey(this.deviceId))
-      .then((data) => {
-        if (!data) return null
-        try {
-          return Invite.deserialize(data)
-        } catch {
-          return null
-        }
-      })
+    // Fetch-merge-publish pattern to achieve eventual consistency
+    // 1. Load from local storage (has our private keys)
+    const local = await this.loadInviteList()
 
-    const invite =
-      ourInviteFromStorage || Invite.createNew(this.ourPublicKey, this.deviceId)
+    // 2. Fetch from relay (has other devices' entries)
+    const remote = await this.fetchUserInviteList(this.ourPublicKey)
 
-    this.currentDeviceInvite = invite
+    // 3. Merge local + remote
+    const inviteList = this.mergeInviteLists(local, remote)
 
-    await this.storage.put(this.deviceInviteKey(this.deviceId), invite.serialize())
+    // 4. Add our device if not present
+    const needsAdd = !inviteList.getDevice(this.deviceId)
+    if (needsAdd) {
+      const device = inviteList.createDevice(this.deviceId, this.deviceId)
+      inviteList.addDevice(device)
+    }
 
-    this.ourDeviceInviteSubscription = invite.listen(
+    // 5. Save and publish
+    this.inviteList = inviteList
+    await this.saveInviteList(inviteList)
+
+    // 6. Setup sessions with our own other devices
+    // First, add only our current device to prevent accepting our own invite
+    const ourUserRecord = this.getOrCreateUserRecord(this.ourPublicKey)
+    this.upsertDeviceRecord(ourUserRecord, this.deviceId)
+    // Then call setupUser to accept invites from our other devices
+    this.setupUser(this.ourPublicKey)
+
+    // Listen for invite responses using InviteList
+    this.restartOurInviteListSubscription(inviteList)
+
+    // Note: We don't subscribe to our own tombstones because we always have InviteList
+    // which is the source of truth. Tombstones are only for legacy (v1) users.
+
+    // Publish merged InviteList (kind 10078)
+    const inviteListEvent = inviteList.getEvent()
+    this.nostrPublish(inviteListEvent).catch((error) => {
+      console.error("Failed to publish our InviteList:", error)
+    })
+  }
+
+  private restartOurInviteListSubscription(inviteList: InviteList | null = this.inviteList) {
+    // Tear down previous subscription
+    this.ourInviteListSubscription?.()
+    this.ourInviteListSubscription = null
+
+    if (!inviteList) return
+
+    this.ourInviteListSubscription = inviteList.listen(
       this.ourIdentityKey,
       this.nostrSubscribe,
-      async (session, inviteePubkey, deviceId) => {
+      async (session, inviteePubkey, deviceId, ourDeviceId) => {
         if (!deviceId || deviceId === this.deviceId) return
+        if (ourDeviceId && ourDeviceId !== this.deviceId) return // Not for our device
+
         const nostrEventId = session.name
         const acceptanceKey = this.inviteAcceptKey(nostrEventId, inviteePubkey, deviceId)
         const nostrEventIdInStorage = await this.storage.get<string>(acceptanceKey)
@@ -142,17 +175,6 @@ export class SessionManager {
         this.attachSessionSubscription(inviteePubkey, deviceRecord, session, true)
       }
     )
-
-    if (!this.ourDeviceIntiveTombstoneSubscription) {
-      this.ourDeviceIntiveTombstoneSubscription = this.createInviteTombstoneSubscription(
-        this.ourPublicKey
-      )
-    }
-
-    const inviteNostrEvent = invite.getEvent()
-    this.nostrPublish(inviteNostrEvent).catch((error) => {
-      console.error("Failed to publish our device invite:", error)
-    })
   }
 
   // -------------------
@@ -185,35 +207,6 @@ export class SessionManager {
     return deviceRecord
   }
 
-  private createInviteTombstoneSubscription(authorPublicKey: string): Unsubscribe {
-    return this.nostrSubscribe(
-      {
-        kinds: [INVITE_EVENT_KIND],
-        authors: [authorPublicKey],
-        "#l": ["double-ratchet/invites"],
-      },
-      (event: VerifiedEvent) => {
-        try {
-          const isTombstone = !event.tags?.some(
-            ([key]) => key === "ephemeralKey" || key === "sharedSecret"
-          )
-          if (isTombstone) {
-            const deviceIdTag = event.tags.find(
-              ([key, value]) => key === "d" && value.startsWith("double-ratchet/invites/")
-            )
-            const [, deviceIdTagValue] = deviceIdTag || []
-            const deviceId = deviceIdTagValue.split("/").pop()
-            if (!deviceId) return
-
-            this.cleanupDevice(authorPublicKey, deviceId)
-          }
-        } catch (error) {
-          console.error("Failed to handle device tombstone:", error)
-        }
-      }
-    )
-  }
-
   private sessionKey(userPubkey: string, deviceId: string, sessionName: string) {
     return `${this.sessionKeyPrefix(userPubkey)}${deviceId}/${sessionName}`
   }
@@ -222,10 +215,6 @@ export class SessionManager {
   }
   private inviteAcceptKey(nostrEventId: string, userPubkey: string, deviceId: string) {
     return `${this.inviteAcceptKeyPrefix(userPubkey)}${deviceId}/${nostrEventId}`
-  }
-
-  private deviceInviteKey(deviceId: string) {
-    return `${this.versionPrefix}/device-invite/${deviceId}`
   }
 
   private userInviteKey(userPubkey: string) {
@@ -249,6 +238,96 @@ export class SessionManager {
   }
   private versionKey() {
     return `storage-version`
+  }
+  private inviteListKey() {
+    return `${this.versionPrefix}/invite-list`
+  }
+
+  // -------------------
+  // InviteList helpers
+  // -------------------
+  private mergeInviteLists(local: InviteList | null, remote: InviteList | null): InviteList {
+    if (local && remote) return local.merge(remote)
+    if (local) return local
+    if (remote) return remote
+    return new InviteList(this.ourPublicKey)
+  }
+
+  private async loadInviteList(): Promise<InviteList | null> {
+    const data = await this.storage.get<string>(this.inviteListKey())
+    if (!data) return null
+    try {
+      return InviteList.deserialize(data)
+    } catch {
+      return null
+    }
+  }
+
+  private async saveInviteList(list: InviteList): Promise<void> {
+    await this.storage.put(this.inviteListKey(), list.serialize())
+  }
+
+  private fetchUserInviteList(pubkey: string, timeoutMs: number = 500): Promise<InviteList | null> {
+    return new Promise((resolve) => {
+      let found: InviteList | null = null
+      let resolved = false
+
+      const timeout = setTimeout(() => {
+        if (resolved) return
+        resolved = true
+        unsubscribe()
+        resolve(found)
+      }, timeoutMs)
+
+      // Initialize to no-op to avoid "Cannot access before initialization" error
+      // when events are delivered synchronously during subscribe()
+      let unsubscribe: () => void = () => {}
+      unsubscribe = this.nostrSubscribe(
+        {
+          kinds: [INVITE_LIST_EVENT_KIND],
+          authors: [pubkey],
+          "#d": ["double-ratchet/invite-list"],
+          limit: 1,
+        },
+        (event) => {
+          if (resolved) return
+          try {
+            found = InviteList.fromEvent(event)
+            resolved = true
+            clearTimeout(timeout)
+            resolve(found)
+          } catch {
+            // Invalid event, ignore
+          }
+        }
+      )
+
+      // If we found the event synchronously, unsubscribe now
+      if (resolved) {
+        unsubscribe()
+      }
+    })
+  }
+
+  private subscribeToUserInviteList(
+    pubkey: string,
+    onInviteList: (list: InviteList) => void
+  ): Unsubscribe {
+    return this.nostrSubscribe(
+      {
+        kinds: [INVITE_LIST_EVENT_KIND],
+        authors: [pubkey],
+        "#d": ["double-ratchet/invite-list"],
+      },
+      (event) => {
+        try {
+          const list = InviteList.fromEvent(event)
+          onInviteList(list)
+        } catch {
+          // Invalid event, ignore
+        }
+      }
+    )
   }
 
   private attachSessionSubscription(
@@ -326,21 +405,48 @@ export class SessionManager {
     this.inviteSubscriptions.set(key, unsubscribe)
   }
 
-  private attachInviteTombstoneSubscription(userPubkey: string): void {
-    if (this.inviteTombstoneSubscriptions.has(userPubkey)) {
-      return
-    }
+  private attachInviteListSubscription(
+    userPubkey: string,
+    onInviteList?: (inviteList: InviteList) => void | Promise<void>
+  ): void {
+    const key = `invitelist:${userPubkey}`
+    if (this.inviteSubscriptions.has(key)) return
 
-    const unsubscribe = this.createInviteTombstoneSubscription(userPubkey)
-    this.inviteTombstoneSubscriptions.set(userPubkey, unsubscribe)
+    const unsubscribe = this.subscribeToUserInviteList(
+      userPubkey,
+      async (inviteList) => {
+        // Cache the InviteList - if user has one, we use it as source of truth
+        this.userInviteLists.set(userPubkey, inviteList)
+        if (onInviteList) await onInviteList(inviteList)
+      }
+    )
+
+    this.inviteSubscriptions.set(key, unsubscribe)
   }
 
   setupUser(userPubkey: string) {
     const userRecord = this.getOrCreateUserRecord(userPubkey)
 
-    this.attachInviteTombstoneSubscription(userPubkey)
+    // Helper to accept an invite (works for both InviteList devices and legacy Invite)
+    const acceptInviteFromDevice = async (
+      inviteList: InviteList,
+      deviceId: string
+    ) => {
+      const { session, event } = await inviteList.accept(
+        deviceId,
+        this.nostrSubscribe,
+        this.ourPublicKey,
+        this.ourIdentityKey,
+        this.deviceId
+      )
+      return this.nostrPublish(event)
+        .then(() => this.upsertDeviceRecord(userRecord, deviceId))
+        .then((dr) => this.attachSessionSubscription(userPubkey, dr, session))
+        .then(() => this.sendMessageHistory(userPubkey, deviceId))
+        .catch(console.error)
+    }
 
-    const acceptInvite = async (invite: Invite) => {
+    const acceptLegacyInvite = async (invite: Invite) => {
       const { deviceId } = invite
       if (!deviceId) return
 
@@ -357,12 +463,28 @@ export class SessionManager {
         .catch(console.error)
     }
 
+    // Subscribe to InviteList (kind 10078) - new format
+    this.attachInviteListSubscription(userPubkey, async (inviteList) => {
+      // Handle removed devices (source of truth for revocation)
+      for (const deviceId of inviteList.getRemovedDeviceIds()) {
+        await this.cleanupDevice(userPubkey, deviceId)
+      }
+
+      // Accept invites from new devices
+      for (const device of inviteList.getAllDevices()) {
+        if (!userRecord.devices.has(device.deviceId)) {
+          await acceptInviteFromDevice(inviteList, device.deviceId)
+        }
+      }
+    })
+
+    // Subscribe to per-device invites (kind 30078) - legacy format for backwards compatibility
     this.attachInviteSubscription(userPubkey, async (invite) => {
       const { deviceId } = invite
       if (!deviceId) return
 
       if (!userRecord.devices.has(deviceId)) {
-        await acceptInvite(invite)
+        await acceptLegacyInvite(invite)
       }
     })
   }
@@ -380,11 +502,73 @@ export class SessionManager {
   }
 
   getDeviceInviteEphemeralKey(): string | null {
-    return this.currentDeviceInvite?.inviterEphemeralPublicKey || null
+    return this.getOwnDevice()?.ephemeralPublicKey ?? null
   }
 
   getUserRecords(): Map<string, UserRecord> {
     return this.userRecords
+  }
+
+  /**
+   * Returns all devices from the InviteList (our own devices).
+   * Returns empty array if InviteList is not initialized.
+   */
+  getOwnDevices(): DeviceEntry[] {
+    if (!this.inviteList) {
+      return []
+    }
+    return this.inviteList.getAllDevices()
+  }
+
+  /**
+   * Returns the current device's entry from the InviteList.
+   * Returns undefined if InviteList is not initialized or device not found.
+   */
+  getOwnDevice(): DeviceEntry | undefined {
+    if (!this.inviteList) {
+      return undefined
+    }
+    return this.inviteList.getDevice(this.deviceId)
+  }
+
+  /**
+   * Adds a device to the InviteList from a device payload.
+   * Used by main device when scanning QR or entering code from secondary device.
+   *
+   * @param payload - The device payload (ephemeralPubkey, sharedSecret, deviceId, deviceLabel)
+   */
+  async addDevice(payload: {
+    ephemeralPubkey: string
+    sharedSecret: string
+    deviceId: string
+    deviceLabel: string
+  }): Promise<void> {
+    await this.init()
+
+    await this.modifyInviteList((list) => {
+      const device: DeviceEntry = {
+        ephemeralPublicKey: payload.ephemeralPubkey,
+        sharedSecret: payload.sharedSecret,
+        deviceId: payload.deviceId,
+        deviceLabel: payload.deviceLabel,
+        createdAt: Math.floor(Date.now() / 1000),
+      }
+      list.addDevice(device)
+    })
+  }
+
+  /**
+   * Updates a device's label in the InviteList.
+   *
+   * @param deviceId - The device ID to update
+   * @param label - The new label
+   */
+  async updateDeviceLabel(deviceId: string, label: string): Promise<void> {
+    await this.init()
+
+    await this.modifyInviteList((list) => {
+      list.updateDeviceLabel(deviceId, label)
+    })
   }
 
   close() {
@@ -396,12 +580,8 @@ export class SessionManager {
       unsubscribe()
     }
 
-    for (const unsubscribe of this.inviteTombstoneSubscriptions.values()) {
-      unsubscribe()
-    }
-
     this.ourDeviceInviteSubscription?.()
-    this.ourDeviceIntiveTombstoneSubscription?.()
+    this.ourInviteListSubscription?.()
   }
 
   deactivateCurrentSessions(publicKey: string) {
@@ -444,12 +624,6 @@ export class SessionManager {
     if (inviteUnsub) {
       inviteUnsub()
       this.inviteSubscriptions.delete(inviteKey)
-    }
-
-    const tombstoneUnsub = this.inviteTombstoneSubscriptions.get(userPubkey)
-    if (tombstoneUnsub) {
-      tombstoneUnsub()
-      this.inviteTombstoneSubscriptions.delete(userPubkey)
     }
 
     this.messageHistory.delete(userPubkey)
@@ -526,10 +700,9 @@ export class SessionManager {
     this.setupUser(recipientIdentityKey)
     this.setupUser(this.ourPublicKey)
 
-    const devices = [
-      ...Array.from(userRecord.devices.values()),
-      ...Array.from(ourUserRecord.devices.values()),
-    ].filter((device) => device.staleAt === undefined)
+    const recipientDevices = Array.from(userRecord.devices.values()).filter(d => d.staleAt === undefined)
+    const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
+    const devices = [...recipientDevices, ...ownDevices]
 
     // Send to all devices in background (if sessions exist)
     Promise.allSettled(
@@ -584,28 +757,41 @@ export class SessionManager {
   async revokeDevice(deviceId: string): Promise<void> {
     await this.init()
 
-    await this.publishDeviceTombstone(deviceId).catch((error) => {
-      console.error("Failed to publish device tombstone:", error)
+    // Use fetch-merge-publish pattern for InviteList
+    await this.modifyInviteList((list) => {
+      list.removeDevice(deviceId)
+    }).catch((error) => {
+      console.error("Failed to update InviteList for device revocation:", error)
     })
 
     await this.cleanupDevice(this.ourPublicKey, deviceId)
   }
 
-  private async publishDeviceTombstone(deviceId: string): Promise<void> {
-    const tags: string[][] = [
-      ["l", "double-ratchet/invites"],
-      ["d", `double-ratchet/invites/${deviceId}`],
-    ]
+  /**
+   * Modifies the InviteList using fetch-merge-publish pattern.
+   * This ensures we don't accidentally drop devices due to stale cache or race conditions.
+   */
+  private async modifyInviteList(
+    change: (list: InviteList) => void
+  ): Promise<void> {
+    // 1. Fetch latest from relay
+    const remote = await this.fetchUserInviteList(this.ourPublicKey)
 
-    const deletionEvent = {
-      content: "",
-      kind: INVITE_EVENT_KIND,
-      created_at: Math.floor(Date.now() / 1000),
-      tags,
-      pubkey: this.ourPublicKey,
-    }
+    // 2. Merge with local (preserves private keys)
+    const merged = this.mergeInviteLists(this.inviteList, remote)
 
-    await this.nostrPublish(deletionEvent)
+    // 3. Apply the change
+    change(merged)
+
+    // 4. Publish and save
+    const event = merged.getEvent()
+    await this.nostrPublish(event)
+    await this.saveInviteList(merged)
+
+    this.inviteList = merged
+
+    // Refresh our invite list listener so it tracks any device set changes
+    this.restartOurInviteListSubscription(merged)
   }
 
   private async cleanupDevice(publicKey: string, deviceId: string): Promise<void> {
@@ -712,10 +898,6 @@ export class SessionManager {
           devices,
         })
 
-        if (publicKey !== this.ourPublicKey) {
-          this.attachInviteTombstoneSubscription(publicKey)
-        }
-
         for (const device of devices.values()) {
           const { deviceId, activeSession, inactiveSessions, staleAt } = device
           if (!deviceId || staleAt !== undefined) continue
@@ -806,16 +988,9 @@ export class SessionManager {
         })
       )
 
-      // Set version to 1 so next migration can run
+      // Set version to 1
       version = "1"
       await this.storage.put(this.versionKey(), version)
-
-      return
-    }
-
-    // Future migrations
-    if (version === "1") {
-      return
     }
   }
 }

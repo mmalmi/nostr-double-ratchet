@@ -366,15 +366,42 @@ describe('Invite', () => {
     await new Promise(resolve => setTimeout(resolve, 100))
 
     expect(onSession).toHaveBeenCalledTimes(2)
-    
+
     const calls = onSession.mock.calls
     const bobCall = calls.find(([, identity]) => identity === bobPublicKey)
     const charlieCall = calls.find(([, identity]) => identity === charliePublicKey)
-    
+
     expect(bobCall[2]).toBeUndefined() // no deviceId
     expect(bobCall[0].name).toBe(bobEvent.id) // session name is event ID
-    
+
     expect(charlieCall[2]).toBe('device-1') // has deviceId
     expect(charlieCall[0].name).toBe(charlieEvent.id) // session name is event ID
+  })
+
+  it('should create valid deletion/tombstone event', () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey, 'device-1')
+    const tombstone = invite.getDeletionEvent()
+
+    expect(tombstone.kind).toBe(INVITE_EVENT_KIND)
+    expect(tombstone.pubkey).toBe(alicePublicKey)
+
+    // Tombstone should have d-tag
+    const dTag = tombstone.tags.find(t => t[0] === 'd')
+    expect(dTag).toBeDefined()
+    expect(dTag![1]).toBe('double-ratchet/invites/device-1')
+
+    // Tombstone should NOT have keys (that's what makes it a tombstone)
+    expect(tombstone.tags.some(t => t[0] === 'ephemeralKey')).toBe(false)
+    expect(tombstone.tags.some(t => t[0] === 'sharedSecret')).toBe(false)
+  })
+
+  it('should require device ID for getDeletionEvent', () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey) // no deviceId
+
+    expect(() => invite.getDeletionEvent()).toThrow('Device ID is required')
   })
 })
