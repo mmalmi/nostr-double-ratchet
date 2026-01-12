@@ -332,11 +332,15 @@ export class InviteList {
     const encrypt = typeof encryptor === "function" ? encryptor : undefined
     const inviteePrivateKey = typeof encryptor === "function" ? undefined : encryptor
 
+    // For delegate devices, use the delegate's identity key for DH encryption
+    // For regular devices, use the InviteList owner's public key
+    const inviterIdentityKey = device.identityPubkey ?? this.ownerPublicKey
+
     const encrypted = await encryptInviteResponse({
       inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
       inviteePublicKey,
       inviteePrivateKey,
-      inviterPublicKey: this.ownerPublicKey,
+      inviterPublicKey: inviterIdentityKey,
       inviterEphemeralPublicKey: device.ephemeralPublicKey,
       sharedSecret: device.sharedSecret,
       deviceId: inviteeDeviceId,
