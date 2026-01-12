@@ -16,6 +16,8 @@ export interface DevicePayload {
   deviceId: string
   /** Human-readable device label */
   deviceLabel: string
+  /** Identity public key for delegate devices (64 hex chars, optional) */
+  identityPubkey?: string
 }
 
 /**
@@ -265,112 +267,4 @@ export function createSessionFromAccept(params: CreateSessionFromAcceptParams): 
 
   const sharedSecretBytes = hexToBytes(sharedSecret)
   return Session.init(nostrSubscribe, theirPublicKey, ourSessionPrivateKey, isSender, sharedSecretBytes, name)
-}
-
-// Hex validation regex
-const HEX_REGEX = /^[0-9a-fA-F]+$/
-
-/**
- * Validates a hex string.
- */
-function isValidHex(str: string, expectedLength: number): boolean {
-  return str.length === expectedLength && HEX_REGEX.test(str)
-}
-
-/**
- * Encodes a Uint8Array to base64url (URL-safe base64 without padding).
- */
-function toBase64Url(bytes: Uint8Array): string {
-  const base64 = btoa(String.fromCharCode(...bytes))
-  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-/**
- * Decodes a base64url string to Uint8Array.
- */
-function fromBase64Url(str: string): Uint8Array | null {
-  try {
-    // Convert base64url to standard base64
-    const base64 = str.replace(/-/g, '+').replace(/_/g, '/')
-    // Add padding if needed
-    const padded = base64 + '==='.slice(0, (4 - (base64.length % 4)) % 4)
-    const binary = atob(padded)
-    return new Uint8Array([...binary].map(c => c.charCodeAt(0)))
-  } catch {
-    return null
-  }
-}
-
-/**
- * Encodes a device payload to a URL-safe string (base64url).
- *
- * Format: JSON -> UTF-8 bytes -> base64url
- *
- * @param payload - The device payload to encode
- * @returns A base64url-encoded string
- */
-export function encodeDevicePayload(payload: DevicePayload): string {
-  const json = JSON.stringify({
-    p: payload.ephemeralPubkey,
-    s: payload.sharedSecret,
-    i: payload.deviceId,
-    l: payload.deviceLabel,
-  })
-  const bytes = new TextEncoder().encode(json)
-  return toBase64Url(bytes)
-}
-
-/**
- * Decodes a device payload from a base64url string.
- *
- * @param encoded - The base64url-encoded string
- * @returns The decoded device payload, or null if invalid
- */
-export function decodeDevicePayload(encoded: string): DevicePayload | null {
-  if (!encoded || encoded.length === 0) {
-    return null
-  }
-
-  const bytes = fromBase64Url(encoded)
-  if (!bytes) {
-    return null
-  }
-
-  let parsed: { p?: string; s?: string; i?: string; l?: string }
-  try {
-    const json = new TextDecoder().decode(bytes)
-    parsed = JSON.parse(json)
-  } catch {
-    return null
-  }
-
-  const { p: ephemeralPubkey, s: sharedSecret, i: deviceId, l: deviceLabel } = parsed
-
-  // Validate required fields exist
-  if (
-    typeof ephemeralPubkey !== 'string' ||
-    typeof sharedSecret !== 'string' ||
-    typeof deviceId !== 'string' ||
-    typeof deviceLabel !== 'string'
-  ) {
-    return null
-  }
-
-  // Validate hex format and lengths
-  if (!isValidHex(ephemeralPubkey, 64)) {
-    return null
-  }
-  if (!isValidHex(sharedSecret, 64)) {
-    return null
-  }
-  if (!isValidHex(deviceId, 16)) {
-    return null
-  }
-
-  return {
-    ephemeralPubkey,
-    sharedSecret,
-    deviceId,
-    deviceLabel,
-  }
 }

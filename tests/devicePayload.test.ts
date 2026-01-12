@@ -1,178 +1,72 @@
 import { describe, it, expect } from 'vitest'
-import { encodeDevicePayload, decodeDevicePayload, DevicePayload } from '../src/inviteUtils'
-import { generateEphemeralKeypair, generateSharedSecret, generateDeviceId } from '../src/inviteUtils'
+import { SessionManager } from '../src/SessionManager'
 
-describe('Device Payload Encoding/Decoding', () => {
-  const createTestPayload = (label = 'Test Device'): DevicePayload => ({
-    ephemeralPubkey: generateEphemeralKeypair().publicKey,
-    sharedSecret: generateSharedSecret(),
-    deviceId: generateDeviceId(),
-    deviceLabel: label,
+describe('SessionManager.createDelegateDevice', () => {
+  it('should generate manager and payload with all required fields', () => {
+    const { manager, payload } = SessionManager.createDelegateDevice(
+      'device-123',
+      'My Delegate Phone',
+      () => () => {},
+      async () => ({} as any)
+    )
+
+    expect(manager).toBeDefined()
+    expect(manager.isDelegateMode()).toBe(true)
+    expect(payload.deviceId).toBe('device-123')
+    expect(payload.deviceLabel).toBe('My Delegate Phone')
+    expect(payload.identityPubkey).toBeDefined()
+    expect(payload.ephemeralPubkey).toBeDefined()
+    expect(payload.sharedSecret).toBeDefined()
   })
 
-  describe('encodeDevicePayload', () => {
-    it('should encode a device payload to a string', () => {
-      const payload = createTestPayload()
-      const encoded = encodeDevicePayload(payload)
+  it('should generate valid hex strings for public keys', () => {
+    const { payload } = SessionManager.createDelegateDevice(
+      'device-123',
+      'Test Device',
+      () => () => {},
+      async () => ({} as any)
+    )
 
-      expect(typeof encoded).toBe('string')
-      expect(encoded.length).toBeGreaterThan(0)
-    })
+    // Public keys should be 64-char hex strings
+    expect(payload.identityPubkey).toHaveLength(64)
+    expect(payload.identityPubkey).toMatch(/^[0-9a-f]+$/)
 
-    it('should produce different encodings for different payloads', () => {
-      const payload1 = createTestPayload('Device 1')
-      const payload2 = createTestPayload('Device 2')
+    expect(payload.ephemeralPubkey).toHaveLength(64)
+    expect(payload.ephemeralPubkey).toMatch(/^[0-9a-f]+$/)
 
-      const encoded1 = encodeDevicePayload(payload1)
-      const encoded2 = encodeDevicePayload(payload2)
-
-      expect(encoded1).not.toBe(encoded2)
-    })
+    // Shared secret should be 64-char hex string
+    expect(payload.sharedSecret).toHaveLength(64)
+    expect(payload.sharedSecret).toMatch(/^[0-9a-f]+$/)
   })
 
-  describe('decodeDevicePayload', () => {
-    it('should decode a valid encoded payload', () => {
-      const original = createTestPayload('My Phone')
-      const encoded = encodeDevicePayload(original)
+  it('should generate unique keys for each call', () => {
+    const { payload: payload1 } = SessionManager.createDelegateDevice(
+      'device-1',
+      'Device 1',
+      () => () => {},
+      async () => ({} as any)
+    )
+    const { payload: payload2 } = SessionManager.createDelegateDevice(
+      'device-2',
+      'Device 2',
+      () => () => {},
+      async () => ({} as any)
+    )
 
-      const decoded = decodeDevicePayload(encoded)
-
-      expect(decoded).not.toBeNull()
-      expect(decoded!.ephemeralPubkey).toBe(original.ephemeralPubkey)
-      expect(decoded!.sharedSecret).toBe(original.sharedSecret)
-      expect(decoded!.deviceId).toBe(original.deviceId)
-      expect(decoded!.deviceLabel).toBe(original.deviceLabel)
-    })
-
-    it('should return null for invalid input', () => {
-      expect(decodeDevicePayload('')).toBeNull()
-      expect(decodeDevicePayload('not-valid-data')).toBeNull()
-      expect(decodeDevicePayload('!!!invalid!!!')).toBeNull()
-    })
-
-    it('should return null for truncated input', () => {
-      const payload = createTestPayload()
-      const encoded = encodeDevicePayload(payload)
-      const truncated = encoded.slice(0, encoded.length / 2)
-
-      expect(decodeDevicePayload(truncated)).toBeNull()
-    })
-
-    it('should return null for corrupted input', () => {
-      const payload = createTestPayload()
-      const encoded = encodeDevicePayload(payload)
-      // Corrupt a character in the middle
-      const corrupted = encoded.slice(0, 10) + 'X' + encoded.slice(11)
-
-      expect(decodeDevicePayload(corrupted)).toBeNull()
-    })
+    expect(payload1.identityPubkey).not.toBe(payload2.identityPubkey)
+    expect(payload1.ephemeralPubkey).not.toBe(payload2.ephemeralPubkey)
+    expect(payload1.sharedSecret).not.toBe(payload2.sharedSecret)
   })
 
-  describe('roundtrip', () => {
-    it('should roundtrip a simple label', () => {
-      const payload = createTestPayload('Phone')
-      const encoded = encodeDevicePayload(payload)
-      const decoded = decodeDevicePayload(encoded)
+  it('should use provided deviceId and label', () => {
+    const { payload } = SessionManager.createDelegateDevice(
+      'custom-device-id',
+      'Custom Label 123',
+      () => () => {},
+      async () => ({} as any)
+    )
 
-      expect(decoded).toEqual(payload)
-    })
-
-    it('should roundtrip a label with spaces', () => {
-      const payload = createTestPayload('My Work Laptop')
-      const encoded = encodeDevicePayload(payload)
-      const decoded = decodeDevicePayload(encoded)
-
-      expect(decoded).toEqual(payload)
-    })
-
-    it('should roundtrip a label with special characters', () => {
-      const payload = createTestPayload('iPhone 15 Pro (Personal)')
-      const encoded = encodeDevicePayload(payload)
-      const decoded = decodeDevicePayload(encoded)
-
-      expect(decoded).toEqual(payload)
-    })
-
-    it('should roundtrip a label with unicode', () => {
-      const payload = createTestPayload('我的手机 📱')
-      const encoded = encodeDevicePayload(payload)
-      const decoded = decodeDevicePayload(encoded)
-
-      expect(decoded).toEqual(payload)
-    })
-
-    it('should roundtrip an empty label', () => {
-      const payload = createTestPayload('')
-      const encoded = encodeDevicePayload(payload)
-      const decoded = decodeDevicePayload(encoded)
-
-      expect(decoded).toEqual(payload)
-    })
-  })
-
-  describe('payload validation', () => {
-    it('should reject payload with invalid ephemeralPubkey length', () => {
-      const encoded = encodeDevicePayload({
-        ephemeralPubkey: 'tooshort',
-        sharedSecret: generateSharedSecret(),
-        deviceId: generateDeviceId(),
-        deviceLabel: 'Test',
-      })
-      // Even if encoding works, decoding should validate
-      const decoded = decodeDevicePayload(encoded)
-      expect(decoded).toBeNull()
-    })
-
-    it('should reject payload with invalid sharedSecret length', () => {
-      const encoded = encodeDevicePayload({
-        ephemeralPubkey: generateEphemeralKeypair().publicKey,
-        sharedSecret: 'tooshort',
-        deviceId: generateDeviceId(),
-        deviceLabel: 'Test',
-      })
-      const decoded = decodeDevicePayload(encoded)
-      expect(decoded).toBeNull()
-    })
-
-    it('should reject payload with non-hex ephemeralPubkey', () => {
-      const encoded = encodeDevicePayload({
-        ephemeralPubkey: 'g'.repeat(64), // 'g' is not valid hex
-        sharedSecret: generateSharedSecret(),
-        deviceId: generateDeviceId(),
-        deviceLabel: 'Test',
-      })
-      const decoded = decodeDevicePayload(encoded)
-      expect(decoded).toBeNull()
-    })
-
-    it('should reject payload with non-hex sharedSecret', () => {
-      const encoded = encodeDevicePayload({
-        ephemeralPubkey: generateEphemeralKeypair().publicKey,
-        sharedSecret: 'z'.repeat(64), // 'z' is not valid hex
-        deviceId: generateDeviceId(),
-        deviceLabel: 'Test',
-      })
-      const decoded = decodeDevicePayload(encoded)
-      expect(decoded).toBeNull()
-    })
-  })
-
-  describe('format properties', () => {
-    it('should produce URL-safe output (base64url)', () => {
-      const payload = createTestPayload()
-      const encoded = encodeDevicePayload(payload)
-
-      // Base64url should not contain +, /, or =
-      expect(encoded).not.toMatch(/[+/=]/)
-    })
-
-    it('should be reasonably compact', () => {
-      const payload = createTestPayload('Phone')
-      const encoded = encodeDevicePayload(payload)
-
-      // JSON would be ~180 chars, base64 adds ~33% overhead
-      // So we expect roughly 240 chars max for a short label
-      expect(encoded.length).toBeLessThan(300)
-    })
+    expect(payload.deviceId).toBe('custom-device-id')
+    expect(payload.deviceLabel).toBe('Custom Label 123')
   })
 })

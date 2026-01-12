@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
+import { generateSecretKey, getPublicKey } from "nostr-tools"
 
 describe("SessionManager device methods", () => {
   describe("getOwnDevice", () => {
@@ -149,6 +150,85 @@ describe("SessionManager device methods", () => {
       expect(restoredDevice!.deviceId).toBe(originalDevice!.deviceId)
       expect(restoredDevice!.ephemeralPublicKey).toBe(originalDevice!.ephemeralPublicKey)
       expect(restoredDevice!.sharedSecret).toBe(originalDevice!.sharedSecret)
+    })
+  })
+
+  describe("addDevice with identityPubkey (delegate devices)", () => {
+    it("should add device with identityPubkey to InviteList", async () => {
+      const sharedRelay = new MockRelay()
+      const { manager } = await createMockSessionManager("main-device", sharedRelay)
+      const { generateEphemeralKeypair, generateSharedSecret, generateDeviceId } = await import("../src/inviteUtils")
+
+      const delegatePrivkey = generateSecretKey()
+      const delegatePubkey = getPublicKey(delegatePrivkey)
+      const ephemeral = generateEphemeralKeypair()
+
+      await manager.addDevice({
+        ephemeralPubkey: ephemeral.publicKey,
+        sharedSecret: generateSharedSecret(),
+        deviceId: generateDeviceId(),
+        deviceLabel: "Delegate Phone",
+        identityPubkey: delegatePubkey,
+      })
+
+      const devices = manager.getOwnDevices()
+      const delegateDevice = devices.find(d => d.deviceLabel === "Delegate Phone")
+
+      expect(delegateDevice).toBeDefined()
+      expect(delegateDevice!.identityPubkey).toBe(delegatePubkey)
+    })
+
+    it("should publish InviteList with identityPubkey in tag", async () => {
+      const sharedRelay = new MockRelay()
+      const { manager, publicKey } = await createMockSessionManager("main-device", sharedRelay)
+      const { generateEphemeralKeypair, generateSharedSecret, generateDeviceId } = await import("../src/inviteUtils")
+
+      const delegatePrivkey = generateSecretKey()
+      const delegatePubkey = getPublicKey(delegatePrivkey)
+      const deviceId = generateDeviceId()
+      const ephemeral = generateEphemeralKeypair()
+
+      await manager.addDevice({
+        ephemeralPubkey: ephemeral.publicKey,
+        sharedSecret: generateSharedSecret(),
+        deviceId,
+        deviceLabel: "Delegate Phone",
+        identityPubkey: delegatePubkey,
+      })
+
+      // Check that the relay received an InviteList event with the identityPubkey
+      const inviteListEvents = sharedRelay.getEvents().filter(e => e.kind === 10078)
+      expect(inviteListEvents.length).toBeGreaterThan(0)
+
+      const latestInviteList = inviteListEvents[inviteListEvents.length - 1]
+      const deviceTag = latestInviteList.tags.find(
+        t => t[0] === "device" && t[3] === deviceId
+      )
+
+      expect(deviceTag).toBeDefined()
+      expect(deviceTag![6]).toBe(delegatePubkey)
+    })
+
+    it("should add device without identityPubkey (regular device)", async () => {
+      const sharedRelay = new MockRelay()
+      const { manager } = await createMockSessionManager("main-device", sharedRelay)
+      const { generateEphemeralKeypair, generateSharedSecret, generateDeviceId } = await import("../src/inviteUtils")
+
+      const ephemeral = generateEphemeralKeypair()
+
+      await manager.addDevice({
+        ephemeralPubkey: ephemeral.publicKey,
+        sharedSecret: generateSharedSecret(),
+        deviceId: generateDeviceId(),
+        deviceLabel: "Regular Device",
+        // No identityPubkey - this is a regular device
+      })
+
+      const devices = manager.getOwnDevices()
+      const regularDevice = devices.find(d => d.deviceLabel === "Regular Device")
+
+      expect(regularDevice).toBeDefined()
+      expect(regularDevice!.identityPubkey).toBeUndefined()
     })
   })
 })

@@ -6,7 +6,7 @@ import { generateEphemeralKeypair, generateSharedSecret, generateDeviceId } from
 import { INVITE_LIST_EVENT_KIND } from '../src/types'
 
 describe('InviteList', () => {
-  const createTestDevice = (label?: string): DeviceEntry => {
+  const createTestDevice = (label?: string, identityPubkey?: string): DeviceEntry => {
     const keypair = generateEphemeralKeypair()
     return {
       ephemeralPublicKey: keypair.publicKey,
@@ -15,6 +15,7 @@ describe('InviteList', () => {
       deviceId: generateDeviceId(),
       deviceLabel: label || 'Test Device',
       createdAt: Math.floor(Date.now() / 1000),
+      identityPubkey,
     }
   }
 
@@ -471,6 +472,134 @@ describe('InviteList', () => {
       // Allow 1 second tolerance for rounding
       expect(device.createdAt).toBeGreaterThanOrEqual(now - 1)
       expect(device.createdAt).toBeLessThanOrEqual(now + 1)
+    })
+  })
+
+  describe('DeviceEntry with identityPubkey (delegate devices)', () => {
+    it('should add device with identityPubkey', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const list = new InviteList(ownerPublicKey)
+
+      const delegatePrivateKey = generateSecretKey()
+      const delegatePublicKey = getPublicKey(delegatePrivateKey)
+      const device = createTestDevice('Delegate Phone', delegatePublicKey)
+
+      list.addDevice(device)
+
+      const retrieved = list.getDevice(device.deviceId)
+      expect(retrieved).toBeDefined()
+      expect(retrieved!.identityPubkey).toBe(delegatePublicKey)
+    })
+
+    it('should include identityPubkey in event tags', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const list = new InviteList(ownerPublicKey)
+
+      const delegatePrivateKey = generateSecretKey()
+      const delegatePublicKey = getPublicKey(delegatePrivateKey)
+      const device = createTestDevice('Delegate Phone', delegatePublicKey)
+
+      list.addDevice(device)
+      const event = list.getEvent()
+
+      const deviceTag = event.tags.find(t => t[0] === 'device' && t[3] === device.deviceId)
+      expect(deviceTag).toBeDefined()
+      expect(deviceTag![6]).toBe(delegatePublicKey)
+    })
+
+    it('should not include identityPubkey in tag when not set', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const list = new InviteList(ownerPublicKey)
+
+      const device = createTestDevice('Regular Device')
+      list.addDevice(device)
+      const event = list.getEvent()
+
+      const deviceTag = event.tags.find(t => t[0] === 'device' && t[3] === device.deviceId)
+      expect(deviceTag).toBeDefined()
+      // Tag should have 6 elements (no identityPubkey) or 7th element should be empty/undefined
+      expect(deviceTag!.length).toBe(6)
+    })
+
+    it('should parse identityPubkey from event', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const list = new InviteList(ownerPublicKey)
+
+      const delegatePrivateKey = generateSecretKey()
+      const delegatePublicKey = getPublicKey(delegatePrivateKey)
+      const device = createTestDevice('Delegate Phone', delegatePublicKey)
+
+      list.addDevice(device)
+      const event = list.getEvent()
+      const signedEvent = finalizeEvent(event, ownerPrivateKey)
+
+      const parsed = InviteList.fromEvent(signedEvent)
+      const parsedDevice = parsed.getDevice(device.deviceId)
+
+      expect(parsedDevice).toBeDefined()
+      expect(parsedDevice!.identityPubkey).toBe(delegatePublicKey)
+    })
+
+    it('should preserve identityPubkey in serialization', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const list = new InviteList(ownerPublicKey)
+
+      const delegatePrivateKey = generateSecretKey()
+      const delegatePublicKey = getPublicKey(delegatePrivateKey)
+      const device = createTestDevice('Delegate Phone', delegatePublicKey)
+
+      list.addDevice(device)
+      const json = list.serialize()
+      const restored = InviteList.deserialize(json)
+
+      const restoredDevice = restored.getDevice(device.deviceId)
+      expect(restoredDevice).toBeDefined()
+      expect(restoredDevice!.identityPubkey).toBe(delegatePublicKey)
+    })
+
+    it('should preserve identityPubkey in merge', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+
+      const delegatePrivateKey = generateSecretKey()
+      const delegatePublicKey = getPublicKey(delegatePrivateKey)
+      const device = createTestDevice('Delegate Phone', delegatePublicKey)
+
+      const list1 = new InviteList(ownerPublicKey, [device])
+      const list2 = new InviteList(ownerPublicKey)
+
+      const merged = list1.merge(list2)
+
+      const mergedDevice = merged.getDevice(device.deviceId)
+      expect(mergedDevice).toBeDefined()
+      expect(mergedDevice!.identityPubkey).toBe(delegatePublicKey)
+    })
+
+    it('should handle mixed devices (with and without identityPubkey)', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const list = new InviteList(ownerPublicKey)
+
+      const delegatePrivateKey = generateSecretKey()
+      const delegatePublicKey = getPublicKey(delegatePrivateKey)
+
+      const mainDevice = createTestDevice('Main Device')
+      const delegateDevice = createTestDevice('Delegate Device', delegatePublicKey)
+
+      list.addDevice(mainDevice)
+      list.addDevice(delegateDevice)
+
+      const event = list.getEvent()
+      const signedEvent = finalizeEvent(event, ownerPrivateKey)
+      const parsed = InviteList.fromEvent(signedEvent)
+
+      expect(parsed.getDevice(mainDevice.deviceId)?.identityPubkey).toBeUndefined()
+      expect(parsed.getDevice(delegateDevice.deviceId)?.identityPubkey).toBe(delegatePublicKey)
     })
   })
 })

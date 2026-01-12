@@ -25,7 +25,8 @@ type DeviceTag = [
   sharedSecret: string,
   deviceId: string,
   deviceLabel: string,
-  createdAt: string
+  createdAt: string,
+  ...rest: string[]  // Optional: identityPubkey at index 6
 ]
 
 type RemovedTag = [type: "removed", deviceId: string]
@@ -56,6 +57,12 @@ export interface DeviceEntry {
   deviceLabel: string
   /** When this device was added (unix timestamp) */
   createdAt: number
+  /**
+   * Identity public key for delegate devices.
+   * If set, this device uses its own identity key for encryption/decryption
+   * instead of the owner's main identity key.
+   */
+  identityPubkey?: string
 }
 
 /**
@@ -157,14 +164,21 @@ export class InviteList {
    * Creates an unsigned event representing this invite list.
    */
   getEvent(): UnsignedEvent {
-    const deviceTags = this.getAllDevices().map((device) => [
-      "device",
-      device.ephemeralPublicKey,
-      device.sharedSecret,
-      device.deviceId,
-      device.deviceLabel,
-      String(device.createdAt),
-    ])
+    const deviceTags = this.getAllDevices().map((device) => {
+      const tag = [
+        "device",
+        device.ephemeralPublicKey,
+        device.sharedSecret,
+        device.deviceId,
+        device.deviceLabel,
+        String(device.createdAt),
+      ]
+      // Only include identityPubkey if it's set (delegate devices)
+      if (device.identityPubkey) {
+        tag.push(device.identityPubkey)
+      }
+      return tag
+    })
 
     const removedTags = this.getRemovedDeviceIds().map((deviceId) => [
       "removed",
@@ -198,12 +212,13 @@ export class InviteList {
 
     const devices = event.tags
       .filter(isDeviceTag)
-      .map(([, ephemeralPublicKey, sharedSecret, deviceId, deviceLabel, createdAt]) => ({
+      .map(([, ephemeralPublicKey, sharedSecret, deviceId, deviceLabel, createdAt, identityPubkey]) => ({
         ephemeralPublicKey,
         sharedSecret,
         deviceId,
         deviceLabel,
         createdAt: parseInt(createdAt, 10) || event.created_at,
+        identityPubkey: identityPubkey || undefined,
       }))
 
     const removedDeviceIds = event.tags
