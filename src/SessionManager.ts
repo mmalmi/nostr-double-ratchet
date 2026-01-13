@@ -65,6 +65,8 @@ export class SessionManager {
   private userRecords: Map<string, UserRecord> = new Map()
   private messageHistory: Map<string, Rumor[]> = new Map()
   private userInviteLists: Map<string, InviteList> = new Map()
+  // Map delegate device pubkeys to their owner's pubkey
+  private delegateToOwner: Map<string, string> = new Map()
 
   // Subscriptions
   private ourDeviceInviteSubscription: Unsubscribe | null = null
@@ -182,10 +184,12 @@ export class SessionManager {
             name: event.id,
           })
 
-          const userRecord = this.getOrCreateUserRecord(decrypted.inviteeIdentity)
+          // Resolve delegate pubkey to owner for correct UserRecord attribution
+          const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
+          const userRecord = this.getOrCreateUserRecord(ownerPubkey)
           const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
 
-          this.attachSessionSubscription(decrypted.inviteeIdentity, deviceRecord, session, true)
+          this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
         } catch {
           // Invalid response, ignore
         }
@@ -248,6 +252,26 @@ export class SessionManager {
     return `storage-version`
   }
 
+  /**
+   * Resolve a pubkey to its owner if it's a known delegate device.
+   * Returns the input pubkey if not a known delegate.
+   */
+  resolveToOwner(pubkey: string): string {
+    return this.delegateToOwner.get(pubkey) || pubkey
+  }
+
+  /**
+   * Update the delegate-to-owner mapping from an InviteList.
+   * Extracts delegate device pubkeys and maps them to the owner.
+   */
+  private updateDelegateMapping(ownerPubkey: string, inviteList: InviteList): void {
+    for (const device of inviteList.getAllDevices()) {
+      if (device.identityPubkey) {
+        this.delegateToOwner.set(device.identityPubkey, ownerPubkey)
+      }
+    }
+  }
+
   private subscribeToUserInviteList(
     pubkey: string,
     onInviteList: (list: InviteList) => void
@@ -261,6 +285,8 @@ export class SessionManager {
       (event) => {
         try {
           const list = InviteList.fromEvent(event)
+          // Update delegate mapping whenever we receive an InviteList
+          this.updateDelegateMapping(pubkey, list)
           onInviteList(list)
         } catch {
           // Invalid event, ignore
