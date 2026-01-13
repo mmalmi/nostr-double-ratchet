@@ -110,9 +110,11 @@ export class SessionManager {
     this.ephemeralKeypair = ephemeralKeypair
     this.sharedSecret = sharedSecret
 
-    // If already initialized, start the listener now
+    // If already initialized, start the listener and setup own devices now
     if (this.initialized && !this.ourInviteResponseSubscription) {
       this.startInviteResponseListener()
+      // Now that we can receive responses, setup sessions with our own other devices
+      this.setupUser(this.ourPublicKey)
     }
   }
 
@@ -132,13 +134,14 @@ export class SessionManager {
     const ourUserRecord = this.getOrCreateUserRecord(this.ourPublicKey)
     this.upsertDeviceRecord(ourUserRecord, this.deviceId)
 
-    // Setup sessions with our own other devices
-    this.setupUser(this.ourPublicKey)
-
-    // If we have an ephemeral keypair, listen for invite responses
+    // IMPORTANT: Start invite response listener BEFORE setting up users
+    // This ensures we're listening when other devices respond to our invites
     if (this.ephemeralKeypair && this.sharedSecret) {
       this.startInviteResponseListener()
+      // Setup sessions with our own other devices (only if we can receive responses)
+      this.setupUser(this.ourPublicKey)
     }
+    // If no ephemeral keys yet, setupUser will be called when setEphemeralKeys is called
   }
 
   /**
