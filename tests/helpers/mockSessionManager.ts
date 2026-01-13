@@ -1,5 +1,6 @@
 import { vi } from "vitest"
 import { SessionManager } from "../../src/SessionManager"
+import { DeviceManager } from "../../src/DeviceManager"
 import {
   Filter,
   generateSecretKey,
@@ -39,13 +40,33 @@ export const createMockSessionManager = async (
     return await mockRelay.publish(event, secretKey)
   })
 
+  // Create DeviceManager first to handle InviteList
+  const deviceManager = DeviceManager.createMain({
+    ownerPublicKey: publicKey,
+    ownerPrivateKey: secretKey,
+    deviceId,
+    deviceLabel: deviceId,
+    nostrSubscribe: subscribe,
+    nostrPublish: publish,
+    storage: mockStorage,
+  })
+
+  await deviceManager.init()
+
+  // Get ephemeral keypair and shared secret from DeviceManager
+  const ephemeralKeypair = deviceManager.getEphemeralKeypair()
+  const sharedSecret = deviceManager.getSharedSecret()
+
+  // Create SessionManager with ephemeral keypair for invite response listening
   const manager = new SessionManager(
     publicKey,
     secretKey,
     deviceId,
     subscribe,
     publish,
-    mockStorage
+    mockStorage,
+    ephemeralKeypair ?? undefined,
+    sharedSecret ?? undefined
   )
 
   await manager.init()
@@ -55,6 +76,7 @@ export const createMockSessionManager = async (
 
   return {
     manager,
+    deviceManager,
     subscribe,
     publish,
     onEvent,

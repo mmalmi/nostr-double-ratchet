@@ -9,12 +9,10 @@ import {
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { Invite } from "./Invite"
-import { InviteList, DeviceEntry } from "./InviteList"
+import { InviteList } from "./InviteList"
 import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
-import { getEventHash, generateSecretKey, getPublicKey } from "nostr-tools"
-import { bytesToHex } from "@noble/hashes/utils"
-import { DevicePayload } from "./inviteUtils"
+import { getEventHash } from "nostr-tools"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
 
@@ -46,26 +44,6 @@ interface StoredUserRecord {
   devices: StoredDeviceRecord[]
 }
 
-/**
- * Internal options for delegate mode.
- * Used by the static createDelegateDevice factory method.
- */
-interface DelegateModeOptions {
-  delegateMode: true
-  ephemeralKeypair: { publicKey: string; privateKey: Uint8Array }
-  sharedSecret: string
-}
-
-/**
- * Result from creating a delegate device.
- */
-export interface CreateDelegateDeviceResult {
-  /** The SessionManager configured for delegate mode */
-  manager: SessionManager
-  /** The payload to display as QR code for the main device to scan */
-  payload: DevicePayload
-}
-
 export class SessionManager {
   // Versioning
   private readonly storageVersion = "1"
@@ -79,20 +57,18 @@ export class SessionManager {
   private ourIdentityKey: Uint8Array | DecryptFunction
   private ourPublicKey: string
 
-  // Delegate mode
-  private readonly delegateMode: boolean
-  private readonly delegateEphemeralKeypair?: { publicKey: string; privateKey: Uint8Array }
-  private readonly delegateSharedSecret?: string
+  // Ephemeral keypair for listening to invite responses (optional)
+  private readonly ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array }
+  private readonly sharedSecret?: string
 
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
   private messageHistory: Map<string, Rumor[]> = new Map()
-  private inviteList: InviteList | null = null
   private userInviteLists: Map<string, InviteList> = new Map()
 
   // Subscriptions
   private ourDeviceInviteSubscription: Unsubscribe | null = null
-  private ourInviteListSubscription: Unsubscribe | null = null
+  private ourInviteResponseSubscription: Unsubscribe | null = null
   private inviteSubscriptions: Map<string, Unsubscribe> = new Map()
   private sessionSubscriptions: Map<string, Unsubscribe> = new Map()
 
@@ -109,7 +85,8 @@ export class SessionManager {
     nostrSubscribe: NostrSubscribe,
     nostrPublish: NostrPublish,
     storage?: StorageAdapter,
-    options?: DelegateModeOptions
+    ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array },
+    sharedSecret?: string
   ) {
     this.userRecords = new Map()
     this.nostrSubscribe = nostrSubscribe
@@ -119,98 +96,8 @@ export class SessionManager {
     this.deviceId = deviceId
     this.storage = storage || new InMemoryStorageAdapter()
     this.versionPrefix = `v${this.storageVersion}`
-
-    // Delegate mode setup
-    this.delegateMode = options?.delegateMode ?? false
-    this.delegateEphemeralKeypair = options?.ephemeralKeypair
-    this.delegateSharedSecret = options?.sharedSecret
-  }
-
-  /**
-   * Creates a new SessionManager configured as a delegate device.
-   *
-   * Delegate devices operate without the main nsec key. They generate their own
-   * identity and ephemeral keys, which must be added to the main device's InviteList
-   * (typically by scanning a QR code).
-   *
-   * @param deviceId - Unique identifier for this device
-   * @param deviceLabel - Human-readable label for this device
-   * @param nostrSubscribe - Function to subscribe to Nostr events
-   * @param nostrPublish - Function to publish Nostr events
-   * @param storage - Optional storage adapter for persistence
-   * @returns The SessionManager and a payload for QR code display
-   *
-   * @example
-   * ```typescript
-   * const { manager, payload } = SessionManager.createDelegateDevice(
-   *   "device-123",
-   *   "My Phone",
-   *   subscribe,
-   *   publish,
-   *   storage
-   * )
-   *
-   * // Display payload as QR code
-   * const qrData = encodeDevicePayload(payload)
-   *
-   * // Initialize the manager
-   * await manager.init()
-   * ```
-   */
-  static createDelegateDevice(
-    deviceId: string,
-    deviceLabel: string,
-    nostrSubscribe: NostrSubscribe,
-    nostrPublish: NostrPublish,
-    storage?: StorageAdapter
-  ): CreateDelegateDeviceResult {
-    // Generate identity keypair for this delegate device
-    const identityPrivkey = generateSecretKey()
-    const identityPubkey = getPublicKey(identityPrivkey)
-
-    // Generate ephemeral keypair for invite handshakes
-    const ephemeralPrivkey = generateSecretKey()
-    const ephemeralPubkey = getPublicKey(ephemeralPrivkey)
-
-    // Generate shared secret for invite handshake encryption
-    const sharedSecret = bytesToHex(generateSecretKey())
-
-    // Create the SessionManager in delegate mode
-    const manager = new SessionManager(
-      identityPubkey,
-      identityPrivkey,
-      deviceId,
-      nostrSubscribe,
-      nostrPublish,
-      storage,
-      {
-        delegateMode: true,
-        ephemeralKeypair: {
-          publicKey: ephemeralPubkey,
-          privateKey: ephemeralPrivkey,
-        },
-        sharedSecret,
-      }
-    )
-
-    // Create the payload for QR code display
-    const payload: DevicePayload = {
-      ephemeralPubkey,
-      sharedSecret,
-      deviceId,
-      deviceLabel,
-      identityPubkey,
-    }
-
-    return { manager, payload }
-  }
-
-  /**
-   * Returns whether this SessionManager is operating in delegate mode.
-   * In delegate mode, device management operations are disabled.
-   */
-  isDelegateMode(): boolean {
-    return this.delegateMode
+    this.ephemeralKeypair = ephemeralKeypair
+    this.sharedSecret = sharedSecret
   }
 
   async init() {
@@ -225,77 +112,31 @@ export class SessionManager {
       console.error("Failed to load user records:", error)
     })
 
-    // Delegate mode: don't manage InviteList, just listen for invites
-    if (this.delegateMode) {
-      await this.initDelegateMode()
-      return
-    }
-
-    // Fetch-merge-publish pattern to achieve eventual consistency
-    // 1. Load from local storage (has our private keys)
-    const local = await this.loadInviteList()
-
-    // 2. Fetch from relay (has other devices' entries)
-    const remote = await this.fetchUserInviteList(this.ourPublicKey)
-
-    // 3. Merge local + remote
-    const inviteList = this.mergeInviteLists(local, remote)
-
-    // 4. Add our device if not present
-    const needsAdd = !inviteList.getDevice(this.deviceId)
-    if (needsAdd) {
-      const device = inviteList.createDevice(this.deviceId, this.deviceId)
-      inviteList.addDevice(device)
-    }
-
-    // 5. Save and publish
-    this.inviteList = inviteList
-    await this.saveInviteList(inviteList)
-
-    // 6. Setup sessions with our own other devices
-    // First, add only our current device to prevent accepting our own invite
+    // Add our own device to user record to prevent accepting our own invite
     const ourUserRecord = this.getOrCreateUserRecord(this.ourPublicKey)
     this.upsertDeviceRecord(ourUserRecord, this.deviceId)
-    // Then call setupUser to accept invites from our other devices
+
+    // Setup sessions with our own other devices
     this.setupUser(this.ourPublicKey)
 
-    // Listen for invite responses using InviteList
-    this.restartOurInviteListSubscription(inviteList)
-
-    // Note: We don't subscribe to our own tombstones because we always have InviteList
-    // which is the source of truth. Tombstones are only for legacy (v1) users.
-
-    // Publish merged InviteList (kind 10078)
-    const inviteListEvent = inviteList.getEvent()
-    this.nostrPublish(inviteListEvent).catch((error) => {
-      console.error("Failed to publish our InviteList:", error)
-    })
-  }
-
-  /**
-   * Initialize in delegate mode.
-   * Does not publish InviteList, just listens for invite responses on ephemeral key.
-   */
-  private async initDelegateMode(): Promise<void> {
-    if (!this.delegateEphemeralKeypair || !this.delegateSharedSecret) {
-      throw new Error("Delegate mode requires ephemeralKeypair and sharedSecret")
+    // If we have an ephemeral keypair, listen for invite responses
+    if (this.ephemeralKeypair && this.sharedSecret) {
+      this.startInviteResponseListener()
     }
-
-    // Listen for invite responses on our ephemeral key
-    this.startDelegateInviteListener()
   }
 
   /**
-   * Start listening for invite responses in delegate mode.
+   * Start listening for invite responses on our ephemeral key.
+   * This is used by devices to receive session establishment responses.
    */
-  private startDelegateInviteListener(): void {
-    if (!this.delegateEphemeralKeypair || !this.delegateSharedSecret) return
+  private startInviteResponseListener(): void {
+    if (!this.ephemeralKeypair || !this.sharedSecret) return
 
-    const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.delegateEphemeralKeypair
-    const sharedSecret = this.delegateSharedSecret
+    const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.ephemeralKeypair
+    const sharedSecret = this.sharedSecret
 
     // Subscribe to invite responses tagged to our ephemeral key
-    this.ourInviteListSubscription = this.nostrSubscribe(
+    this.ourInviteResponseSubscription = this.nostrSubscribe(
       {
         kinds: [1059], // INVITE_RESPONSE_KIND
         "#p": [ephemeralPubkey],
@@ -329,37 +170,6 @@ export class SessionManager {
         } catch {
           // Invalid response, ignore
         }
-      }
-    )
-  }
-
-  private restartOurInviteListSubscription(inviteList: InviteList | null = this.inviteList) {
-    // Tear down previous subscription
-    this.ourInviteListSubscription?.()
-    this.ourInviteListSubscription = null
-
-    if (!inviteList) return
-
-    this.ourInviteListSubscription = inviteList.listen(
-      this.ourIdentityKey,
-      this.nostrSubscribe,
-      async (session, inviteePubkey, deviceId, ourDeviceId) => {
-        if (!deviceId || deviceId === this.deviceId) return
-        if (ourDeviceId && ourDeviceId !== this.deviceId) return // Not for our device
-
-        const nostrEventId = session.name
-        const acceptanceKey = this.inviteAcceptKey(nostrEventId, inviteePubkey, deviceId)
-        const nostrEventIdInStorage = await this.storage.get<string>(acceptanceKey)
-        if (nostrEventIdInStorage) {
-          return
-        }
-
-        await this.storage.put(acceptanceKey, "1")
-
-        const userRecord = this.getOrCreateUserRecord(inviteePubkey)
-        const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
-
-        this.attachSessionSubscription(inviteePubkey, deviceRecord, session, true)
       }
     )
   }
@@ -400,16 +210,8 @@ export class SessionManager {
   private inviteKey(userPubkey: string) {
     return this.userInviteKey(userPubkey)
   }
-  private inviteAcceptKey(nostrEventId: string, userPubkey: string, deviceId: string) {
-    return `${this.inviteAcceptKeyPrefix(userPubkey)}${deviceId}/${nostrEventId}`
-  }
-
   private userInviteKey(userPubkey: string) {
     return `${this.versionPrefix}/invite/${userPubkey}`
-  }
-
-  private inviteAcceptKeyPrefix(userPublicKey: string) {
-    return `${this.versionPrefix}/invite-accept/${userPublicKey}/`
   }
 
   private sessionKeyPrefix(userPubkey: string) {
@@ -425,75 +227,6 @@ export class SessionManager {
   }
   private versionKey() {
     return `storage-version`
-  }
-  private inviteListKey() {
-    return `${this.versionPrefix}/invite-list`
-  }
-
-  // -------------------
-  // InviteList helpers
-  // -------------------
-  private mergeInviteLists(local: InviteList | null, remote: InviteList | null): InviteList {
-    if (local && remote) return local.merge(remote)
-    if (local) return local
-    if (remote) return remote
-    return new InviteList(this.ourPublicKey)
-  }
-
-  private async loadInviteList(): Promise<InviteList | null> {
-    const data = await this.storage.get<string>(this.inviteListKey())
-    if (!data) return null
-    try {
-      return InviteList.deserialize(data)
-    } catch {
-      return null
-    }
-  }
-
-  private async saveInviteList(list: InviteList): Promise<void> {
-    await this.storage.put(this.inviteListKey(), list.serialize())
-  }
-
-  private fetchUserInviteList(pubkey: string, timeoutMs: number = 500): Promise<InviteList | null> {
-    return new Promise((resolve) => {
-      let found: InviteList | null = null
-      let resolved = false
-
-      const timeout = setTimeout(() => {
-        if (resolved) return
-        resolved = true
-        unsubscribe()
-        resolve(found)
-      }, timeoutMs)
-
-      // Initialize to no-op to avoid "Cannot access before initialization" error
-      // when events are delivered synchronously during subscribe()
-      let unsubscribe: () => void = () => {}
-      unsubscribe = this.nostrSubscribe(
-        {
-          kinds: [INVITE_LIST_EVENT_KIND],
-          authors: [pubkey],
-          "#d": ["double-ratchet/invite-list"],
-          limit: 1,
-        },
-        (event) => {
-          if (resolved) return
-          try {
-            found = InviteList.fromEvent(event)
-            resolved = true
-            clearTimeout(timeout)
-            resolve(found)
-          } catch {
-            // Invalid event, ignore
-          }
-        }
-      )
-
-      // If we found the event synchronously, unsubscribe now
-      if (resolved) {
-        unsubscribe()
-      }
-    })
   }
 
   private subscribeToUserInviteList(
@@ -688,85 +421,8 @@ export class SessionManager {
     return this.deviceId
   }
 
-  getDeviceInviteEphemeralKey(): string | null {
-    return this.getOwnDevice()?.ephemeralPublicKey ?? null
-  }
-
   getUserRecords(): Map<string, UserRecord> {
     return this.userRecords
-  }
-
-  /**
-   * Returns all devices from the InviteList (our own devices).
-   * Returns empty array if InviteList is not initialized.
-   */
-  getOwnDevices(): DeviceEntry[] {
-    if (!this.inviteList) {
-      return []
-    }
-    return this.inviteList.getAllDevices()
-  }
-
-  /**
-   * Returns the current device's entry from the InviteList.
-   * Returns undefined if InviteList is not initialized or device not found.
-   */
-  getOwnDevice(): DeviceEntry | undefined {
-    if (!this.inviteList) {
-      return undefined
-    }
-    return this.inviteList.getDevice(this.deviceId)
-  }
-
-  /**
-   * Adds a device to the InviteList from a device payload.
-   * Used by main device when scanning QR or entering code from secondary device.
-   *
-   * @param payload - The device payload (ephemeralPubkey, sharedSecret, deviceId, deviceLabel, identityPubkey?)
-   * @throws Error if called in delegate mode
-   */
-  async addDevice(payload: {
-    ephemeralPubkey: string
-    sharedSecret: string
-    deviceId: string
-    deviceLabel: string
-    /** Identity pubkey for delegate devices (optional) */
-    identityPubkey?: string
-  }): Promise<void> {
-    if (this.delegateMode) {
-      throw new Error("Cannot add devices in delegate mode")
-    }
-    await this.init()
-
-    await this.modifyInviteList((list) => {
-      const device: DeviceEntry = {
-        ephemeralPublicKey: payload.ephemeralPubkey,
-        sharedSecret: payload.sharedSecret,
-        deviceId: payload.deviceId,
-        deviceLabel: payload.deviceLabel,
-        createdAt: Math.floor(Date.now() / 1000),
-        identityPubkey: payload.identityPubkey,
-      }
-      list.addDevice(device)
-    })
-  }
-
-  /**
-   * Updates a device's label in the InviteList.
-   *
-   * @param deviceId - The device ID to update
-   * @param label - The new label
-   * @throws Error if called in delegate mode
-   */
-  async updateDeviceLabel(deviceId: string, label: string): Promise<void> {
-    if (this.delegateMode) {
-      throw new Error("Cannot update device labels in delegate mode")
-    }
-    await this.init()
-
-    await this.modifyInviteList((list) => {
-      list.updateDeviceLabel(deviceId, label)
-    })
   }
 
   close() {
@@ -779,7 +435,7 @@ export class SessionManager {
     }
 
     this.ourDeviceInviteSubscription?.()
-    this.ourInviteListSubscription?.()
+    this.ourInviteResponseSubscription?.()
   }
 
   deactivateCurrentSessions(publicKey: string) {
@@ -950,53 +606,6 @@ export class SessionManager {
     this.sendEvent(recipientPublicKey, rumor).catch(console.error)
 
     return rumor
-  }
-
-  /**
-   * Revokes a device from the InviteList.
-   * @throws Error if called in delegate mode
-   */
-  async revokeDevice(deviceId: string): Promise<void> {
-    if (this.delegateMode) {
-      throw new Error("Cannot revoke devices in delegate mode")
-    }
-    await this.init()
-
-    // Use fetch-merge-publish pattern for InviteList
-    await this.modifyInviteList((list) => {
-      list.removeDevice(deviceId)
-    }).catch((error) => {
-      console.error("Failed to update InviteList for device revocation:", error)
-    })
-
-    await this.cleanupDevice(this.ourPublicKey, deviceId)
-  }
-
-  /**
-   * Modifies the InviteList using fetch-merge-publish pattern.
-   * This ensures we don't accidentally drop devices due to stale cache or race conditions.
-   */
-  private async modifyInviteList(
-    change: (list: InviteList) => void
-  ): Promise<void> {
-    // 1. Fetch latest from relay
-    const remote = await this.fetchUserInviteList(this.ourPublicKey)
-
-    // 2. Merge with local (preserves private keys)
-    const merged = this.mergeInviteLists(this.inviteList, remote)
-
-    // 3. Apply the change
-    change(merged)
-
-    // 4. Publish and save
-    const event = merged.getEvent()
-    await this.nostrPublish(event)
-    await this.saveInviteList(merged)
-
-    this.inviteList = merged
-
-    // Refresh our invite list listener so it tracks any device set changes
-    this.restartOurInviteListSubscription(merged)
   }
 
   private async cleanupDevice(publicKey: string, deviceId: string): Promise<void> {
