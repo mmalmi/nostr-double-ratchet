@@ -58,8 +58,8 @@ export class SessionManager {
   private ourPublicKey: string
 
   // Ephemeral keypair for listening to invite responses (optional)
-  private readonly ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array }
-  private readonly sharedSecret?: string
+  private ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array }
+  private sharedSecret?: string
 
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
@@ -98,6 +98,22 @@ export class SessionManager {
     this.versionPrefix = `v${this.storageVersion}`
     this.ephemeralKeypair = ephemeralKeypair
     this.sharedSecret = sharedSecret
+  }
+
+  /**
+   * Set ephemeral keys after construction (for async initialization)
+   */
+  setEphemeralKeys(
+    ephemeralKeypair: { publicKey: string; privateKey: Uint8Array },
+    sharedSecret: string
+  ): void {
+    this.ephemeralKeypair = ephemeralKeypair
+    this.sharedSecret = sharedSecret
+
+    // If already initialized, start the listener now
+    if (this.initialized && !this.ourInviteResponseSubscription) {
+      this.startInviteResponseListener()
+    }
   }
 
   async init() {
