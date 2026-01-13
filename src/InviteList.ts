@@ -93,6 +93,17 @@ export class InviteList {
   }
 
   /**
+   * Updates a device's identity public key.
+   * Useful for assigning a dedicated identity to the main device as well.
+   */
+  updateDeviceIdentityPubkey(deviceId: string, identityPubkey: string): void {
+    const device = this.devices.get(deviceId)
+    if (device) {
+      device.identityPubkey = identityPubkey
+    }
+  }
+
+  /**
    * Creates a new device entry with generated keys.
    * @param label - Human-readable label for the device
    * @param deviceId - Optional device ID (generates random if not provided)

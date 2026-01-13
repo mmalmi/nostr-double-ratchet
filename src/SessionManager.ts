@@ -103,6 +103,14 @@ export class SessionManager {
   }
 
   /**
+   * Update our identity key used for DH during invite handshakes.
+   * Useful when main devices use a dedicated per-device identity.
+   */
+  setIdentityKey(key: Uint8Array | DecryptFunction): void {
+    this.ourIdentityKey = key
+  }
+
+  /**
    * Set ephemeral keys after construction (for async initialization)
    */
   setEphemeralKeys(

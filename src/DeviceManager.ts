@@ -84,6 +84,11 @@ export class DeviceManager {
   private initialized = false
   private subscriptions: Unsubscribe[] = []
 
+  // Main device identity (for main mode): dedicated per-device keypair
+  // Generated and stored locally; used for DH during invite handshakes
+  private mainDeviceIdentityPublicKey?: string
+  private mainDeviceIdentityPrivateKey?: Uint8Array
+
   // Storage keys
   private readonly storageVersion = "1"
   private get versionPrefix(): string {
@@ -233,6 +238,10 @@ export class DeviceManager {
       const device = inviteList.createDevice(this.deviceLabel, this.deviceId)
       inviteList.addDevice(device)
     }
+
+    // 4.5 Ensure main device identity exists and is set on our device entry
+    const idKeypair = await this.ensureMainDeviceIdentityKeypair()
+    inviteList.updateDeviceIdentityPubkey(this.deviceId, idKeypair.publicKey)
 
     // 5. Save and set
     this.inviteList = inviteList
@@ -519,6 +528,59 @@ export class DeviceManager {
 
   private ownerPubkeyKey(): string {
     return `${this.versionPrefix}/device-manager/owner-pubkey`
+  }
+
+  private mainIdentityKeyKey(): string {
+    return `${this.versionPrefix}/device-manager/main-identity`
+  }
+
+  private async ensureMainDeviceIdentityKeypair(): Promise<{ publicKey: string; privateKey: Uint8Array }> {
+    if (this.delegateMode) {
+      throw new Error("Main device identity is only applicable in main mode")
+    }
+
+    // Return cached if present
+    if (this.mainDeviceIdentityPublicKey && this.mainDeviceIdentityPrivateKey) {
+      return {
+        publicKey: this.mainDeviceIdentityPublicKey,
+        privateKey: this.mainDeviceIdentityPrivateKey,
+      }
+    }
+
+    // Try loading from storage
+    const stored = await this.storage.get<{ publicKey: string; privateKey: number[] }>(
+      this.mainIdentityKeyKey()
+    )
+    if (stored?.publicKey && stored?.privateKey?.length) {
+      this.mainDeviceIdentityPublicKey = stored.publicKey
+      this.mainDeviceIdentityPrivateKey = new Uint8Array(stored.privateKey)
+      return {
+        publicKey: this.mainDeviceIdentityPublicKey,
+        privateKey: this.mainDeviceIdentityPrivateKey,
+      }
+    }
+
+    // Generate new keypair
+    const priv = generateSecretKey()
+    const pub = getPublicKey(priv)
+
+    this.mainDeviceIdentityPublicKey = pub
+    this.mainDeviceIdentityPrivateKey = priv
+
+    // Persist
+    await this.storage.put(this.mainIdentityKeyKey(), {
+      publicKey: pub,
+      privateKey: Array.from(priv),
+    })
+
+    return { publicKey: pub, privateKey: priv }
+  }
+
+  /**
+   * Returns the main device's dedicated identity keypair (main mode only).
+   */
+  async getMainDeviceIdentityKeypair(): Promise<{ publicKey: string; privateKey: Uint8Array }> {
+    return this.ensureMainDeviceIdentityKeypair()
   }
 
   private async loadInviteList(): Promise<InviteList | null> {
