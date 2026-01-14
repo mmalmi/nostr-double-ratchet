@@ -109,11 +109,13 @@ export class SessionManager {
     ephemeralKeypair: { publicKey: string; privateKey: Uint8Array },
     sharedSecret: string
   ): void {
+    console.warn(`[SM ${this.deviceId}] setEphemeralKeys: ephemeralPubkey=${ephemeralKeypair.publicKey.slice(0, 16)}...`)
     this.ephemeralKeypair = ephemeralKeypair
     this.sharedSecret = sharedSecret
 
     // If already initialized, start the listener and setup own devices now
     if (this.initialized && !this.ourInviteResponseSubscription) {
+      console.warn(`[SM ${this.deviceId}] setEphemeralKeys: already initialized, starting listener now`)
       this.startInviteResponseListener()
       // Now that we can receive responses, setup sessions with our own other devices
       this.setupUser(this.ourPublicKey)
@@ -139,9 +141,12 @@ export class SessionManager {
     // IMPORTANT: Start invite response listener BEFORE setting up users
     // This ensures we're listening when other devices respond to our invites
     if (this.ephemeralKeypair && this.sharedSecret) {
+      console.warn(`[SM ${this.deviceId}] init: has ephemeral keys, starting invite response listener`)
       this.startInviteResponseListener()
       // Setup sessions with our own other devices (only if we can receive responses)
       this.setupUser(this.ourPublicKey)
+    } else {
+      console.warn(`[SM ${this.deviceId}] init: NO ephemeral keys yet, will wait for setEphemeralKeys`)
     }
     // If no ephemeral keys yet, setupUser will be called when setEphemeralKeys is called
   }
@@ -155,6 +160,9 @@ export class SessionManager {
 
     const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.ephemeralKeypair
     const sharedSecret = this.sharedSecret
+
+    const hasRawKey = this.ourIdentityKey instanceof Uint8Array
+    console.warn(`[SM ${this.deviceId}] startInviteResponseListener: listening on ephemeralPubkey=${ephemeralPubkey.slice(0, 16)}..., ourPublicKey=${this.ourPublicKey.slice(0, 8)}..., hasRawKey=${hasRawKey}`)
 
     // Subscribe to invite responses tagged to our ephemeral key
     this.ourInviteResponseSubscription = this.nostrSubscribe(
@@ -186,12 +194,14 @@ export class SessionManager {
 
           // Resolve delegate pubkey to owner for correct UserRecord attribution
           const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
+          console.warn(`[SM ${this.deviceId}] startInviteResponseListener: received response from ${decrypted.inviteeIdentity.slice(0, 8)}... (resolved to ${ownerPubkey.slice(0, 8)}...), deviceId=${decrypted.deviceId}`)
           const userRecord = this.getOrCreateUserRecord(ownerPubkey)
           const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
 
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
-        } catch {
+        } catch (e) {
           // Invalid response, ignore
+          console.warn(`[SM ${this.deviceId}] startInviteResponseListener: failed to decrypt response:`, e)
         }
       }
     )
@@ -302,10 +312,17 @@ export class SessionManager {
     // Set to true if only handshake -> not yet sendable -> will be promoted on message
     inactive: boolean = false
   ): void {
-    if (deviceRecord.staleAt !== undefined) return
+    console.warn(`[SM ${this.deviceId}] attachSessionSubscription: user=${userPubkey.slice(0, 8)}..., device=${deviceRecord.deviceId}, inactive=${inactive}`)
+    if (deviceRecord.staleAt !== undefined) {
+      console.warn(`[SM ${this.deviceId}] device is stale, skipping`)
+      return
+    }
 
     const key = this.sessionKey(userPubkey, deviceRecord.deviceId, session.name)
-    if (this.sessionSubscriptions.has(key)) return
+    if (this.sessionSubscriptions.has(key)) {
+      console.warn(`[SM ${this.deviceId}] session subscription already exists for ${key}`)
+      return
+    }
 
     const dr = deviceRecord
     const rotateSession = (nextSession: Session) => {
@@ -343,10 +360,12 @@ export class SessionManager {
     }
 
     const unsub = session.onEvent((event) => {
+      console.warn(`[SM ${this.deviceId}] received message from ${userPubkey.slice(0, 8)}... device=${deviceRecord.deviceId}: "${event.content?.slice(0, 30)}..."`)
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       rotateSession(session)
       this.storeUserRecord(userPubkey).catch(console.error)
     })
+    console.warn(`[SM ${this.deviceId}] session subscription attached for ${key}`)
     this.storeUserRecord(userPubkey).catch(console.error)
     this.sessionSubscriptions.set(key, unsub)
   }
@@ -390,6 +409,7 @@ export class SessionManager {
   }
 
   setupUser(userPubkey: string) {
+    console.warn(`[SM ${this.deviceId}] setupUser(${userPubkey.slice(0, 8)}...)`)
     const userRecord = this.getOrCreateUserRecord(userPubkey)
 
     // Helper to accept an invite (works for both InviteList devices and legacy Invite)
@@ -397,6 +417,7 @@ export class SessionManager {
       inviteList: InviteList,
       deviceId: string
     ) => {
+      console.warn(`[SM ${this.deviceId}] acceptInviteFromDevice: user=${userPubkey.slice(0, 8)}..., device=${deviceId}`)
       const { session, event } = await inviteList.accept(
         deviceId,
         this.nostrSubscribe,
@@ -404,6 +425,7 @@ export class SessionManager {
         this.ourIdentityKey,
         this.deviceId
       )
+      console.warn(`[SM ${this.deviceId}] accepted invite, publishing response...`)
       return this.nostrPublish(event)
         .then(() => this.upsertDeviceRecord(userRecord, deviceId))
         .then((dr) => this.attachSessionSubscription(userPubkey, dr, session))
@@ -430,15 +452,21 @@ export class SessionManager {
 
     // Subscribe to InviteList (kind 10078) - new format
     this.attachInviteListSubscription(userPubkey, async (inviteList) => {
+      const devices = inviteList.getAllDevices()
+      console.warn(`[SM ${this.deviceId}] received InviteList for ${userPubkey.slice(0, 8)}... with ${devices.length} devices:`, devices.map(d => ({ id: d.deviceId, identityPubkey: d.identityPubkey?.slice(0, 8) })))
+
       // Handle removed devices (source of truth for revocation)
       for (const deviceId of inviteList.getRemovedDeviceIds()) {
         await this.cleanupDevice(userPubkey, deviceId)
       }
 
       // Accept invites from new devices
-      for (const device of inviteList.getAllDevices()) {
+      for (const device of devices) {
         if (!userRecord.devices.has(device.deviceId)) {
+          console.warn(`[SM ${this.deviceId}] new device found: ${device.deviceId}, will accept invite`)
           await acceptInviteFromDevice(inviteList, device.deviceId)
+        } else {
+          console.warn(`[SM ${this.deviceId}] device ${device.deviceId} already known, skipping`)
         }
       }
     })
@@ -584,6 +612,7 @@ export class SessionManager {
     event: Partial<Rumor>
   ): Promise<Rumor | undefined> {
     await this.init()
+    console.warn(`[SM ${this.deviceId}] sendEvent to ${recipientIdentityKey.slice(0, 8)}...: "${(event as Rumor).content?.slice(0, 30)}..."`)
 
     // Add to message history queue (will be sent when session is established)
     const completeEvent = event as Rumor
@@ -603,11 +632,17 @@ export class SessionManager {
     const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
     const devices = [...recipientDevices, ...ownDevices]
 
+    console.warn(`[SM ${this.deviceId}] sending to ${devices.length} devices:`, devices.map(d => ({ id: d.deviceId, hasSession: !!d.activeSession })))
+
     // Send to all devices in background (if sessions exist)
     Promise.allSettled(
       devices.map(async (device) => {
         const { activeSession } = device
-        if (!activeSession) return
+        if (!activeSession) {
+          console.warn(`[SM ${this.deviceId}] no active session for device ${device.deviceId}, skipping`)
+          return
+        }
+        console.warn(`[SM ${this.deviceId}] sending via session to device ${device.deviceId}`)
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         await this.nostrPublish(verifiedEvent).catch(console.error)
       })

@@ -89,9 +89,14 @@ export class MockRelay {
         "existing events to new subscriber"
       )
     }
-    for (const event of this.events) {
-      this.deliverToSubscriber(subscriber, event)
-    }
+
+    // Defer initial delivery to next tick to allow subscriber assignment to complete
+    // This mimics real relay behavior where events arrive asynchronously
+    queueMicrotask(() => {
+      for (const event of this.events) {
+        this.deliverToSubscriber(subscriber, event)
+      }
+    })
 
     return () => {
       this.subscribers.delete(subId)

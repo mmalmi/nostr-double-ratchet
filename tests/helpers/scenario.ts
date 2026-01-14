@@ -1,9 +1,10 @@
 import { MockRelay } from "./mockRelay"
-import { createMockSessionManager } from "./mockSessionManager"
+import { createMockSessionManager, createMockDelegateSessionManager } from "./mockSessionManager"
 import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { generateSecretKey, getPublicKey } from "nostr-tools"
+import { DeviceManager } from "../../src/DeviceManager"
 
 export type ActorId = "alice" | "bob"
 
@@ -24,6 +25,7 @@ interface ActorState {
   secretKey: Uint8Array
   publicKey: string
   devices: Map<string, DeviceState>
+  mainDeviceManager?: DeviceManager
 }
 
 interface DeviceState {
@@ -34,6 +36,8 @@ interface DeviceState {
   messageCounts: Map<string, number>
   waiters: MessageWaiter[]
   unsub?: () => void
+  isDelegate?: boolean
+  delegateDeviceManager?: DeviceManager
 }
 
 interface ActorDeviceRef {
@@ -54,6 +58,7 @@ type ScenarioStep =
   | { type: "expect"; actor: ActorId; deviceId: string; message: string }
   | { type: "expectAll"; actor: ActorId; deviceId: string; messages: string[] }
   | { type: "addDevice"; actor: ActorId; deviceId: string }
+  | { type: "addDelegateDevice"; actor: ActorId; deviceId: string; mainDeviceId: string }
   | { type: "close"; actor: ActorId; deviceId: string }
   | { type: "restart"; actor: ActorId; deviceId: string }
   | { type: "clearEvents" }
@@ -87,6 +92,9 @@ export async function runScenario(def: ScenarioDefinition): Promise<ScenarioCont
         break
       case "addDevice":
         await addDevice(context, step.actor, step.deviceId)
+        break
+      case "addDelegateDevice":
+        await addDelegateDevice(context, step.actor, step.deviceId, step.mainDeviceId)
         break
       case "close":
         closeDevice(context, { actor: step.actor, deviceId: step.deviceId })
@@ -287,13 +295,51 @@ async function addDevice(context: ScenarioContext, actorId: ActorId, deviceId: s
     throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage } = await createMockSessionManager(
+  const { manager, mockStorage, deviceManager } = await createMockSessionManager(
     deviceId,
     context.relay,
     actor.secretKey
   )
 
+  // Track the first device's DeviceManager as the main one for this actor
+  if (!actor.mainDeviceManager) {
+    actor.mainDeviceManager = deviceManager
+  }
+
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
+  actor.devices.set(deviceId, deviceState)
+  return deviceState
+}
+
+async function addDelegateDevice(
+  context: ScenarioContext,
+  actorId: ActorId,
+  deviceId: string,
+  mainDeviceId: string
+) {
+  const actor = getActor(context, actorId)
+  if (actor.devices.has(deviceId)) {
+    throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
+  }
+
+  const mainDevice = actor.devices.get(mainDeviceId)
+  if (!mainDevice) {
+    throw new Error(`Main device '${mainDeviceId}' not found for actor '${actorId}'`)
+  }
+
+  if (!actor.mainDeviceManager) {
+    throw new Error(`No main DeviceManager found for actor '${actorId}'`)
+  }
+
+  const { manager, mockStorage, delegateDeviceManager } = await createMockDelegateSessionManager(
+    deviceId,
+    context.relay,
+    actor.mainDeviceManager
+  )
+
+  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
+  deviceState.isDelegate = true
+  deviceState.delegateDeviceManager = delegateDeviceManager
   actor.devices.set(deviceId, deviceState)
   return deviceState
 }

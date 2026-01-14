@@ -1,5 +1,4 @@
 import { vi } from "vitest"
-import { SessionManager } from "../../src/SessionManager"
 import { DeviceManager } from "../../src/DeviceManager"
 import {
   Filter,
@@ -53,22 +52,8 @@ export const createMockSessionManager = async (
 
   await deviceManager.init()
 
-  // Get ephemeral keypair and shared secret from DeviceManager
-  const ephemeralKeypair = deviceManager.getEphemeralKeypair()
-  const sharedSecret = deviceManager.getSharedSecret()
-
-  // Create SessionManager with ephemeral keypair for invite response listening
-  const manager = new SessionManager(
-    publicKey,
-    secretKey,
-    deviceId,
-    subscribe,
-    publish,
-    mockStorage,
-    ephemeralKeypair ?? undefined,
-    sharedSecret ?? undefined
-  )
-
+  // Use DeviceManager to create properly configured SessionManager
+  const manager = deviceManager.createSessionManager()
   await manager.init()
 
   const onEvent = vi.fn()
@@ -85,5 +70,78 @@ export const createMockSessionManager = async (
     secretKey,
     publicKey,
     relay: mockRelay,
+  }
+}
+
+export const createMockDelegateSessionManager = async (
+  deviceId: string,
+  sharedMockRelay: MockRelay,
+  mainDeviceManager: DeviceManager
+) => {
+  const mockStorage = new InMemoryStorageAdapter()
+  const storageSpy = {
+    get: vi.spyOn(mockStorage, "get"),
+    del: vi.spyOn(mockStorage, "del"),
+    put: vi.spyOn(mockStorage, "put"),
+    list: vi.spyOn(mockStorage, "list"),
+  }
+
+  // Create subscribe/publish functions that don't need signing (delegate uses its own keys)
+  const subscribe = vi
+    .fn()
+    .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
+      return sharedMockRelay.subscribe(filter, onEvent)
+    })
+
+  const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
+    // Delegate's SessionManager signs its own events, so we might receive already-signed events
+    if ('sig' in event && event.sig) {
+      // Already signed, just add to relay
+      const verifiedEvent = event as VerifiedEvent
+      // Manually add to relay's events array since we bypass the normal publish flow
+      ;(sharedMockRelay as any).events.push(verifiedEvent)
+      for (const sub of (sharedMockRelay as any).subscribers.values()) {
+        ;(sharedMockRelay as any).deliverToSubscriber(sub, verifiedEvent)
+      }
+      return verifiedEvent
+    }
+    // Unsigned event - this shouldn't happen for delegate but handle gracefully
+    throw new Error("Delegate publish received unsigned event")
+  })
+
+  // Create delegate DeviceManager
+  const { manager: delegateDeviceManager, payload } = DeviceManager.createDelegate({
+    deviceId,
+    deviceLabel: deviceId,
+    nostrSubscribe: subscribe,
+    nostrPublish: publish,
+    storage: mockStorage,
+  })
+
+  await delegateDeviceManager.init()
+
+  // Main device adds delegate to its InviteList
+  await mainDeviceManager.addDevice(payload)
+
+  // Delegate waits for activation
+  await delegateDeviceManager.waitForActivation(5000)
+
+  // Use DeviceManager to create properly configured SessionManager
+  const manager = delegateDeviceManager.createSessionManager()
+  await manager.init()
+
+  const onEvent = vi.fn()
+  manager.onEvent(onEvent)
+
+  return {
+    manager,
+    delegateDeviceManager,
+    subscribe,
+    publish,
+    onEvent,
+    mockStorage,
+    storageSpy,
+    publicKey: delegateDeviceManager.getIdentityPublicKey(),
+    relay: sharedMockRelay,
   }
 }

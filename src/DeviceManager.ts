@@ -4,6 +4,7 @@ import { InviteList, DeviceEntry } from "./InviteList"
 import { DevicePayload } from "./inviteUtils"
 import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
+import { SessionManager } from "./SessionManager"
 
 /**
  * Options for creating a main device DeviceManager
@@ -509,6 +510,42 @@ export class DeviceManager {
       unsubscribe()
     }
     this.subscriptions = []
+  }
+
+  /**
+   * Creates a SessionManager configured for this device.
+   * Must be called after init().
+   *
+   * For main devices: Uses owner's keys and ephemeral keys from InviteList
+   * For delegate devices: Uses device's own identity keys and ephemeral keys
+   *
+   * @param sessionStorage - Optional separate storage for SessionManager (defaults to DeviceManager's storage)
+   */
+  createSessionManager(sessionStorage?: StorageAdapter): SessionManager {
+    if (!this.initialized) {
+      throw new Error("DeviceManager must be initialized before creating SessionManager")
+    }
+
+    const ephemeralKeypair = this.getEphemeralKeypair()
+    const sharedSecret = this.getSharedSecret()
+
+    if (!ephemeralKeypair || !sharedSecret) {
+      throw new Error("Ephemeral keypair and shared secret required for SessionManager")
+    }
+
+    const publicKey = this.getIdentityPublicKey()
+    const privateKey = this.getIdentityPrivateKey()
+
+    return new SessionManager(
+      publicKey,
+      privateKey,
+      this.deviceId,
+      this.nostrSubscribe,
+      this.nostrPublish,
+      sessionStorage || this.storage,
+      ephemeralKeypair,
+      sharedSecret
+    )
   }
 
   // Private helpers
