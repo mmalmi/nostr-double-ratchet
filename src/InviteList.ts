@@ -24,17 +24,16 @@ type DeviceTag = [
   ephemeralPublicKey: string,
   sharedSecret: string,
   deviceId: string,
-  deviceLabel: string,
   createdAt: string,
-  ...rest: string[]  // Optional: identityPubkey at index 6
+  ...rest: string[]  // Optional: identityPubkey at index 5
 ]
 
 type RemovedTag = [type: "removed", deviceId: string]
 
 const isDeviceTag = (tag: string[]): tag is DeviceTag =>
-  tag.length >= 6 &&
+  tag.length >= 5 &&
   tag[0] === "device" &&
-  tag.slice(1, 6).every((v) => typeof v === "string")
+  tag.slice(1, 5).every((v) => typeof v === "string")
 
 const isRemovedTag = (tag: string[]): tag is RemovedTag =>
   tag.length >= 2 &&
@@ -170,7 +169,6 @@ export class InviteList {
         device.ephemeralPublicKey,
         device.sharedSecret,
         device.deviceId,
-        device.deviceLabel,
         String(device.createdAt),
       ]
       // Only include identityPubkey if it's set (delegate devices)
@@ -212,11 +210,11 @@ export class InviteList {
 
     const devices = event.tags
       .filter(isDeviceTag)
-      .map(([, ephemeralPublicKey, sharedSecret, deviceId, deviceLabel, createdAt, identityPubkey]) => ({
+      .map(([, ephemeralPublicKey, sharedSecret, deviceId, createdAt, identityPubkey]) => ({
         ephemeralPublicKey,
         sharedSecret,
         deviceId,
-        deviceLabel,
+        deviceLabel: deviceId,
         createdAt: parseInt(createdAt, 10) || event.created_at,
         identityPubkey: identityPubkey || undefined,
       }))

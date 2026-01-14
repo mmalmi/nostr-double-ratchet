@@ -167,12 +167,12 @@ describe('InviteList', () => {
       expect(event.tags).toContainEqual(['d', 'double-ratchet/invite-list'])
       expect(event.tags).toContainEqual(['version', '1'])
 
-      // Check device tag
+      // Check device tag (deviceLabel is no longer published for privacy)
       const deviceTag = event.tags.find(t => t[0] === 'device' && t[3] === device.deviceId)
       expect(deviceTag).toBeDefined()
       expect(deviceTag![1]).toBe(device.ephemeralPublicKey)
       expect(deviceTag![2]).toBe(device.sharedSecret)
-      expect(deviceTag![4]).toBe(device.deviceLabel)
+      expect(deviceTag![4]).toBe(String(device.createdAt))
     })
 
     it('should include removed devices in event tags', () => {
@@ -202,7 +202,8 @@ describe('InviteList', () => {
       expect(parsed.ownerPublicKey).toBe(ownerPublicKey)
       expect(parsed.getAllDevices()).toHaveLength(1)
       expect(parsed.getAllDevices()[0].deviceId).toBe(device.deviceId)
-      expect(parsed.getAllDevices()[0].deviceLabel).toBe(device.deviceLabel)
+      // deviceLabel is no longer published, falls back to deviceId
+      expect(parsed.getAllDevices()[0].deviceLabel).toBe(device.deviceId)
       // Note: ephemeralPrivateKey is not included in event
       expect(parsed.getAllDevices()[0].ephemeralPrivateKey).toBeUndefined()
     })
@@ -506,7 +507,7 @@ describe('InviteList', () => {
 
       const deviceTag = event.tags.find(t => t[0] === 'device' && t[3] === device.deviceId)
       expect(deviceTag).toBeDefined()
-      expect(deviceTag![6]).toBe(delegatePublicKey)
+      expect(deviceTag![5]).toBe(delegatePublicKey)
     })
 
     it('should not include identityPubkey in tag when not set', () => {
@@ -520,8 +521,8 @@ describe('InviteList', () => {
 
       const deviceTag = event.tags.find(t => t[0] === 'device' && t[3] === device.deviceId)
       expect(deviceTag).toBeDefined()
-      // Tag should have 6 elements (no identityPubkey) or 7th element should be empty/undefined
-      expect(deviceTag!.length).toBe(6)
+      // Tag should have 5 elements (no identityPubkey): device, ephem, secret, id, createdAt
+      expect(deviceTag!.length).toBe(5)
     })
 
     it('should parse identityPubkey from event', () => {

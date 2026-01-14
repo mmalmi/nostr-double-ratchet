@@ -171,7 +171,6 @@ describe("DeviceManager - Main Device", () => {
             remoteEphemeralPubkey,
             remoteSharedSecret,
             remoteDeviceId,
-            "Device 2",
             String(Math.floor(Date.now() / 1000)),
           ],
         ],
