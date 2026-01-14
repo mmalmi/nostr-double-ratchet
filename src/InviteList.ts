@@ -316,7 +316,21 @@ export class InviteList {
     if (!device) {
       throw new Error(`Device ${deviceId} not found in invite list`)
     }
-    console.warn(`[InviteList.accept] deviceId=${deviceId}, identityPubkey=${device.identityPubkey?.slice(0, 8) ?? 'none'}, inviteePublicKey=${inviteePublicKey.slice(0, 8)}...`)
+
+    // Validate identityPubkey - must be 64-char hex string to be a valid secp256k1 pubkey
+    const isValidPubkey = (pubkey: string | undefined): pubkey is string => {
+      if (!pubkey) return false
+      if (pubkey.length !== 64) return false
+      if (!/^[0-9a-f]+$/i.test(pubkey)) return false
+      return true
+    }
+
+    // Use identityPubkey only if valid, otherwise fall back to owner's pubkey
+    const inviterIdentityKey = isValidPubkey(device.identityPubkey)
+      ? device.identityPubkey
+      : this.ownerPublicKey
+
+    console.warn(`[InviteList.accept] deviceId=${deviceId}, identityPubkey=${device.identityPubkey?.slice(0, 8) ?? 'none'} (valid=${isValidPubkey(device.identityPubkey)}), using=${inviterIdentityKey.slice(0, 8)}..., inviteePublicKey=${inviteePublicKey.slice(0, 8)}...`)
 
     const inviteeSessionKeypair = generateEphemeralKeypair()
 
@@ -330,10 +344,6 @@ export class InviteList {
 
     const encrypt = typeof encryptor === "function" ? encryptor : undefined
     const inviteePrivateKey = typeof encryptor === "function" ? undefined : encryptor
-
-    // For delegate devices, use the delegate's identity key for DH encryption
-    // For regular devices, use the InviteList owner's public key
-    const inviterIdentityKey = device.identityPubkey ?? this.ownerPublicKey
 
     const encrypted = await encryptInviteResponse({
       inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
