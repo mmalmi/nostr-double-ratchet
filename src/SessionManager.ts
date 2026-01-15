@@ -630,7 +630,16 @@ export class SessionManager {
 
     const recipientDevices = Array.from(userRecord.devices.values()).filter(d => d.staleAt === undefined)
     const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
-    const devices = [...recipientDevices, ...ownDevices]
+
+    // Merge and deduplicate by deviceId, excluding our own sending device
+    // This fixes the self-message bug where sending to yourself would duplicate devices
+    const deviceMap = new Map<string, DeviceRecord>()
+    for (const d of [...recipientDevices, ...ownDevices]) {
+      if (d.deviceId !== this.deviceId) {  // Exclude sender's own device
+        deviceMap.set(d.deviceId, d)
+      }
+    }
+    const devices = Array.from(deviceMap.values())
 
     console.warn(`[SM ${this.deviceId}] sending to ${devices.length} devices:`, devices.map(d => ({ id: d.deviceId, hasSession: !!d.activeSession })))
 
