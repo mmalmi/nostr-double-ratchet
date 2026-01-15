@@ -1,3 +1,4 @@
+import { vi } from "vitest"
 import { ControlledMockRelay } from "./ControlledMockRelay"
 import {
   createControlledMockSessionManager,
@@ -6,7 +7,7 @@ import {
 import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
-import { generateSecretKey, getPublicKey } from "nostr-tools"
+import { generateSecretKey, getPublicKey, Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
 import { DeviceManager } from "../../src/DeviceManager"
 
 export type ActorId = "alice" | "bob"
@@ -452,15 +453,21 @@ async function restartDevice(context: ControlledScenarioContext, ref: ActorDevic
   device.unsub?.()
   device.manager.close()
 
-  const { manager: newManager } = await createControlledMockSessionManager(
-    device.deviceId,
-    context.relay,
-    actor.secretKey,
-    device.storage
-  )
+  if (device.isDelegate && device.delegateDeviceManager) {
+    // Restart delegate device
+    await restartDelegateDevice(context, ref, actor, device)
+  } else {
+    // Restart main device
+    const { manager: newManager } = await createControlledMockSessionManager(
+      device.deviceId,
+      context.relay,
+      actor.secretKey,
+      device.storage
+    )
 
-  device.manager = newManager
-  device.unsub = attachManagerListener(actor, device)
+    device.manager = newManager
+    device.unsub = attachManagerListener(actor, device)
+  }
 
   // Update subscription ID for the new manager
   const subs = context.relay.getSubscriptions()
@@ -468,6 +475,66 @@ async function restartDevice(context: ControlledScenarioContext, ref: ActorDevic
   if (latestSub) {
     device.subscriptionId = latestSub.id
   }
+}
+
+async function restartDelegateDevice(
+  context: ControlledScenarioContext,
+  _ref: ActorDeviceRef,
+  actor: ActorState,
+  device: DeviceState
+) {
+  const oldDelegateManager = device.delegateDeviceManager!
+
+  // Get the delegate's keys before they're lost
+  const devicePrivateKey = oldDelegateManager.getIdentityPrivateKey()
+  const devicePublicKey = oldDelegateManager.getIdentityPublicKey()
+  const ephemeralKeypair = oldDelegateManager.getEphemeralKeypair()
+  const sharedSecret = oldDelegateManager.getSharedSecret()
+
+  if (!ephemeralKeypair || !sharedSecret) {
+    throw new Error(`Delegate device '${device.deviceId}' was not activated - cannot restart`)
+  }
+
+  // Create new subscribe/publish functions
+  const subscribe = vi
+    .fn()
+    .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
+      const handle = context.relay.subscribe(filter, onEvent)
+      return handle.close
+    })
+
+  const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
+    if ('sig' in event && event.sig) {
+      const verifiedEvent = event as VerifiedEvent
+      await context.relay.publishAndDeliver(event as UnsignedEvent)
+      return verifiedEvent
+    }
+    throw new Error("Delegate publish received unsigned event")
+  })
+
+  // Restore the delegate DeviceManager with saved keys
+  const newDelegateManager = DeviceManager.restoreDelegate({
+    deviceId: device.deviceId,
+    deviceLabel: device.deviceId,
+    nostrSubscribe: subscribe,
+    nostrPublish: publish,
+    storage: device.storage,
+    devicePublicKey,
+    devicePrivateKey,
+    ephemeralPublicKey: ephemeralKeypair.publicKey,
+    ephemeralPrivateKey: ephemeralKeypair.privateKey,
+    sharedSecret,
+  })
+
+  await newDelegateManager.init()
+
+  // Create new SessionManager
+  const newManager = newDelegateManager.createSessionManager()
+  await newManager.init()
+
+  device.manager = newManager
+  device.delegateDeviceManager = newDelegateManager
+  device.unsub = attachManagerListener(actor, device)
 }
 
 function attachManagerListener(_actor: ActorState, device: DeviceState): () => void {
