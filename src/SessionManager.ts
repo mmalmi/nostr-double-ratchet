@@ -22,6 +22,9 @@ interface DeviceRecord {
   inactiveSessions: Session[]
   createdAt: number
   staleAt?: number
+  // Set to true when we've processed an invite response from this device
+  // This survives restarts and prevents duplicate RESPONDER session creation
+  hasResponderSession?: boolean
 }
 
 interface UserRecord {
@@ -37,6 +40,7 @@ interface StoredDeviceRecord {
   inactiveSessions: StoredSessionEntry[]
   createdAt: number
   staleAt?: number
+  hasResponderSession?: boolean
 }
 
 interface StoredUserRecord {
@@ -197,18 +201,21 @@ export class SessionManager {
           const userRecord = this.getOrCreateUserRecord(ownerPubkey)
           const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
 
-          // Check for duplicate/stale responses
+          // Check for duplicate/stale responses using the persisted flag
+          // This flag survives restarts and prevents creating duplicate RESPONDER sessions
+          if (deviceRecord.hasResponderSession) {
+            console.warn(`[SM ${this.deviceId}] startInviteResponseListener: skipping response from ${decrypted.deviceId} - already have responder session (persisted flag)`)
+            return
+          }
+
+          // Also check session state as a fallback (for existing sessions before the flag was added)
           const responseSessionKey = decrypted.inviteeSessionPublicKey
           const existingSession = deviceRecord.activeSession
           const existingInactive = deviceRecord.inactiveSessions || []
           const allSessions = existingSession ? [existingSession, ...existingInactive] : existingInactive
 
-          // Invite responses create RESPONDER sessions (we receive on them).
-          // A fresh responder session has ourCurrentNostrKey === undefined.
-          // If we already have such a session, or a session that has evolved past that state
-          // (received messages, now can send), we don't need another responder session.
-          // Check if any session can already receive from this device:
-          // - Has receivingChainKey set (can decrypt incoming), OR
+          // Check if any existing session can already receive from this device:
+          // - Has receivingChainKey set (RESPONDER session has received messages)
           // - Has the same theirNextNostrPublicKey (same session, duplicate response)
           const canAlreadyReceive = allSessions.some(s =>
             s.state?.receivingChainKey !== undefined ||
@@ -229,7 +236,13 @@ export class SessionManager {
             name: event.id,
           })
 
+          // Mark that we've processed a responder session for this device
+          // This flag is persisted and survives restarts
+          deviceRecord.hasResponderSession = true
+
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
+          // Persist the flag
+          this.storeUserRecord(ownerPubkey).catch(console.error)
         } catch (e) {
           // Invalid response, ignore
           console.warn(`[SM ${this.deviceId}] startInviteResponseListener: failed to decrypt response:`, e)
@@ -392,6 +405,7 @@ export class SessionManager {
 
     const unsub = session.onEvent((event) => {
       console.warn(`[SM ${this.deviceId}] received message from ${userPubkey.slice(0, 8)}... device=${deviceRecord.deviceId}: "${event.content?.slice(0, 30)}..."`)
+      console.warn(`[SM ${this.deviceId}] EVENT: ${JSON.stringify(event)}`)
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       rotateSession(session)
       this.storeUserRecord(userPubkey).catch(console.error)
@@ -701,6 +715,7 @@ export class SessionManager {
         this.storeUserRecord(recipientIdentityKey)
         // Also store owner's record if different (for sibling device sessions)
         // This ensures session state is persisted after ratcheting
+        // TODO: check if really necessary, if yes, why?
         if (this.ownerPublicKey !== recipientIdentityKey) {
           this.storeUserRecord(this.ownerPublicKey)
         }
@@ -792,6 +807,7 @@ export class SessionManager {
           ),
           createdAt: device.createdAt,
           staleAt: device.staleAt,
+          hasResponderSession: device.hasResponderSession,
         })
       ),
     }
@@ -813,6 +829,7 @@ export class SessionManager {
             inactiveSessions: serializedInactive,
             createdAt,
             staleAt,
+            hasResponderSession,
           } = deviceData
 
           try {
@@ -833,6 +850,7 @@ export class SessionManager {
               inactiveSessions,
               createdAt,
               staleAt,
+              hasResponderSession,
             })
           } catch (e) {
             console.error(
