@@ -195,6 +195,13 @@ export class SessionManager {
             decrypt: typeof this.ourIdentityKey === "function" ? this.ourIdentityKey : undefined,
           })
 
+          // Skip our own responses - this happens when we publish an invite response
+          // and our own listener receives it back from relays
+          if (decrypted.deviceId === this.deviceId) {
+            console.warn(`[SM ${this.deviceId}] startInviteResponseListener: skipping our own response`)
+            return
+          }
+
           // Resolve delegate pubkey to owner for correct UserRecord attribution
           const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
           console.warn(`[SM ${this.deviceId}] startInviteResponseListener: received response from ${decrypted.inviteeIdentity.slice(0, 8)}... (resolved to ${ownerPubkey.slice(0, 8)}...), deviceId=${decrypted.deviceId}`)
