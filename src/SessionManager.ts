@@ -56,6 +56,8 @@ export class SessionManager {
   private nostrPublish: NostrPublish
   private ourIdentityKey: Uint8Array | DecryptFunction
   private ourPublicKey: string
+  // Owner's public key - for delegates this is the main device's owner, for main devices it's the same as ourPublicKey
+  private ownerPublicKey: string
 
   // Ephemeral keypair for listening to invite responses (optional)
   private ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array }
@@ -88,7 +90,8 @@ export class SessionManager {
     nostrPublish: NostrPublish,
     storage?: StorageAdapter,
     ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array },
-    sharedSecret?: string
+    sharedSecret?: string,
+    ownerPublicKey?: string
   ) {
     this.userRecords = new Map()
     this.nostrSubscribe = nostrSubscribe
@@ -100,6 +103,8 @@ export class SessionManager {
     this.versionPrefix = `v${this.storageVersion}`
     this.ephemeralKeypair = ephemeralKeypair
     this.sharedSecret = sharedSecret
+    // For delegates, ownerPublicKey is the actual owner. For main devices, it's the same as ourPublicKey.
+    this.ownerPublicKey = ownerPublicKey || ourPublicKey
   }
 
   /**
@@ -118,7 +123,8 @@ export class SessionManager {
       console.warn(`[SM ${this.deviceId}] setEphemeralKeys: already initialized, starting listener now`)
       this.startInviteResponseListener()
       // Now that we can receive responses, setup sessions with our own other devices
-      this.setupUser(this.ourPublicKey)
+      // Use ownerPublicKey to find sibling devices (important for delegates)
+      this.setupUser(this.ownerPublicKey)
     }
   }
 
@@ -135,7 +141,8 @@ export class SessionManager {
     })
 
     // Add our own device to user record to prevent accepting our own invite
-    const ourUserRecord = this.getOrCreateUserRecord(this.ourPublicKey)
+    // Use ownerPublicKey so delegates are added to the owner's record
+    const ourUserRecord = this.getOrCreateUserRecord(this.ownerPublicKey)
     this.upsertDeviceRecord(ourUserRecord, this.deviceId)
 
     // IMPORTANT: Start invite response listener BEFORE setting up users
@@ -144,7 +151,8 @@ export class SessionManager {
       console.warn(`[SM ${this.deviceId}] init: has ephemeral keys, starting invite response listener`)
       this.startInviteResponseListener()
       // Setup sessions with our own other devices (only if we can receive responses)
-      this.setupUser(this.ourPublicKey)
+      // Use ownerPublicKey to find sibling devices (important for delegates)
+      this.setupUser(this.ownerPublicKey)
     } else {
       console.warn(`[SM ${this.deviceId}] init: NO ephemeral keys yet, will wait for setEphemeralKeys`)
     }
@@ -183,6 +191,28 @@ export class SessionManager {
             decrypt: typeof this.ourIdentityKey === "function" ? this.ourIdentityKey : undefined,
           })
 
+          // Resolve delegate pubkey to owner for correct UserRecord attribution
+          const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
+          console.warn(`[SM ${this.deviceId}] startInviteResponseListener: received response from ${decrypted.inviteeIdentity.slice(0, 8)}... (resolved to ${ownerPubkey.slice(0, 8)}...), deviceId=${decrypted.deviceId}`)
+          const userRecord = this.getOrCreateUserRecord(ownerPubkey)
+          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
+
+          // Skip creating new session if we already have an ESTABLISHED active session
+          // (one that has exchanged messages). This prevents old/duplicate invite responses
+          // from creating conflicting sessions after restart.
+          // But we DO want to create sessions during initial setup (when active session exists
+          // but hasn't sent/received yet).
+          const existingSession = deviceRecord.activeSession
+          if (existingSession) {
+            const hasExchangedMessages =
+              existingSession.state.sendingChainMessageNumber > 0 ||
+              existingSession.state.receivingChainMessageNumber > 0
+            if (hasExchangedMessages) {
+              console.warn(`[SM ${this.deviceId}] startInviteResponseListener: device ${decrypted.deviceId} already has established session, skipping`)
+              return
+            }
+          }
+
           const session = createSessionFromAccept({
             nostrSubscribe: this.nostrSubscribe,
             theirPublicKey: decrypted.inviteeSessionPublicKey,
@@ -191,12 +221,6 @@ export class SessionManager {
             isSender: false,
             name: event.id,
           })
-
-          // Resolve delegate pubkey to owner for correct UserRecord attribution
-          const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
-          console.warn(`[SM ${this.deviceId}] startInviteResponseListener: received response from ${decrypted.inviteeIdentity.slice(0, 8)}... (resolved to ${ownerPubkey.slice(0, 8)}...), deviceId=${decrypted.deviceId}`)
-          const userRecord = this.getOrCreateUserRecord(ownerPubkey)
-          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
 
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
         } catch (e) {
@@ -418,6 +442,11 @@ export class SessionManager {
       deviceId: string
     ) => {
       console.warn(`[SM ${this.deviceId}] acceptInviteFromDevice: user=${userPubkey.slice(0, 8)}..., device=${deviceId}`)
+
+      // Add device record IMMEDIATELY to prevent duplicate acceptance from race conditions
+      // (InviteList callback can fire multiple times before async accept completes)
+      const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
+
       const { session, event } = await inviteList.accept(
         deviceId,
         this.nostrSubscribe,
@@ -427,8 +456,7 @@ export class SessionManager {
       )
       console.warn(`[SM ${this.deviceId}] accepted invite, publishing response...`)
       return this.nostrPublish(event)
-        .then(() => this.upsertDeviceRecord(userRecord, deviceId))
-        .then((dr) => this.attachSessionSubscription(userPubkey, dr, session))
+        .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
         .then(() => this.sendMessageHistory(userPubkey, deviceId))
         .catch(console.error)
     }
@@ -437,6 +465,9 @@ export class SessionManager {
       const { deviceId } = invite
       if (!deviceId) return
 
+      // Add device record IMMEDIATELY to prevent duplicate acceptance
+      const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
+
       const { session, event } = await invite.accept(
         this.nostrSubscribe,
         this.ourPublicKey,
@@ -444,8 +475,7 @@ export class SessionManager {
         this.deviceId
       )
       return this.nostrPublish(event)
-        .then(() => this.upsertDeviceRecord(userRecord, deviceId))
-        .then((dr) => this.attachSessionSubscription(userPubkey, dr, session))
+        .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
         .then(() => this.sendMessageHistory(userPubkey, deviceId))
         .catch(console.error)
     }
@@ -616,17 +646,20 @@ export class SessionManager {
 
     // Add to message history queue (will be sent when session is established)
     const completeEvent = event as Rumor
-    const historyTargets = new Set([recipientIdentityKey, this.ourPublicKey])
+    // Use ownerPublicKey for history targets so delegates share history with owner
+    const historyTargets = new Set([recipientIdentityKey, this.ownerPublicKey])
     for (const key of historyTargets) {
       const existing = this.messageHistory.get(key) || []
       this.messageHistory.set(key, [...existing, completeEvent])
     }
 
     const userRecord = this.getOrCreateUserRecord(recipientIdentityKey)
-    const ourUserRecord = this.getOrCreateUserRecord(this.ourPublicKey)
+    // Use ownerPublicKey to find sibling devices (important for delegates)
+    const ourUserRecord = this.getOrCreateUserRecord(this.ownerPublicKey)
 
     this.setupUser(recipientIdentityKey)
-    this.setupUser(this.ourPublicKey)
+    // Use ownerPublicKey to setup sessions with sibling devices
+    this.setupUser(this.ownerPublicKey)
 
     const recipientDevices = Array.from(userRecord.devices.values()).filter(d => d.staleAt === undefined)
     const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
@@ -657,7 +690,13 @@ export class SessionManager {
       })
     )
       .then(() => {
+        // Store recipient's user record
         this.storeUserRecord(recipientIdentityKey)
+        // Also store owner's record if different (for sibling device sessions)
+        // This ensures session state is persisted after ratcheting
+        if (this.ownerPublicKey !== recipientIdentityKey) {
+          this.storeUserRecord(this.ownerPublicKey)
+        }
       })
       .catch(console.error)
 

@@ -116,7 +116,9 @@ export class ControlledMockRelay {
     const verifiedEvent = await this.signEvent(event, signerSecretKey)
 
     this.deliveredEvents.push(verifiedEvent)
-    this.log(`Event ${verifiedEvent.id} published and delivering immediately`)
+    const activeSubs = Array.from(this.subscriptions.values()).filter(s => !s.closed)
+    const subFilters = activeSubs.map(s => s.filters.map(f => f.authors?.map(a => a.slice(0, 8)).join(',') || 'none').join(';')).join(' | ')
+    console.warn(`[ControlledMockRelay] Event (pubkey=${verifiedEvent.pubkey?.slice(0, 8)}) published, ${activeSubs.length} subs: [${subFilters}]`)
 
     for (const sub of this.subscriptions.values()) {
       if (!sub.closed) {
@@ -132,6 +134,11 @@ export class ControlledMockRelay {
     signerSecretKey?: Uint8Array
   ): Promise<VerifiedEvent> {
     this.eventCounter++
+
+    // If event is already signed, just return it
+    if ('id' in event && 'sig' in event && event.id && (event as VerifiedEvent).sig) {
+      return event as VerifiedEvent
+    }
 
     const ndkEvent = new NDKEvent()
     ndkEvent.kind = event.kind
@@ -329,14 +336,15 @@ export class ControlledMockRelay {
   private deliverEventToSubscriber(sub: Subscription, event: VerifiedEvent): void {
     // Check if already delivered to this subscriber
     if (sub.delivered.has(event.id)) {
-      this.log(`Event ${event.id} already delivered to ${sub.id}, skipping`)
+      console.warn(`[ControlledMockRelay] Event ${event.id?.slice(0, 8)} already delivered to ${sub.id}, skipping`)
       return
     }
 
     // Check if event matches any of the subscription's filters
     const matches = sub.filters.some((filter) => matchFilter(filter, event))
     if (!matches) {
-      this.log(`Event ${event.id} doesn't match filters for ${sub.id}`)
+      const filterAuthors = sub.filters.map(f => f.authors?.map(a => a.slice(0, 8)).join(',') || 'none').join('; ')
+      console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}) doesn't match ${sub.id} (authors: ${filterAuthors})`)
       return
     }
 
@@ -349,7 +357,7 @@ export class ControlledMockRelay {
       filters: sub.filters,
     })
 
-    this.log(`Event ${event.id} delivered to ${sub.id}`)
+    console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}) DELIVERED to ${sub.id}`)
     sub.onEvent(event)
   }
 

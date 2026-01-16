@@ -535,6 +535,8 @@ export class DeviceManager {
 
     const publicKey = this.getIdentityPublicKey()
     const privateKey = this.getIdentityPrivateKey()
+    // For delegates, pass the owner's public key so SessionManager can find sibling devices
+    const ownerPublicKey = this.getOwnerPublicKey() || undefined
 
     return new SessionManager(
       publicKey,
@@ -544,7 +546,8 @@ export class DeviceManager {
       this.nostrPublish,
       sessionStorage || this.storage,
       ephemeralKeypair,
-      sharedSecret
+      sharedSecret,
+      ownerPublicKey
     )
   }
 

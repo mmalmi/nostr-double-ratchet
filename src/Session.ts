@@ -151,6 +151,7 @@ export class Session {
     const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNextNostrPublicKey);
     const encryptedHeader = nip44.encrypt(JSON.stringify(header), sharedSecret);
     
+    console.warn(`[Session ${this.name}] sendEvent: signing with ourCurrentPubkey=${this.state.ourCurrentNostrKey.publicKey.slice(0, 8)}...`)
     const nostrEvent = finalizeEvent({
       content: encryptedData,
       kind: MESSAGE_EVENT_KIND,
@@ -356,6 +357,7 @@ export class Session {
       }
 
       if (pendingSwitch) {
+        console.warn(`[Session ${this.name}] pendingSwitch: theirCurrentPubkey now=${this.state.theirCurrentNostrPublicKey?.slice(0, 8)}..., theirNextPubkey now=${this.state.theirNextNostrPublicKey?.slice(0, 8)}...`)
         this.nostrUnsubscribe?.();
         this.nostrUnsubscribe = this.nostrNextUnsubscribe;
         this.nostrNextUnsubscribe = this.nostrSubscribe(
@@ -384,6 +386,7 @@ export class Session {
 
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
+    console.warn(`[Session ${this.name}] subscribeToNostrEvents: theirNextPubkey=${this.state.theirNextNostrPublicKey?.slice(0, 8)}..., theirCurrentPubkey=${this.state.theirCurrentNostrPublicKey?.slice(0, 8) || 'none'}`)
     this.nostrNextUnsubscribe = this.nostrSubscribe(
       {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
@@ -393,7 +396,7 @@ export class Session {
       this.nostrUnsubscribe = this.nostrSubscribe(
         {authors: [this.state.theirCurrentNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
         (e) => this.handleNostrEvent(e)
-      );  
+      );
     }
 
     const skippedAuthors = Object.keys(this.state.skippedKeys);
