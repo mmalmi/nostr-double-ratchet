@@ -197,20 +197,27 @@ export class SessionManager {
           const userRecord = this.getOrCreateUserRecord(ownerPubkey)
           const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
 
-          // Skip creating new session if we already have an ESTABLISHED active session
-          // (one that has exchanged messages). This prevents old/duplicate invite responses
-          // from creating conflicting sessions after restart.
-          // But we DO want to create sessions during initial setup (when active session exists
-          // but hasn't sent/received yet).
+          // Check for duplicate/stale responses
+          const responseSessionKey = decrypted.inviteeSessionPublicKey
           const existingSession = deviceRecord.activeSession
-          if (existingSession) {
-            const hasExchangedMessages =
-              existingSession.state.sendingChainMessageNumber > 0 ||
-              existingSession.state.receivingChainMessageNumber > 0
-            if (hasExchangedMessages) {
-              console.warn(`[SM ${this.deviceId}] startInviteResponseListener: device ${decrypted.deviceId} already has established session, skipping`)
-              return
-            }
+          const existingInactive = deviceRecord.inactiveSessions || []
+          const allSessions = existingSession ? [existingSession, ...existingInactive] : existingInactive
+
+          // Invite responses create RESPONDER sessions (we receive on them).
+          // A fresh responder session has ourCurrentNostrKey === undefined.
+          // If we already have such a session, or a session that has evolved past that state
+          // (received messages, now can send), we don't need another responder session.
+          // Check if any session can already receive from this device:
+          // - Has receivingChainKey set (can decrypt incoming), OR
+          // - Has the same theirNextNostrPublicKey (same session, duplicate response)
+          const canAlreadyReceive = allSessions.some(s =>
+            s.state?.receivingChainKey !== undefined ||
+            s.state?.theirNextNostrPublicKey === responseSessionKey ||
+            s.state?.theirCurrentNostrPublicKey === responseSessionKey
+          )
+          if (canAlreadyReceive) {
+            console.warn(`[SM ${this.deviceId}] startInviteResponseListener: skipping response from ${decrypted.deviceId} - already have receiving capability`)
+            return
           }
 
           const session = createSessionFromAccept({
