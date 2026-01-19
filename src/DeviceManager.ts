@@ -2,16 +2,22 @@ import { generateSecretKey, getPublicKey } from "nostr-tools"
 import { bytesToHex } from "@noble/hashes/utils"
 import { InviteList, DeviceEntry } from "./InviteList"
 import { DevicePayload } from "./inviteUtils"
-import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe } from "./types"
+import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, DecryptFunction, EncryptFunction } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
 /**
  * Options for creating a DeviceManager with owner's key (can manage InviteList)
+ *
+ * For extension login (NIP-07), pass decrypt/encrypt functions instead of raw private key.
+ * The functions should implement NIP-44 encryption/decryption.
  */
 export interface OwnerDeviceOptions {
   ownerPublicKey: string
-  ownerPrivateKey: Uint8Array
+  /** Raw private key bytes OR a NIP-44 decrypt function for extension login */
+  ownerPrivateKey: Uint8Array | DecryptFunction
+  /** Optional NIP-44 encrypt function (required if ownerPrivateKey is a DecryptFunction) */
+  ownerEncrypt?: EncryptFunction
   deviceId: string
   deviceLabel: string
   nostrSubscribe: NostrSubscribe
@@ -68,9 +74,10 @@ export class DeviceManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
 
-  // Owner mode fields (has owner's nsec)
+  // Owner mode fields (has owner's nsec or decrypt/encrypt functions)
   private readonly ownerPublicKey?: string
-  private readonly ownerPrivateKey?: Uint8Array
+  private readonly ownerPrivateKey?: Uint8Array | DecryptFunction
+  private readonly ownerEncrypt?: EncryptFunction
 
   // Delegate mode fields
   private readonly devicePublicKey?: string
@@ -99,7 +106,8 @@ export class DeviceManager {
     nostrPublish: NostrPublish
     storage?: StorageAdapter
     ownerPublicKey?: string
-    ownerPrivateKey?: Uint8Array
+    ownerPrivateKey?: Uint8Array | DecryptFunction
+    ownerEncrypt?: EncryptFunction
     devicePublicKey?: string
     devicePrivateKey?: Uint8Array
     ephemeralPublicKey?: string
@@ -116,6 +124,7 @@ export class DeviceManager {
     // Owner mode
     this.ownerPublicKey = options.ownerPublicKey
     this.ownerPrivateKey = options.ownerPrivateKey
+    this.ownerEncrypt = options.ownerEncrypt
 
     // Delegate mode
     this.devicePublicKey = options.devicePublicKey
@@ -127,6 +136,7 @@ export class DeviceManager {
 
   /**
    * Create a DeviceManager with owner's nsec (can manage InviteList)
+   * For extension login, pass decrypt/encrypt functions instead of raw private key.
    */
   static createOwnerDevice(options: OwnerDeviceOptions): DeviceManager {
     return new DeviceManager({
@@ -138,6 +148,7 @@ export class DeviceManager {
       storage: options.storage,
       ownerPublicKey: options.ownerPublicKey,
       ownerPrivateKey: options.ownerPrivateKey,
+      ownerEncrypt: options.ownerEncrypt,
     })
   }
 
@@ -295,9 +306,10 @@ export class DeviceManager {
   }
 
   /**
-   * Get the identity private key (owner privkey for owner mode, device privkey for delegate)
+   * Get the identity private key or decrypt function (owner privkey for owner mode, device privkey for delegate)
+   * Returns Uint8Array for raw key mode, or DecryptFunction for extension login mode.
    */
-  getIdentityPrivateKey(): Uint8Array {
+  getIdentityPrivateKey(): Uint8Array | DecryptFunction {
     if (this.delegateMode) {
       if (!this.devicePrivateKey) {
         throw new Error("Device private key not set")
@@ -308,6 +320,20 @@ export class DeviceManager {
       throw new Error("Owner private key not set")
     }
     return this.ownerPrivateKey
+  }
+
+  /**
+   * Get the encrypt function (only available in extension login mode)
+   */
+  getEncryptFunction(): EncryptFunction | undefined {
+    return this.ownerEncrypt
+  }
+
+  /**
+   * Check if this DeviceManager is using extension login (function callbacks instead of raw keys)
+   */
+  isExtensionLogin(): boolean {
+    return typeof this.ownerPrivateKey === "function"
   }
 
   /**
