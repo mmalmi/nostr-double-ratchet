@@ -15,6 +15,7 @@ import { serializeSessionState, deserializeSessionState } from "./utils"
 import { getEventHash } from "nostr-tools"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
+export type LogFunction = (...args: unknown[]) => void
 
 interface DeviceRecord {
   deviceId: string
@@ -86,6 +87,9 @@ export class SessionManager {
   // Initialization flag
   private initialized: boolean = false
 
+  // Debug logger
+  private debug!: LogFunction
+
   constructor(
     ourPublicKey: string,
     ourIdentityKey: Uint8Array | DecryptFunction,
@@ -96,6 +100,7 @@ export class SessionManager {
     storage?: StorageAdapter,
     ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array },
     sharedSecret?: string,
+    debug?: LogFunction,
   ) {
     this.userRecords = new Map()
     this.nostrSubscribe = nostrSubscribe
@@ -108,27 +113,7 @@ export class SessionManager {
     this.versionPrefix = `v${this.storageVersion}`
     this.ephemeralKeypair = ephemeralKeypair
     this.sharedSecret = sharedSecret
-  }
-
-  /**
-   * Set ephemeral keys after construction (for async initialization)
-   */
-  setEphemeralKeys(
-    ephemeralKeypair: { publicKey: string; privateKey: Uint8Array },
-    sharedSecret: string
-  ): void {
-    console.warn(`[SM ${this.deviceId}] setEphemeralKeys: ephemeralPubkey=${ephemeralKeypair.publicKey.slice(0, 16)}...`)
-    this.ephemeralKeypair = ephemeralKeypair
-    this.sharedSecret = sharedSecret
-
-    // If already initialized, start the listener and setup own devices now
-    if (this.initialized && !this.ourInviteResponseSubscription) {
-      console.warn(`[SM ${this.deviceId}] setEphemeralKeys: already initialized, starting listener now`)
-      this.startInviteResponseListener()
-      // Now that we can receive responses, setup sessions with our own other devices
-      // Use ownerPublicKey to find sibling devices (important for delegates)
-      this.setupUser(this.ownerPublicKey)
-    }
+    this.debug = debug || (() => {})
   }
 
   async init() {
@@ -148,18 +133,14 @@ export class SessionManager {
     const ourUserRecord = this.getOrCreateUserRecord(this.ownerPublicKey)
     this.upsertDeviceRecord(ourUserRecord, this.deviceId)
 
-    // IMPORTANT: Start invite response listener BEFORE setting up users
+    // Start invite response listener BEFORE setting up users
     // This ensures we're listening when other devices respond to our invites
     if (this.ephemeralKeypair && this.sharedSecret) {
-      console.warn(`[SM ${this.deviceId}] init: has ephemeral keys, starting invite response listener`)
       this.startInviteResponseListener()
       // Setup sessions with our own other devices (only if we can receive responses)
       // Use ownerPublicKey to find sibling devices (important for delegates)
       this.setupUser(this.ownerPublicKey)
-    } else {
-      console.warn(`[SM ${this.deviceId}] init: NO ephemeral keys yet, will wait for setEphemeralKeys`)
     }
-    // If no ephemeral keys yet, setupUser will be called when setEphemeralKeys is called
   }
 
   /**
@@ -173,7 +154,7 @@ export class SessionManager {
     const sharedSecret = this.sharedSecret
 
     const hasRawKey = this.ourIdentityKey instanceof Uint8Array
-    console.warn(`[SM ${this.deviceId}] startInviteResponseListener: listening on ephemeralPubkey=${ephemeralPubkey.slice(0, 16)}..., ourPublicKey=${this.ourPublicKey.slice(0, 8)}..., hasRawKey=${hasRawKey}`)
+    this.debug(`[SM ${this.deviceId}] startInviteResponseListener: listening on ephemeralPubkey=${ephemeralPubkey.slice(0, 16)}..., ourPublicKey=${this.ourPublicKey.slice(0, 8)}..., hasRawKey=${hasRawKey}`)
 
     // Subscribe to invite responses tagged to our ephemeral key
     this.ourInviteResponseSubscription = this.nostrSubscribe(
@@ -197,20 +178,20 @@ export class SessionManager {
           // Skip our own responses - this happens when we publish an invite response
           // and our own listener receives it back from relays
           if (decrypted.deviceId === this.deviceId) {
-            console.warn(`[SM ${this.deviceId}] startInviteResponseListener: skipping our own response`)
+            this.debug(`[SM ${this.deviceId}] startInviteResponseListener: skipping our own response`)
             return
           }
 
           // Resolve delegate pubkey to owner for correct UserRecord attribution
           const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
-          console.warn(`[SM ${this.deviceId}] startInviteResponseListener: received response from ${decrypted.inviteeIdentity.slice(0, 8)}... (resolved to ${ownerPubkey.slice(0, 8)}...), deviceId=${decrypted.deviceId}`)
+          this.debug(`[SM ${this.deviceId}] startInviteResponseListener: received response from ${decrypted.inviteeIdentity.slice(0, 8)}... (resolved to ${ownerPubkey.slice(0, 8)}...), deviceId=${decrypted.deviceId}`)
           const userRecord = this.getOrCreateUserRecord(ownerPubkey)
           const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
 
           // Check for duplicate/stale responses using the persisted flag
           // This flag survives restarts and prevents creating duplicate RESPONDER sessions
           if (deviceRecord.hasResponderSession) {
-            console.warn(`[SM ${this.deviceId}] startInviteResponseListener: skipping response from ${decrypted.deviceId} - already have responder session (persisted flag)`)
+            this.debug(`[SM ${this.deviceId}] startInviteResponseListener: skipping response from ${decrypted.deviceId} - already have responder session (persisted flag)`)
             return
           }
 
@@ -229,7 +210,7 @@ export class SessionManager {
             s.state?.theirCurrentNostrPublicKey === responseSessionKey
           )
           if (canAlreadyReceive) {
-            console.warn(`[SM ${this.deviceId}] startInviteResponseListener: skipping response from ${decrypted.deviceId} - already have receiving capability`)
+            this.debug(`[SM ${this.deviceId}] startInviteResponseListener: skipping response from ${decrypted.deviceId} - already have receiving capability`)
             return
           }
 
@@ -251,7 +232,7 @@ export class SessionManager {
           this.storeUserRecord(ownerPubkey).catch(console.error)
         } catch (e) {
           // Invalid response, ignore
-          console.warn(`[SM ${this.deviceId}] startInviteResponseListener: failed to decrypt response:`, e)
+          this.debug(`[SM ${this.deviceId}] startInviteResponseListener: failed to decrypt response:`, e)
         }
       }
     )
@@ -362,15 +343,15 @@ export class SessionManager {
     // Set to true if only handshake -> not yet sendable -> will be promoted on message
     inactive: boolean = false
   ): void {
-    console.warn(`[SM ${this.deviceId}] attachSessionSubscription: user=${userPubkey.slice(0, 8)}..., device=${deviceRecord.deviceId}, inactive=${inactive}`)
+    this.debug(`[SM ${this.deviceId}] attachSessionSubscription: user=${userPubkey.slice(0, 8)}..., device=${deviceRecord.deviceId}, inactive=${inactive}`)
     if (deviceRecord.staleAt !== undefined) {
-      console.warn(`[SM ${this.deviceId}] device is stale, skipping`)
+      this.debug(`[SM ${this.deviceId}] device is stale, skipping`)
       return
     }
 
     const key = this.sessionKey(userPubkey, deviceRecord.deviceId, session.name)
     if (this.sessionSubscriptions.has(key)) {
-      console.warn(`[SM ${this.deviceId}] session subscription already exists for ${key}`)
+      this.debug(`[SM ${this.deviceId}] session subscription already exists for ${key}`)
       return
     }
 
@@ -410,13 +391,13 @@ export class SessionManager {
     }
 
     const unsub = session.onEvent((event) => {
-      console.warn(`[SM ${this.deviceId}] received message from ${userPubkey.slice(0, 8)}... device=${deviceRecord.deviceId}: "${event.content?.slice(0, 30)}..."`)
-      console.warn(`[SM ${this.deviceId}] EVENT: ${JSON.stringify(event)}`)
+      this.debug(`[SM ${this.deviceId}] received message from ${userPubkey.slice(0, 8)}... device=${deviceRecord.deviceId}: "${event.content?.slice(0, 30)}..."`)
+      this.debug(`[SM ${this.deviceId}] EVENT: ${JSON.stringify(event)}`)
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       rotateSession(session)
       this.storeUserRecord(userPubkey).catch(console.error)
     })
-    console.warn(`[SM ${this.deviceId}] session subscription attached for ${key}`)
+    this.debug(`[SM ${this.deviceId}] session subscription attached for ${key}`)
     this.storeUserRecord(userPubkey).catch(console.error)
     this.sessionSubscriptions.set(key, unsub)
   }
@@ -460,7 +441,7 @@ export class SessionManager {
   }
 
   setupUser(userPubkey: string) {
-    console.warn(`[SM ${this.deviceId}] setupUser(${userPubkey.slice(0, 8)}...)`)
+    this.debug(`[SM ${this.deviceId}] setupUser(${userPubkey.slice(0, 8)}...)`)
     const userRecord = this.getOrCreateUserRecord(userPubkey)
 
     // Helper to accept an invite (works for both InviteList devices and legacy Invite)
@@ -468,7 +449,7 @@ export class SessionManager {
       inviteList: InviteList,
       deviceId: string
     ) => {
-      console.warn(`[SM ${this.deviceId}] acceptInviteFromDevice: user=${userPubkey.slice(0, 8)}..., device=${deviceId}`)
+      this.debug(`[SM ${this.deviceId}] acceptInviteFromDevice: user=${userPubkey.slice(0, 8)}..., device=${deviceId}`)
 
       // Add device record IMMEDIATELY to prevent duplicate acceptance from race conditions
       // (InviteList callback can fire multiple times before async accept completes)
@@ -481,7 +462,7 @@ export class SessionManager {
         this.ourIdentityKey,
         this.deviceId
       )
-      console.warn(`[SM ${this.deviceId}] accepted invite, publishing response...`)
+      this.debug(`[SM ${this.deviceId}] accepted invite, publishing response...`)
       return this.nostrPublish(event)
         .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
         .then(() => this.sendMessageHistory(userPubkey, deviceId))
@@ -510,7 +491,7 @@ export class SessionManager {
     // Subscribe to InviteList (kind 10078) - new format
     this.attachInviteListSubscription(userPubkey, async (inviteList) => {
       const devices = inviteList.getAllDevices()
-      console.warn(`[SM ${this.deviceId}] received InviteList for ${userPubkey.slice(0, 8)}... with ${devices.length} devices:`, devices.map(d => ({ id: d.deviceId, identityPubkey: d.identityPubkey?.slice(0, 8) })))
+      this.debug(`[SM ${this.deviceId}] received InviteList for ${userPubkey.slice(0, 8)}... with ${devices.length} devices:`, devices.map(d => ({ id: d.deviceId, identityPubkey: d.identityPubkey?.slice(0, 8) })))
 
       // Handle removed devices (source of truth for revocation)
       for (const deviceId of inviteList.getRemovedDeviceIds()) {
@@ -520,10 +501,10 @@ export class SessionManager {
       // Accept invites from new devices
       for (const device of devices) {
         if (!userRecord.devices.has(device.deviceId)) {
-          console.warn(`[SM ${this.deviceId}] new device found: ${device.deviceId}, will accept invite`)
+          this.debug(`[SM ${this.deviceId}] new device found: ${device.deviceId}, will accept invite`)
           await acceptInviteFromDevice(inviteList, device.deviceId)
         } else {
-          console.warn(`[SM ${this.deviceId}] device ${device.deviceId} already known, skipping`)
+          this.debug(`[SM ${this.deviceId}] device ${device.deviceId} already known, skipping`)
         }
       }
     })
@@ -669,7 +650,7 @@ export class SessionManager {
     event: Partial<Rumor>
   ): Promise<Rumor | undefined> {
     await this.init()
-    console.warn(`[SM ${this.deviceId}] sendEvent to ${recipientIdentityKey.slice(0, 8)}...: "${(event as Rumor).content?.slice(0, 30)}..."`)
+    this.debug(`[SM ${this.deviceId}] sendEvent to ${recipientIdentityKey.slice(0, 8)}...: "${(event as Rumor).content?.slice(0, 30)}..."`)
 
     // Add to message history queue (will be sent when session is established)
     const completeEvent = event as Rumor
@@ -701,17 +682,17 @@ export class SessionManager {
     }
     const devices = Array.from(deviceMap.values())
 
-    console.warn(`[SM ${this.deviceId}] sending to ${devices.length} devices:`, devices.map(d => ({ id: d.deviceId, hasSession: !!d.activeSession })))
+    this.debug(`[SM ${this.deviceId}] sending to ${devices.length} devices:`, devices.map(d => ({ id: d.deviceId, hasSession: !!d.activeSession })))
 
     // Send to all devices in background (if sessions exist)
     Promise.allSettled(
       devices.map(async (device) => {
         const { activeSession } = device
         if (!activeSession) {
-          console.warn(`[SM ${this.deviceId}] no active session for device ${device.deviceId}, skipping`)
+          this.debug(`[SM ${this.deviceId}] no active session for device ${device.deviceId}, skipping`)
           return
         }
-        console.warn(`[SM ${this.deviceId}] sending via session to device ${device.deviceId}`)
+        this.debug(`[SM ${this.deviceId}] sending via session to device ${device.deviceId}`)
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         await this.nostrPublish(verifiedEvent).catch(console.error)
       })
