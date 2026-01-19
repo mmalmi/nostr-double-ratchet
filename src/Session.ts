@@ -386,7 +386,6 @@ export class Session {
 
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
-    console.warn(`[Session ${this.name}] subscribeToNostrEvents: theirNextPubkey=${this.state.theirNextNostrPublicKey?.slice(0, 8)}..., theirCurrentPubkey=${this.state.theirCurrentNostrPublicKey?.slice(0, 8) || 'none'}`)
     this.nostrNextUnsubscribe = this.nostrSubscribe(
       {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
