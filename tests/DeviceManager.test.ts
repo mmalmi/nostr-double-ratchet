@@ -500,9 +500,9 @@ describe("DeviceManager - Main Device", () => {
     }) as unknown as NostrPublish
   })
 
-  describe("createMain()", () => {
+  describe("createOwnerDevice()", () => {
     it("should create a DeviceManager in main mode", () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -518,7 +518,7 @@ describe("DeviceManager - Main Device", () => {
 
   describe("init()", () => {
     it("should create InviteList with own device", async () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -539,7 +539,7 @@ describe("DeviceManager - Main Device", () => {
     })
 
     it("should publish InviteList on init", async () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -559,7 +559,7 @@ describe("DeviceManager - Main Device", () => {
     it("should load existing InviteList from storage", async () => {
       const storage = new InMemoryStorageAdapter()
 
-      const manager1 = DeviceManager.createMain({
+      const manager1 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -572,7 +572,7 @@ describe("DeviceManager - Main Device", () => {
 
       const ephemeralKey1 = manager1.getEphemeralKeypair()?.publicKey
 
-      const manager2 = DeviceManager.createMain({
+      const manager2 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -590,7 +590,7 @@ describe("DeviceManager - Main Device", () => {
     it("should merge local and remote InviteLists", async () => {
       const storage = new InMemoryStorageAdapter()
 
-      const manager1 = DeviceManager.createMain({
+      const manager1 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "device-1",
@@ -623,7 +623,7 @@ describe("DeviceManager - Main Device", () => {
       }
       const signedRemoteEvent = finalizeEvent(unsignedRemoteEvent as any, ownerPrivateKey)
 
-      const manager2 = DeviceManager.createMain({
+      const manager2 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "device-1",
@@ -651,7 +651,7 @@ describe("DeviceManager - Main Device", () => {
 
   describe("addDevice()", () => {
     it("should add device to InviteList and publish", async () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -687,7 +687,7 @@ describe("DeviceManager - Main Device", () => {
     })
 
     it("should include identityPubkey for delegate devices", async () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -716,7 +716,7 @@ describe("DeviceManager - Main Device", () => {
 
   describe("revokeDevice()", () => {
     it("should remove device from InviteList", async () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -743,7 +743,7 @@ describe("DeviceManager - Main Device", () => {
     })
 
     it("should not allow revoking own device", async () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -759,7 +759,7 @@ describe("DeviceManager - Main Device", () => {
 
   describe("updateDeviceLabel()", () => {
     it("should update device label in InviteList", async () => {
-      const manager = DeviceManager.createMain({
+      const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -780,7 +780,7 @@ describe("DeviceManager - Main Device", () => {
     let manager: DeviceManager
 
     beforeEach(async () => {
-      manager = DeviceManager.createMain({
+      manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
         ownerPrivateKey,
         deviceId: "main-device",
@@ -904,7 +904,7 @@ describe("DeviceManager Integration", () => {
     await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    const mainManager = DeviceManager.createMain({
+    const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
       ownerPrivateKey,
       deviceId: "main-device",
@@ -946,7 +946,7 @@ describe("DeviceManager Integration", () => {
     await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    const mainManager = DeviceManager.createMain({
+    const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
       ownerPrivateKey,
       deviceId: "main-device",
@@ -1001,7 +1001,7 @@ describe("DeviceManager Integration", () => {
     const activation1 = delegate1.waitForActivation(5000)
     const activation2 = delegate2.waitForActivation(5000)
 
-    const mainManager = DeviceManager.createMain({
+    const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
       ownerPrivateKey,
       deviceId: "main-device",
@@ -1059,7 +1059,7 @@ describe("DeviceManager Integration", () => {
       nostrPublish: createNostrPublish(),
     })
 
-    const mainManager = DeviceManager.createMain({
+    const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
       ownerPrivateKey,
       deviceId: "main-device",
@@ -1092,7 +1092,7 @@ describe("DeviceManager Integration", () => {
       nostrPublish: createNostrPublish(),
     })
 
-    const mainManager = DeviceManager.createMain({
+    const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
       ownerPrivateKey,
       deviceId: "main-device",

@@ -73,7 +73,7 @@ describe('Delegate Device Messaging', () => {
     // Step 1: Create Alice's main device
     // ============================================================
     console.log('Creating Alice main device...')
-    const aliceMainDeviceManager = DeviceManager.createMain({
+    const aliceMainDeviceManager = DeviceManager.createOwnerDevice({
       ownerPublicKey: alicePublicKey,
       ownerPrivateKey: alicePrivateKey,
       deviceId: generateDeviceId(),
@@ -158,7 +158,7 @@ describe('Delegate Device Messaging', () => {
     // Step 3: Create Bob's main device
     // ============================================================
     console.log('Creating Bob main device...')
-    const bobMainDeviceManager = DeviceManager.createMain({
+    const bobMainDeviceManager = DeviceManager.createOwnerDevice({
       ownerPublicKey: bobPublicKey,
       ownerPrivateKey: bobPrivateKey,
       deviceId: generateDeviceId(),

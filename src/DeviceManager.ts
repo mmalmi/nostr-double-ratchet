@@ -20,11 +20,6 @@ export interface OwnerDeviceOptions {
 }
 
 /**
- * @deprecated Use OwnerDeviceOptions instead
- */
-export type MainDeviceOptions = OwnerDeviceOptions
-
-/**
  * Options for creating a delegate device DeviceManager
  */
 export interface DelegateDeviceOptions {
@@ -128,14 +123,6 @@ export class DeviceManager {
     this.ephemeralPublicKey = options.ephemeralPublicKey
     this.ephemeralPrivateKey = options.ephemeralPrivateKey
     this.sharedSecret = options.sharedSecret
-  }
-
-  /**
-   * Create a DeviceManager with owner's nsec (can manage InviteList)
-   * @deprecated Use createOwnerDevice instead
-   */
-  static createMain(options: OwnerDeviceOptions): DeviceManager {
-    return DeviceManager.createOwnerDevice(options)
   }
 
   /**
