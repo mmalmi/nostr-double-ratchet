@@ -10,6 +10,8 @@ export interface ControlledMockRelayOptions {
   debug?: boolean
   /** Auto-deliver events after this delay (ms). Default: manual only (undefined) */
   autoDeliveryDelay?: number
+  /** Enable cascading replay - replay to new subscriptions created during event processing (default: true) */
+  cascadeReplay?: boolean
 }
 
 export interface PendingEvent {
@@ -68,10 +70,12 @@ export class ControlledMockRelay {
   private debug: boolean
   private autoDeliveryDelay?: number
   private autoEose: boolean = false
+  private cascadeReplay: boolean
 
   constructor(options: ControlledMockRelayOptions = {}) {
     this.debug = options.debug ?? false
     this.autoDeliveryDelay = options.autoDeliveryDelay
+    this.cascadeReplay = options.cascadeReplay ?? true
   }
 
   // ============================================================================
@@ -191,11 +195,15 @@ export class ControlledMockRelay {
     this.subscriptions.set(subId, subscription)
     this.log(`Subscription ${subId} created with ${filterArray.length} filter(s)`)
 
-    // Always replay delivered events to new subscribers (like original MockRelay)
-    // This is needed for session establishment to work properly
+    // Replay delivered events to new subscribers
+    // If cascadeReplay is enabled, also replay to any new subscriptions created during processing
     queueMicrotask(() => {
-      for (const event of this.deliveredEvents) {
-        this.deliverEventToSubscriber(subscription, event)
+      if (this.cascadeReplay) {
+        this.replayWithCascade()
+      } else {
+        for (const event of this.deliveredEvents) {
+          this.deliverEventToSubscriber(subscription, event)
+        }
       }
       if (this.autoEose) {
         this.sendEose(subId)
@@ -343,8 +351,8 @@ export class ControlledMockRelay {
     // Check if event matches any of the subscription's filters
     const matches = sub.filters.some((filter) => matchFilter(filter, event))
     if (!matches) {
-      const filterAuthors = sub.filters.map(f => f.authors?.map(a => a.slice(0, 8)).join(',') || 'none').join('; ')
-      console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}) doesn't match ${sub.id} (authors: ${filterAuthors})`)
+      const filterInfo = sub.filters.map(f => `authors:${f.authors?.map(a => a.slice(0, 8)).join(',') || 'none'}, kinds:${f.kinds?.join(',') || 'any'}`).join('; ')
+      console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}, kind=${event.kind}) doesn't match ${sub.id} (${filterInfo})`)
       return
     }
 
@@ -357,7 +365,7 @@ export class ControlledMockRelay {
       filters: sub.filters,
     })
 
-    console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}) DELIVERED to ${sub.id}`)
+    console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}, kind=${event.kind}) DELIVERED to ${sub.id}`)
     sub.onEvent(event)
   }
 
@@ -396,6 +404,39 @@ export class ControlledMockRelay {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  /**
+   * Replay events with cascade - keeps replaying to new subscriptions
+   * that are created during event processing (e.g., when Session receives
+   * a message and subscribes to the sender's new key).
+   */
+  private replayWithCascade(maxIterations = 20): void {
+    const replayedTo = new Set<string>()
+    let iteration = 0
+
+    while (iteration < maxIterations) {
+      // Find subscriptions that haven't been replayed to yet
+      const newSubs = Array.from(this.subscriptions.values())
+        .filter(s => !s.closed && !replayedTo.has(s.id))
+
+      if (newSubs.length === 0) break
+
+      console.warn(`[ControlledMockRelay] replayWithCascade: iteration ${iteration}, replaying to ${newSubs.length} new sub(s): ${newSubs.map(s => s.id).join(', ')}`)
+
+      for (const sub of newSubs) {
+        replayedTo.add(sub.id)
+        for (const event of this.deliveredEvents) {
+          this.deliverEventToSubscriber(sub, event)
+        }
+      }
+
+      iteration++
+    }
+
+    if (iteration >= maxIterations) {
+      console.warn(`[ControlledMockRelay] replayWithCascade: hit max iterations (${maxIterations})`)
+    }
   }
 
   // ============================================================================

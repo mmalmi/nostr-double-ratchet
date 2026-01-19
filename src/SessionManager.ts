@@ -60,7 +60,7 @@ export class SessionManager {
   private nostrPublish: NostrPublish
   private ourIdentityKey: Uint8Array | DecryptFunction
   private ourPublicKey: string
-  // Owner's public key - for delegates this is the main device's owner, for main devices it's the same as ourPublicKey
+  // Owner's public key - used for grouping devices together (all devices are delegates)
   private ownerPublicKey: string
 
   // Ephemeral keypair for listening to invite responses (optional)
@@ -92,10 +92,10 @@ export class SessionManager {
     deviceId: string,
     nostrSubscribe: NostrSubscribe,
     nostrPublish: NostrPublish,
+    ownerPublicKey: string,
     storage?: StorageAdapter,
     ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array },
     sharedSecret?: string,
-    ownerPublicKey?: string
   ) {
     this.userRecords = new Map()
     this.nostrSubscribe = nostrSubscribe
@@ -103,12 +103,11 @@ export class SessionManager {
     this.ourPublicKey = ourPublicKey
     this.ourIdentityKey = ourIdentityKey
     this.deviceId = deviceId
+    this.ownerPublicKey = ownerPublicKey
     this.storage = storage || new InMemoryStorageAdapter()
     this.versionPrefix = `v${this.storageVersion}`
     this.ephemeralKeypair = ephemeralKeypair
     this.sharedSecret = sharedSecret
-    // For delegates, ownerPublicKey is the actual owner. For main devices, it's the same as ourPublicKey.
-    this.ownerPublicKey = ownerPublicKey || ourPublicKey
   }
 
   /**

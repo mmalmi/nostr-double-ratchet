@@ -7,9 +7,9 @@ import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
 /**
- * Options for creating a main device DeviceManager
+ * Options for creating a DeviceManager with owner's key (can manage InviteList)
  */
-export interface MainDeviceOptions {
+export interface OwnerDeviceOptions {
   ownerPublicKey: string
   ownerPrivateKey: Uint8Array
   deviceId: string
@@ -18,6 +18,11 @@ export interface MainDeviceOptions {
   nostrPublish: NostrPublish
   storage?: StorageAdapter
 }
+
+/**
+ * @deprecated Use OwnerDeviceOptions instead
+ */
+export type MainDeviceOptions = OwnerDeviceOptions
 
 /**
  * Options for creating a delegate device DeviceManager
@@ -57,8 +62,8 @@ export interface RestoreDelegateOptions {
 /**
  * DeviceManager handles device lifecycle and InviteList management.
  *
- * Main mode: Manages InviteList, can add/revoke devices
- * Delegate mode: Waits for activation, checks revocation status
+ * Owner mode: Has owner's nsec, can manage InviteList (add/revoke devices)
+ * Delegate mode: Has own identity key, waits for activation, checks revocation status
  */
 export class DeviceManager {
   private readonly delegateMode: boolean
@@ -68,7 +73,7 @@ export class DeviceManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
 
-  // Main mode fields
+  // Owner mode fields (has owner's nsec)
   private readonly ownerPublicKey?: string
   private readonly ownerPrivateKey?: Uint8Array
 
@@ -113,7 +118,7 @@ export class DeviceManager {
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
 
-    // Main mode
+    // Owner mode
     this.ownerPublicKey = options.ownerPublicKey
     this.ownerPrivateKey = options.ownerPrivateKey
 
@@ -126,9 +131,17 @@ export class DeviceManager {
   }
 
   /**
-   * Create a DeviceManager for a main device (has owner's nsec)
+   * Create a DeviceManager with owner's nsec (can manage InviteList)
+   * @deprecated Use createOwnerDevice instead
    */
-  static createMain(options: MainDeviceOptions): DeviceManager {
+  static createMain(options: OwnerDeviceOptions): DeviceManager {
+    return DeviceManager.createOwnerDevice(options)
+  }
+
+  /**
+   * Create a DeviceManager with owner's nsec (can manage InviteList)
+   */
+  static createOwnerDevice(options: OwnerDeviceOptions): DeviceManager {
     return new DeviceManager({
       delegateMode: false,
       deviceId: options.deviceId,
@@ -211,13 +224,13 @@ export class DeviceManager {
     if (this.delegateMode) {
       await this.initDelegateMode()
     } else {
-      await this.initMainMode()
+      await this.initOwnerMode()
     }
   }
 
-  private async initMainMode(): Promise<void> {
+  private async initOwnerMode(): Promise<void> {
     if (!this.ownerPublicKey) {
-      throw new Error("Owner public key required for main mode")
+      throw new Error("Owner public key required for owner mode")
     }
 
     // 1. Load from local storage
@@ -279,7 +292,7 @@ export class DeviceManager {
   }
 
   /**
-   * Get the identity public key (owner pubkey for main, device pubkey for delegate)
+   * Get the identity public key (owner pubkey for owner mode, device pubkey for delegate)
    */
   getIdentityPublicKey(): string {
     if (this.delegateMode) {
@@ -295,7 +308,7 @@ export class DeviceManager {
   }
 
   /**
-   * Get the identity private key (owner privkey for main, device privkey for delegate)
+   * Get the identity private key (owner privkey for owner mode, device privkey for delegate)
    */
   getIdentityPrivateKey(): Uint8Array {
     if (this.delegateMode) {
@@ -324,7 +337,7 @@ export class DeviceManager {
       }
     }
 
-    // For main mode, get from InviteList
+    // For owner mode, get from InviteList
     const device = this.inviteList?.getDevice(this.deviceId)
     if (!device?.ephemeralPublicKey || !device?.ephemeralPrivateKey) {
       return null
@@ -343,13 +356,13 @@ export class DeviceManager {
       return this.sharedSecret || null
     }
 
-    // For main mode, get from InviteList
+    // For owner mode, get from InviteList
     const device = this.inviteList?.getDevice(this.deviceId)
     return device?.sharedSecret || null
   }
 
   /**
-   * Get the InviteList (main mode only)
+   * Get the InviteList (owner mode only)
    */
   getInviteList(): InviteList | null {
     return this.inviteList
@@ -363,7 +376,7 @@ export class DeviceManager {
   }
 
   /**
-   * Add a device to the InviteList (main mode only)
+   * Add a device to the InviteList (owner mode only)
    */
   async addDevice(payload: DevicePayload): Promise<void> {
     if (this.delegateMode) {
@@ -386,7 +399,7 @@ export class DeviceManager {
   }
 
   /**
-   * Revoke a device from the InviteList (main mode only)
+   * Revoke a device from the InviteList (owner mode only)
    */
   async revokeDevice(deviceId: string): Promise<void> {
     if (this.delegateMode) {
@@ -405,7 +418,7 @@ export class DeviceManager {
   }
 
   /**
-   * Update a device's label (main mode only)
+   * Update a device's label (owner mode only)
    */
   async updateDeviceLabel(deviceId: string, label: string): Promise<void> {
     if (this.delegateMode) {
@@ -516,7 +529,7 @@ export class DeviceManager {
    * Creates a SessionManager configured for this device.
    * Must be called after init().
    *
-   * For main devices: Uses owner's keys and ephemeral keys from InviteList
+   * For owner mode: Uses owner's keys and ephemeral keys from InviteList
    * For delegate devices: Uses device's own identity keys and ephemeral keys
    *
    * @param sessionStorage - Optional separate storage for SessionManager (defaults to DeviceManager's storage)
@@ -535,8 +548,11 @@ export class DeviceManager {
 
     const publicKey = this.getIdentityPublicKey()
     const privateKey = this.getIdentityPrivateKey()
-    // For delegates, pass the owner's public key so SessionManager can find sibling devices
-    const ownerPublicKey = this.getOwnerPublicKey() || undefined
+    const ownerPublicKey = this.getOwnerPublicKey()
+
+    if (!ownerPublicKey) {
+      throw new Error("Owner public key required for SessionManager")
+    }
 
     return new SessionManager(
       publicKey,
@@ -544,10 +560,10 @@ export class DeviceManager {
       this.deviceId,
       this.nostrSubscribe,
       this.nostrPublish,
+      ownerPublicKey,
       sessionStorage || this.storage,
       ephemeralKeypair,
       sharedSecret,
-      ownerPublicKey
     )
   }
 

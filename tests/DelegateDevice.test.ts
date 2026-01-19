@@ -90,6 +90,7 @@ describe('Delegate Device Messaging', () => {
       aliceMainDeviceManager.getDeviceId(),
       createSubscribe('AliceMainSM'),
       createPublish('AliceMainSM', alicePrivateKey),
+      alicePublicKey, // ownerPublicKey
       new InMemoryStorageAdapter(),
       aliceMainDeviceManager.getEphemeralKeypair()!,
       aliceMainDeviceManager.getSharedSecret()!
@@ -142,6 +143,7 @@ describe('Delegate Device Messaging', () => {
       aliceDelegateManager.getDeviceId(),
       createSubscribe('AliceDelegateSM'),
       createPublish('AliceDelegateSM'), // Session events are already signed
+      alicePublicKey, // ownerPublicKey - delegate belongs to Alice
       new InMemoryStorageAdapter(),
       aliceDelegateManager.getEphemeralKeypair()!,
       aliceDelegateManager.getSharedSecret()!
@@ -173,6 +175,7 @@ describe('Delegate Device Messaging', () => {
       bobMainDeviceManager.getDeviceId(),
       createSubscribe('BobMainSM'),
       createPublish('BobMainSM', bobPrivateKey),
+      bobPublicKey, // ownerPublicKey
       new InMemoryStorageAdapter(),
       bobMainDeviceManager.getEphemeralKeypair()!,
       bobMainDeviceManager.getSharedSecret()!
@@ -223,6 +226,7 @@ describe('Delegate Device Messaging', () => {
       bobDelegateManager.getDeviceId(),
       createSubscribe('BobDelegateSM'),
       createPublish('BobDelegateSM'), // Session events are already signed
+      bobPublicKey, // ownerPublicKey - delegate belongs to Bob
       new InMemoryStorageAdapter(),
       bobDelegateManager.getEphemeralKeypair()!,
       bobDelegateManager.getSharedSecret()!
