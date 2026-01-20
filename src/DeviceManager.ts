@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey } from "nostr-tools"
+import { generateSecretKey, getPublicKey, VerifiedEvent } from "nostr-tools"
 import { bytesToHex } from "@noble/hashes/utils"
 import { InviteList, DeviceEntry } from "./InviteList"
 import { DevicePayload } from "./inviteUtils"
@@ -606,7 +606,7 @@ export class DeviceManager {
 
   private fetchInviteList(pubkey: string, timeoutMs = 500): Promise<InviteList | null> {
     return new Promise((resolve) => {
-      let latestEvent: { event: any; inviteList: InviteList } | null = null
+      let latestEvent: { event: VerifiedEvent; inviteList: InviteList } | null = null
       let resolved = false
 
       setTimeout(() => {

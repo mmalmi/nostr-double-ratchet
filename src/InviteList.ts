@@ -64,6 +64,11 @@ export interface DeviceEntry {
   identityPubkey?: string
 }
 
+/** Serialized form of DeviceEntry (ephemeralPrivateKey as number array) */
+interface SerializedDeviceEntry extends Omit<DeviceEntry, 'ephemeralPrivateKey'> {
+  ephemeralPrivateKey?: number[]
+}
+
 /**
  * InviteList manages a consolidated list of device invites (kind 10078).
  *
@@ -249,8 +254,8 @@ export class InviteList {
    * Deserializes an InviteList from JSON.
    */
   static deserialize(json: string): InviteList {
-    const data = JSON.parse(json)
-    const devices: DeviceEntry[] = data.devices.map((d: any) => ({
+    const data = JSON.parse(json) as { ownerPublicKey: string; devices: SerializedDeviceEntry[]; removedDeviceIds?: string[] }
+    const devices: DeviceEntry[] = data.devices.map((d) => ({
       ...d,
       ephemeralPrivateKey: d.ephemeralPrivateKey
         ? new Uint8Array(d.ephemeralPrivateKey)
