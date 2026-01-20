@@ -404,4 +404,114 @@ describe('Invite', () => {
 
     expect(() => invite.getDeletionEvent()).toThrow('Device ID is required')
   })
+
+  describe('Invite Link URL serialization', () => {
+    it('should serialize and deserialize invite link correctly', () => {
+      const alicePrivateKey = generateSecretKey()
+      const alicePublicKey = getPublicKey(alicePrivateKey)
+      const label = 'Test Invite'
+      const maxUses = 5
+
+      const invite = Invite.createNew(alicePublicKey, label, maxUses)
+      expect(invite.maxUses).toBe(maxUses)
+      expect(invite.inviter).toBe(alicePublicKey)
+      expect(invite.inviterEphemeralPublicKey).toHaveLength(64)
+      expect(invite.sharedSecret).toHaveLength(64)
+
+      const url = invite.getUrl()
+      expect(url).toContain('https://iris.to/#')
+      const urlData = JSON.parse(decodeURIComponent(new URL(url).hash.slice(1)))
+      expect(urlData.inviter).toBe(alicePublicKey)
+      expect(urlData.ephemeralKey).toBe(invite.inviterEphemeralPublicKey)
+      expect(urlData.sharedSecret).toBe(invite.sharedSecret)
+
+      const parsedInvite = Invite.fromUrl(url)
+      expect(parsedInvite.inviter).toBe(alicePublicKey)
+      expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
+      expect(parsedInvite.sharedSecret).toBe(invite.sharedSecret)
+      expect(parsedInvite.maxUses).toBeUndefined() // maxUses is not included in URL
+    })
+
+    it('should handle invite link with custom root URL', () => {
+      const alicePrivateKey = generateSecretKey()
+      const alicePublicKey = getPublicKey(alicePrivateKey)
+      const invite = Invite.createNew(alicePublicKey, 'Custom URL Test')
+
+      const customUrl = invite.getUrl('https://custom.example.com')
+      expect(customUrl).toContain('https://custom.example.com/#')
+
+      const parsedInvite = Invite.fromUrl(customUrl)
+      expect(parsedInvite.inviter).toBe(alicePublicKey)
+      expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
+    })
+
+    it('should throw error for invalid URL', () => {
+      expect(() => Invite.fromUrl('https://iris.to/')).toThrow('No invite data found in the URL hash')
+      expect(() => Invite.fromUrl('https://iris.to/#invalid')).toThrow('Invite data in URL hash is not valid JSON')
+      expect(() => Invite.fromUrl('https://iris.to/#{}')).toThrow('Missing required fields')
+    })
+
+    it('should allow communication after serializing and deserializing invite for both parties', async () => {
+      const alicePrivateKey = generateSecretKey()
+      const alicePublicKey = getPublicKey(alicePrivateKey)
+      const bobPrivateKey = generateSecretKey()
+      const bobPublicKey = getPublicKey(bobPrivateKey)
+
+      const messageQueue: any[] = []
+      const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+        const checkQueue = () => {
+          const index = messageQueue.findIndex(event => matchFilter(filter, event))
+          if (index !== -1) {
+            onEvent(messageQueue.splice(index, 1)[0])
+          }
+          setTimeout(checkQueue, 100)
+        }
+        checkQueue()
+        return () => {}
+      }
+
+      const invite = Invite.createNew(alicePublicKey, 'Serialized Test')
+      const inviteUrl = invite.getUrl()
+
+      const bobInvite = Invite.fromUrl(inviteUrl)
+
+      let aliceSession: Session | undefined
+      const aliceSessionPromise = new Promise<Session>((resolve) => {
+        invite.listen(
+          alicePrivateKey,
+          createSubscribe(),
+          (session: Session) => {
+            aliceSession = session
+            resolve(session)
+          }
+        )
+      })
+
+      const { session: bobSession, event: acceptanceEvent } = await bobInvite.accept(
+        createSubscribe(),
+        bobPublicKey,
+        bobPrivateKey
+      )
+
+      messageQueue.push(acceptanceEvent)
+
+      await aliceSessionPromise
+      expect(aliceSession).toBeDefined()
+
+      const aliceMessages = createEventStream(aliceSession!)
+      const bobMessages = createEventStream(bobSession)
+
+      // Bob sends first message
+      const bobMessage1 = bobSession.send('Hello Alice from Bob!')
+      messageQueue.push(bobMessage1.event)
+      const aliceReceived1 = await aliceMessages.next()
+      expect(aliceReceived1.value?.content).toBe('Hello Alice from Bob!')
+
+      // Alice sends reply
+      const aliceMessage1 = aliceSession!.send('Hi Bob from Alice!')
+      messageQueue.push(aliceMessage1.event)
+      const bobReceived1 = await bobMessages.next()
+      expect(bobReceived1.value?.content).toBe('Hi Bob from Alice!')
+    })
+  })
 })
