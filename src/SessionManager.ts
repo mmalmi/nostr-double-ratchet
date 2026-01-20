@@ -71,12 +71,10 @@ export class SessionManager {
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
   private messageHistory: Map<string, Rumor[]> = new Map()
-  private userInviteLists: Map<string, InviteList> = new Map()
   // Map delegate device pubkeys to their owner's pubkey
   private delegateToOwner: Map<string, string> = new Map()
 
   // Subscriptions
-  private ourDeviceInviteSubscription: Unsubscribe | null = null
   private ourInviteResponseSubscription: Unsubscribe | null = null
   private inviteSubscriptions: Map<string, Unsubscribe> = new Map()
   private sessionSubscriptions: Map<string, Unsubscribe> = new Map()
@@ -271,9 +269,7 @@ export class SessionManager {
   private sessionKey(userPubkey: string, deviceId: string, sessionName: string) {
     return `${this.sessionKeyPrefix(userPubkey)}${deviceId}/${sessionName}`
   }
-  private inviteKey(userPubkey: string) {
-    return this.userInviteKey(userPubkey)
-  }
+
   private userInviteKey(userPubkey: string) {
     return `${this.versionPrefix}/invite/${userPubkey}`
   }
@@ -297,7 +293,7 @@ export class SessionManager {
    * Resolve a pubkey to its owner if it's a known delegate device.
    * Returns the input pubkey if not a known delegate.
    */
-  resolveToOwner(pubkey: string): string {
+  private resolveToOwner(pubkey: string): string {
     return this.delegateToOwner.get(pubkey) || pubkey
   }
 
@@ -406,7 +402,7 @@ export class SessionManager {
     userPubkey: string,
     onInvite?: (invite: Invite) => void | Promise<void>
   ): void {
-    const key = this.inviteKey(userPubkey)
+    const key = this.userInviteKey(userPubkey)
     if (this.inviteSubscriptions.has(key)) return
 
     const unsubscribe = Invite.fromUser(
@@ -431,8 +427,6 @@ export class SessionManager {
     const unsubscribe = this.subscribeToUserInviteList(
       userPubkey,
       async (inviteList) => {
-        // Cache the InviteList - if user has one, we use it as source of truth
-        this.userInviteLists.set(userPubkey, inviteList)
         if (onInviteList) await onInviteList(inviteList)
       }
     )
@@ -545,7 +539,6 @@ export class SessionManager {
       unsubscribe()
     }
 
-    this.ourDeviceInviteSubscription?.()
     this.ourInviteResponseSubscription?.()
   }
 
@@ -584,7 +577,7 @@ export class SessionManager {
       this.userRecords.delete(userPubkey)
     }
 
-    const inviteKey = this.inviteKey(userPubkey)
+    const inviteKey = this.userInviteKey(userPubkey)
     const inviteUnsub = this.inviteSubscriptions.get(inviteKey)
     if (inviteUnsub) {
       inviteUnsub()
@@ -594,7 +587,7 @@ export class SessionManager {
     this.messageHistory.delete(userPubkey)
 
     await Promise.allSettled([
-      this.storage.del(this.inviteKey(userPubkey)),
+      this.storage.del(this.userInviteKey(userPubkey)),
       this.deleteUserSessionsFromStorage(userPubkey),
       this.storage.del(this.userRecordKey(userPubkey)),
     ])
