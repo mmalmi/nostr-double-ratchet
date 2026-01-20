@@ -151,7 +151,6 @@ export class Session {
     const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNextNostrPublicKey);
     const encryptedHeader = nip44.encrypt(JSON.stringify(header), sharedSecret);
     
-    console.warn(`[Session ${this.name}] sendEvent: signing with ourCurrentPubkey=${this.state.ourCurrentNostrKey.publicKey.slice(0, 8)}...`)
     const nostrEvent = finalizeEvent({
       content: encryptedData,
       kind: MESSAGE_EVENT_KIND,
@@ -357,7 +356,6 @@ export class Session {
       }
 
       if (pendingSwitch) {
-        console.warn(`[Session ${this.name}] pendingSwitch: theirCurrentPubkey now=${this.state.theirCurrentNostrPublicKey?.slice(0, 8)}..., theirNextPubkey now=${this.state.theirNextNostrPublicKey?.slice(0, 8)}...`)
         this.nostrUnsubscribe?.();
         this.nostrUnsubscribe = this.nostrNextUnsubscribe;
         this.nostrNextUnsubscribe = this.nostrSubscribe(

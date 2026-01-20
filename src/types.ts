@@ -72,7 +72,7 @@ export type NostrPublish = (_event: UnsignedEvent) => Promise<VerifiedEvent>;
 
 export type Rumor = UnsignedEvent & { id: string }
 
-/** 
+/**
  * Callback function for handling decrypted messages
  * @param _event - The decrypted message object (Rumor)
  * @param _outerEvent - The outer Nostr event (VerifiedEvent)

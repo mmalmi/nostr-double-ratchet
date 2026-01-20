@@ -330,8 +330,6 @@ export class InviteList {
       ? device.identityPubkey
       : this.ownerPublicKey
 
-    console.warn(`[InviteList.accept] deviceId=${deviceId}, identityPubkey=${device.identityPubkey?.slice(0, 8) ?? 'none'} (valid=${isValidPubkey(device.identityPubkey)}), using=${inviterIdentityKey.slice(0, 8)}..., inviteePublicKey=${inviteePublicKey.slice(0, 8)}...`)
-
     const inviteeSessionKeypair = generateEphemeralKeypair()
 
     const session = createSessionFromAccept({
@@ -382,11 +380,9 @@ export class InviteList {
   ): Unsubscribe {
     const devices = this.getAllDevices()
     const decryptableDevices = devices.filter((d) => !!d.ephemeralPrivateKey)
-    console.warn(`[InviteList.listen] owner=${this.ownerPublicKey.slice(0, 8)}..., total devices=${devices.length}, decryptable=${decryptableDevices.length}`)
 
     // If we don't have any devices we can decrypt for, do nothing gracefully
     if (decryptableDevices.length === 0) {
-      console.warn(`[InviteList.listen] no decryptable devices, returning no-op`)
       return () => {}
     }
 
@@ -434,9 +430,8 @@ export class InviteList {
           decrypted.deviceId,
           device.deviceId
         )
-      } catch (e) {
+      } catch {
         // Invalid response, ignore
-        console.warn(`[InviteList.listen] Failed to decrypt response for device ${device.deviceId}:`, e)
       }
     })
   }
