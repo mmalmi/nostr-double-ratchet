@@ -40,46 +40,26 @@ const isRemovedTag = (tag: string[]): tag is RemovedTag =>
   tag[0] === "removed" &&
   typeof tag[1] === "string"
 
-/**
- * A device entry in the invite list.
- */
 export interface DeviceEntry {
-  /** Ephemeral public key for this device (used for handshakes) */
   ephemeralPublicKey: string
-  /** Ephemeral private key (only stored locally, not published) */
+  /** Only stored locally, not published */
   ephemeralPrivateKey?: Uint8Array
-  /** Shared secret for initial handshake encryption */
   sharedSecret: string
-  /** Unique identifier for this device */
   deviceId: string
-  /** Human-readable label (e.g., "iPhone", "Laptop") */
   deviceLabel: string
-  /** When this device was added (unix timestamp) */
   createdAt: number
-  /**
-   * Identity public key for this device.
-   * For owner devices, this is the owner's public key.
-   * For delegate devices, this is their own identity key.
-   */
+  /** Owner's pubkey for owner devices, delegate's own pubkey for delegate devices */
   identityPubkey: string
 }
 
-/** Serialized form of DeviceEntry (ephemeralPrivateKey as number array) */
 interface SerializedDeviceEntry extends Omit<DeviceEntry, 'ephemeralPrivateKey'> {
   ephemeralPrivateKey?: number[]
 }
 
 /**
- * InviteList manages a consolidated list of device invites (kind 10078).
- *
- * This replaces the per-device invite approach with a single atomic event
- * containing all device invites for a user.
- *
- * Features:
- * - Atomic updates across all devices
- * - Device revocation by any device with main nsec
- * - Single query to fetch all device invites
- * - Union merge strategy for conflict resolution
+ * Manages a consolidated list of device invites (kind 10078).
+ * Single atomic event containing all device invites for a user.
+ * Uses union merge strategy for conflict resolution.
  */
 export class InviteList {
   private devices: Map<string, DeviceEntry> = new Map()
@@ -96,11 +76,6 @@ export class InviteList {
       .forEach((device) => this.devices.set(device.deviceId, device))
   }
 
-  /**
-   * Creates a new device entry with generated keys for the owner.
-   * @param label - Human-readable label for the device
-   * @param deviceId - Optional device ID (generates random if not provided)
-   */
   createDevice(label: string, deviceId?: string): DeviceEntry {
     const keypair = generateEphemeralKeypair()
     return {
@@ -114,50 +89,32 @@ export class InviteList {
     }
   }
 
-  /**
-   * Adds a device to the list. Does nothing if device ID is already present or was removed.
-   */
   addDevice(device: DeviceEntry): void {
     if (this.removedDeviceIds.has(device.deviceId)) {
-      return // Cannot re-add a removed device
+      return
     }
     if (!this.devices.has(device.deviceId)) {
       this.devices.set(device.deviceId, device)
     }
   }
 
-  /**
-   * Removes a device from the list. The device ID is tracked to prevent re-addition.
-   */
   removeDevice(deviceId: string): void {
     this.devices.delete(deviceId)
     this.removedDeviceIds.add(deviceId)
   }
 
-  /**
-   * Gets a device by its ID.
-   */
   getDevice(deviceId: string): DeviceEntry | undefined {
     return this.devices.get(deviceId)
   }
 
-  /**
-   * Gets all active devices.
-   */
   getAllDevices(): DeviceEntry[] {
     return Array.from(this.devices.values())
   }
 
-  /**
-   * Gets all removed device IDs.
-   */
   getRemovedDeviceIds(): string[] {
     return Array.from(this.removedDeviceIds)
   }
 
-  /**
-   * Updates a device's label.
-   */
   updateDeviceLabel(deviceId: string, newLabel: string): void {
     const device = this.devices.get(deviceId)
     if (device) {
@@ -165,9 +122,6 @@ export class InviteList {
     }
   }
 
-  /**
-   * Creates an unsigned event representing this invite list.
-   */
   getEvent(): UnsignedEvent {
     const deviceTags = this.getAllDevices().map((device) => [
       "device",
@@ -197,9 +151,6 @@ export class InviteList {
     }
   }
 
-  /**
-   * Parses an InviteList from a signed Nostr event.
-   */
   static fromEvent(event: VerifiedEvent): InviteList {
     if (!event.sig) {
       throw new Error("Event is not signed")
@@ -226,10 +177,6 @@ export class InviteList {
     return new InviteList(event.pubkey, devices, removedDeviceIds)
   }
 
-  /**
-   * Serializes the invite list to JSON for local storage.
-   * Includes private keys.
-   */
   serialize(): string {
     const devices = this.getAllDevices().map((d) => ({
       ...d,
@@ -245,9 +192,6 @@ export class InviteList {
     })
   }
 
-  /**
-   * Deserializes an InviteList from JSON.
-   */
   static deserialize(json: string): InviteList {
     const data = JSON.parse(json) as { ownerPublicKey: string; devices: SerializedDeviceEntry[]; removedDeviceIds?: string[] }
     const devices: DeviceEntry[] = data.devices.map((d) => ({
@@ -260,21 +204,12 @@ export class InviteList {
     return new InviteList(data.ownerPublicKey, devices, data.removedDeviceIds || [])
   }
 
-  /**
-   * Merges another InviteList into this one using union strategy.
-   *
-   * - Union all devices from both lists
-   * - Union all removed device IDs
-   * - Active devices = all devices − removed devices
-   * - Private keys are preserved from the list that has them
-   */
   merge(other: InviteList): InviteList {
     const mergedRemovedIds = new Set([
       ...this.removedDeviceIds,
       ...other.removedDeviceIds,
     ])
 
-    // Union all devices, preserving private keys from either list
     const mergedDevices = [...this.devices.values(), ...other.devices.values()]
       .reduce((map, device) => {
         const existing = map.get(device.deviceId)
@@ -295,16 +230,6 @@ export class InviteList {
     )
   }
 
-  /**
-   * Called by an invitee to accept an invite from a specific device.
-   *
-   * @param deviceId - The device ID to accept the invite from
-   * @param nostrSubscribe - Nostr subscription function
-   * @param inviteePublicKey - The invitee's public key
-   * @param encryptor - The invitee's private key or encrypt function
-   * @param inviteeDeviceId - Optional device ID for the invitee
-   * @returns The session and event to publish
-   */
   async accept(
     deviceId: string,
     nostrSubscribe: NostrSubscribe,
@@ -347,14 +272,6 @@ export class InviteList {
     }
   }
 
-  /**
-   * Listens for invite responses on all devices.
-   *
-   * @param decryptor - The owner's private key or decrypt function
-   * @param nostrSubscribe - Nostr subscription function
-   * @param onSession - Callback when a new session is established
-   * @returns Unsubscribe function
-   */
   listen(
     decryptor: Uint8Array | DecryptFunction,
     nostrSubscribe: NostrSubscribe,
@@ -374,52 +291,43 @@ export class InviteList {
     }
 
     const ephemeralPubkeys = decryptableDevices.map((d) => d.ephemeralPublicKey)
-
-    const filter = {
-      kinds: [INVITE_RESPONSE_KIND],
-      "#p": ephemeralPubkeys,
-    }
-
     const decrypt = typeof decryptor === "function" ? decryptor : undefined
     const ownerPrivateKey = typeof decryptor === "function" ? undefined : decryptor
 
-    return nostrSubscribe(filter, async (event) => {
-      // Find which device this response is for
-      const targetPubkey = event.tags.find((t) => t[0] === "p")?.[1]
-      const device = decryptableDevices.find((d) => d.ephemeralPublicKey === targetPubkey)
+    return nostrSubscribe(
+      { kinds: [INVITE_RESPONSE_KIND], "#p": ephemeralPubkeys },
+      async (event) => {
+        const targetPubkey = event.tags.find((t) => t[0] === "p")?.[1]
+        const device = decryptableDevices.find((d) => d.ephemeralPublicKey === targetPubkey)
 
-      if (!device || !device.ephemeralPrivateKey) {
-        return
+        if (!device || !device.ephemeralPrivateKey) {
+          return
+        }
+
+        try {
+          const decrypted = await decryptInviteResponse({
+            envelopeContent: event.content,
+            envelopeSenderPubkey: event.pubkey,
+            inviterEphemeralPrivateKey: device.ephemeralPrivateKey,
+            inviterPrivateKey: ownerPrivateKey,
+            sharedSecret: device.sharedSecret,
+            decrypt,
+          })
+
+          const session = createSessionFromAccept({
+            nostrSubscribe,
+            theirPublicKey: decrypted.inviteeSessionPublicKey,
+            ourSessionPrivateKey: device.ephemeralPrivateKey,
+            sharedSecret: device.sharedSecret,
+            isSender: false,
+            name: event.id,
+          })
+
+          onSession(session, decrypted.inviteeIdentity, decrypted.deviceId, device.deviceId)
+        } catch {
+          // Invalid response
+        }
       }
-
-      try {
-        const decrypted = await decryptInviteResponse({
-          envelopeContent: event.content,
-          envelopeSenderPubkey: event.pubkey,
-          inviterEphemeralPrivateKey: device.ephemeralPrivateKey,
-          inviterPrivateKey: ownerPrivateKey,
-          sharedSecret: device.sharedSecret,
-          decrypt,
-        })
-
-        const session = createSessionFromAccept({
-          nostrSubscribe,
-          theirPublicKey: decrypted.inviteeSessionPublicKey,
-          ourSessionPrivateKey: device.ephemeralPrivateKey,
-          sharedSecret: device.sharedSecret,
-          isSender: false,
-          name: event.id,
-        })
-
-        onSession(
-          session,
-          decrypted.inviteeIdentity,
-          decrypted.deviceId,
-          device.deviceId
-        )
-      } catch {
-        // Invalid response, ignore
-      }
-    })
+    )
   }
 }

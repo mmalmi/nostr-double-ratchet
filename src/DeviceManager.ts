@@ -6,14 +6,8 @@ import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, Iden
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
-/**
- * Options for creating an OwnerDeviceManager
- *
- * For extension login (NIP-07), pass { encrypt, decrypt } functions instead of raw private key.
- */
 export interface OwnerDeviceOptions {
   ownerPublicKey: string
-  /** Raw private key bytes OR { encrypt, decrypt } functions for extension login */
   identityKey: IdentityKey
   deviceId: string
   deviceLabel: string
@@ -22,9 +16,6 @@ export interface OwnerDeviceOptions {
   storage?: StorageAdapter
 }
 
-/**
- * Options for creating a DelegateDeviceManager
- */
 export interface DelegateDeviceOptions {
   deviceId: string
   deviceLabel: string
@@ -33,9 +24,6 @@ export interface DelegateDeviceOptions {
   storage?: StorageAdapter
 }
 
-/**
- * Options for restoring a delegate device from existing credentials
- */
 export interface RestoreDelegateOptions {
   deviceId: string
   deviceLabel: string
@@ -49,17 +37,11 @@ export interface RestoreDelegateOptions {
   storage?: StorageAdapter
 }
 
-/**
- * Result from creating a delegate device
- */
 export interface CreateDelegateResult {
   manager: DelegateDeviceManager
   payload: DevicePayload
 }
 
-/**
- * Common interface for device managers
- */
 export interface IDeviceManager {
   init(): Promise<void>
   getDeviceId(): string
@@ -73,10 +55,7 @@ export interface IDeviceManager {
   createSessionManager(sessionStorage?: StorageAdapter): SessionManager
 }
 
-/**
- * OwnerDeviceManager handles device lifecycle for the owner's main device.
- * Has owner's identity key, can manage InviteList (add/revoke devices).
- */
+/** Owner's main device. Has identity key and can manage InviteList. */
 export class OwnerDeviceManager implements IDeviceManager {
   private readonly deviceId: string
   private readonly deviceLabel: string
@@ -109,32 +88,23 @@ export class OwnerDeviceManager implements IDeviceManager {
     if (this.initialized) return
     this.initialized = true
 
-    // 1. Load from local storage
     const local = await this.loadInviteList()
-
-    // 2. Fetch from relay
     const remote = await this.fetchInviteList(this.ownerPublicKey)
-
-    // 3. Merge local + remote
     const inviteList = this.mergeInviteLists(local, remote)
 
-    // 4. Add our device if not present
     if (!inviteList.getDevice(this.deviceId)) {
       const device = inviteList.createDevice(this.deviceLabel, this.deviceId)
       inviteList.addDevice(device)
     }
 
-    // 5. Save and set
     this.inviteList = inviteList
     await this.saveInviteList(inviteList)
 
-    // 6. Publish
     const event = inviteList.getEvent()
     await this.nostrPublish(event).catch((error) => {
       console.error("Failed to publish InviteList:", error)
     })
 
-    // 7. Subscribe to our InviteList for updates
     this.subscribeToOwnInviteList()
   }
 
@@ -154,9 +124,6 @@ export class OwnerDeviceManager implements IDeviceManager {
     return this.identityKey
   }
 
-  /**
-   * Check if this DeviceManager is using extension login (function callbacks instead of raw keys)
-   */
   isExtensionLogin(): boolean {
     return !(this.identityKey instanceof Uint8Array)
   }
@@ -181,23 +148,14 @@ export class OwnerDeviceManager implements IDeviceManager {
     return this.ownerPublicKey
   }
 
-  /**
-   * Get the InviteList
-   */
   getInviteList(): InviteList | null {
     return this.inviteList
   }
 
-  /**
-   * Get all devices from the InviteList
-   */
   getOwnDevices(): DeviceEntry[] {
     return this.inviteList?.getAllDevices() || []
   }
 
-  /**
-   * Add a device to the InviteList
-   */
   async addDevice(payload: DevicePayload): Promise<void> {
     await this.init()
 
@@ -214,9 +172,6 @@ export class OwnerDeviceManager implements IDeviceManager {
     })
   }
 
-  /**
-   * Revoke a device from the InviteList
-   */
   async revokeDevice(deviceId: string): Promise<void> {
     if (deviceId === this.deviceId) {
       throw new Error("Cannot revoke own device")
@@ -229,9 +184,6 @@ export class OwnerDeviceManager implements IDeviceManager {
     })
   }
 
-  /**
-   * Update a device's label
-   */
   async updateDeviceLabel(deviceId: string, label: string): Promise<void> {
     await this.init()
 
@@ -247,10 +199,6 @@ export class OwnerDeviceManager implements IDeviceManager {
     this.subscriptions = []
   }
 
-  /**
-   * Creates a SessionManager configured for this device.
-   * Must be called after init().
-   */
   createSessionManager(sessionStorage?: StorageAdapter): SessionManager {
     if (!this.initialized) {
       throw new Error("DeviceManager must be initialized before creating SessionManager")
@@ -274,8 +222,6 @@ export class OwnerDeviceManager implements IDeviceManager {
       sessionStorage || this.storage,
     )
   }
-
-  // Private helpers
 
   private inviteListKey(): string {
     return `${this.versionPrefix}/device-manager/invite-list`
@@ -318,17 +264,15 @@ export class OwnerDeviceManager implements IDeviceManager {
           if (resolved) return
           try {
             const inviteList = InviteList.fromEvent(event)
-            // Keep track of the latest event by created_at
             if (!latestEvent || event.created_at >= latestEvent.event.created_at) {
               latestEvent = { event, inviteList }
             }
           } catch {
-            // Invalid event, ignore
+            // Invalid event
           }
         }
       )
 
-      // If found synchronously, unsubscribe
       if (resolved) {
         unsubscribe()
       }
@@ -343,20 +287,13 @@ export class OwnerDeviceManager implements IDeviceManager {
   }
 
   private async modifyInviteList(change: (list: InviteList) => void): Promise<void> {
-    // Fetch latest from relay
     const remote = await this.fetchInviteList(this.ownerPublicKey)
-
-    // Merge with local
     const merged = this.mergeInviteLists(this.inviteList, remote)
-
-    // Apply change
     change(merged)
 
-    // Publish and save
     const event = merged.getEvent()
     await this.nostrPublish(event)
     await this.saveInviteList(merged)
-
     this.inviteList = merged
   }
 
@@ -384,10 +321,7 @@ export class OwnerDeviceManager implements IDeviceManager {
   }
 }
 
-/**
- * DelegateDeviceManager handles device lifecycle for delegate devices.
- * Has own identity key, waits for activation, checks revocation status.
- */
+/** Delegate device. Has own identity key, waits for activation, checks revocation. */
 export class DelegateDeviceManager implements IDeviceManager {
   private readonly deviceId: string
   private readonly deviceLabel: string
@@ -434,19 +368,11 @@ export class DelegateDeviceManager implements IDeviceManager {
     this.sharedSecret = sharedSecret
   }
 
-  /**
-   * Create a new delegate device (generates own keys)
-   */
   static create(options: DelegateDeviceOptions): CreateDelegateResult {
-    // Generate identity keypair for this delegate device
     const devicePrivateKey = generateSecretKey()
     const devicePublicKey = getPublicKey(devicePrivateKey)
-
-    // Generate ephemeral keypair for invite handshakes
     const ephemeralPrivateKey = generateSecretKey()
     const ephemeralPublicKey = getPublicKey(ephemeralPrivateKey)
-
-    // Generate shared secret
     const sharedSecret = bytesToHex(generateSecretKey())
 
     const manager = new DelegateDeviceManager(
@@ -473,9 +399,6 @@ export class DelegateDeviceManager implements IDeviceManager {
     return { manager, payload }
   }
 
-  /**
-   * Restore a delegate device from existing credentials
-   */
   static restore(options: RestoreDelegateOptions): DelegateDeviceManager {
     return new DelegateDeviceManager(
       options.deviceId,
@@ -495,7 +418,6 @@ export class DelegateDeviceManager implements IDeviceManager {
     if (this.initialized) return
     this.initialized = true
 
-    // Load stored owner pubkey if exists
     const storedOwnerPubkey = await this.storage.get<string>(this.ownerPubkeyKey())
     if (storedOwnerPubkey) {
       this.ownerPubkeyFromActivation = storedOwnerPubkey
@@ -533,12 +455,7 @@ export class DelegateDeviceManager implements IDeviceManager {
     return this.ownerPubkeyFromActivation || null
   }
 
-  /**
-   * Wait for this delegate device to be activated (added to an InviteList)
-   * Returns the owner's public key
-   */
   async waitForActivation(timeoutMs = 60000): Promise<string> {
-    // If already activated, return immediately
     if (this.ownerPubkeyFromActivation) {
       return this.ownerPubkeyFromActivation
     }
@@ -561,17 +478,14 @@ export class DelegateDeviceManager implements IDeviceManager {
             const device = inviteList.getDevice(this.deviceId)
 
             if (device && device.ephemeralPublicKey === this.ephemeralPublicKey) {
-              // Found our device in someone's InviteList
               clearTimeout(timeout)
               unsubscribe()
-
               this.ownerPubkeyFromActivation = event.pubkey
               await this.storage.put(this.ownerPubkeyKey(), event.pubkey)
-
               resolve(event.pubkey)
             }
           } catch {
-            // Invalid InviteList, ignore
+            // Invalid InviteList
           }
         }
       )
@@ -580,19 +494,12 @@ export class DelegateDeviceManager implements IDeviceManager {
     })
   }
 
-  /**
-   * Check if this delegate device has been revoked
-   */
   async isRevoked(): Promise<boolean> {
     const ownerPubkey = this.getOwnerPublicKey()
-    if (!ownerPubkey) {
-      return false // Not activated yet
-    }
+    if (!ownerPubkey) return false
 
     const inviteList = await this.fetchInviteList(ownerPubkey)
-    if (!inviteList) {
-      return true // No InviteList found, assume revoked
-    }
+    if (!inviteList) return true
 
     const device = inviteList.getDevice(this.deviceId)
     return !device || device.ephemeralPublicKey !== this.ephemeralPublicKey
@@ -605,10 +512,6 @@ export class DelegateDeviceManager implements IDeviceManager {
     this.subscriptions = []
   }
 
-  /**
-   * Creates a SessionManager configured for this device.
-   * Must be called after init() and after activation.
-   */
   createSessionManager(sessionStorage?: StorageAdapter): SessionManager {
     if (!this.initialized) {
       throw new Error("DeviceManager must be initialized before creating SessionManager")
@@ -636,8 +539,6 @@ export class DelegateDeviceManager implements IDeviceManager {
       sessionStorage || this.storage,
     )
   }
-
-  // Private helpers
 
   private ownerPubkeyKey(): string {
     return `${this.versionPrefix}/device-manager/owner-pubkey`
@@ -670,7 +571,7 @@ export class DelegateDeviceManager implements IDeviceManager {
               latestEvent = { event, inviteList }
             }
           } catch {
-            // Invalid event, ignore
+            // Invalid event
           }
         }
       )
