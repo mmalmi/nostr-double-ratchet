@@ -18,6 +18,14 @@ import { getEventHash } from "nostr-tools"
 export type OnEventCallback = (event: Rumor, from: string) => void
 export type LogFunction = (...args: unknown[]) => void
 
+/**
+ * Credentials for the invite handshake - used to listen for and decrypt invite responses
+ */
+export interface InviteCredentials {
+  ephemeralKeypair: { publicKey: string; privateKey: Uint8Array }
+  sharedSecret: string
+}
+
 interface DeviceRecord {
   deviceId: string
   activeSession?: Session
@@ -65,9 +73,8 @@ export class SessionManager {
   // Owner's public key - used for grouping devices together (all devices are delegates)
   private ownerPublicKey: string
 
-  // Ephemeral keypair for listening to invite responses (optional)
-  private ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array }
-  private sharedSecret?: string
+  // Credentials for invite handshake
+  private inviteKeys: InviteCredentials
 
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
@@ -96,9 +103,8 @@ export class SessionManager {
     nostrSubscribe: NostrSubscribe,
     nostrPublish: NostrPublish,
     ownerPublicKey: string,
+    inviteKeys: InviteCredentials,
     storage?: StorageAdapter,
-    ephemeralKeypair?: { publicKey: string; privateKey: Uint8Array },
-    sharedSecret?: string,
     debug?: LogFunction,
   ) {
     this.userRecords = new Map()
@@ -108,10 +114,9 @@ export class SessionManager {
     this.identityKey = identityKey
     this.deviceId = deviceId
     this.ownerPublicKey = ownerPublicKey
+    this.inviteKeys = inviteKeys
     this.storage = storage || new InMemoryStorageAdapter()
     this.versionPrefix = `v${this.storageVersion}`
-    this.ephemeralKeypair = ephemeralKeypair
-    this.sharedSecret = sharedSecret
     this.debug = debug || (() => {})
   }
 
@@ -134,12 +139,10 @@ export class SessionManager {
 
     // Start invite response listener BEFORE setting up users
     // This ensures we're listening when other devices respond to our invites
-    if (this.ephemeralKeypair && this.sharedSecret) {
-      this.startInviteResponseListener()
-      // Setup sessions with our own other devices (only if we can receive responses)
-      // Use ownerPublicKey to find sibling devices (important for delegates)
-      this.setupUser(this.ownerPublicKey)
-    }
+    this.startInviteResponseListener()
+    // Setup sessions with our own other devices
+    // Use ownerPublicKey to find sibling devices (important for delegates)
+    this.setupUser(this.ownerPublicKey)
   }
 
   /**
@@ -147,10 +150,8 @@ export class SessionManager {
    * This is used by devices to receive session establishment responses.
    */
   private startInviteResponseListener(): void {
-    if (!this.ephemeralKeypair || !this.sharedSecret) return
-
-    const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.ephemeralKeypair
-    const sharedSecret = this.sharedSecret
+    const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.inviteKeys.ephemeralKeypair
+    const sharedSecret = this.inviteKeys.sharedSecret
 
     const hasRawKey = this.identityKey instanceof Uint8Array
     this.debug(`[SM ${this.deviceId}] startInviteResponseListener: listening on ephemeralPubkey=${ephemeralPubkey.slice(0, 16)}..., ourPublicKey=${this.ourPublicKey.slice(0, 8)}..., hasRawKey=${hasRawKey}`)

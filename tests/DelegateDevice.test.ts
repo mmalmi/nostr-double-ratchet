@@ -91,9 +91,11 @@ describe('Delegate Device Messaging', () => {
       createSubscribe('AliceMainSM'),
       createPublish('AliceMainSM', alicePrivateKey),
       alicePublicKey, // ownerPublicKey
+      {
+        ephemeralKeypair: aliceMainDeviceManager.getEphemeralKeypair()!,
+        sharedSecret: aliceMainDeviceManager.getSharedSecret()!,
+      },
       new InMemoryStorageAdapter(),
-      aliceMainDeviceManager.getEphemeralKeypair()!,
-      aliceMainDeviceManager.getSharedSecret()!
     )
     await aliceMainSessionManager.init()
     aliceMainSessionManager.onEvent((event, from) => {
@@ -144,9 +146,11 @@ describe('Delegate Device Messaging', () => {
       createSubscribe('AliceDelegateSM'),
       createPublish('AliceDelegateSM'), // Session events are already signed
       alicePublicKey, // ownerPublicKey - delegate belongs to Alice
+      {
+        ephemeralKeypair: aliceDelegateManager.getEphemeralKeypair()!,
+        sharedSecret: aliceDelegateManager.getSharedSecret()!,
+      },
       new InMemoryStorageAdapter(),
-      aliceDelegateManager.getEphemeralKeypair()!,
-      aliceDelegateManager.getSharedSecret()!
     )
     await aliceDelegateSessionManager.init()
     aliceDelegateSessionManager.onEvent((event, from) => {
@@ -176,9 +180,11 @@ describe('Delegate Device Messaging', () => {
       createSubscribe('BobMainSM'),
       createPublish('BobMainSM', bobPrivateKey),
       bobPublicKey, // ownerPublicKey
+      {
+        ephemeralKeypair: bobMainDeviceManager.getEphemeralKeypair()!,
+        sharedSecret: bobMainDeviceManager.getSharedSecret()!,
+      },
       new InMemoryStorageAdapter(),
-      bobMainDeviceManager.getEphemeralKeypair()!,
-      bobMainDeviceManager.getSharedSecret()!
     )
     await bobMainSessionManager.init()
     bobMainSessionManager.onEvent((event, from) => {
@@ -227,9 +233,11 @@ describe('Delegate Device Messaging', () => {
       createSubscribe('BobDelegateSM'),
       createPublish('BobDelegateSM'), // Session events are already signed
       bobPublicKey, // ownerPublicKey - delegate belongs to Bob
+      {
+        ephemeralKeypair: bobDelegateManager.getEphemeralKeypair()!,
+        sharedSecret: bobDelegateManager.getSharedSecret()!,
+      },
       new InMemoryStorageAdapter(),
-      bobDelegateManager.getEphemeralKeypair()!,
-      bobDelegateManager.getSharedSecret()!
     )
     await bobDelegateSessionManager.init()
     bobDelegateSessionManager.onEvent((event, from) => {

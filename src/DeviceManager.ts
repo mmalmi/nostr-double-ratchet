@@ -560,9 +560,8 @@ export class DeviceManager {
       this.nostrSubscribe,
       this.nostrPublish,
       ownerPublicKey,
+      { ephemeralKeypair, sharedSecret },
       sessionStorage || this.storage,
-      ephemeralKeypair,
-      sharedSecret,
     )
   }
 
