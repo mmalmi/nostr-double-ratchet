@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { DeviceManager } from "../src/DeviceManager"
+import { OwnerDeviceManager, DelegateDeviceManager } from "../src/DeviceManager"
 import { DevicePayload } from "../src/inviteUtils"
 import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND } from "../src/types"
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
@@ -32,20 +32,19 @@ describe("DeviceManager - Delegate Device", () => {
   })
 
   describe("createDelegate()", () => {
-    it("should create a DeviceManager in delegate mode", () => {
-      const { manager } = DeviceManager.createDelegate({
+    it("should create a DelegateDeviceManager", () => {
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
         nostrPublish,
       })
 
-      expect(manager).toBeInstanceOf(DeviceManager)
-      expect(manager.isDelegateMode()).toBe(true)
+      expect(manager).toBeInstanceOf(DelegateDeviceManager)
     })
 
     it("should generate identity and ephemeral keypairs", () => {
-      const { manager, payload } = DeviceManager.createDelegate({
+      const { manager, payload } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -70,7 +69,7 @@ describe("DeviceManager - Delegate Device", () => {
     })
 
     it("should generate shared secret", () => {
-      const { manager, payload } = DeviceManager.createDelegate({
+      const { manager, payload } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -83,7 +82,7 @@ describe("DeviceManager - Delegate Device", () => {
     })
 
     it("should return payload with all required fields", () => {
-      const { payload } = DeviceManager.createDelegate({
+      const { payload } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -100,7 +99,7 @@ describe("DeviceManager - Delegate Device", () => {
 
   describe("init()", () => {
     it("should NOT publish InviteList", async () => {
-      const { manager } = DeviceManager.createDelegate({
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -121,7 +120,7 @@ describe("DeviceManager - Delegate Device", () => {
 
       await storage.put("v1/device-manager/owner-pubkey", ownerPubkey)
 
-      const { manager } = DeviceManager.createDelegate({
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -137,7 +136,7 @@ describe("DeviceManager - Delegate Device", () => {
 
   describe("waitForActivation()", () => {
     it("should subscribe to InviteList events", async () => {
-      const { manager } = DeviceManager.createDelegate({
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -162,7 +161,7 @@ describe("DeviceManager - Delegate Device", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DeviceManager.createDelegate({
+      const { manager, payload } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -213,7 +212,7 @@ describe("DeviceManager - Delegate Device", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DeviceManager.createDelegate({
+      const { manager, payload } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -267,7 +266,7 @@ describe("DeviceManager - Delegate Device", () => {
 
       await storage.put("v1/device-manager/owner-pubkey", ownerPubkey)
 
-      const { manager } = DeviceManager.createDelegate({
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -287,7 +286,7 @@ describe("DeviceManager - Delegate Device", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DeviceManager.createDelegate({
+      const { manager, payload } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -348,7 +347,7 @@ describe("DeviceManager - Delegate Device", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DeviceManager.createDelegate({
+      const { manager, payload } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
@@ -420,54 +419,38 @@ describe("DeviceManager - Delegate Device", () => {
   })
 
   describe("restrictions", () => {
-    it("addDevice() should throw in delegate mode", async () => {
-      const { manager } = DeviceManager.createDelegate({
+    it("DelegateDeviceManager does not have addDevice method", () => {
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
         nostrPublish,
       })
 
-      await manager.init()
-
-      await expect(
-        manager.addDevice({
-          ephemeralPubkey: getPublicKey(generateSecretKey()),
-          sharedSecret: bytesToHex(generateSecretKey()),
-          deviceId: "another-device",
-          deviceLabel: "Another Device",
-        })
-      ).rejects.toThrow("Cannot add devices in delegate mode")
+      // Type system enforces this - addDevice doesn't exist on DelegateDeviceManager
+      expect((manager as any).addDevice).toBeUndefined()
     })
 
-    it("revokeDevice() should throw in delegate mode", async () => {
-      const { manager } = DeviceManager.createDelegate({
+    it("DelegateDeviceManager does not have revokeDevice method", () => {
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
         nostrPublish,
       })
 
-      await manager.init()
-
-      await expect(manager.revokeDevice("some-device")).rejects.toThrow(
-        "Cannot revoke devices in delegate mode"
-      )
+      expect((manager as any).revokeDevice).toBeUndefined()
     })
 
-    it("updateDeviceLabel() should throw in delegate mode", async () => {
-      const { manager } = DeviceManager.createDelegate({
+    it("DelegateDeviceManager does not have updateDeviceLabel method", () => {
+      const { manager } = DelegateDeviceManager.create({
         deviceId: "delegate-device",
         deviceLabel: "My Phone",
         nostrSubscribe,
         nostrPublish,
       })
 
-      await manager.init()
-
-      await expect(
-        manager.updateDeviceLabel("some-device", "New Label")
-      ).rejects.toThrow("Cannot update device labels in delegate mode")
+      expect((manager as any).updateDeviceLabel).toBeUndefined()
     })
   })
 })
@@ -500,9 +483,9 @@ describe("DeviceManager - Main Device", () => {
     }) as unknown as NostrPublish
   })
 
-  describe("createOwnerDevice()", () => {
-    it("should create a DeviceManager in main mode", () => {
-      const manager = DeviceManager.createOwnerDevice({
+  describe("constructor", () => {
+    it("should create an OwnerDeviceManager", () => {
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -511,14 +494,13 @@ describe("DeviceManager - Main Device", () => {
         nostrPublish,
       })
 
-      expect(manager).toBeInstanceOf(DeviceManager)
-      expect(manager.isDelegateMode()).toBe(false)
+      expect(manager).toBeInstanceOf(OwnerDeviceManager)
     })
   })
 
   describe("init()", () => {
     it("should create InviteList with own device", async () => {
-      const manager = DeviceManager.createOwnerDevice({
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -539,7 +521,7 @@ describe("DeviceManager - Main Device", () => {
     })
 
     it("should publish InviteList on init", async () => {
-      const manager = DeviceManager.createOwnerDevice({
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -559,7 +541,7 @@ describe("DeviceManager - Main Device", () => {
     it("should load existing InviteList from storage", async () => {
       const storage = new InMemoryStorageAdapter()
 
-      const manager1 = DeviceManager.createOwnerDevice({
+      const manager1 = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -572,7 +554,7 @@ describe("DeviceManager - Main Device", () => {
 
       const ephemeralKey1 = manager1.getEphemeralKeypair()?.publicKey
 
-      const manager2 = DeviceManager.createOwnerDevice({
+      const manager2 = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -590,7 +572,7 @@ describe("DeviceManager - Main Device", () => {
     it("should merge local and remote InviteLists", async () => {
       const storage = new InMemoryStorageAdapter()
 
-      const manager1 = DeviceManager.createOwnerDevice({
+      const manager1 = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "device-1",
@@ -623,7 +605,7 @@ describe("DeviceManager - Main Device", () => {
       }
       const signedRemoteEvent = finalizeEvent(unsignedRemoteEvent as any, ownerPrivateKey)
 
-      const manager2 = DeviceManager.createOwnerDevice({
+      const manager2 = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "device-1",
@@ -651,7 +633,7 @@ describe("DeviceManager - Main Device", () => {
 
   describe("addDevice()", () => {
     it("should add device to InviteList and publish", async () => {
-      const manager = DeviceManager.createOwnerDevice({
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -687,7 +669,7 @@ describe("DeviceManager - Main Device", () => {
     })
 
     it("should include identityPubkey for delegate devices", async () => {
-      const manager = DeviceManager.createOwnerDevice({
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -716,7 +698,7 @@ describe("DeviceManager - Main Device", () => {
 
   describe("revokeDevice()", () => {
     it("should remove device from InviteList", async () => {
-      const manager = DeviceManager.createOwnerDevice({
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -743,7 +725,7 @@ describe("DeviceManager - Main Device", () => {
     })
 
     it("should not allow revoking own device", async () => {
-      const manager = DeviceManager.createOwnerDevice({
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -759,7 +741,7 @@ describe("DeviceManager - Main Device", () => {
 
   describe("updateDeviceLabel()", () => {
     it("should update device label in InviteList", async () => {
-      const manager = DeviceManager.createOwnerDevice({
+      const manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -777,10 +759,10 @@ describe("DeviceManager - Main Device", () => {
   })
 
   describe("getters", () => {
-    let manager: DeviceManager
+    let manager: OwnerDeviceManager
 
     beforeEach(async () => {
-      manager = DeviceManager.createOwnerDevice({
+      manager = new OwnerDeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         deviceId: "main-device",
@@ -893,7 +875,7 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { manager: delegateManager, payload } = DeviceManager.createDelegate({
+    const { manager: delegateManager, payload } = DelegateDeviceManager.create({
       deviceId: "phone-123",
       deviceLabel: "My Phone",
       nostrSubscribe: createNostrSubscribe(),
@@ -904,7 +886,7 @@ describe("DeviceManager Integration", () => {
     await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    const mainManager = DeviceManager.createOwnerDevice({
+    const mainManager = new OwnerDeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
       deviceId: "main-device",
@@ -935,7 +917,7 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { manager: delegateManager, payload } = DeviceManager.createDelegate({
+    const { manager: delegateManager, payload } = DelegateDeviceManager.create({
       deviceId: "phone-123",
       deviceLabel: "My Phone",
       nostrSubscribe: createNostrSubscribe(),
@@ -946,7 +928,7 @@ describe("DeviceManager Integration", () => {
     await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    const mainManager = DeviceManager.createOwnerDevice({
+    const mainManager = new OwnerDeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
       deviceId: "main-device",
@@ -979,7 +961,7 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { manager: delegate1, payload: payload1 } = DeviceManager.createDelegate({
+    const { manager: delegate1, payload: payload1 } = DelegateDeviceManager.create({
       deviceId: "phone-1",
       deviceLabel: "Phone 1",
       nostrSubscribe: createNostrSubscribe(),
@@ -987,7 +969,7 @@ describe("DeviceManager Integration", () => {
       storage: new InMemoryStorageAdapter(),
     })
 
-    const { manager: delegate2, payload: payload2 } = DeviceManager.createDelegate({
+    const { manager: delegate2, payload: payload2 } = DelegateDeviceManager.create({
       deviceId: "phone-2",
       deviceLabel: "Phone 2",
       nostrSubscribe: createNostrSubscribe(),
@@ -1001,7 +983,7 @@ describe("DeviceManager Integration", () => {
     const activation1 = delegate1.waitForActivation(5000)
     const activation2 = delegate2.waitForActivation(5000)
 
-    const mainManager = DeviceManager.createOwnerDevice({
+    const mainManager = new OwnerDeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
       deviceId: "main-device",
@@ -1031,7 +1013,7 @@ describe("DeviceManager Integration", () => {
   })
 
   it("delegate cannot activate if not added to InviteList", async () => {
-    const { manager: delegateManager } = DeviceManager.createDelegate({
+    const { manager: delegateManager } = DelegateDeviceManager.create({
       deviceId: "phone-orphan",
       deviceLabel: "Orphan Phone",
       nostrSubscribe: createNostrSubscribe(),
@@ -1052,14 +1034,14 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { manager: delegateManager, payload } = DeviceManager.createDelegate({
+    const { manager: delegateManager, payload } = DelegateDeviceManager.create({
       deviceId: "phone-123",
       deviceLabel: "My Phone",
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
     })
 
-    const mainManager = DeviceManager.createOwnerDevice({
+    const mainManager = new OwnerDeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
       deviceId: "main-device",
@@ -1085,14 +1067,14 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { payload } = DeviceManager.createDelegate({
+    const { payload } = DelegateDeviceManager.create({
       deviceId: "phone-123",
       deviceLabel: "My Phone",
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
     })
 
-    const mainManager = DeviceManager.createOwnerDevice({
+    const mainManager = new OwnerDeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
       deviceId: "main-device",

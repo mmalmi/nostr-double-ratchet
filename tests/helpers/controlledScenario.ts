@@ -8,7 +8,7 @@ import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { generateSecretKey, getPublicKey, Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
-import { DeviceManager } from "../../src/DeviceManager"
+import { OwnerDeviceManager, DelegateDeviceManager } from "../../src/DeviceManager"
 
 export type ActorId = "alice" | "bob"
 
@@ -33,7 +33,7 @@ interface ActorState {
   secretKey: Uint8Array
   publicKey: string
   devices: Map<string, DeviceState>
-  mainDeviceManager?: DeviceManager
+  mainDeviceManager?: OwnerDeviceManager
 }
 
 interface DeviceState {
@@ -46,7 +46,7 @@ interface DeviceState {
   unsub?: () => void
   subscriptionId?: string
   isDelegate?: boolean
-  delegateDeviceManager?: DeviceManager
+  delegateDeviceManager?: DelegateDeviceManager
 }
 
 interface ActorDeviceRef {
@@ -514,7 +514,7 @@ async function restartDelegateDevice(
   })
 
   // Restore the delegate DeviceManager with saved keys
-  const newDelegateManager = DeviceManager.restoreDelegate({
+  const newDelegateManager = DelegateDeviceManager.restore({
     deviceId: device.deviceId,
     deviceLabel: device.deviceId,
     nostrSubscribe: subscribe,

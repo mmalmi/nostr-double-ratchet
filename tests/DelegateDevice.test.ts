@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { generateSecretKey, getPublicKey, matchFilter, finalizeEvent, UnsignedEvent } from 'nostr-tools'
-import { DeviceManager, SessionManager, Rumor, generateDeviceId } from '../src'
+import { OwnerDeviceManager, DelegateDeviceManager, SessionManager, Rumor, generateDeviceId } from '../src'
 import { InMemoryStorageAdapter } from '../src/StorageAdapter'
 
 describe('Delegate Device Messaging', () => {
@@ -73,7 +73,7 @@ describe('Delegate Device Messaging', () => {
     // Step 1: Create Alice's main device
     // ============================================================
     console.log('Creating Alice main device...')
-    const aliceMainDeviceManager = DeviceManager.createOwnerDevice({
+    const aliceMainDeviceManager = new OwnerDeviceManager({
       ownerPublicKey: alicePublicKey,
       identityKey: alicePrivateKey,
       deviceId: generateDeviceId(),
@@ -108,7 +108,7 @@ describe('Delegate Device Messaging', () => {
     // ============================================================
     console.log('Creating Alice delegate device...')
     // Delegate devices don't publish InviteList, so we can use a dummy publish initially
-    const { manager: aliceDelegateManager, payload: aliceDelegatePayload } = DeviceManager.createDelegate({
+    const { manager: aliceDelegateManager, payload: aliceDelegatePayload } = DelegateDeviceManager.create({
       deviceId: generateDeviceId(),
       deviceLabel: 'Alice Delegate',
       nostrSubscribe: createSubscribe('AliceDelegate'),
@@ -162,7 +162,7 @@ describe('Delegate Device Messaging', () => {
     // Step 3: Create Bob's main device
     // ============================================================
     console.log('Creating Bob main device...')
-    const bobMainDeviceManager = DeviceManager.createOwnerDevice({
+    const bobMainDeviceManager = new OwnerDeviceManager({
       ownerPublicKey: bobPublicKey,
       identityKey: bobPrivateKey,
       deviceId: generateDeviceId(),
@@ -196,7 +196,7 @@ describe('Delegate Device Messaging', () => {
     // Step 4: Create Bob's delegate device
     // ============================================================
     console.log('Creating Bob delegate device...')
-    const { manager: bobDelegateManager, payload: bobDelegatePayload } = DeviceManager.createDelegate({
+    const { manager: bobDelegateManager, payload: bobDelegatePayload } = DelegateDeviceManager.create({
       deviceId: generateDeviceId(),
       deviceLabel: 'Bob Delegate',
       nostrSubscribe: createSubscribe('BobDelegate'),

@@ -1,5 +1,5 @@
 import { vi } from "vitest"
-import { DeviceManager } from "../../src/DeviceManager"
+import { OwnerDeviceManager, DelegateDeviceManager } from "../../src/DeviceManager"
 import {
   Filter,
   generateSecretKey,
@@ -58,7 +58,7 @@ export const createControlledMockSessionManager = async (
   })
 
   // Create DeviceManager first to handle InviteList
-  const deviceManager = DeviceManager.createOwnerDevice({
+  const deviceManager = new OwnerDeviceManager({
     ownerPublicKey: publicKey,
     identityKey: secretKey,
     deviceId,
@@ -94,7 +94,7 @@ export const createControlledMockSessionManager = async (
 export const createControlledMockDelegateSessionManager = async (
   deviceId: string,
   sharedMockRelay: ControlledMockRelay,
-  mainDeviceManager: DeviceManager
+  mainDeviceManager: OwnerDeviceManager
 ) => {
   const mockStorage = new InMemoryStorageAdapter()
   const storageSpy = {
@@ -126,7 +126,7 @@ export const createControlledMockDelegateSessionManager = async (
   })
 
   // Create delegate DeviceManager
-  const { manager: delegateDeviceManager, payload } = DeviceManager.createDelegate({
+  const { manager: delegateDeviceManager, payload } = DelegateDeviceManager.create({
     deviceId,
     deviceLabel: deviceId,
     nostrSubscribe: subscribe,
