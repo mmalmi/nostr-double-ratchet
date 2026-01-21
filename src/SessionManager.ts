@@ -12,6 +12,7 @@ import { Invite } from "./Invite"
 import { InviteList } from "./InviteList"
 import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
+import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
 import { getEventHash } from "nostr-tools"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
@@ -162,8 +163,6 @@ export class SessionManager {
       },
       async (event) => {
         try {
-          const { decryptInviteResponse, createSessionFromAccept } = await import("./inviteUtils")
-
           const decrypted = await decryptInviteResponse({
             envelopeContent: event.content,
             envelopeSenderPubkey: event.pubkey,
