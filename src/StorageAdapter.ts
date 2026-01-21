@@ -58,8 +58,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     try {
       const item = localStorage.getItem(this.getFullKey(key))
       return item ? JSON.parse(item) : undefined
-    } catch (e) {
-      console.warn(`Failed to get key ${key} from localStorage:`, e)
+    } catch {
       return undefined
     }
   }
@@ -76,8 +75,8 @@ export class LocalStorageAdapter implements StorageAdapter {
   async del(key: string): Promise<void> {
     try {
       localStorage.removeItem(this.getFullKey(key))
-    } catch (e) {
-      console.warn(`Failed to delete key ${key} from localStorage:`, e)
+    } catch {
+      // Ignore deletion failures
     }
   }
 
@@ -93,8 +92,8 @@ export class LocalStorageAdapter implements StorageAdapter {
           keys.push(key.substring(this.keyPrefix.length))
         }
       }
-    } catch (e) {
-      console.warn("Failed to list keys from localStorage:", e)
+    } catch {
+      // Ignore list failures
     }
 
     return keys

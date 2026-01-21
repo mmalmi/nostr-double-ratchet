@@ -136,12 +136,12 @@ export function deepCopyState(s: SessionState): SessionState {
     receivingChainMessageNumber: s.receivingChainMessageNumber,
     previousSendingChainMessageCount: s.previousSendingChainMessageCount,
     skippedKeys: Object.fromEntries(
-      Object.entries(s.skippedKeys).map(([author, entry]: any) => [
+      Object.entries(s.skippedKeys).map(([author, entry]) => [
         author,
         {
-          headerKeys: entry.headerKeys.map((hk: Uint8Array) => new Uint8Array(hk)),
+          headerKeys: entry.headerKeys.map((hk) => new Uint8Array(hk)),
           messageKeys: Object.fromEntries(
-            Object.entries(entry.messageKeys).map(([n, mk]: any) => [n, new Uint8Array(mk)])
+            Object.entries(entry.messageKeys).map(([n, mk]) => [n, new Uint8Array(mk)])
           ),
         },
       ])

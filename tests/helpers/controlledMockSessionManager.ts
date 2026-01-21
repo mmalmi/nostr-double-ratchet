@@ -8,14 +8,22 @@ import {
   VerifiedEvent,
 } from "nostr-tools"
 import { InMemoryStorageAdapter } from "../../src/StorageAdapter"
-import { MockRelay } from "./mockRelay"
+import { ControlledMockRelay } from "./ControlledMockRelay"
 
-export const createMockSessionManager = async (
+export interface ControlledMockSessionManagerOptions {
+  /** If true, auto-deliver events during publish (useful for session setup) */
+  autoDeliver?: boolean
+}
+
+export const createControlledMockSessionManager = async (
   deviceId: string,
-  sharedMockRelay?: MockRelay,
+  sharedMockRelay?: ControlledMockRelay,
   existingSecretKey?: Uint8Array,
-  existingStorage?: InMemoryStorageAdapter
+  existingStorage?: InMemoryStorageAdapter,
+  options: ControlledMockSessionManagerOptions = {}
 ) => {
+  const { autoDeliver = true } = options // Default to auto-deliver for easier setup
+
   const secretKey = existingSecretKey || generateSecretKey()
   const publicKey = getPublicKey(secretKey)
 
@@ -27,16 +35,26 @@ export const createMockSessionManager = async (
     list: vi.spyOn(mockStorage, "list"),
   }
 
-  const mockRelay = sharedMockRelay || new MockRelay()
+  const mockRelay = sharedMockRelay || new ControlledMockRelay()
 
   const subscribe = vi
     .fn()
     .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
-      return mockRelay.subscribe(filter, onEvent)
+      const handle = mockRelay.subscribe(filter, onEvent)
+      return handle.close
     })
 
   const publish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
-    return await mockRelay.publish(event, secretKey)
+    // Use publishAndDeliver for auto-delivery mode, otherwise just queue
+    if (autoDeliver) {
+      const eventId = await mockRelay.publishAndDeliver(event, secretKey)
+      const allEvents = mockRelay.getAllEvents()
+      return allEvents.find((e) => e.id === eventId)
+    } else {
+      const eventId = await mockRelay.publish(event, secretKey)
+      const allEvents = mockRelay.getAllEvents()
+      return allEvents.find((e) => e.id === eventId)
+    }
   })
 
   // Create DeviceManager first to handle InviteList
@@ -73,9 +91,9 @@ export const createMockSessionManager = async (
   }
 }
 
-export const createMockDelegateSessionManager = async (
+export const createControlledMockDelegateSessionManager = async (
   deviceId: string,
-  sharedMockRelay: MockRelay,
+  sharedMockRelay: ControlledMockRelay,
   mainDeviceManager: OwnerDeviceManager
 ) => {
   const mockStorage = new InMemoryStorageAdapter()
@@ -90,19 +108,17 @@ export const createMockDelegateSessionManager = async (
   const subscribe = vi
     .fn()
     .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
-      return sharedMockRelay.subscribe(filter, onEvent)
+      const handle = sharedMockRelay.subscribe(filter, onEvent)
+      return handle.close
     })
 
   const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
     // Delegate's SessionManager signs its own events, so we might receive already-signed events
     if ('sig' in event && event.sig) {
-      // Already signed, just add to relay
+      // Already signed - use publishAndDeliver to add directly
+      // For controlled relay, we need to handle this differently
       const verifiedEvent = event as VerifiedEvent
-      // Manually add to relay's events array since we bypass the normal publish flow
-      ;(sharedMockRelay as any).events.push(verifiedEvent)
-      for (const sub of (sharedMockRelay as any).subscribers.values()) {
-        ;(sharedMockRelay as any).deliverToSubscriber(sub, verifiedEvent)
-      }
+      await sharedMockRelay.publishAndDeliver(event as UnsignedEvent)
       return verifiedEvent
     }
     // Unsigned event - this shouldn't happen for delegate but handle gracefully

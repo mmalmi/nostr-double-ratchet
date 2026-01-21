@@ -1,19 +1,28 @@
 import {
-  DecryptFunction,
+  IdentityKey,
   NostrSubscribe,
   NostrPublish,
   Rumor,
   Unsubscribe,
-  INVITE_EVENT_KIND,
+  INVITE_LIST_EVENT_KIND,
   CHAT_MESSAGE_KIND,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
-import { Invite } from "./Invite"
+import { InviteList } from "./InviteList"
 import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
-import { getEventHash, VerifiedEvent } from "nostr-tools"
+import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
+import { getEventHash } from "nostr-tools"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
+
+/**
+ * Credentials for the invite handshake - used to listen for and decrypt invite responses
+ */
+export interface InviteCredentials {
+  ephemeralKeypair: { publicKey: string; privateKey: Uint8Array }
+  sharedSecret: string
+}
 
 interface DeviceRecord {
   deviceId: string
@@ -21,6 +30,9 @@ interface DeviceRecord {
   inactiveSessions: Session[]
   createdAt: number
   staleAt?: number
+  // Set to true when we've processed an invite response from this device
+  // This survives restarts and prevents duplicate RESPONDER session creation
+  hasResponderSession?: boolean
 }
 
 interface UserRecord {
@@ -36,6 +48,7 @@ interface StoredDeviceRecord {
   inactiveSessions: StoredSessionEntry[]
   createdAt: number
   staleAt?: number
+  hasResponderSession?: boolean
 }
 
 interface StoredUserRecord {
@@ -53,20 +66,24 @@ export class SessionManager {
   private storage: StorageAdapter
   private nostrSubscribe: NostrSubscribe
   private nostrPublish: NostrPublish
-  private ourIdentityKey: Uint8Array | DecryptFunction
+  private identityKey: IdentityKey
   private ourPublicKey: string
+  // Owner's public key - used for grouping devices together (all devices are delegates)
+  private ownerPublicKey: string
+
+  // Credentials for invite handshake
+  private inviteKeys: InviteCredentials
 
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
   private messageHistory: Map<string, Rumor[]> = new Map()
-  private currentDeviceInvite: Invite | null = null
+  // Map delegate device pubkeys to their owner's pubkey
+  private delegateToOwner: Map<string, string> = new Map()
 
   // Subscriptions
-  private ourDeviceInviteSubscription: Unsubscribe | null = null
-  private ourDeviceIntiveTombstoneSubscription: Unsubscribe | null = null
+  private ourInviteResponseSubscription: Unsubscribe | null = null
   private inviteSubscriptions: Map<string, Unsubscribe> = new Map()
   private sessionSubscriptions: Map<string, Unsubscribe> = new Map()
-  private inviteTombstoneSubscriptions: Map<string, Unsubscribe> = new Map()
 
   // Callbacks
   private internalSubscriptions: Set<OnEventCallback> = new Set()
@@ -76,18 +93,22 @@ export class SessionManager {
 
   constructor(
     ourPublicKey: string,
-    ourIdentityKey: Uint8Array | DecryptFunction,
+    identityKey: IdentityKey,
     deviceId: string,
     nostrSubscribe: NostrSubscribe,
     nostrPublish: NostrPublish,
-    storage?: StorageAdapter
+    ownerPublicKey: string,
+    inviteKeys: InviteCredentials,
+    storage?: StorageAdapter,
   ) {
     this.userRecords = new Map()
     this.nostrSubscribe = nostrSubscribe
     this.nostrPublish = nostrPublish
     this.ourPublicKey = ourPublicKey
-    this.ourIdentityKey = ourIdentityKey
+    this.identityKey = identityKey
     this.deviceId = deviceId
+    this.ownerPublicKey = ownerPublicKey
+    this.inviteKeys = inviteKeys
     this.storage = storage || new InMemoryStorageAdapter()
     this.versionPrefix = `v${this.storageVersion}`
   }
@@ -104,55 +125,100 @@ export class SessionManager {
       console.error("Failed to load user records:", error)
     })
 
-    const ourInviteFromStorage: Invite | null = await this.storage
-      .get<string>(this.deviceInviteKey(this.deviceId))
-      .then((data) => {
-        if (!data) return null
+    // Add our own device to user record to prevent accepting our own invite
+    // Use ownerPublicKey so delegates are added to the owner's record
+    const ourUserRecord = this.getOrCreateUserRecord(this.ownerPublicKey)
+    this.upsertDeviceRecord(ourUserRecord, this.deviceId)
+
+    // Start invite response listener BEFORE setting up users
+    // This ensures we're listening when other devices respond to our invites
+    this.startInviteResponseListener()
+    // Setup sessions with our own other devices
+    // Use ownerPublicKey to find sibling devices (important for delegates)
+    this.setupUser(this.ownerPublicKey)
+  }
+
+  /**
+   * Start listening for invite responses on our ephemeral key.
+   * This is used by devices to receive session establishment responses.
+   */
+  private startInviteResponseListener(): void {
+    const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.inviteKeys.ephemeralKeypair
+    const sharedSecret = this.inviteKeys.sharedSecret
+
+    // Subscribe to invite responses tagged to our ephemeral key
+    this.ourInviteResponseSubscription = this.nostrSubscribe(
+      {
+        kinds: [1059], // INVITE_RESPONSE_KIND
+        "#p": [ephemeralPubkey],
+      },
+      async (event) => {
         try {
-          return Invite.deserialize(data)
+          const decrypted = await decryptInviteResponse({
+            envelopeContent: event.content,
+            envelopeSenderPubkey: event.pubkey,
+            inviterEphemeralPrivateKey: ephemeralPrivkey,
+            inviterPrivateKey: this.identityKey instanceof Uint8Array ? this.identityKey : undefined,
+            sharedSecret,
+            decrypt: this.identityKey instanceof Uint8Array ? undefined : this.identityKey.decrypt,
+          })
+
+          // Skip our own responses - this happens when we publish an invite response
+          // and our own listener receives it back from relays
+          if (decrypted.deviceId === this.deviceId) {
+            return
+          }
+
+          // Resolve delegate pubkey to owner for correct UserRecord attribution
+          const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
+          const userRecord = this.getOrCreateUserRecord(ownerPubkey)
+          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
+
+          // Check for duplicate/stale responses using the persisted flag
+          // This flag survives restarts and prevents creating duplicate RESPONDER sessions
+          if (deviceRecord.hasResponderSession) {
+            return
+          }
+
+          // Also check session state as a fallback (for existing sessions before the flag was added)
+          const responseSessionKey = decrypted.inviteeSessionPublicKey
+          const existingSession = deviceRecord.activeSession
+          const existingInactive = deviceRecord.inactiveSessions || []
+          const allSessions = existingSession ? [existingSession, ...existingInactive] : existingInactive
+
+          // Check if any existing session can already receive from this device:
+          // - Has receivingChainKey set (RESPONDER session has received messages)
+          // - Has the same theirNextNostrPublicKey (same session, duplicate response)
+          const canAlreadyReceive = allSessions.some(s =>
+            s.state?.receivingChainKey !== undefined ||
+            s.state?.theirNextNostrPublicKey === responseSessionKey ||
+            s.state?.theirCurrentNostrPublicKey === responseSessionKey
+          )
+          if (canAlreadyReceive) {
+            return
+          }
+
+          const session = createSessionFromAccept({
+            nostrSubscribe: this.nostrSubscribe,
+            theirPublicKey: decrypted.inviteeSessionPublicKey,
+            ourSessionPrivateKey: ephemeralPrivkey,
+            sharedSecret,
+            isSender: false,
+            name: event.id,
+          })
+
+          // Mark that we've processed a responder session for this device
+          // This flag is persisted and survives restarts
+          deviceRecord.hasResponderSession = true
+
+          this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
+          // Persist the flag
+          this.storeUserRecord(ownerPubkey).catch(console.error)
         } catch {
-          return null
+          // Invalid response, ignore
         }
-      })
-
-    const invite =
-      ourInviteFromStorage || Invite.createNew(this.ourPublicKey, this.deviceId)
-
-    this.currentDeviceInvite = invite
-
-    await this.storage.put(this.deviceInviteKey(this.deviceId), invite.serialize())
-
-    this.ourDeviceInviteSubscription = invite.listen(
-      this.ourIdentityKey,
-      this.nostrSubscribe,
-      async (session, inviteePubkey, deviceId) => {
-        if (!deviceId || deviceId === this.deviceId) return
-        const nostrEventId = session.name
-        const acceptanceKey = this.inviteAcceptKey(nostrEventId, inviteePubkey, deviceId)
-        const nostrEventIdInStorage = await this.storage.get<string>(acceptanceKey)
-        if (nostrEventIdInStorage) {
-          return
-        }
-
-        await this.storage.put(acceptanceKey, "1")
-
-        const userRecord = this.getOrCreateUserRecord(inviteePubkey)
-        const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
-
-        this.attachSessionSubscription(inviteePubkey, deviceRecord, session, true)
       }
     )
-
-    if (!this.ourDeviceIntiveTombstoneSubscription) {
-      this.ourDeviceIntiveTombstoneSubscription = this.createInviteTombstoneSubscription(
-        this.ourPublicKey
-      )
-    }
-
-    const inviteNostrEvent = invite.getEvent()
-    this.nostrPublish(inviteNostrEvent).catch((error) => {
-      console.error("Failed to publish our device invite:", error)
-    })
   }
 
   // -------------------
@@ -185,55 +251,8 @@ export class SessionManager {
     return deviceRecord
   }
 
-  private createInviteTombstoneSubscription(authorPublicKey: string): Unsubscribe {
-    return this.nostrSubscribe(
-      {
-        kinds: [INVITE_EVENT_KIND],
-        authors: [authorPublicKey],
-        "#l": ["double-ratchet/invites"],
-      },
-      (event: VerifiedEvent) => {
-        try {
-          const isTombstone = !event.tags?.some(
-            ([key]) => key === "ephemeralKey" || key === "sharedSecret"
-          )
-          if (isTombstone) {
-            const deviceIdTag = event.tags.find(
-              ([key, value]) => key === "d" && value.startsWith("double-ratchet/invites/")
-            )
-            const [, deviceIdTagValue] = deviceIdTag || []
-            const deviceId = deviceIdTagValue.split("/").pop()
-            if (!deviceId) return
-
-            this.cleanupDevice(authorPublicKey, deviceId)
-          }
-        } catch (error) {
-          console.error("Failed to handle device tombstone:", error)
-        }
-      }
-    )
-  }
-
   private sessionKey(userPubkey: string, deviceId: string, sessionName: string) {
     return `${this.sessionKeyPrefix(userPubkey)}${deviceId}/${sessionName}`
-  }
-  private inviteKey(userPubkey: string) {
-    return this.userInviteKey(userPubkey)
-  }
-  private inviteAcceptKey(nostrEventId: string, userPubkey: string, deviceId: string) {
-    return `${this.inviteAcceptKeyPrefix(userPubkey)}${deviceId}/${nostrEventId}`
-  }
-
-  private deviceInviteKey(deviceId: string) {
-    return `${this.versionPrefix}/device-invite/${deviceId}`
-  }
-
-  private userInviteKey(userPubkey: string) {
-    return `${this.versionPrefix}/invite/${userPubkey}`
-  }
-
-  private inviteAcceptKeyPrefix(userPublicKey: string) {
-    return `${this.versionPrefix}/invite-accept/${userPublicKey}/`
   }
 
   private sessionKeyPrefix(userPubkey: string) {
@@ -251,6 +270,49 @@ export class SessionManager {
     return `storage-version`
   }
 
+  /**
+   * Resolve a pubkey to its owner if it's a known delegate device.
+   * Returns the input pubkey if not a known delegate.
+   */
+  private resolveToOwner(pubkey: string): string {
+    return this.delegateToOwner.get(pubkey) || pubkey
+  }
+
+  /**
+   * Update the delegate-to-owner mapping from an InviteList.
+   * Extracts delegate device pubkeys and maps them to the owner.
+   */
+  private updateDelegateMapping(ownerPubkey: string, inviteList: InviteList): void {
+    for (const device of inviteList.getAllDevices()) {
+      if (device.identityPubkey) {
+        this.delegateToOwner.set(device.identityPubkey, ownerPubkey)
+      }
+    }
+  }
+
+  private subscribeToUserInviteList(
+    pubkey: string,
+    onInviteList: (list: InviteList) => void
+  ): Unsubscribe {
+    return this.nostrSubscribe(
+      {
+        kinds: [INVITE_LIST_EVENT_KIND],
+        authors: [pubkey],
+        "#d": ["double-ratchet/invite-list"],
+      },
+      (event) => {
+        try {
+          const list = InviteList.fromEvent(event)
+          // Update delegate mapping whenever we receive an InviteList
+          this.updateDelegateMapping(pubkey, list)
+          onInviteList(list)
+        } catch {
+          // Invalid event, ignore
+        }
+      }
+    )
+  }
+
   private attachSessionSubscription(
     userPubkey: string,
     deviceRecord: DeviceRecord,
@@ -258,10 +320,14 @@ export class SessionManager {
     // Set to true if only handshake -> not yet sendable -> will be promoted on message
     inactive: boolean = false
   ): void {
-    if (deviceRecord.staleAt !== undefined) return
+    if (deviceRecord.staleAt !== undefined) {
+      return
+    }
 
     const key = this.sessionKey(userPubkey, deviceRecord.deviceId, session.name)
-    if (this.sessionSubscriptions.has(key)) return
+    if (this.sessionSubscriptions.has(key)) {
+      return
+    }
 
     const dr = deviceRecord
     const rotateSession = (nextSession: Session) => {
@@ -307,62 +373,61 @@ export class SessionManager {
     this.sessionSubscriptions.set(key, unsub)
   }
 
-  private attachInviteSubscription(
+  private attachInviteListSubscription(
     userPubkey: string,
-    onInvite?: (invite: Invite) => void | Promise<void>
+    onInviteList?: (inviteList: InviteList) => void | Promise<void>
   ): void {
-    const key = this.inviteKey(userPubkey)
+    const key = `invitelist:${userPubkey}`
     if (this.inviteSubscriptions.has(key)) return
 
-    const unsubscribe = Invite.fromUser(
+    const unsubscribe = this.subscribeToUserInviteList(
       userPubkey,
-      this.nostrSubscribe,
-      async (invite) => {
-        if (!invite.deviceId) return
-        if (onInvite) await onInvite(invite)
+      async (inviteList) => {
+        if (onInviteList) await onInviteList(inviteList)
       }
     )
 
     this.inviteSubscriptions.set(key, unsubscribe)
   }
 
-  private attachInviteTombstoneSubscription(userPubkey: string): void {
-    if (this.inviteTombstoneSubscriptions.has(userPubkey)) {
-      return
-    }
-
-    const unsubscribe = this.createInviteTombstoneSubscription(userPubkey)
-    this.inviteTombstoneSubscriptions.set(userPubkey, unsubscribe)
-  }
-
   setupUser(userPubkey: string) {
     const userRecord = this.getOrCreateUserRecord(userPubkey)
 
-    this.attachInviteTombstoneSubscription(userPubkey)
+    const acceptInviteFromDevice = async (
+      inviteList: InviteList,
+      deviceId: string
+    ) => {
+      // Add device record IMMEDIATELY to prevent duplicate acceptance from race conditions
+      // (InviteList callback can fire multiple times before async accept completes)
+      const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
 
-    const acceptInvite = async (invite: Invite) => {
-      const { deviceId } = invite
-      if (!deviceId) return
-
-      const { session, event } = await invite.accept(
+      const encryptor = this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
+      const { session, event } = await inviteList.accept(
+        deviceId,
         this.nostrSubscribe,
         this.ourPublicKey,
-        this.ourIdentityKey,
+        encryptor,
         this.deviceId
       )
       return this.nostrPublish(event)
-        .then(() => this.upsertDeviceRecord(userRecord, deviceId))
-        .then((dr) => this.attachSessionSubscription(userPubkey, dr, session))
+        .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
         .then(() => this.sendMessageHistory(userPubkey, deviceId))
         .catch(console.error)
     }
 
-    this.attachInviteSubscription(userPubkey, async (invite) => {
-      const { deviceId } = invite
-      if (!deviceId) return
+    this.attachInviteListSubscription(userPubkey, async (inviteList) => {
+      const devices = inviteList.getAllDevices()
 
-      if (!userRecord.devices.has(deviceId)) {
-        await acceptInvite(invite)
+      // Handle removed devices (source of truth for revocation)
+      for (const deviceId of inviteList.getRemovedDeviceIds()) {
+        await this.cleanupDevice(userPubkey, deviceId)
+      }
+
+      // Accept invites from new devices
+      for (const device of devices) {
+        if (!userRecord.devices.has(device.deviceId)) {
+          await acceptInviteFromDevice(inviteList, device.deviceId)
+        }
       }
     })
   }
@@ -379,10 +444,6 @@ export class SessionManager {
     return this.deviceId
   }
 
-  getDeviceInviteEphemeralKey(): string | null {
-    return this.currentDeviceInvite?.inviterEphemeralPublicKey || null
-  }
-
   getUserRecords(): Map<string, UserRecord> {
     return this.userRecords
   }
@@ -396,12 +457,7 @@ export class SessionManager {
       unsubscribe()
     }
 
-    for (const unsubscribe of this.inviteTombstoneSubscriptions.values()) {
-      unsubscribe()
-    }
-
-    this.ourDeviceInviteSubscription?.()
-    this.ourDeviceIntiveTombstoneSubscription?.()
+    this.ourInviteResponseSubscription?.()
   }
 
   deactivateCurrentSessions(publicKey: string) {
@@ -439,23 +495,16 @@ export class SessionManager {
       this.userRecords.delete(userPubkey)
     }
 
-    const inviteKey = this.inviteKey(userPubkey)
-    const inviteUnsub = this.inviteSubscriptions.get(inviteKey)
-    if (inviteUnsub) {
-      inviteUnsub()
-      this.inviteSubscriptions.delete(inviteKey)
-    }
-
-    const tombstoneUnsub = this.inviteTombstoneSubscriptions.get(userPubkey)
-    if (tombstoneUnsub) {
-      tombstoneUnsub()
-      this.inviteTombstoneSubscriptions.delete(userPubkey)
+    const inviteListKey = `invitelist:${userPubkey}`
+    const inviteListUnsub = this.inviteSubscriptions.get(inviteListKey)
+    if (inviteListUnsub) {
+      inviteListUnsub()
+      this.inviteSubscriptions.delete(inviteListKey)
     }
 
     this.messageHistory.delete(userPubkey)
 
     await Promise.allSettled([
-      this.storage.del(this.inviteKey(userPubkey)),
       this.deleteUserSessionsFromStorage(userPubkey),
       this.storage.del(this.userRecordKey(userPubkey)),
     ])
@@ -514,34 +563,54 @@ export class SessionManager {
 
     // Add to message history queue (will be sent when session is established)
     const completeEvent = event as Rumor
-    const historyTargets = new Set([recipientIdentityKey, this.ourPublicKey])
+    // Use ownerPublicKey for history targets so delegates share history with owner
+    const historyTargets = new Set([recipientIdentityKey, this.ownerPublicKey])
     for (const key of historyTargets) {
       const existing = this.messageHistory.get(key) || []
       this.messageHistory.set(key, [...existing, completeEvent])
     }
 
     const userRecord = this.getOrCreateUserRecord(recipientIdentityKey)
-    const ourUserRecord = this.getOrCreateUserRecord(this.ourPublicKey)
+    // Use ownerPublicKey to find sibling devices (important for delegates)
+    const ourUserRecord = this.getOrCreateUserRecord(this.ownerPublicKey)
 
     this.setupUser(recipientIdentityKey)
-    this.setupUser(this.ourPublicKey)
+    // Use ownerPublicKey to setup sessions with sibling devices
+    this.setupUser(this.ownerPublicKey)
 
-    const devices = [
-      ...Array.from(userRecord.devices.values()),
-      ...Array.from(ourUserRecord.devices.values()),
-    ].filter((device) => device.staleAt === undefined)
+    const recipientDevices = Array.from(userRecord.devices.values()).filter(d => d.staleAt === undefined)
+    const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
+
+    // Merge and deduplicate by deviceId, excluding our own sending device
+    // This fixes the self-message bug where sending to yourself would duplicate devices
+    const deviceMap = new Map<string, DeviceRecord>()
+    for (const d of [...recipientDevices, ...ownDevices]) {
+      if (d.deviceId !== this.deviceId) {  // Exclude sender's own device
+        deviceMap.set(d.deviceId, d)
+      }
+    }
+    const devices = Array.from(deviceMap.values())
 
     // Send to all devices in background (if sessions exist)
     Promise.allSettled(
       devices.map(async (device) => {
         const { activeSession } = device
-        if (!activeSession) return
+        if (!activeSession) {
+          return
+        }
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         await this.nostrPublish(verifiedEvent).catch(console.error)
       })
     )
       .then(() => {
+        // Store recipient's user record
         this.storeUserRecord(recipientIdentityKey)
+        // Also store owner's record if different (for sibling device sessions)
+        // This ensures session state is persisted after ratcheting
+        // TODO: check if really necessary, if yes, why?
+        if (this.ownerPublicKey !== recipientIdentityKey) {
+          this.storeUserRecord(this.ownerPublicKey)
+        }
       })
       .catch(console.error)
 
@@ -579,33 +648,6 @@ export class SessionManager {
     this.sendEvent(recipientPublicKey, rumor).catch(console.error)
 
     return rumor
-  }
-
-  async revokeDevice(deviceId: string): Promise<void> {
-    await this.init()
-
-    await this.publishDeviceTombstone(deviceId).catch((error) => {
-      console.error("Failed to publish device tombstone:", error)
-    })
-
-    await this.cleanupDevice(this.ourPublicKey, deviceId)
-  }
-
-  private async publishDeviceTombstone(deviceId: string): Promise<void> {
-    const tags: string[][] = [
-      ["l", "double-ratchet/invites"],
-      ["d", `double-ratchet/invites/${deviceId}`],
-    ]
-
-    const deletionEvent = {
-      content: "",
-      kind: INVITE_EVENT_KIND,
-      created_at: Math.floor(Date.now() / 1000),
-      tags,
-      pubkey: this.ourPublicKey,
-    }
-
-    await this.nostrPublish(deletionEvent)
   }
 
   private async cleanupDevice(publicKey: string, deviceId: string): Promise<void> {
@@ -657,6 +699,7 @@ export class SessionManager {
           ),
           createdAt: device.createdAt,
           staleAt: device.staleAt,
+          hasResponderSession: device.hasResponderSession,
         })
       ),
     }
@@ -678,6 +721,7 @@ export class SessionManager {
             inactiveSessions: serializedInactive,
             createdAt,
             staleAt,
+            hasResponderSession,
           } = deviceData
 
           try {
@@ -698,6 +742,7 @@ export class SessionManager {
               inactiveSessions,
               createdAt,
               staleAt,
+              hasResponderSession,
             })
           } catch (e) {
             console.error(
@@ -711,10 +756,6 @@ export class SessionManager {
           publicKey: data.publicKey,
           devices,
         })
-
-        if (publicKey !== this.ourPublicKey) {
-          this.attachInviteTombstoneSubscription(publicKey)
-        }
 
         for (const device of devices.values()) {
           const { deviceId, activeSession, inactiveSessions, staleAt } = device
@@ -751,34 +792,12 @@ export class SessionManager {
 
     // First migration
     if (!version) {
-      // Fetch all existing invites
-      // Assume no version prefix
-      // Deserialize and serialize to start using persistent createdAt
-      // Re-save invites with proper keys
+      // Delete old invite data (legacy format no longer supported)
       const oldInvitePrefix = "invite/"
       const inviteKeys = await this.storage.list(oldInvitePrefix)
-      await Promise.all(
-        inviteKeys.map(async (key) => {
-          try {
-            const publicKey = key.slice(oldInvitePrefix.length)
-            const inviteData = await this.storage.get<string>(key)
-            if (inviteData) {
-              const newKey = this.userInviteKey(publicKey)
-              const invite = Invite.deserialize(inviteData)
-              const serializedInvite = invite.serialize()
-              await this.storage.put(newKey, serializedInvite)
-              await this.storage.del(key)
-            }
-          } catch (e) {
-            console.error("Migration error for invite:", e)
-          }
-        })
-      )
+      await Promise.all(inviteKeys.map((key) => this.storage.del(key)))
 
-      // Fetch all existing user records
-      // Assume no version prefix
-      // Remove all old sessions as these may have key issues
-      // Re-save user records without sessions with proper keys
+      // Migrate old user records (clear sessions, keep device records)
       const oldUserRecordPrefix = "user/"
       const sessionKeys = await this.storage.list(oldUserRecordPrefix)
       await Promise.all(
@@ -806,16 +825,8 @@ export class SessionManager {
         })
       )
 
-      // Set version to 1 so next migration can run
       version = "1"
       await this.storage.put(this.versionKey(), version)
-
-      return
-    }
-
-    // Future migrations
-    if (version === "1") {
-      return
     }
   }
 }

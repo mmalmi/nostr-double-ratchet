@@ -49,6 +49,16 @@ export class MockRelay {
       tags: ndkEvent.tags || [],
     } as VerifiedEvent
 
+    // Handle replaceable events (kinds 10000-19999): keep only latest per pubkey + d-tag
+    if (event.kind >= 10000 && event.kind < 20000) {
+      const dTag = event.tags?.find((t) => t[0] === "d")?.[1]
+      this.events = this.events.filter((e) => {
+        if (e.kind !== event.kind || e.pubkey !== event.pubkey) return true
+        const existingDTag = e.tags?.find((t) => t[0] === "d")?.[1]
+        return existingDTag !== dTag
+      })
+    }
+
     this.events.push(verifiedEvent)
 
     for (const sub of this.subscribers.values()) {
@@ -79,9 +89,14 @@ export class MockRelay {
         "existing events to new subscriber"
       )
     }
-    for (const event of this.events) {
-      this.deliverToSubscriber(subscriber, event)
-    }
+
+    // Defer initial delivery to next tick to allow subscriber assignment to complete
+    // This mimics real relay behavior where events arrive asynchronously
+    queueMicrotask(() => {
+      for (const event of this.events) {
+        this.deliverToSubscriber(subscriber, event)
+      }
+    })
 
     return () => {
       this.subscribers.delete(subId)

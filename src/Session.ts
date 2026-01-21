@@ -393,7 +393,7 @@ export class Session {
       this.nostrUnsubscribe = this.nostrSubscribe(
         {authors: [this.state.theirCurrentNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
         (e) => this.handleNostrEvent(e)
-      );  
+      );
     }
 
     const skippedAuthors = Object.keys(this.state.skippedKeys);
