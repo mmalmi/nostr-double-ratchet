@@ -25,15 +25,15 @@ type DeviceTag = [
   sharedSecret: string,
   deviceId: string,
   createdAt: string,
-  ...rest: string[]  // Optional: identityPubkey at index 5
+  identityPubkey: string,
 ]
 
 type RemovedTag = [type: "removed", deviceId: string]
 
 const isDeviceTag = (tag: string[]): tag is DeviceTag =>
-  tag.length >= 5 &&
+  tag.length >= 6 &&
   tag[0] === "device" &&
-  tag.slice(1, 5).every((v) => typeof v === "string")
+  tag.slice(1, 6).every((v) => typeof v === "string")
 
 const isRemovedTag = (tag: string[]): tag is RemovedTag =>
   tag.length >= 2 &&
@@ -57,11 +57,11 @@ export interface DeviceEntry {
   /** When this device was added (unix timestamp) */
   createdAt: number
   /**
-   * Identity public key for delegate devices.
-   * If set, this device uses its own identity key for encryption/decryption
-   * instead of the owner's main identity key.
+   * Identity public key for this device.
+   * For owner devices, this is the owner's public key.
+   * For delegate devices, this is their own identity key.
    */
-  identityPubkey?: string
+  identityPubkey: string
 }
 
 /** Serialized form of DeviceEntry (ephemeralPrivateKey as number array) */
@@ -97,7 +97,7 @@ export class InviteList {
   }
 
   /**
-   * Creates a new device entry with generated keys.
+   * Creates a new device entry with generated keys for the owner.
    * @param label - Human-readable label for the device
    * @param deviceId - Optional device ID (generates random if not provided)
    */
@@ -110,6 +110,7 @@ export class InviteList {
       deviceId: deviceId || generateDeviceId(),
       deviceLabel: label,
       createdAt: now(),
+      identityPubkey: this.ownerPublicKey,
     }
   }
 
@@ -168,20 +169,14 @@ export class InviteList {
    * Creates an unsigned event representing this invite list.
    */
   getEvent(): UnsignedEvent {
-    const deviceTags = this.getAllDevices().map((device) => {
-      const tag = [
-        "device",
-        device.ephemeralPublicKey,
-        device.sharedSecret,
-        device.deviceId,
-        String(device.createdAt),
-      ]
-      // Only include identityPubkey if it's set (delegate devices)
-      if (device.identityPubkey) {
-        tag.push(device.identityPubkey)
-      }
-      return tag
-    })
+    const deviceTags = this.getAllDevices().map((device) => [
+      "device",
+      device.ephemeralPublicKey,
+      device.sharedSecret,
+      device.deviceId,
+      String(device.createdAt),
+      device.identityPubkey,
+    ])
 
     const removedTags = this.getRemovedDeviceIds().map((deviceId) => [
       "removed",
@@ -221,7 +216,7 @@ export class InviteList {
         deviceId,
         deviceLabel: deviceId,
         createdAt: parseInt(createdAt, 10) || event.created_at,
-        identityPubkey: identityPubkey || undefined,
+        identityPubkey,
       }))
 
     const removedDeviceIds = event.tags
@@ -322,19 +317,6 @@ export class InviteList {
       throw new Error(`Device ${deviceId} not found in invite list`)
     }
 
-    // Validate identityPubkey - must be 64-char hex string to be a valid secp256k1 pubkey
-    const isValidPubkey = (pubkey: string | undefined): pubkey is string => {
-      if (!pubkey) return false
-      if (pubkey.length !== 64) return false
-      if (!/^[0-9a-f]+$/i.test(pubkey)) return false
-      return true
-    }
-
-    // Use identityPubkey only if valid, otherwise fall back to owner's pubkey
-    const inviterIdentityKey = isValidPubkey(device.identityPubkey)
-      ? device.identityPubkey
-      : this.ownerPublicKey
-
     const inviteeSessionKeypair = generateEphemeralKeypair()
 
     const session = createSessionFromAccept({
@@ -352,7 +334,7 @@ export class InviteList {
       inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
       inviteePublicKey,
       inviteePrivateKey,
-      inviterPublicKey: inviterIdentityKey,
+      inviterPublicKey: device.identityPubkey,
       inviterEphemeralPublicKey: device.ephemeralPublicKey,
       sharedSecret: device.sharedSecret,
       deviceId: inviteeDeviceId,

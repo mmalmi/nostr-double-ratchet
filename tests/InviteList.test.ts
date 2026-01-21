@@ -15,7 +15,7 @@ describe('InviteList', () => {
       deviceId: generateDeviceId(),
       deviceLabel: label || 'Test Device',
       createdAt: Math.floor(Date.now() / 1000),
-      identityPubkey,
+      identityPubkey: identityPubkey || getPublicKey(generateSecretKey()),
     }
   }
 
@@ -443,6 +443,7 @@ describe('InviteList', () => {
         deviceId: generateDeviceId(),
         deviceLabel: 'Phone',
         createdAt: Math.floor(Date.now() / 1000),
+        identityPubkey: ownerPublicKey,
         // No ephemeralPrivateKey
       }
       const list = new InviteList(ownerPublicKey, [device])
@@ -510,7 +511,7 @@ describe('InviteList', () => {
       expect(deviceTag![5]).toBe(delegatePublicKey)
     })
 
-    it('should not include identityPubkey in tag when not set', () => {
+    it('should always include identityPubkey in tag', () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const list = new InviteList(ownerPublicKey)
@@ -521,8 +522,9 @@ describe('InviteList', () => {
 
       const deviceTag = event.tags.find(t => t[0] === 'device' && t[3] === device.deviceId)
       expect(deviceTag).toBeDefined()
-      // Tag should have 5 elements (no identityPubkey): device, ephem, secret, id, createdAt
-      expect(deviceTag!.length).toBe(5)
+      // Tag should have 6 elements: device, ephem, secret, id, createdAt, identityPubkey
+      expect(deviceTag!.length).toBe(6)
+      expect(deviceTag![5]).toBe(device.identityPubkey)
     })
 
     it('should parse identityPubkey from event', () => {
@@ -599,7 +601,8 @@ describe('InviteList', () => {
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
       const parsed = InviteList.fromEvent(signedEvent)
 
-      expect(parsed.getDevice(mainDevice.deviceId)?.identityPubkey).toBeUndefined()
+      // Both devices should have identityPubkey set
+      expect(parsed.getDevice(mainDevice.deviceId)?.identityPubkey).toBe(mainDevice.identityPubkey)
       expect(parsed.getDevice(delegateDevice.deviceId)?.identityPubkey).toBe(delegatePublicKey)
     })
   })

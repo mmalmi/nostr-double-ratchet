@@ -16,8 +16,8 @@ export interface DevicePayload {
   deviceId: string
   /** Human-readable device label */
   deviceLabel: string
-  /** Identity public key for delegate devices (64 hex chars, optional) */
-  identityPubkey?: string
+  /** Identity public key for this device (64 hex chars) */
+  identityPubkey: string
 }
 
 /**

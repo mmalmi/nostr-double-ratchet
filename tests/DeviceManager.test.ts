@@ -599,6 +599,7 @@ describe("DeviceManager - Main Device", () => {
             remoteSharedSecret,
             remoteDeviceId,
             String(Math.floor(Date.now() / 1000)),
+            ownerPublicKey,
           ],
         ],
         content: "",
@@ -652,6 +653,7 @@ describe("DeviceManager - Main Device", () => {
         sharedSecret: bytesToHex(generateSecretKey()),
         deviceId: "secondary-device",
         deviceLabel: "Secondary Device",
+        identityPubkey: ownerPublicKey,
       }
 
       await manager.addDevice(payload)
@@ -713,6 +715,7 @@ describe("DeviceManager - Main Device", () => {
         sharedSecret: bytesToHex(generateSecretKey()),
         deviceId: "secondary-device",
         deviceLabel: "Secondary Device",
+        identityPubkey: ownerPublicKey,
       }
       await manager.addDevice(payload)
 
