@@ -486,7 +486,8 @@ async function restartDelegateDevice(
   const oldDelegateManager = device.delegateDeviceManager!
 
   // Get the delegate's keys before they're lost
-  const devicePrivateKey = oldDelegateManager.getIdentityPrivateKey()
+  // Delegate devices always use raw keys, never extension login
+  const devicePrivateKey = oldDelegateManager.getIdentityKey() as Uint8Array
   const devicePublicKey = oldDelegateManager.getIdentityPublicKey()
   const ephemeralKeypair = oldDelegateManager.getEphemeralKeypair()
   const sharedSecret = oldDelegateManager.getSharedSecret()

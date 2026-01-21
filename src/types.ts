@@ -68,6 +68,13 @@ export type Unsubscribe = () => void;
 export type NostrSubscribe = (_filter: Filter, _onEvent: (_e: VerifiedEvent) => void) => Unsubscribe;
 export type EncryptFunction = (_plaintext: string, _pubkey: string) => Promise<string>;
 export type DecryptFunction = (_ciphertext: string, _pubkey: string) => Promise<string>;
+
+/**
+ * Identity key for cryptographic operations.
+ * Either a raw private key (Uint8Array) or encrypt/decrypt functions for extension login (NIP-07).
+ */
+export type IdentityKey = Uint8Array | { encrypt: EncryptFunction; decrypt: DecryptFunction };
+
 export type NostrPublish = (_event: UnsignedEvent) => Promise<VerifiedEvent>;
 
 export type Rumor = UnsignedEvent & { id: string }

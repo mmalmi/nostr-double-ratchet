@@ -75,7 +75,7 @@ describe('Delegate Device Messaging', () => {
     console.log('Creating Alice main device...')
     const aliceMainDeviceManager = DeviceManager.createOwnerDevice({
       ownerPublicKey: alicePublicKey,
-      ownerPrivateKey: alicePrivateKey,
+      identityKey: alicePrivateKey,
       deviceId: generateDeviceId(),
       deviceLabel: 'Alice Main',
       nostrSubscribe: createSubscribe('AliceMain'),
@@ -131,7 +131,7 @@ describe('Delegate Device Messaging', () => {
     console.log('Alice delegate activated')
 
     // Now get the delegate's identity key for the SessionManager
-    const aliceDelegatePrivateKey = aliceDelegateManager.getIdentityPrivateKey()
+    const aliceDelegatePrivateKey = aliceDelegateManager.getIdentityKey()
 
     // Create SessionManager for Alice delegate
     // NOTE: Delegate must use its OWN public key for DH encryption to work correctly
@@ -160,7 +160,7 @@ describe('Delegate Device Messaging', () => {
     console.log('Creating Bob main device...')
     const bobMainDeviceManager = DeviceManager.createOwnerDevice({
       ownerPublicKey: bobPublicKey,
-      ownerPrivateKey: bobPrivateKey,
+      identityKey: bobPrivateKey,
       deviceId: generateDeviceId(),
       deviceLabel: 'Bob Main',
       nostrSubscribe: createSubscribe('BobMain'),
@@ -215,7 +215,7 @@ describe('Delegate Device Messaging', () => {
     console.log('Bob delegate activated')
 
     // Now get the delegate's identity key for the SessionManager
-    const bobDelegatePrivateKey = bobDelegateManager.getIdentityPrivateKey()
+    const bobDelegatePrivateKey = bobDelegateManager.getIdentityKey()
 
     // Create SessionManager for Bob delegate
     // NOTE: Delegate must use its OWN public key for DH encryption to work correctly

@@ -1,5 +1,5 @@
 import {
-  DecryptFunction,
+  IdentityKey,
   NostrSubscribe,
   NostrPublish,
   Rumor,
@@ -60,7 +60,7 @@ export class SessionManager {
   private storage: StorageAdapter
   private nostrSubscribe: NostrSubscribe
   private nostrPublish: NostrPublish
-  private ourIdentityKey: Uint8Array | DecryptFunction
+  private identityKey: IdentityKey
   private ourPublicKey: string
   // Owner's public key - used for grouping devices together (all devices are delegates)
   private ownerPublicKey: string
@@ -91,7 +91,7 @@ export class SessionManager {
 
   constructor(
     ourPublicKey: string,
-    ourIdentityKey: Uint8Array | DecryptFunction,
+    identityKey: IdentityKey,
     deviceId: string,
     nostrSubscribe: NostrSubscribe,
     nostrPublish: NostrPublish,
@@ -105,7 +105,7 @@ export class SessionManager {
     this.nostrSubscribe = nostrSubscribe
     this.nostrPublish = nostrPublish
     this.ourPublicKey = ourPublicKey
-    this.ourIdentityKey = ourIdentityKey
+    this.identityKey = identityKey
     this.deviceId = deviceId
     this.ownerPublicKey = ownerPublicKey
     this.storage = storage || new InMemoryStorageAdapter()
@@ -152,7 +152,7 @@ export class SessionManager {
     const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.ephemeralKeypair
     const sharedSecret = this.sharedSecret
 
-    const hasRawKey = this.ourIdentityKey instanceof Uint8Array
+    const hasRawKey = this.identityKey instanceof Uint8Array
     this.debug(`[SM ${this.deviceId}] startInviteResponseListener: listening on ephemeralPubkey=${ephemeralPubkey.slice(0, 16)}..., ourPublicKey=${this.ourPublicKey.slice(0, 8)}..., hasRawKey=${hasRawKey}`)
 
     // Subscribe to invite responses tagged to our ephemeral key
@@ -167,9 +167,9 @@ export class SessionManager {
             envelopeContent: event.content,
             envelopeSenderPubkey: event.pubkey,
             inviterEphemeralPrivateKey: ephemeralPrivkey,
-            inviterPrivateKey: this.ourIdentityKey instanceof Uint8Array ? this.ourIdentityKey : undefined,
+            inviterPrivateKey: this.identityKey instanceof Uint8Array ? this.identityKey : undefined,
             sharedSecret,
-            decrypt: typeof this.ourIdentityKey === "function" ? this.ourIdentityKey : undefined,
+            decrypt: this.identityKey instanceof Uint8Array ? undefined : this.identityKey.decrypt,
           })
 
           // Skip our own responses - this happens when we publish an invite response
@@ -448,11 +448,12 @@ export class SessionManager {
       // (InviteList callback can fire multiple times before async accept completes)
       const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
 
+      const encryptor = this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
       const { session, event } = await inviteList.accept(
         deviceId,
         this.nostrSubscribe,
         this.ourPublicKey,
-        this.ourIdentityKey,
+        encryptor,
         this.deviceId
       )
       this.debug(`[SM ${this.deviceId}] accepted invite, publishing response...`)
@@ -469,10 +470,11 @@ export class SessionManager {
       // Add device record IMMEDIATELY to prevent duplicate acceptance
       const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
 
+      const encryptor = this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
       const { session, event } = await invite.accept(
         this.nostrSubscribe,
         this.ourPublicKey,
-        this.ourIdentityKey,
+        encryptor,
         this.deviceId
       )
       return this.nostrPublish(event)

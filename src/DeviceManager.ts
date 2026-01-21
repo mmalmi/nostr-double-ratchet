@@ -2,22 +2,19 @@ import { generateSecretKey, getPublicKey, VerifiedEvent } from "nostr-tools"
 import { bytesToHex } from "@noble/hashes/utils"
 import { InviteList, DeviceEntry } from "./InviteList"
 import { DevicePayload } from "./inviteUtils"
-import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, DecryptFunction, EncryptFunction } from "./types"
+import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, IdentityKey } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
 /**
  * Options for creating a DeviceManager with owner's key (can manage InviteList)
  *
- * For extension login (NIP-07), pass decrypt/encrypt functions instead of raw private key.
- * The functions should implement NIP-44 encryption/decryption.
+ * For extension login (NIP-07), pass { encrypt, decrypt } functions instead of raw private key.
  */
 export interface OwnerDeviceOptions {
   ownerPublicKey: string
-  /** Raw private key bytes OR a NIP-44 decrypt function for extension login */
-  ownerPrivateKey: Uint8Array | DecryptFunction
-  /** Optional NIP-44 encrypt function (required if ownerPrivateKey is a DecryptFunction) */
-  ownerEncrypt?: EncryptFunction
+  /** Raw private key bytes OR { encrypt, decrypt } functions for extension login */
+  identityKey: IdentityKey
   deviceId: string
   deviceLabel: string
   nostrSubscribe: NostrSubscribe
@@ -74,10 +71,9 @@ export class DeviceManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
 
-  // Owner mode fields (has owner's nsec or decrypt/encrypt functions)
+  // Owner mode fields (has owner's nsec or encrypt/decrypt functions)
   private readonly ownerPublicKey?: string
-  private readonly ownerPrivateKey?: Uint8Array | DecryptFunction
-  private readonly ownerEncrypt?: EncryptFunction
+  private readonly identityKey?: IdentityKey
 
   // Delegate mode fields
   private readonly devicePublicKey?: string
@@ -106,8 +102,7 @@ export class DeviceManager {
     nostrPublish: NostrPublish
     storage?: StorageAdapter
     ownerPublicKey?: string
-    ownerPrivateKey?: Uint8Array | DecryptFunction
-    ownerEncrypt?: EncryptFunction
+    identityKey?: IdentityKey
     devicePublicKey?: string
     devicePrivateKey?: Uint8Array
     ephemeralPublicKey?: string
@@ -123,8 +118,7 @@ export class DeviceManager {
 
     // Owner mode
     this.ownerPublicKey = options.ownerPublicKey
-    this.ownerPrivateKey = options.ownerPrivateKey
-    this.ownerEncrypt = options.ownerEncrypt
+    this.identityKey = options.identityKey
 
     // Delegate mode
     this.devicePublicKey = options.devicePublicKey
@@ -136,7 +130,7 @@ export class DeviceManager {
 
   /**
    * Create a DeviceManager with owner's nsec (can manage InviteList)
-   * For extension login, pass decrypt/encrypt functions instead of raw private key.
+   * For extension login, pass { encrypt, decrypt } functions instead of raw private key.
    */
   static createOwnerDevice(options: OwnerDeviceOptions): DeviceManager {
     return new DeviceManager({
@@ -147,8 +141,7 @@ export class DeviceManager {
       nostrPublish: options.nostrPublish,
       storage: options.storage,
       ownerPublicKey: options.ownerPublicKey,
-      ownerPrivateKey: options.ownerPrivateKey,
-      ownerEncrypt: options.ownerEncrypt,
+      identityKey: options.identityKey,
     })
   }
 
@@ -306,34 +299,27 @@ export class DeviceManager {
   }
 
   /**
-   * Get the identity private key or decrypt function (owner privkey for owner mode, device privkey for delegate)
-   * Returns Uint8Array for raw key mode, or DecryptFunction for extension login mode.
+   * Get the identity key (owner key for owner mode, device key for delegate)
+   * Returns Uint8Array for raw key mode, or { encrypt, decrypt } for extension login mode.
    */
-  getIdentityPrivateKey(): Uint8Array | DecryptFunction {
+  getIdentityKey(): IdentityKey {
     if (this.delegateMode) {
       if (!this.devicePrivateKey) {
         throw new Error("Device private key not set")
       }
       return this.devicePrivateKey
     }
-    if (!this.ownerPrivateKey) {
-      throw new Error("Owner private key not set")
+    if (!this.identityKey) {
+      throw new Error("Identity key not set")
     }
-    return this.ownerPrivateKey
-  }
-
-  /**
-   * Get the encrypt function (only available in extension login mode)
-   */
-  getEncryptFunction(): EncryptFunction | undefined {
-    return this.ownerEncrypt
+    return this.identityKey
   }
 
   /**
    * Check if this DeviceManager is using extension login (function callbacks instead of raw keys)
    */
   isExtensionLogin(): boolean {
-    return typeof this.ownerPrivateKey === "function"
+    return this.identityKey !== undefined && !(this.identityKey instanceof Uint8Array)
   }
 
   /**
@@ -560,7 +546,7 @@ export class DeviceManager {
     }
 
     const publicKey = this.getIdentityPublicKey()
-    const privateKey = this.getIdentityPrivateKey()
+    const identityKey = this.getIdentityKey()
     const ownerPublicKey = this.getOwnerPublicKey()
 
     if (!ownerPublicKey) {
@@ -569,7 +555,7 @@ export class DeviceManager {
 
     return new SessionManager(
       publicKey,
-      privateKey,
+      identityKey,
       this.deviceId,
       this.nostrSubscribe,
       this.nostrPublish,

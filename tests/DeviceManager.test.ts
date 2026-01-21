@@ -56,9 +56,9 @@ describe("DeviceManager - Delegate Device", () => {
       expect(payload.identityPubkey).toHaveLength(64)
       expect(manager.getIdentityPublicKey()).toBe(payload.identityPubkey)
 
-      const privkey = manager.getIdentityPrivateKey()
+      const privkey = manager.getIdentityKey()
       expect(privkey).toBeInstanceOf(Uint8Array)
-      expect(privkey.length).toBe(32)
+      expect((privkey as Uint8Array).length).toBe(32)
 
       expect(payload.ephemeralPubkey).toBeDefined()
       expect(payload.ephemeralPubkey).toHaveLength(64)
@@ -504,7 +504,7 @@ describe("DeviceManager - Main Device", () => {
     it("should create a DeviceManager in main mode", () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -520,7 +520,7 @@ describe("DeviceManager - Main Device", () => {
     it("should create InviteList with own device", async () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -541,7 +541,7 @@ describe("DeviceManager - Main Device", () => {
     it("should publish InviteList on init", async () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -561,7 +561,7 @@ describe("DeviceManager - Main Device", () => {
 
       const manager1 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -574,7 +574,7 @@ describe("DeviceManager - Main Device", () => {
 
       const manager2 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -592,7 +592,7 @@ describe("DeviceManager - Main Device", () => {
 
       const manager1 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "device-1",
         deviceLabel: "Device 1",
         nostrSubscribe,
@@ -625,7 +625,7 @@ describe("DeviceManager - Main Device", () => {
 
       const manager2 = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "device-1",
         deviceLabel: "Device 1",
         nostrSubscribe: vi.fn((filter, onEvent) => {
@@ -653,7 +653,7 @@ describe("DeviceManager - Main Device", () => {
     it("should add device to InviteList and publish", async () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -689,7 +689,7 @@ describe("DeviceManager - Main Device", () => {
     it("should include identityPubkey for delegate devices", async () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -718,7 +718,7 @@ describe("DeviceManager - Main Device", () => {
     it("should remove device from InviteList", async () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -745,7 +745,7 @@ describe("DeviceManager - Main Device", () => {
     it("should not allow revoking own device", async () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -761,7 +761,7 @@ describe("DeviceManager - Main Device", () => {
     it("should update device label in InviteList", async () => {
       const manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -782,7 +782,7 @@ describe("DeviceManager - Main Device", () => {
     beforeEach(async () => {
       manager = DeviceManager.createOwnerDevice({
         ownerPublicKey,
-        ownerPrivateKey,
+        identityKey: ownerPrivateKey,
         deviceId: "main-device",
         deviceLabel: "Main Device",
         nostrSubscribe,
@@ -795,8 +795,8 @@ describe("DeviceManager - Main Device", () => {
       expect(manager.getIdentityPublicKey()).toBe(ownerPublicKey)
     })
 
-    it("getIdentityPrivateKey() should return owner privkey", () => {
-      expect(manager.getIdentityPrivateKey()).toEqual(ownerPrivateKey)
+    it("getIdentityKey() should return owner privkey", () => {
+      expect(manager.getIdentityKey()).toEqual(ownerPrivateKey)
     })
 
     it("getDeviceId() should return device ID", () => {
@@ -906,7 +906,7 @@ describe("DeviceManager Integration", () => {
 
     const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
-      ownerPrivateKey,
+      identityKey: ownerPrivateKey,
       deviceId: "main-device",
       deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),
@@ -948,7 +948,7 @@ describe("DeviceManager Integration", () => {
 
     const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
-      ownerPrivateKey,
+      identityKey: ownerPrivateKey,
       deviceId: "main-device",
       deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),
@@ -1003,7 +1003,7 @@ describe("DeviceManager Integration", () => {
 
     const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
-      ownerPrivateKey,
+      identityKey: ownerPrivateKey,
       deviceId: "main-device",
       deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),
@@ -1061,7 +1061,7 @@ describe("DeviceManager Integration", () => {
 
     const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
-      ownerPrivateKey,
+      identityKey: ownerPrivateKey,
       deviceId: "main-device",
       deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),
@@ -1094,7 +1094,7 @@ describe("DeviceManager Integration", () => {
 
     const mainManager = DeviceManager.createOwnerDevice({
       ownerPublicKey,
-      ownerPrivateKey,
+      identityKey: ownerPrivateKey,
       deviceId: "main-device",
       deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),

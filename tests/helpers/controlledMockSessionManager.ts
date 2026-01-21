@@ -60,7 +60,7 @@ export const createControlledMockSessionManager = async (
   // Create DeviceManager first to handle InviteList
   const deviceManager = DeviceManager.createOwnerDevice({
     ownerPublicKey: publicKey,
-    ownerPrivateKey: secretKey,
+    identityKey: secretKey,
     deviceId,
     deviceLabel: deviceId,
     nostrSubscribe: subscribe,
