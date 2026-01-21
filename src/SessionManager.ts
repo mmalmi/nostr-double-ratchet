@@ -8,7 +8,6 @@ import {
   CHAT_MESSAGE_KIND,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
-import { Invite } from "./Invite"
 import { InviteList } from "./InviteList"
 import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
@@ -256,10 +255,6 @@ export class SessionManager {
     return `${this.sessionKeyPrefix(userPubkey)}${deviceId}/${sessionName}`
   }
 
-  private userInviteKey(userPubkey: string) {
-    return `${this.versionPrefix}/invite/${userPubkey}`
-  }
-
   private sessionKeyPrefix(userPubkey: string) {
     return `${this.versionPrefix}/session/${userPubkey}/`
   }
@@ -378,25 +373,6 @@ export class SessionManager {
     this.sessionSubscriptions.set(key, unsub)
   }
 
-  private attachInviteSubscription(
-    userPubkey: string,
-    onInvite?: (invite: Invite) => void | Promise<void>
-  ): void {
-    const key = this.userInviteKey(userPubkey)
-    if (this.inviteSubscriptions.has(key)) return
-
-    const unsubscribe = Invite.fromUser(
-      userPubkey,
-      this.nostrSubscribe,
-      async (invite) => {
-        if (!invite.deviceId) return
-        if (onInvite) await onInvite(invite)
-      }
-    )
-
-    this.inviteSubscriptions.set(key, unsubscribe)
-  }
-
   private attachInviteListSubscription(
     userPubkey: string,
     onInviteList?: (inviteList: InviteList) => void | Promise<void>
@@ -417,7 +393,6 @@ export class SessionManager {
   setupUser(userPubkey: string) {
     const userRecord = this.getOrCreateUserRecord(userPubkey)
 
-    // Helper to accept an invite (works for both InviteList devices and legacy Invite)
     const acceptInviteFromDevice = async (
       inviteList: InviteList,
       deviceId: string
@@ -440,27 +415,6 @@ export class SessionManager {
         .catch(console.error)
     }
 
-    const acceptLegacyInvite = async (invite: Invite) => {
-      const { deviceId } = invite
-      if (!deviceId) return
-
-      // Add device record IMMEDIATELY to prevent duplicate acceptance
-      const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
-
-      const encryptor = this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
-      const { session, event } = await invite.accept(
-        this.nostrSubscribe,
-        this.ourPublicKey,
-        encryptor,
-        this.deviceId
-      )
-      return this.nostrPublish(event)
-        .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
-        .then(() => this.sendMessageHistory(userPubkey, deviceId))
-        .catch(console.error)
-    }
-
-    // Subscribe to InviteList (kind 10078) - new format
     this.attachInviteListSubscription(userPubkey, async (inviteList) => {
       const devices = inviteList.getAllDevices()
 
@@ -474,16 +428,6 @@ export class SessionManager {
         if (!userRecord.devices.has(device.deviceId)) {
           await acceptInviteFromDevice(inviteList, device.deviceId)
         }
-      }
-    })
-
-    // Subscribe to per-device invites (kind 30078) - legacy format for backwards compatibility
-    this.attachInviteSubscription(userPubkey, async (invite) => {
-      const { deviceId } = invite
-      if (!deviceId) return
-
-      if (!userRecord.devices.has(deviceId)) {
-        await acceptLegacyInvite(invite)
       }
     })
   }
@@ -551,17 +495,16 @@ export class SessionManager {
       this.userRecords.delete(userPubkey)
     }
 
-    const inviteKey = this.userInviteKey(userPubkey)
-    const inviteUnsub = this.inviteSubscriptions.get(inviteKey)
-    if (inviteUnsub) {
-      inviteUnsub()
-      this.inviteSubscriptions.delete(inviteKey)
+    const inviteListKey = `invitelist:${userPubkey}`
+    const inviteListUnsub = this.inviteSubscriptions.get(inviteListKey)
+    if (inviteListUnsub) {
+      inviteListUnsub()
+      this.inviteSubscriptions.delete(inviteListKey)
     }
 
     this.messageHistory.delete(userPubkey)
 
     await Promise.allSettled([
-      this.storage.del(this.userInviteKey(userPubkey)),
       this.deleteUserSessionsFromStorage(userPubkey),
       this.storage.del(this.userRecordKey(userPubkey)),
     ])
@@ -849,34 +792,12 @@ export class SessionManager {
 
     // First migration
     if (!version) {
-      // Fetch all existing invites
-      // Assume no version prefix
-      // Deserialize and serialize to start using persistent createdAt
-      // Re-save invites with proper keys
+      // Delete old invite data (legacy format no longer supported)
       const oldInvitePrefix = "invite/"
       const inviteKeys = await this.storage.list(oldInvitePrefix)
-      await Promise.all(
-        inviteKeys.map(async (key) => {
-          try {
-            const publicKey = key.slice(oldInvitePrefix.length)
-            const inviteData = await this.storage.get<string>(key)
-            if (inviteData) {
-              const newKey = this.userInviteKey(publicKey)
-              const invite = Invite.deserialize(inviteData)
-              const serializedInvite = invite.serialize()
-              await this.storage.put(newKey, serializedInvite)
-              await this.storage.del(key)
-            }
-          } catch (e) {
-            console.error("Migration error for invite:", e)
-          }
-        })
-      )
+      await Promise.all(inviteKeys.map((key) => this.storage.del(key)))
 
-      // Fetch all existing user records
-      // Assume no version prefix
-      // Remove all old sessions as these may have key issues
-      // Re-save user records without sessions with proper keys
+      // Migrate old user records (clear sessions, keep device records)
       const oldUserRecordPrefix = "user/"
       const sessionKeys = await this.storage.list(oldUserRecordPrefix)
       await Promise.all(
@@ -904,7 +825,6 @@ export class SessionManager {
         })
       )
 
-      // Set version to 1
       version = "1"
       await this.storage.put(this.versionKey(), version)
     }
