@@ -26,7 +26,6 @@ export interface DelegateDeviceOptions {
 
 export interface RestoreDelegateOptions {
   deviceId: string
-  deviceLabel: string
   devicePublicKey: string
   devicePrivateKey: Uint8Array
   ephemeralPublicKey: string
@@ -45,7 +44,6 @@ export interface CreateDelegateResult {
 export interface IDeviceManager {
   init(): Promise<void>
   getDeviceId(): string
-  getDeviceLabel(): string
   getIdentityPublicKey(): string
   getIdentityKey(): IdentityKey
   getEphemeralKeypair(): { publicKey: string; privateKey: Uint8Array } | null
@@ -112,20 +110,12 @@ export class OwnerDeviceManager implements IDeviceManager {
     return this.deviceId
   }
 
-  getDeviceLabel(): string {
-    return this.deviceLabel
-  }
-
   getIdentityPublicKey(): string {
     return this.ownerPublicKey
   }
 
   getIdentityKey(): IdentityKey {
     return this.identityKey
-  }
-
-  isExtensionLogin(): boolean {
-    return !(this.identityKey instanceof Uint8Array)
   }
 
   getEphemeralKeypair(): { publicKey: string; privateKey: Uint8Array } | null {
@@ -324,7 +314,6 @@ export class OwnerDeviceManager implements IDeviceManager {
 /** Delegate device. Has own identity key, waits for activation, checks revocation. */
 export class DelegateDeviceManager implements IDeviceManager {
   private readonly deviceId: string
-  private readonly deviceLabel: string
   private readonly nostrSubscribe: NostrSubscribe
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
@@ -346,7 +335,6 @@ export class DelegateDeviceManager implements IDeviceManager {
 
   private constructor(
     deviceId: string,
-    deviceLabel: string,
     nostrSubscribe: NostrSubscribe,
     nostrPublish: NostrPublish,
     storage: StorageAdapter,
@@ -357,7 +345,6 @@ export class DelegateDeviceManager implements IDeviceManager {
     sharedSecret: string,
   ) {
     this.deviceId = deviceId
-    this.deviceLabel = deviceLabel
     this.nostrSubscribe = nostrSubscribe
     this.nostrPublish = nostrPublish
     this.storage = storage
@@ -377,7 +364,6 @@ export class DelegateDeviceManager implements IDeviceManager {
 
     const manager = new DelegateDeviceManager(
       options.deviceId,
-      options.deviceLabel,
       options.nostrSubscribe,
       options.nostrPublish,
       options.storage || new InMemoryStorageAdapter(),
@@ -402,7 +388,6 @@ export class DelegateDeviceManager implements IDeviceManager {
   static restore(options: RestoreDelegateOptions): DelegateDeviceManager {
     return new DelegateDeviceManager(
       options.deviceId,
-      options.deviceLabel,
       options.nostrSubscribe,
       options.nostrPublish,
       options.storage || new InMemoryStorageAdapter(),
@@ -426,10 +411,6 @@ export class DelegateDeviceManager implements IDeviceManager {
 
   getDeviceId(): string {
     return this.deviceId
-  }
-
-  getDeviceLabel(): string {
-    return this.deviceLabel
   }
 
   getIdentityPublicKey(): string {
