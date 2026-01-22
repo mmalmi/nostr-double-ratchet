@@ -57,7 +57,7 @@ interface SerializedDeviceEntry extends Omit<DeviceEntry, 'ephemeralPrivateKey'>
 }
 
 /**
- * Manages a consolidated list of device invites (kind 10078).
+ * Manages a consolidated list of device invites (kind 30078, d-tag "double-ratchet/invite-list").
  * Single atomic event containing all device invites for a user.
  * Uses union merge strategy for conflict resolution.
  */
