@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { OwnerDeviceManager, DelegateDeviceManager, DelegateDevicePayload } from "../src/DeviceManager"
+import { DeviceManager, DelegateManager, DelegatePayload } from "../src/DeviceManager"
 import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, INVITE_EVENT_KIND } from "../src/types"
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
 import { InviteList } from "../src/InviteList"
 
-describe("DeviceManager - Delegate Device", () => {
+describe("DelegateManager", () => {
   let nostrSubscribe: NostrSubscribe
   let nostrPublish: NostrPublish
   let publishedEvents: any[]
@@ -29,22 +29,18 @@ describe("DeviceManager - Delegate Device", () => {
     }) as unknown as NostrPublish
   })
 
-  describe("createDelegate()", () => {
-    it("should create a DelegateDeviceManager", () => {
-      const { manager } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+  describe("create()", () => {
+    it("should create a DelegateManager", () => {
+      const { manager } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
 
-      expect(manager).toBeInstanceOf(DelegateDeviceManager)
+      expect(manager).toBeInstanceOf(DelegateManager)
     })
 
     it("should generate identity keypair", () => {
-      const { manager, payload } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager, payload } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
@@ -58,19 +54,17 @@ describe("DeviceManager - Delegate Device", () => {
       expect((privkey as Uint8Array).length).toBe(32)
     })
 
-    it("should return payload with identity fields only", () => {
-      const { payload } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+    it("should return simplified payload with only identityPubkey", () => {
+      const { payload } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
 
-      // New payload only contains identity info
-      expect(payload.deviceId).toBe("delegate-device")
-      expect(payload.deviceLabel).toBe("My Phone")
+      // Simplified payload only contains identityPubkey
       expect(payload.identityPubkey).toBeDefined()
-      // No longer includes ephemeral keys or shared secret in payload
+      // No deviceId, deviceLabel, ephemeralPubkey, or sharedSecret
+      expect((payload as any).deviceId).toBeUndefined()
+      expect((payload as any).deviceLabel).toBeUndefined()
       expect((payload as any).ephemeralPubkey).toBeUndefined()
       expect((payload as any).sharedSecret).toBeUndefined()
     })
@@ -78,16 +72,14 @@ describe("DeviceManager - Delegate Device", () => {
 
   describe("init()", () => {
     it("should publish Invite event (not InviteList)", async () => {
-      const { manager } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
 
       await manager.init()
 
-      // Should NOT publish InviteList (only owner does that)
+      // Should NOT publish InviteList (only DeviceManager does that)
       const inviteListEvents = publishedEvents.filter(
         (e) => e.kind === INVITE_LIST_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/invite-list")
       )
@@ -103,9 +95,7 @@ describe("DeviceManager - Delegate Device", () => {
     it("should create and store Invite on init", async () => {
       const storage = new InMemoryStorageAdapter()
 
-      const { manager } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
         storage,
@@ -124,11 +114,9 @@ describe("DeviceManager - Delegate Device", () => {
       const storage = new InMemoryStorageAdapter()
       const ownerPubkey = getPublicKey(generateSecretKey())
 
-      await storage.put("v2/device-manager/owner-pubkey", ownerPubkey)
+      await storage.put("v3/device-manager/owner-pubkey", ownerPubkey)
 
-      const { manager } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
         storage,
@@ -142,9 +130,7 @@ describe("DeviceManager - Delegate Device", () => {
 
   describe("waitForActivation()", () => {
     it("should subscribe to InviteList events", async () => {
-      const { manager } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
@@ -163,13 +149,11 @@ describe("DeviceManager - Delegate Device", () => {
       await expect(activationPromise).rejects.toThrow("Activation timeout")
     })
 
-    it("should resolve when own deviceId appears in an InviteList with matching identityPubkey", async () => {
+    it("should resolve when own identityPubkey appears in an InviteList", async () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager, payload } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
@@ -180,17 +164,16 @@ describe("DeviceManager - Delegate Device", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50))
 
-      // New tag format: ["device", deviceId, identityPubkey, createdAt]
+      // Simplified tag format: ["device", identityPubkey, createdAt]
       const inviteListEvent = finalizeEvent(
         {
           kind: INVITE_LIST_EVENT_KIND,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "2"],
+            ["version", "3"],
             [
               "device",
-              payload.deviceId,
               payload.identityPubkey,
               String(Math.floor(Date.now() / 1000)),
             ],
@@ -216,11 +199,9 @@ describe("DeviceManager - Delegate Device", () => {
       const storage = new InMemoryStorageAdapter()
       const ownerPubkey = getPublicKey(generateSecretKey())
 
-      await storage.put("v2/device-manager/owner-pubkey", ownerPubkey)
+      await storage.put("v3/device-manager/owner-pubkey", ownerPubkey)
 
-      const { manager } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
         storage,
@@ -238,9 +219,7 @@ describe("DeviceManager - Delegate Device", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager, payload } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
@@ -256,10 +235,9 @@ describe("DeviceManager - Delegate Device", () => {
           created_at: Math.floor(Date.now() / 1000),
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "2"],
+            ["version", "3"],
             [
               "device",
-              payload.deviceId,
               payload.identityPubkey,
               String(Math.floor(Date.now() / 1000)),
             ],
@@ -298,9 +276,7 @@ describe("DeviceManager - Delegate Device", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DelegateDeviceManager.create({
-        deviceId: "delegate-device",
-        deviceLabel: "My Phone",
+      const { manager, payload } = DelegateManager.create({
         nostrSubscribe,
         nostrPublish,
       })
@@ -316,10 +292,9 @@ describe("DeviceManager - Delegate Device", () => {
           created_at: Math.floor(Date.now() / 1000),
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "2"],
+            ["version", "3"],
             [
               "device",
-              payload.deviceId,
               payload.identityPubkey,
               String(Math.floor(Date.now() / 1000)),
             ],
@@ -338,14 +313,15 @@ describe("DeviceManager - Delegate Device", () => {
 
       await activationPromise
 
+      // Simplified removed tag format: ["removed", identityPubkey, removedAt]
       const revokedInviteListEvent = finalizeEvent(
         {
           kind: INVITE_LIST_EVENT_KIND,
           created_at: Math.floor(Date.now() / 1000) + 1,
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "2"],
-            ["removed", payload.deviceId],
+            ["version", "3"],
+            ["removed", payload.identityPubkey, String(Math.floor(Date.now() / 1000))],
           ],
           content: "",
         },
@@ -370,7 +346,7 @@ describe("DeviceManager - Delegate Device", () => {
   })
 })
 
-describe("DeviceManager - Main Device", () => {
+describe("DeviceManager - Authority", () => {
   let ownerPrivateKey: Uint8Array
   let ownerPublicKey: string
   let nostrSubscribe: NostrSubscribe
@@ -399,48 +375,23 @@ describe("DeviceManager - Main Device", () => {
   })
 
   describe("constructor", () => {
-    it("should create an OwnerDeviceManager", () => {
-      const manager = new OwnerDeviceManager({
+    it("should create a DeviceManager", () => {
+      const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
         nostrSubscribe,
         nostrPublish,
       })
 
-      expect(manager).toBeInstanceOf(OwnerDeviceManager)
+      expect(manager).toBeInstanceOf(DeviceManager)
     })
   })
 
   describe("init()", () => {
-    it("should create InviteList with own device", async () => {
-      const manager = new OwnerDeviceManager({
+    it("should publish InviteList on init (but not Invite)", async () => {
+      const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
-        nostrSubscribe,
-        nostrPublish,
-      })
-
-      await manager.init()
-
-      const inviteList = manager.getInviteList()
-      expect(inviteList).not.toBeNull()
-
-      const devices = manager.getOwnDevices()
-      expect(devices.length).toBe(1)
-      expect(devices[0].deviceId).toBe("main-device")
-      expect(devices[0].deviceLabel).toBe("Main Device")
-    })
-
-    it("should publish both InviteList and Invite on init", async () => {
-      const manager = new OwnerDeviceManager({
-        ownerPublicKey,
-        identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
         nostrSubscribe,
         nostrPublish,
       })
@@ -453,73 +404,37 @@ describe("DeviceManager - Main Device", () => {
       )
       expect(inviteListEvents.length).toBeGreaterThan(0)
 
-      // Should also publish device's Invite
+      // Should NOT publish Invite (DeviceManager has no device identity)
       const inviteEvents = publishedEvents.filter(
         (e) => e.kind === INVITE_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1]?.startsWith("double-ratchet/invites/"))
       )
-      expect(inviteEvents.length).toBe(1)
+      expect(inviteEvents.length).toBe(0)
     })
 
-    it("should create and store Invite on init", async () => {
-      const storage = new InMemoryStorageAdapter()
-
-      const manager = new OwnerDeviceManager({
+    it("should start with empty device list", async () => {
+      const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
         nostrSubscribe,
         nostrPublish,
-        storage,
       })
+
       await manager.init()
 
-      const invite = manager.getInvite()
-      expect(invite).not.toBeNull()
-      expect(invite?.inviterEphemeralPublicKey).toHaveLength(64)
-      expect(invite?.inviterEphemeralPrivateKey).toBeInstanceOf(Uint8Array)
-      expect(invite?.sharedSecret).toHaveLength(64)
-    })
+      const inviteList = manager.getInviteList()
+      expect(inviteList).not.toBeNull()
 
-    it("should reload same Invite from storage", async () => {
-      const storage = new InMemoryStorageAdapter()
-
-      const manager1 = new OwnerDeviceManager({
-        ownerPublicKey,
-        identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
-        nostrSubscribe,
-        nostrPublish,
-        storage,
-      })
-      await manager1.init()
-
-      const ephemeralKey1 = manager1.getInvite()?.inviterEphemeralPublicKey
-
-      const manager2 = new OwnerDeviceManager({
-        ownerPublicKey,
-        identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
-        nostrSubscribe,
-        nostrPublish,
-        storage,
-      })
-      await manager2.init()
-
-      const ephemeralKey2 = manager2.getInvite()?.inviterEphemeralPublicKey
-      expect(ephemeralKey2).toBe(ephemeralKey1)
+      // DeviceManager no longer auto-adds a device (client must add via DelegateManager flow)
+      const devices = manager.getOwnDevices()
+      expect(devices.length).toBe(0)
     })
   })
 
   describe("addDevice()", () => {
     it("should add device to InviteList and publish", async () => {
-      const manager = new OwnerDeviceManager({
+      const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
         nostrSubscribe,
         nostrPublish,
       })
@@ -529,20 +444,17 @@ describe("DeviceManager - Main Device", () => {
         (e) => e.kind === INVITE_LIST_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/invite-list")
       ).length
 
-      // New payload format - identity only
-      const payload: DelegateDevicePayload = {
-        deviceId: "secondary-device",
-        deviceLabel: "Secondary Device",
+      // Simplified payload format - only identityPubkey
+      const payload: DelegatePayload = {
         identityPubkey: getPublicKey(generateSecretKey()),
       }
 
       await manager.addDevice(payload)
 
       const devices = manager.getOwnDevices()
-      expect(devices.length).toBe(2)
-      const secondaryDevice = devices.find((d) => d.deviceId === "secondary-device")
-      expect(secondaryDevice).toBeDefined()
-      expect(secondaryDevice?.deviceLabel).toBe("Secondary Device")
+      expect(devices.length).toBe(1)
+      const device = devices[0]
+      expect(device.identityPubkey).toBe(payload.identityPubkey)
 
       const finalPublishCount = publishedEvents.filter(
         (e) => e.kind === INVITE_LIST_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/invite-list")
@@ -550,129 +462,78 @@ describe("DeviceManager - Main Device", () => {
       expect(finalPublishCount).toBeGreaterThan(initialPublishCount)
     })
 
-    it("should include identityPubkey for delegate devices", async () => {
-      const manager = new OwnerDeviceManager({
+    it("should use identityPubkey as device identifier", async () => {
+      const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
         nostrSubscribe,
         nostrPublish,
       })
       await manager.init()
 
       const delegateIdentityPubkey = getPublicKey(generateSecretKey())
-      const payload: DelegateDevicePayload = {
-        deviceId: "delegate-device",
-        deviceLabel: "Delegate Device",
+      const payload: DelegatePayload = {
         identityPubkey: delegateIdentityPubkey,
       }
 
       await manager.addDevice(payload)
 
       const devices = manager.getOwnDevices()
-      const delegateDevice = devices.find((d) => d.deviceId === "delegate-device")
-      expect(delegateDevice?.identityPubkey).toBe(delegateIdentityPubkey)
+      expect(devices.length).toBe(1)
+      expect(devices[0].identityPubkey).toBe(delegateIdentityPubkey)
+
+      // Can retrieve by identityPubkey
+      const device = manager.getInviteList()?.getDevice(delegateIdentityPubkey)
+      expect(device).toBeDefined()
+      expect(device?.identityPubkey).toBe(delegateIdentityPubkey)
     })
   })
 
   describe("revokeDevice()", () => {
-    it("should remove device from InviteList", async () => {
-      const manager = new OwnerDeviceManager({
+    it("should remove device from InviteList by identityPubkey", async () => {
+      const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
         nostrSubscribe,
         nostrPublish,
       })
       await manager.init()
 
-      const payload: DelegateDevicePayload = {
-        deviceId: "secondary-device",
-        deviceLabel: "Secondary Device",
-        identityPubkey: getPublicKey(generateSecretKey()),
+      const identityPubkey = getPublicKey(generateSecretKey())
+      const payload: DelegatePayload = {
+        identityPubkey,
       }
       await manager.addDevice(payload)
 
-      expect(manager.getOwnDevices().length).toBe(2)
-
-      await manager.revokeDevice("secondary-device")
-
       expect(manager.getOwnDevices().length).toBe(1)
-      expect(manager.getOwnDevices()[0].deviceId).toBe("main-device")
-    })
 
-    it("should not allow revoking own device", async () => {
-      const manager = new OwnerDeviceManager({
-        ownerPublicKey,
-        identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
-        nostrSubscribe,
-        nostrPublish,
-      })
-      await manager.init()
+      await manager.revokeDevice(identityPubkey)
 
-      await expect(manager.revokeDevice("main-device")).rejects.toThrow()
+      expect(manager.getOwnDevices().length).toBe(0)
     })
   })
 
   describe("getters", () => {
-    let manager: OwnerDeviceManager
+    let manager: DeviceManager
 
     beforeEach(async () => {
-      manager = new OwnerDeviceManager({
+      manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
         nostrSubscribe,
         nostrPublish,
       })
       await manager.init()
     })
 
-    it("getIdentityPublicKey() should return owner pubkey", () => {
-      expect(manager.getIdentityPublicKey()).toBe(ownerPublicKey)
+    it("getOwnerPublicKey() should return owner pubkey", () => {
+      expect(manager.getOwnerPublicKey()).toBe(ownerPublicKey)
     })
 
-    it("getIdentityKey() should return owner privkey", () => {
-      expect(manager.getIdentityKey()).toEqual(ownerPrivateKey)
-    })
-
-    it("getDeviceId() should return device ID", () => {
-      expect(manager.getDeviceId()).toBe("main-device")
-    })
-
-    it("getInvite() should return Invite with ephemeral keys", () => {
-      const invite = manager.getInvite()
-      expect(invite).not.toBeNull()
-      expect(invite?.inviterEphemeralPublicKey).toHaveLength(64)
-      expect(invite?.inviterEphemeralPrivateKey).toBeInstanceOf(Uint8Array)
-      expect(invite?.sharedSecret).toHaveLength(64)
-    })
-  })
-
-  describe("rotateInvite()", () => {
-    it("should create new Invite with different keys", async () => {
-      const manager = new OwnerDeviceManager({
-        ownerPublicKey,
-        identityKey: ownerPrivateKey,
-        deviceId: "main-device",
-        deviceLabel: "Main Device",
-        nostrSubscribe,
-        nostrPublish,
-      })
-      await manager.init()
-
-      const originalInvite = manager.getInvite()
-      const originalEphemeralKey = originalInvite?.inviterEphemeralPublicKey
-
-      await manager.rotateInvite()
-
-      const newInvite = manager.getInvite()
-      expect(newInvite?.inviterEphemeralPublicKey).not.toBe(originalEphemeralKey)
+    it("getInviteList() should return InviteList", () => {
+      const list = manager.getInviteList()
+      expect(list).not.toBeNull()
+      expect(list?.ownerPublicKey).toBe(ownerPublicKey)
     })
   })
 })
@@ -752,15 +613,14 @@ describe("DeviceManager Integration", () => {
     signingKeys = new Map()
   })
 
-  it("main device adds delegate, delegate activates", async () => {
+  it("DeviceManager adds delegate, delegate activates via waitForActivation", async () => {
     const ownerPrivateKey = generateSecretKey()
     const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { manager: delegateManager, payload } = DelegateDeviceManager.create({
-      deviceId: "phone-123",
-      deviceLabel: "My Phone",
+    // 1. Create DelegateManager (device identity)
+    const { manager: delegateManager, payload } = DelegateManager.create({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
@@ -772,40 +632,81 @@ describe("DeviceManager Integration", () => {
     await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    const mainManager = new OwnerDeviceManager({
+    // 2. Create DeviceManager (authority)
+    const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
-      deviceId: "main-device",
-      deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
     })
 
-    await mainManager.init()
-    await mainManager.addDevice(payload)
+    await deviceManager.init()
 
-    const devices = mainManager.getOwnDevices()
-    expect(devices.length).toBe(2)
-    expect(devices.some((d) => d.deviceId === "phone-123")).toBe(true)
+    // 3. Add the delegate device
+    await deviceManager.addDevice(payload)
+
+    const devices = deviceManager.getOwnDevices()
+    expect(devices.length).toBe(1)
+    expect(devices[0].identityPubkey).toBe(payload.identityPubkey)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
 
+    // 4. Delegate should activate
     const activatedOwnerPubkey = await activationPromise
 
     expect(activatedOwnerPubkey).toBe(ownerPublicKey)
     expect(delegateManager.getOwnerPublicKey()).toBe(ownerPublicKey)
   })
 
-  it("main device revokes delegate, delegate detects revocation", async () => {
+  it("main device follows same pairing flow as delegate device", async () => {
     const ownerPrivateKey = generateSecretKey()
     const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { manager: delegateManager, payload } = DelegateDeviceManager.create({
-      deviceId: "phone-123",
-      deviceLabel: "My Phone",
+    // 1. Create DeviceManager (authority - uses main key)
+    const deviceManager = new DeviceManager({
+      ownerPublicKey,
+      identityKey: ownerPrivateKey,
+      nostrSubscribe: createNostrSubscribe(),
+      nostrPublish: createNostrPublish(),
+      storage: new InMemoryStorageAdapter(),
+    })
+    await deviceManager.init()
+
+    // 2. Create DelegateManager for main device identity (same flow as delegate!)
+    const { manager: mainDelegateManager, payload: mainPayload } = DelegateManager.create({
+      nostrSubscribe: createNostrSubscribe(),
+      nostrPublish: createNostrPublish(),
+      storage: new InMemoryStorageAdapter(),
+    })
+
+    registerSigningKey(mainDelegateManager.getIdentityPublicKey(), mainDelegateManager.getIdentityKey())
+    await mainDelegateManager.init()
+
+    // 3. Add main device to InviteList (same as adding any device)
+    await deviceManager.addDevice(mainPayload)
+
+    const devices = deviceManager.getOwnDevices()
+    expect(devices.length).toBe(1)
+    expect(devices[0].identityPubkey).toBe(mainPayload.identityPubkey)
+
+    // 4. Wait for activation (same as any device!)
+    const ownerPubkey = await mainDelegateManager.waitForActivation(5000)
+    expect(ownerPubkey).toBe(ownerPublicKey)
+
+    // Main device now has separate identity key (not main key!)
+    expect(mainDelegateManager.getIdentityPublicKey()).not.toBe(ownerPublicKey)
+  })
+
+  it("DeviceManager revokes delegate, delegate detects revocation", async () => {
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerPrivateKey)
+
+    registerSigningKey(ownerPublicKey, ownerPrivateKey)
+
+    const { manager: delegateManager, payload } = DelegateManager.create({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
@@ -816,18 +717,16 @@ describe("DeviceManager Integration", () => {
     await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    const mainManager = new OwnerDeviceManager({
+    const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
-      deviceId: "main-device",
-      deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
     })
 
-    await mainManager.init()
-    await mainManager.addDevice(payload)
+    await deviceManager.init()
+    await deviceManager.addDevice(payload)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     await activationPromise
@@ -835,7 +734,8 @@ describe("DeviceManager Integration", () => {
     const initialRevoked = await delegateManager.isRevoked()
     expect(initialRevoked).toBe(false)
 
-    await mainManager.revokeDevice("phone-123")
+    // Revoke by identityPubkey
+    await deviceManager.revokeDevice(payload.identityPubkey)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
 
@@ -844,9 +744,7 @@ describe("DeviceManager Integration", () => {
   })
 
   it("delegate cannot activate if not added to InviteList", async () => {
-    const { manager: delegateManager } = DelegateDeviceManager.create({
-      deviceId: "phone-orphan",
-      deviceLabel: "Orphan Phone",
+    const { manager: delegateManager } = DelegateManager.create({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
@@ -867,24 +765,20 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { payload } = DelegateDeviceManager.create({
-      deviceId: "phone-123",
-      deviceLabel: "My Phone",
+    const { payload } = DelegateManager.create({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
     })
 
-    const mainManager = new OwnerDeviceManager({
+    const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
-      deviceId: "main-device",
-      deviceLabel: "Main Device",
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
     })
 
-    await mainManager.init()
-    await mainManager.addDevice(payload)
+    await deviceManager.init()
+    await deviceManager.addDevice(payload)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
 
@@ -926,10 +820,7 @@ describe("DeviceManager Integration", () => {
     expect(fetchedList).not.toBeNull()
 
     const devices = fetchedList!.getAllDevices()
-    expect(devices.length).toBe(2)
-
-    const delegateDevice = devices.find((d) => d.deviceId === "phone-123")
-    expect(delegateDevice).toBeDefined()
-    expect(delegateDevice?.identityPubkey).toBe(payload.identityPubkey)
+    expect(devices.length).toBe(1)
+    expect(devices[0].identityPubkey).toBe(payload.identityPubkey)
   })
 })

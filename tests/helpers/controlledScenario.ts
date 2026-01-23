@@ -8,7 +8,7 @@ import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { finalizeEvent, generateSecretKey, getPublicKey, Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
-import { OwnerDeviceManager, DelegateDeviceManager } from "../../src/DeviceManager"
+import { DeviceManager, DelegateManager } from "../../src/DeviceManager"
 
 export type ActorId = "alice" | "bob"
 
@@ -33,7 +33,7 @@ interface ActorState {
   secretKey: Uint8Array
   publicKey: string
   devices: Map<string, DeviceState>
-  mainDeviceManager?: OwnerDeviceManager
+  mainDeviceManager?: DeviceManager
 }
 
 interface DeviceState {
@@ -46,7 +46,7 @@ interface DeviceState {
   unsub?: () => void
   subscriptionId?: string
   isDelegate?: boolean
-  delegateDeviceManager?: DelegateDeviceManager
+  delegateManager?: DelegateManager
 }
 
 interface ActorDeviceRef {
@@ -453,12 +453,12 @@ async function restartDevice(context: ControlledScenarioContext, ref: ActorDevic
   device.unsub?.()
   device.manager.close()
 
-  if (device.isDelegate && device.delegateDeviceManager) {
+  if (device.isDelegate && device.delegateManager) {
     // Restart delegate device
     await restartDelegateDevice(context, ref, actor, device)
   } else {
     // Restart main device
-    const { manager: newManager } = await createControlledMockSessionManager(
+    const { manager: newManager, delegateManager: newDelegateManager } = await createControlledMockSessionManager(
       device.deviceId,
       context.relay,
       actor.secretKey,
@@ -466,6 +466,7 @@ async function restartDevice(context: ControlledScenarioContext, ref: ActorDevic
     )
 
     device.manager = newManager
+    device.delegateManager = newDelegateManager
     device.unsub = attachManagerListener(actor, device)
   }
 
@@ -483,11 +484,11 @@ async function restartDelegateDevice(
   actor: ActorState,
   device: DeviceState
 ) {
-  const oldDelegateManager = device.delegateDeviceManager!
+  const oldDelegateManager = device.delegateManager!
 
   // Get the delegate's keys before they're lost
   // Delegate devices always use raw keys, never extension login
-  const devicePrivateKey = oldDelegateManager.getIdentityKey() as Uint8Array
+  const devicePrivateKey = oldDelegateManager.getIdentityKey()
   const devicePublicKey = oldDelegateManager.getIdentityPublicKey()
 
   // Create new subscribe/publish functions
@@ -511,10 +512,9 @@ async function restartDelegateDevice(
     return signedEvent
   })
 
-  // Restore the delegate DeviceManager with saved keys
+  // Restore the delegate DelegateManager with saved keys
   // The Invite is stored separately and will be loaded from storage during init()
-  const newDelegateManager = DelegateDeviceManager.restore({
-    deviceId: device.deviceId,
+  const newDelegateManager = DelegateManager.restore({
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: device.storage,
@@ -529,7 +529,7 @@ async function restartDelegateDevice(
   await newManager.init()
 
   device.manager = newManager
-  device.delegateDeviceManager = newDelegateManager
+  device.delegateManager = newDelegateManager
   device.unsub = attachManagerListener(actor, device)
 }
 
@@ -628,7 +628,7 @@ async function addDevice(
     throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, deviceManager } = await createControlledMockSessionManager(
+  const { manager, mockStorage, deviceManager, delegateManager } = await createControlledMockSessionManager(
     deviceId,
     context.relay,
     actor.secretKey
@@ -639,7 +639,7 @@ async function addDevice(
     actor.mainDeviceManager = deviceManager
   }
 
-  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
+  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
 
   // Track subscription ID for delivery control
   const subs = context.relay.getSubscriptions()
@@ -673,16 +673,15 @@ async function addDelegateDevice(
     throw new Error(`No main DeviceManager found for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, delegateDeviceManager } =
+  const { manager, mockStorage, delegateManager } =
     await createControlledMockDelegateSessionManager(
       deviceId,
       context.relay,
       actor.mainDeviceManager
     )
 
-  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
+  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
   deviceState.isDelegate = true
-  deviceState.delegateDeviceManager = delegateDeviceManager
 
   // Track subscription ID
   const subs = context.relay.getSubscriptions()
@@ -721,7 +720,8 @@ function createDeviceState(
   actor: ActorState,
   deviceId: string,
   manager: SessionManager,
-  storage: InMemoryStorageAdapter
+  storage: InMemoryStorageAdapter,
+  delegateManager?: DelegateManager
 ): DeviceState {
   const deviceState: DeviceState = {
     deviceId,
@@ -730,6 +730,7 @@ function createDeviceState(
     events: [],
     messageCounts: new Map(),
     waiters: [],
+    delegateManager,
   }
 
   deviceState.unsub = attachManagerListener(actor, deviceState)

@@ -406,7 +406,8 @@ export class SessionManager {
       invite: Invite
     ) => {
       // Add device record IMMEDIATELY to prevent duplicate acceptance from race conditions
-      const deviceRecord = this.upsertDeviceRecord(userRecord, device.deviceId)
+      // Use identityPubkey as the device identifier
+      const deviceRecord = this.upsertDeviceRecord(userRecord, device.identityPubkey)
 
       const encryptor = this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
       const { session, event } = await invite.accept(
@@ -417,7 +418,7 @@ export class SessionManager {
       )
       return this.nostrPublish(event)
         .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
-        .then(() => this.sendMessageHistory(userPubkey, device.deviceId))
+        .then(() => this.sendMessageHistory(userPubkey, device.identityPubkey))
         .catch(console.error)
     }
 
@@ -425,33 +426,32 @@ export class SessionManager {
      * Subscribe to a device's Invite event and accept it when received.
      */
     const subscribeToDeviceInvite = (device: DeviceEntry) => {
-      // Use combination of identityPubkey and deviceId for deduplication
-      // Multiple owner devices share the same identityPubkey but have different deviceIds
-      const deviceKey = `${device.identityPubkey}:${device.deviceId}`
+      // identityPubkey is the device identifier
+      const deviceKey = device.identityPubkey
       if (subscribedDeviceIdentities.has(deviceKey)) {
         return
       }
       subscribedDeviceIdentities.add(deviceKey)
 
       // Already have a record for this device? Skip.
-      if (userRecord.devices.has(device.deviceId)) {
+      if (userRecord.devices.has(device.identityPubkey)) {
         return
       }
 
-      const inviteSubKey = `invite:${device.identityPubkey}:${device.deviceId}`
+      const inviteSubKey = `invite:${device.identityPubkey}`
       if (this.inviteSubscriptions.has(inviteSubKey)) {
         return
       }
 
       // Subscribe to this device's Invite event
       const unsub = Invite.fromUser(device.identityPubkey, this.nostrSubscribe, async (invite) => {
-        // Verify the invite deviceId matches
-        if (invite.deviceId !== device.deviceId) {
+        // Verify the invite is for this device (identityPubkey is the device identifier)
+        if (invite.deviceId !== device.identityPubkey) {
           return
         }
 
         // Skip if we already have a device record (race condition guard)
-        if (userRecord.devices.has(device.deviceId)) {
+        if (userRecord.devices.has(device.identityPubkey)) {
           return
         }
 
@@ -465,8 +465,8 @@ export class SessionManager {
       const devices = inviteList.getAllDevices()
 
       // Handle removed devices (source of truth for revocation)
-      for (const deviceId of inviteList.getRemovedDeviceIds()) {
-        await this.cleanupDevice(userPubkey, deviceId)
+      for (const removed of inviteList.getRemovedDevices()) {
+        await this.cleanupDevice(userPubkey, removed.identityPubkey)
       }
 
       // For each device in InviteList, subscribe to their Invite event

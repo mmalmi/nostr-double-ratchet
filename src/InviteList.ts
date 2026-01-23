@@ -1,40 +1,47 @@
 import { VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
 import { INVITE_LIST_EVENT_KIND } from "./types"
-import { generateDeviceId } from "./inviteUtils"
 
 const now = () => Math.round(Date.now() / 1000)
 
-// New tag format: ["device", deviceId, identityPubkey, createdAt]
+// Simplified tag format: ["device", identityPubkey, createdAt]
 type DeviceTag = [
   type: "device",
-  deviceId: string,
   identityPubkey: string,
   createdAt: string,
 ]
 
-type RemovedTag = [type: "removed", deviceId: string]
+// Simplified removed tag format: ["removed", identityPubkey, removedAt]
+type RemovedTag = [type: "removed", identityPubkey: string, removedAt: string]
 
 const isDeviceTag = (tag: string[]): tag is DeviceTag =>
-  tag.length >= 4 &&
+  tag.length >= 3 &&
   tag[0] === "device" &&
-  tag.slice(1, 4).every((v) => typeof v === "string")
+  typeof tag[1] === "string" &&
+  typeof tag[2] === "string"
 
 const isRemovedTag = (tag: string[]): tag is RemovedTag =>
-  tag.length >= 2 &&
+  tag.length >= 3 &&
   tag[0] === "removed" &&
-  typeof tag[1] === "string"
+  typeof tag[1] === "string" &&
+  typeof tag[2] === "string"
 
 /**
  * Device identity entry - contains only identity information.
- * Invite crypto material (ephemeral keys, shared secret) is now in separate Invite events.
+ * identityPubkey serves as the device identifier.
+ * Invite crypto material (ephemeral keys, shared secret) is in separate Invite events.
  */
 export interface DeviceEntry {
-  deviceId: string
-  /** Human-readable device label (stored locally only, not published) */
-  deviceLabel: string
-  createdAt: number
-  /** Owner's pubkey for owner devices, delegate's own pubkey for delegate devices */
+  /** Identity public key - also serves as device identifier */
   identityPubkey: string
+  createdAt: number
+}
+
+/**
+ * Removed device entry - tracks when a device was removed
+ */
+interface RemovedDevice {
+  identityPubkey: string
+  removedAt: number
 }
 
 /**
@@ -44,17 +51,17 @@ export interface DeviceEntry {
  */
 export class InviteList {
   private devices: Map<string, DeviceEntry> = new Map()
-  private removedDeviceIds: Set<string> = new Set()
+  private removedDevices: Map<string, RemovedDevice> = new Map()
 
   constructor(
     public readonly ownerPublicKey: string,
     devices: DeviceEntry[] = [],
-    removedDeviceIds: string[] = [],
+    removedDevices: RemovedDevice[] = [],
   ) {
-    this.removedDeviceIds = new Set(removedDeviceIds)
+    this.removedDevices = new Map(removedDevices.map(r => [r.identityPubkey, r]))
     devices
-      .filter((device) => !this.removedDeviceIds.has(device.deviceId))
-      .forEach((device) => this.devices.set(device.deviceId, device))
+      .filter((device) => !this.removedDevices.has(device.identityPubkey))
+      .forEach((device) => this.devices.set(device.identityPubkey, device))
   }
 
   /**
@@ -62,60 +69,55 @@ export class InviteList {
    * Note: This only creates the identity entry. The device must separately
    * create and publish its own Invite event with ephemeral keys.
    */
-  createDeviceEntry(label: string, identityPubkey: string, deviceId?: string): DeviceEntry {
+  createDeviceEntry(identityPubkey: string): DeviceEntry {
     return {
-      deviceId: deviceId || generateDeviceId(),
-      deviceLabel: label,
-      createdAt: now(),
       identityPubkey,
+      createdAt: now(),
     }
   }
 
   addDevice(device: DeviceEntry): void {
-    if (this.removedDeviceIds.has(device.deviceId)) {
+    if (this.removedDevices.has(device.identityPubkey)) {
       return
     }
-    if (!this.devices.has(device.deviceId)) {
-      this.devices.set(device.deviceId, device)
+    if (!this.devices.has(device.identityPubkey)) {
+      this.devices.set(device.identityPubkey, device)
     }
   }
 
-  removeDevice(deviceId: string): void {
-    this.devices.delete(deviceId)
-    this.removedDeviceIds.add(deviceId)
+  removeDevice(identityPubkey: string): void {
+    this.devices.delete(identityPubkey)
+    this.removedDevices.set(identityPubkey, {
+      identityPubkey,
+      removedAt: now(),
+    })
   }
 
-  getDevice(deviceId: string): DeviceEntry | undefined {
-    return this.devices.get(deviceId)
+  getDevice(identityPubkey: string): DeviceEntry | undefined {
+    return this.devices.get(identityPubkey)
   }
 
   getAllDevices(): DeviceEntry[] {
     return Array.from(this.devices.values())
   }
 
-  getRemovedDeviceIds(): string[] {
-    return Array.from(this.removedDeviceIds)
-  }
-
-  updateDeviceLabel(deviceId: string, newLabel: string): void {
-    const device = this.devices.get(deviceId)
-    if (device) {
-      device.deviceLabel = newLabel
-    }
+  getRemovedDevices(): RemovedDevice[] {
+    return Array.from(this.removedDevices.values())
   }
 
   getEvent(): UnsignedEvent {
-    // New tag format: ["device", deviceId, identityPubkey, createdAt]
+    // Simplified tag format: ["device", identityPubkey, createdAt]
     const deviceTags = this.getAllDevices().map((device) => [
       "device",
-      device.deviceId,
       device.identityPubkey,
       String(device.createdAt),
     ])
 
-    const removedTags = this.getRemovedDeviceIds().map((deviceId) => [
+    // Simplified removed tag format: ["removed", identityPubkey, removedAt]
+    const removedTags = this.getRemovedDevices().map((removed) => [
       "removed",
-      deviceId,
+      removed.identityPubkey,
+      String(removed.removedAt),
     ])
 
     return {
@@ -125,7 +127,7 @@ export class InviteList {
       created_at: now(),
       tags: [
         ["d", "double-ratchet/invite-list"],
-        ["version", "2"], // Bump version for new format
+        ["version", "3"], // Bump version for simplified format
         ...deviceTags,
         ...removedTags,
       ],
@@ -140,28 +142,30 @@ export class InviteList {
       throw new Error("Event signature is invalid")
     }
 
-    // New tag format: ["device", deviceId, identityPubkey, createdAt]
+    // Simplified tag format: ["device", identityPubkey, createdAt]
     const devices = event.tags
       .filter(isDeviceTag)
-      .map(([, deviceId, identityPubkey, createdAt]) => ({
-        deviceId,
-        deviceLabel: deviceId, // Use deviceId as default label (actual label stored locally)
-        createdAt: parseInt(createdAt, 10) || event.created_at,
+      .map(([, identityPubkey, createdAt]) => ({
         identityPubkey,
+        createdAt: parseInt(createdAt, 10) || event.created_at,
       }))
 
-    const removedDeviceIds = event.tags
+    // Simplified removed tag format: ["removed", identityPubkey, removedAt]
+    const removedDevices = event.tags
       .filter(isRemovedTag)
-      .map(([, deviceId]) => deviceId)
+      .map(([, identityPubkey, removedAt]) => ({
+        identityPubkey,
+        removedAt: parseInt(removedAt, 10) || event.created_at,
+      }))
 
-    return new InviteList(event.pubkey, devices, removedDeviceIds)
+    return new InviteList(event.pubkey, devices, removedDevices)
   }
 
   serialize(): string {
     return JSON.stringify({
       ownerPublicKey: this.ownerPublicKey,
       devices: this.getAllDevices(),
-      removedDeviceIds: this.getRemovedDeviceIds(),
+      removedDevices: this.getRemovedDevices(),
     })
   }
 
@@ -169,34 +173,39 @@ export class InviteList {
     const data = JSON.parse(json) as {
       ownerPublicKey: string
       devices: DeviceEntry[]
-      removedDeviceIds?: string[]
+      removedDevices?: RemovedDevice[]
     }
-    return new InviteList(data.ownerPublicKey, data.devices, data.removedDeviceIds || [])
+    return new InviteList(data.ownerPublicKey, data.devices, data.removedDevices || [])
   }
 
   merge(other: InviteList): InviteList {
-    const mergedRemovedIds = new Set([
-      ...this.removedDeviceIds,
-      ...other.removedDeviceIds,
-    ])
+    const mergedRemoved = new Map<string, RemovedDevice>()
 
-    // Merge devices, preferring the one with earlier createdAt for same deviceId
+    // Merge removed devices, keeping the earliest removal time
+    for (const removed of [...this.removedDevices.values(), ...other.removedDevices.values()]) {
+      const existing = mergedRemoved.get(removed.identityPubkey)
+      if (!existing || removed.removedAt < existing.removedAt) {
+        mergedRemoved.set(removed.identityPubkey, removed)
+      }
+    }
+
+    // Merge devices, preferring the one with earlier createdAt for same identityPubkey
     const mergedDevices = [...this.devices.values(), ...other.devices.values()]
       .reduce((map, device) => {
-        const existing = map.get(device.deviceId)
+        const existing = map.get(device.identityPubkey)
         if (!existing || device.createdAt < existing.createdAt) {
-          map.set(device.deviceId, device)
+          map.set(device.identityPubkey, device)
         }
         return map
       }, new Map<string, DeviceEntry>())
 
     const activeDevices = Array.from(mergedDevices.values())
-      .filter((device) => !mergedRemovedIds.has(device.deviceId))
+      .filter((device) => !mergedRemoved.has(device.identityPubkey))
 
     return new InviteList(
       this.ownerPublicKey,
       activeDevices,
-      Array.from(mergedRemovedIds)
+      Array.from(mergedRemoved.values())
     )
   }
 }
