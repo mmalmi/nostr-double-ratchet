@@ -2,6 +2,7 @@ import { vi } from "vitest"
 import { OwnerDeviceManager, DelegateDeviceManager } from "../../src/DeviceManager"
 import {
   Filter,
+  finalizeEvent,
   generateSecretKey,
   getPublicKey,
   UnsignedEvent,
@@ -104,7 +105,10 @@ export const createControlledMockDelegateSessionManager = async (
     list: vi.spyOn(mockStorage, "list"),
   }
 
-  // Create subscribe/publish functions that don't need signing (delegate uses its own keys)
+  // Context to hold the delegate's private key for signing
+  // Will be set after DelegateDeviceManager is created
+  let delegatePrivateKey: Uint8Array | null = null
+
   const subscribe = vi
     .fn()
     .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
@@ -113,16 +117,19 @@ export const createControlledMockDelegateSessionManager = async (
     })
 
   const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
-    // Delegate's SessionManager signs its own events, so we might receive already-signed events
+    // Already signed - use publishAndDeliver to add directly
     if ('sig' in event && event.sig) {
-      // Already signed - use publishAndDeliver to add directly
-      // For controlled relay, we need to handle this differently
       const verifiedEvent = event as VerifiedEvent
       await sharedMockRelay.publishAndDeliver(event as UnsignedEvent)
       return verifiedEvent
     }
-    // Unsigned event - this shouldn't happen for delegate but handle gracefully
-    throw new Error("Delegate publish received unsigned event")
+    // Unsigned event - sign with delegate's private key (for Invite events from DeviceManager)
+    if (!delegatePrivateKey) {
+      throw new Error("Delegate private key not set yet")
+    }
+    const signedEvent = finalizeEvent(event, delegatePrivateKey)
+    await sharedMockRelay.publishAndDeliver(signedEvent as UnsignedEvent)
+    return signedEvent
   })
 
   // Create delegate DeviceManager
@@ -133,6 +140,9 @@ export const createControlledMockDelegateSessionManager = async (
     nostrPublish: publish,
     storage: mockStorage,
   })
+
+  // Get the delegate's private key for signing
+  delegatePrivateKey = delegateDeviceManager.getIdentityKey() as Uint8Array
 
   await delegateDeviceManager.init()
 

@@ -7,7 +7,7 @@ import {
 import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
-import { generateSecretKey, getPublicKey, Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
+import { finalizeEvent, generateSecretKey, getPublicKey, Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
 import { OwnerDeviceManager, DelegateDeviceManager } from "../../src/DeviceManager"
 
 export type ActorId = "alice" | "bob"
@@ -489,12 +489,6 @@ async function restartDelegateDevice(
   // Delegate devices always use raw keys, never extension login
   const devicePrivateKey = oldDelegateManager.getIdentityKey() as Uint8Array
   const devicePublicKey = oldDelegateManager.getIdentityPublicKey()
-  const ephemeralKeypair = oldDelegateManager.getEphemeralKeypair()
-  const sharedSecret = oldDelegateManager.getSharedSecret()
-
-  if (!ephemeralKeypair || !sharedSecret) {
-    throw new Error(`Delegate device '${device.deviceId}' was not activated - cannot restart`)
-  }
 
   // Create new subscribe/publish functions
   const subscribe = vi
@@ -505,26 +499,27 @@ async function restartDelegateDevice(
     })
 
   const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
+    // Already signed - publish directly
     if ('sig' in event && event.sig) {
       const verifiedEvent = event as VerifiedEvent
       await context.relay.publishAndDeliver(event as UnsignedEvent)
       return verifiedEvent
     }
-    throw new Error("Delegate publish received unsigned event")
+    // Unsigned event - sign with delegate's private key (for Invite events)
+    const signedEvent = finalizeEvent(event, devicePrivateKey)
+    await context.relay.publishAndDeliver(signedEvent as UnsignedEvent)
+    return signedEvent
   })
 
   // Restore the delegate DeviceManager with saved keys
+  // The Invite is stored separately and will be loaded from storage during init()
   const newDelegateManager = DelegateDeviceManager.restore({
     deviceId: device.deviceId,
-    deviceLabel: device.deviceId,
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: device.storage,
     devicePublicKey,
     devicePrivateKey,
-    ephemeralPublicKey: ephemeralKeypair.publicKey,
-    ephemeralPrivateKey: ephemeralKeypair.privateKey,
-    sharedSecret,
   })
 
   await newDelegateManager.init()

@@ -1,10 +1,22 @@
 import { generateSecretKey, getPublicKey, VerifiedEvent } from "nostr-tools"
-import { bytesToHex } from "@noble/hashes/utils"
 import { InviteList, DeviceEntry } from "./InviteList"
-import { DevicePayload } from "./inviteUtils"
+import { Invite } from "./Invite"
 import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, IdentityKey } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
+
+/**
+ * Payload for adding a delegate device to the owner's InviteList.
+ * Contains only identity information - invite crypto is in separate Invite events.
+ */
+export interface DelegateDevicePayload {
+  /** Device ID (16 hex chars) */
+  deviceId: string
+  /** Human-readable device label */
+  deviceLabel: string
+  /** Identity public key for this device (64 hex chars) */
+  identityPubkey: string
+}
 
 export interface OwnerDeviceOptions {
   ownerPublicKey: string
@@ -28,9 +40,6 @@ export interface RestoreDelegateOptions {
   deviceId: string
   devicePublicKey: string
   devicePrivateKey: Uint8Array
-  ephemeralPublicKey: string
-  ephemeralPrivateKey: Uint8Array
-  sharedSecret: string
   nostrSubscribe: NostrSubscribe
   nostrPublish: NostrPublish
   storage?: StorageAdapter
@@ -38,7 +47,7 @@ export interface RestoreDelegateOptions {
 
 export interface CreateDelegateResult {
   manager: DelegateDeviceManager
-  payload: DevicePayload
+  payload: DelegateDevicePayload
 }
 
 export interface IDeviceManager {
@@ -46,8 +55,7 @@ export interface IDeviceManager {
   getDeviceId(): string
   getIdentityPublicKey(): string
   getIdentityKey(): IdentityKey
-  getEphemeralKeypair(): { publicKey: string; privateKey: Uint8Array } | null
-  getSharedSecret(): string | null
+  getInvite(): Invite | null
   getOwnerPublicKey(): string | null
   close(): void
   createSessionManager(sessionStorage?: StorageAdapter): SessionManager
@@ -64,10 +72,11 @@ export class OwnerDeviceManager implements IDeviceManager {
   private readonly identityKey: IdentityKey
 
   private inviteList: InviteList | null = null
+  private invite: Invite | null = null
   private initialized = false
   private subscriptions: Unsubscribe[] = []
 
-  private readonly storageVersion = "1"
+  private readonly storageVersion = "2" // Bump for new invite architecture
   private get versionPrefix(): string {
     return `v${this.storageVersion}`
   }
@@ -86,21 +95,38 @@ export class OwnerDeviceManager implements IDeviceManager {
     if (this.initialized) return
     this.initialized = true
 
+    // Load or create Invite for this device
+    const savedInvite = await this.loadInvite()
+    this.invite = savedInvite || Invite.createNew(this.ownerPublicKey, this.deviceId)
+    await this.saveInvite(this.invite)
+
+    // Load and merge InviteList
     const local = await this.loadInviteList()
     const remote = await this.fetchInviteList(this.ownerPublicKey)
     const inviteList = this.mergeInviteLists(local, remote)
 
+    // Add this device to InviteList if not present (only identity, no invite crypto)
     if (!inviteList.getDevice(this.deviceId)) {
-      const device = inviteList.createDevice(this.deviceLabel, this.deviceId)
+      const device = inviteList.createDeviceEntry(
+        this.deviceLabel,
+        this.ownerPublicKey,
+        this.deviceId
+      )
       inviteList.addDevice(device)
     }
 
     this.inviteList = inviteList
     await this.saveInviteList(inviteList)
 
-    const event = inviteList.getEvent()
-    await this.nostrPublish(event).catch((error) => {
+    // Publish both InviteList and device's Invite
+    const inviteListEvent = inviteList.getEvent()
+    await this.nostrPublish(inviteListEvent).catch((error) => {
       console.error("Failed to publish InviteList:", error)
+    })
+
+    const inviteEvent = this.invite.getEvent()
+    await this.nostrPublish(inviteEvent).catch((error) => {
+      console.error("Failed to publish Invite:", error)
     })
 
     this.subscribeToOwnInviteList()
@@ -118,20 +144,8 @@ export class OwnerDeviceManager implements IDeviceManager {
     return this.identityKey
   }
 
-  getEphemeralKeypair(): { publicKey: string; privateKey: Uint8Array } | null {
-    const device = this.inviteList?.getDevice(this.deviceId)
-    if (!device?.ephemeralPublicKey || !device?.ephemeralPrivateKey) {
-      return null
-    }
-    return {
-      publicKey: device.ephemeralPublicKey,
-      privateKey: device.ephemeralPrivateKey,
-    }
-  }
-
-  getSharedSecret(): string | null {
-    const device = this.inviteList?.getDevice(this.deviceId)
-    return device?.sharedSecret || null
+  getInvite(): Invite | null {
+    return this.invite
   }
 
   getOwnerPublicKey(): string {
@@ -146,13 +160,15 @@ export class OwnerDeviceManager implements IDeviceManager {
     return this.inviteList?.getAllDevices() || []
   }
 
-  async addDevice(payload: DevicePayload): Promise<void> {
+  /**
+   * Add a delegate device to the InviteList.
+   * Only adds identity info - the delegate device publishes its own Invite separately.
+   */
+  async addDevice(payload: DelegateDevicePayload): Promise<void> {
     await this.init()
 
     await this.modifyInviteList((list) => {
       const device: DeviceEntry = {
-        ephemeralPublicKey: payload.ephemeralPubkey,
-        sharedSecret: payload.sharedSecret,
         deviceId: payload.deviceId,
         deviceLabel: payload.deviceLabel,
         createdAt: Math.floor(Date.now() / 1000),
@@ -160,6 +176,19 @@ export class OwnerDeviceManager implements IDeviceManager {
       }
       list.addDevice(device)
     })
+  }
+
+  /**
+   * Rotate this device's invite - generates new ephemeral keys and shared secret.
+   */
+  async rotateInvite(): Promise<void> {
+    await this.init()
+
+    this.invite = Invite.createNew(this.ownerPublicKey, this.deviceId)
+    await this.saveInvite(this.invite)
+
+    const inviteEvent = this.invite.getEvent()
+    await this.nostrPublish(inviteEvent)
   }
 
   async revokeDevice(deviceId: string): Promise<void> {
@@ -194,12 +223,15 @@ export class OwnerDeviceManager implements IDeviceManager {
       throw new Error("DeviceManager must be initialized before creating SessionManager")
     }
 
-    const ephemeralKeypair = this.getEphemeralKeypair()
-    const sharedSecret = this.getSharedSecret()
-
-    if (!ephemeralKeypair || !sharedSecret) {
-      throw new Error("Ephemeral keypair and shared secret required for SessionManager")
+    if (!this.invite || !this.invite.inviterEphemeralPrivateKey) {
+      throw new Error("Invite with ephemeral keys required for SessionManager")
     }
+
+    const ephemeralKeypair = {
+      publicKey: this.invite.inviterEphemeralPublicKey,
+      privateKey: this.invite.inviterEphemeralPrivateKey,
+    }
+    const sharedSecret = this.invite.sharedSecret
 
     return new SessionManager(
       this.ownerPublicKey,
@@ -215,6 +247,24 @@ export class OwnerDeviceManager implements IDeviceManager {
 
   private inviteListKey(): string {
     return `${this.versionPrefix}/device-manager/invite-list`
+  }
+
+  private inviteKey(): string {
+    return `${this.versionPrefix}/device-manager/invite`
+  }
+
+  private async loadInvite(): Promise<Invite | null> {
+    const data = await this.storage.get<string>(this.inviteKey())
+    if (!data) return null
+    try {
+      return Invite.deserialize(data)
+    } catch {
+      return null
+    }
+  }
+
+  private async saveInvite(invite: Invite): Promise<void> {
+    await this.storage.put(this.inviteKey(), invite.serialize())
   }
 
   private async loadInviteList(): Promise<InviteList | null> {
@@ -320,15 +370,13 @@ export class DelegateDeviceManager implements IDeviceManager {
 
   private readonly devicePublicKey: string
   private readonly devicePrivateKey: Uint8Array
-  private readonly ephemeralPublicKey: string
-  private readonly ephemeralPrivateKey: Uint8Array
-  private readonly sharedSecret: string
 
+  private invite: Invite | null = null
   private ownerPubkeyFromActivation?: string
   private initialized = false
   private subscriptions: Unsubscribe[] = []
 
-  private readonly storageVersion = "1"
+  private readonly storageVersion = "2" // Bump for new invite architecture
   private get versionPrefix(): string {
     return `v${this.storageVersion}`
   }
@@ -340,9 +388,6 @@ export class DelegateDeviceManager implements IDeviceManager {
     storage: StorageAdapter,
     devicePublicKey: string,
     devicePrivateKey: Uint8Array,
-    ephemeralPublicKey: string,
-    ephemeralPrivateKey: Uint8Array,
-    sharedSecret: string,
   ) {
     this.deviceId = deviceId
     this.nostrSubscribe = nostrSubscribe
@@ -350,17 +395,11 @@ export class DelegateDeviceManager implements IDeviceManager {
     this.storage = storage
     this.devicePublicKey = devicePublicKey
     this.devicePrivateKey = devicePrivateKey
-    this.ephemeralPublicKey = ephemeralPublicKey
-    this.ephemeralPrivateKey = ephemeralPrivateKey
-    this.sharedSecret = sharedSecret
   }
 
   static create(options: DelegateDeviceOptions): CreateDelegateResult {
     const devicePrivateKey = generateSecretKey()
     const devicePublicKey = getPublicKey(devicePrivateKey)
-    const ephemeralPrivateKey = generateSecretKey()
-    const ephemeralPublicKey = getPublicKey(ephemeralPrivateKey)
-    const sharedSecret = bytesToHex(generateSecretKey())
 
     const manager = new DelegateDeviceManager(
       options.deviceId,
@@ -369,14 +408,10 @@ export class DelegateDeviceManager implements IDeviceManager {
       options.storage || new InMemoryStorageAdapter(),
       devicePublicKey,
       devicePrivateKey,
-      ephemeralPublicKey,
-      ephemeralPrivateKey,
-      sharedSecret,
     )
 
-    const payload: DevicePayload = {
-      ephemeralPubkey: ephemeralPublicKey,
-      sharedSecret,
+    // Payload only contains identity info - invite crypto is created/published separately
+    const payload: DelegateDevicePayload = {
       deviceId: options.deviceId,
       deviceLabel: options.deviceLabel,
       identityPubkey: devicePublicKey,
@@ -393,9 +428,6 @@ export class DelegateDeviceManager implements IDeviceManager {
       options.storage || new InMemoryStorageAdapter(),
       options.devicePublicKey,
       options.devicePrivateKey,
-      options.ephemeralPublicKey,
-      options.ephemeralPrivateKey,
-      options.sharedSecret,
     )
   }
 
@@ -407,6 +439,17 @@ export class DelegateDeviceManager implements IDeviceManager {
     if (storedOwnerPubkey) {
       this.ownerPubkeyFromActivation = storedOwnerPubkey
     }
+
+    // Load or create Invite for this device
+    const savedInvite = await this.loadInvite()
+    this.invite = savedInvite || Invite.createNew(this.devicePublicKey, this.deviceId)
+    await this.saveInvite(this.invite)
+
+    // Publish Invite event (signed by this device's identity key)
+    const inviteEvent = this.invite.getEvent()
+    await this.nostrPublish(inviteEvent).catch((error) => {
+      console.error("Failed to publish Invite:", error)
+    })
   }
 
   getDeviceId(): string {
@@ -421,19 +464,25 @@ export class DelegateDeviceManager implements IDeviceManager {
     return this.devicePrivateKey
   }
 
-  getEphemeralKeypair(): { publicKey: string; privateKey: Uint8Array } {
-    return {
-      publicKey: this.ephemeralPublicKey,
-      privateKey: this.ephemeralPrivateKey,
-    }
-  }
-
-  getSharedSecret(): string {
-    return this.sharedSecret
+  getInvite(): Invite | null {
+    return this.invite
   }
 
   getOwnerPublicKey(): string | null {
     return this.ownerPubkeyFromActivation || null
+  }
+
+  /**
+   * Rotate this device's invite - generates new ephemeral keys and shared secret.
+   */
+  async rotateInvite(): Promise<void> {
+    await this.init()
+
+    this.invite = Invite.createNew(this.devicePublicKey, this.deviceId)
+    await this.saveInvite(this.invite)
+
+    const inviteEvent = this.invite.getEvent()
+    await this.nostrPublish(inviteEvent)
   }
 
   async waitForActivation(timeoutMs = 60000): Promise<string> {
@@ -458,7 +507,8 @@ export class DelegateDeviceManager implements IDeviceManager {
             const inviteList = InviteList.fromEvent(event)
             const device = inviteList.getDevice(this.deviceId)
 
-            if (device && device.ephemeralPublicKey === this.ephemeralPublicKey) {
+            // Check that our identity pubkey matches
+            if (device && device.identityPubkey === this.devicePublicKey) {
               clearTimeout(timeout)
               unsubscribe()
               this.ownerPubkeyFromActivation = event.pubkey
@@ -483,7 +533,8 @@ export class DelegateDeviceManager implements IDeviceManager {
     if (!inviteList) return true
 
     const device = inviteList.getDevice(this.deviceId)
-    return !device || device.ephemeralPublicKey !== this.ephemeralPublicKey
+    // Device is revoked if not in list or identity doesn't match
+    return !device || device.identityPubkey !== this.devicePublicKey
   }
 
   close(): void {
@@ -503,6 +554,16 @@ export class DelegateDeviceManager implements IDeviceManager {
       throw new Error("Owner public key required for SessionManager - device must be activated first")
     }
 
+    if (!this.invite || !this.invite.inviterEphemeralPrivateKey) {
+      throw new Error("Invite with ephemeral keys required for SessionManager")
+    }
+
+    const ephemeralKeypair = {
+      publicKey: this.invite.inviterEphemeralPublicKey,
+      privateKey: this.invite.inviterEphemeralPrivateKey,
+    }
+    const sharedSecret = this.invite.sharedSecret
+
     return new SessionManager(
       this.devicePublicKey,
       this.devicePrivateKey,
@@ -510,19 +571,31 @@ export class DelegateDeviceManager implements IDeviceManager {
       this.nostrSubscribe,
       this.nostrPublish,
       ownerPublicKey,
-      {
-        ephemeralKeypair: {
-          publicKey: this.ephemeralPublicKey,
-          privateKey: this.ephemeralPrivateKey,
-        },
-        sharedSecret: this.sharedSecret,
-      },
+      { ephemeralKeypair, sharedSecret },
       sessionStorage || this.storage,
     )
   }
 
   private ownerPubkeyKey(): string {
     return `${this.versionPrefix}/device-manager/owner-pubkey`
+  }
+
+  private inviteKey(): string {
+    return `${this.versionPrefix}/device-manager/invite`
+  }
+
+  private async loadInvite(): Promise<Invite | null> {
+    const data = await this.storage.get<string>(this.inviteKey())
+    if (!data) return null
+    try {
+      return Invite.deserialize(data)
+    } catch {
+      return null
+    }
+  }
+
+  private async saveInvite(invite: Invite): Promise<void> {
+    await this.storage.put(this.inviteKey(), invite.serialize())
   }
 
   private fetchInviteList(pubkey: string, timeoutMs = 500): Promise<InviteList | null> {

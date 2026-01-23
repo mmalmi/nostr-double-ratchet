@@ -1,59 +1,40 @@
-import { finalizeEvent, VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
-import {
-  NostrSubscribe,
-  Unsubscribe,
-  EncryptFunction,
-  DecryptFunction,
-  INVITE_LIST_EVENT_KIND,
-  INVITE_RESPONSE_KIND,
-} from "./types"
-import { Session } from "./Session"
-import {
-  generateEphemeralKeypair,
-  generateSharedSecret,
-  generateDeviceId,
-  encryptInviteResponse,
-  decryptInviteResponse,
-  createSessionFromAccept,
-} from "./inviteUtils"
+import { VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
+import { INVITE_LIST_EVENT_KIND } from "./types"
+import { generateDeviceId } from "./inviteUtils"
 
 const now = () => Math.round(Date.now() / 1000)
 
+// New tag format: ["device", deviceId, identityPubkey, createdAt]
 type DeviceTag = [
   type: "device",
-  ephemeralPublicKey: string,
-  sharedSecret: string,
   deviceId: string,
-  createdAt: string,
   identityPubkey: string,
+  createdAt: string,
 ]
 
 type RemovedTag = [type: "removed", deviceId: string]
 
 const isDeviceTag = (tag: string[]): tag is DeviceTag =>
-  tag.length >= 6 &&
+  tag.length >= 4 &&
   tag[0] === "device" &&
-  tag.slice(1, 6).every((v) => typeof v === "string")
+  tag.slice(1, 4).every((v) => typeof v === "string")
 
 const isRemovedTag = (tag: string[]): tag is RemovedTag =>
   tag.length >= 2 &&
   tag[0] === "removed" &&
   typeof tag[1] === "string"
 
+/**
+ * Device identity entry - contains only identity information.
+ * Invite crypto material (ephemeral keys, shared secret) is now in separate Invite events.
+ */
 export interface DeviceEntry {
-  ephemeralPublicKey: string
-  /** Only stored locally, not published */
-  ephemeralPrivateKey?: Uint8Array
-  sharedSecret: string
   deviceId: string
+  /** Human-readable device label (stored locally only, not published) */
   deviceLabel: string
   createdAt: number
   /** Owner's pubkey for owner devices, delegate's own pubkey for delegate devices */
   identityPubkey: string
-}
-
-interface SerializedDeviceEntry extends Omit<DeviceEntry, 'ephemeralPrivateKey'> {
-  ephemeralPrivateKey?: number[]
 }
 
 /**
@@ -76,16 +57,17 @@ export class InviteList {
       .forEach((device) => this.devices.set(device.deviceId, device))
   }
 
-  createDevice(label: string, deviceId?: string): DeviceEntry {
-    const keypair = generateEphemeralKeypair()
+  /**
+   * Creates a new device identity entry.
+   * Note: This only creates the identity entry. The device must separately
+   * create and publish its own Invite event with ephemeral keys.
+   */
+  createDeviceEntry(label: string, identityPubkey: string, deviceId?: string): DeviceEntry {
     return {
-      ephemeralPublicKey: keypair.publicKey,
-      ephemeralPrivateKey: keypair.privateKey,
-      sharedSecret: generateSharedSecret(),
       deviceId: deviceId || generateDeviceId(),
       deviceLabel: label,
       createdAt: now(),
-      identityPubkey: this.ownerPublicKey,
+      identityPubkey,
     }
   }
 
@@ -123,13 +105,12 @@ export class InviteList {
   }
 
   getEvent(): UnsignedEvent {
+    // New tag format: ["device", deviceId, identityPubkey, createdAt]
     const deviceTags = this.getAllDevices().map((device) => [
       "device",
-      device.ephemeralPublicKey,
-      device.sharedSecret,
       device.deviceId,
-      String(device.createdAt),
       device.identityPubkey,
+      String(device.createdAt),
     ])
 
     const removedTags = this.getRemovedDeviceIds().map((deviceId) => [
@@ -144,7 +125,7 @@ export class InviteList {
       created_at: now(),
       tags: [
         ["d", "double-ratchet/invite-list"],
-        ["version", "1"],
+        ["version", "2"], // Bump version for new format
         ...deviceTags,
         ...removedTags,
       ],
@@ -159,13 +140,12 @@ export class InviteList {
       throw new Error("Event signature is invalid")
     }
 
+    // New tag format: ["device", deviceId, identityPubkey, createdAt]
     const devices = event.tags
       .filter(isDeviceTag)
-      .map(([, ephemeralPublicKey, sharedSecret, deviceId, createdAt, identityPubkey]) => ({
-        ephemeralPublicKey,
-        sharedSecret,
+      .map(([, deviceId, identityPubkey, createdAt]) => ({
         deviceId,
-        deviceLabel: deviceId,
+        deviceLabel: deviceId, // Use deviceId as default label (actual label stored locally)
         createdAt: parseInt(createdAt, 10) || event.created_at,
         identityPubkey,
       }))
@@ -178,30 +158,20 @@ export class InviteList {
   }
 
   serialize(): string {
-    const devices = this.getAllDevices().map((d) => ({
-      ...d,
-      ephemeralPrivateKey: d.ephemeralPrivateKey
-        ? Array.from(d.ephemeralPrivateKey)
-        : undefined,
-    }))
-
     return JSON.stringify({
       ownerPublicKey: this.ownerPublicKey,
-      devices,
+      devices: this.getAllDevices(),
       removedDeviceIds: this.getRemovedDeviceIds(),
     })
   }
 
   static deserialize(json: string): InviteList {
-    const data = JSON.parse(json) as { ownerPublicKey: string; devices: SerializedDeviceEntry[]; removedDeviceIds?: string[] }
-    const devices: DeviceEntry[] = data.devices.map((d) => ({
-      ...d,
-      ephemeralPrivateKey: d.ephemeralPrivateKey
-        ? new Uint8Array(d.ephemeralPrivateKey)
-        : undefined,
-    }))
-
-    return new InviteList(data.ownerPublicKey, devices, data.removedDeviceIds || [])
+    const data = JSON.parse(json) as {
+      ownerPublicKey: string
+      devices: DeviceEntry[]
+      removedDeviceIds?: string[]
+    }
+    return new InviteList(data.ownerPublicKey, data.devices, data.removedDeviceIds || [])
   }
 
   merge(other: InviteList): InviteList {
@@ -210,13 +180,13 @@ export class InviteList {
       ...other.removedDeviceIds,
     ])
 
+    // Merge devices, preferring the one with earlier createdAt for same deviceId
     const mergedDevices = [...this.devices.values(), ...other.devices.values()]
       .reduce((map, device) => {
         const existing = map.get(device.deviceId)
-        map.set(device.deviceId, existing
-          ? { ...device, ephemeralPrivateKey: existing.ephemeralPrivateKey || device.ephemeralPrivateKey }
-          : device
-        )
+        if (!existing || device.createdAt < existing.createdAt) {
+          map.set(device.deviceId, device)
+        }
         return map
       }, new Map<string, DeviceEntry>())
 
@@ -227,107 +197,6 @@ export class InviteList {
       this.ownerPublicKey,
       activeDevices,
       Array.from(mergedRemovedIds)
-    )
-  }
-
-  async accept(
-    deviceId: string,
-    nostrSubscribe: NostrSubscribe,
-    inviteePublicKey: string,
-    encryptor: Uint8Array | EncryptFunction,
-    inviteeDeviceId?: string
-  ): Promise<{ session: Session; event: VerifiedEvent }> {
-    const device = this.devices.get(deviceId)
-    if (!device) {
-      throw new Error(`Device ${deviceId} not found in invite list`)
-    }
-
-    const inviteeSessionKeypair = generateEphemeralKeypair()
-
-    const session = createSessionFromAccept({
-      nostrSubscribe,
-      theirPublicKey: device.ephemeralPublicKey,
-      ourSessionPrivateKey: inviteeSessionKeypair.privateKey,
-      sharedSecret: device.sharedSecret,
-      isSender: true,
-    })
-
-    const encrypt = typeof encryptor === "function" ? encryptor : undefined
-    const inviteePrivateKey = typeof encryptor === "function" ? undefined : encryptor
-
-    const encrypted = await encryptInviteResponse({
-      inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
-      inviteePublicKey,
-      inviteePrivateKey,
-      inviterPublicKey: device.identityPubkey,
-      inviterEphemeralPublicKey: device.ephemeralPublicKey,
-      sharedSecret: device.sharedSecret,
-      deviceId: inviteeDeviceId,
-      encrypt,
-    })
-
-    return {
-      session,
-      event: finalizeEvent(encrypted.envelope, encrypted.randomSenderPrivateKey),
-    }
-  }
-
-  listen(
-    decryptor: Uint8Array | DecryptFunction,
-    nostrSubscribe: NostrSubscribe,
-    onSession: (
-      session: Session,
-      identity: string,
-      deviceId?: string,
-      ourDeviceId?: string
-    ) => void
-  ): Unsubscribe {
-    const devices = this.getAllDevices()
-    const decryptableDevices = devices.filter((d) => !!d.ephemeralPrivateKey)
-
-    // If we don't have any devices we can decrypt for, do nothing gracefully
-    if (decryptableDevices.length === 0) {
-      return () => {}
-    }
-
-    const ephemeralPubkeys = decryptableDevices.map((d) => d.ephemeralPublicKey)
-    const decrypt = typeof decryptor === "function" ? decryptor : undefined
-    const ownerPrivateKey = typeof decryptor === "function" ? undefined : decryptor
-
-    return nostrSubscribe(
-      { kinds: [INVITE_RESPONSE_KIND], "#p": ephemeralPubkeys },
-      async (event) => {
-        const targetPubkey = event.tags.find((t) => t[0] === "p")?.[1]
-        const device = decryptableDevices.find((d) => d.ephemeralPublicKey === targetPubkey)
-
-        if (!device || !device.ephemeralPrivateKey) {
-          return
-        }
-
-        try {
-          const decrypted = await decryptInviteResponse({
-            envelopeContent: event.content,
-            envelopeSenderPubkey: event.pubkey,
-            inviterEphemeralPrivateKey: device.ephemeralPrivateKey,
-            inviterPrivateKey: ownerPrivateKey,
-            sharedSecret: device.sharedSecret,
-            decrypt,
-          })
-
-          const session = createSessionFromAccept({
-            nostrSubscribe,
-            theirPublicKey: decrypted.inviteeSessionPublicKey,
-            ourSessionPrivateKey: device.ephemeralPrivateKey,
-            sharedSecret: device.sharedSecret,
-            isSender: false,
-            name: event.id,
-          })
-
-          onSession(session, decrypted.inviteeIdentity, decrypted.deviceId, device.deviceId)
-        } catch {
-          // Invalid response
-        }
-      }
     )
   }
 }

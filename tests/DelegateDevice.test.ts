@@ -84,6 +84,7 @@ describe('Delegate Device Messaging', () => {
     })
     await aliceMainDeviceManager.init()
 
+    const aliceMainInvite = aliceMainDeviceManager.getInvite()!
     const aliceMainSessionManager = new SessionManager(
       alicePublicKey,
       alicePrivateKey,
@@ -92,8 +93,11 @@ describe('Delegate Device Messaging', () => {
       createPublish('AliceMainSM', alicePrivateKey),
       alicePublicKey, // ownerPublicKey
       {
-        ephemeralKeypair: aliceMainDeviceManager.getEphemeralKeypair()!,
-        sharedSecret: aliceMainDeviceManager.getSharedSecret()!,
+        ephemeralKeypair: {
+          publicKey: aliceMainInvite.inviterEphemeralPublicKey,
+          privateKey: aliceMainInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: aliceMainInvite.sharedSecret,
       },
       new InMemoryStorageAdapter(),
     )
@@ -107,14 +111,30 @@ describe('Delegate Device Messaging', () => {
     // Step 2: Create Alice's delegate device
     // ============================================================
     console.log('Creating Alice delegate device...')
-    // Delegate devices don't publish InviteList, so we can use a dummy publish initially
+    // Delegate devices now publish their own Invite events, which need signing
+    // Use a closure to capture the key after creation
+    let aliceDelegatePrivateKeyForSigning: Uint8Array | null = null
+    const aliceDelegatePublish = async (event: any) => {
+      let signedEvent = event
+      if (!event.sig && aliceDelegatePrivateKeyForSigning) {
+        signedEvent = finalizeEvent(event as UnsignedEvent, aliceDelegatePrivateKeyForSigning)
+      }
+      if (!messageQueue.some((e: any) => e.id === signedEvent.id)) {
+        messageQueue.push(signedEvent)
+      }
+      return signedEvent
+    }
+
     const { manager: aliceDelegateManager, payload: aliceDelegatePayload } = DelegateDeviceManager.create({
       deviceId: generateDeviceId(),
       deviceLabel: 'Alice Delegate',
       nostrSubscribe: createSubscribe('AliceDelegate'),
-      nostrPublish: createPublish('AliceDelegate'), // No signing key needed for delegate DeviceManager
+      nostrPublish: aliceDelegatePublish,
       storage: new InMemoryStorageAdapter(),
     })
+
+    // Set the signing key before init() so Invite can be published
+    aliceDelegatePrivateKeyForSigning = aliceDelegateManager.getIdentityKey() as Uint8Array
     await aliceDelegateManager.init()
 
     // Start waiting for activation BEFORE main device adds the delegate
@@ -139,6 +159,7 @@ describe('Delegate Device Messaging', () => {
     // NOTE: Delegate must use its OWN public key for DH encryption to work correctly
     // The owner's pubkey is only for UI attribution, not for cryptographic identity
     const aliceDelegatePublicKey = aliceDelegateManager.getIdentityPublicKey()
+    const aliceDelegateInvite = aliceDelegateManager.getInvite()!
     const aliceDelegateSessionManager = new SessionManager(
       aliceDelegatePublicKey, // Use delegate's own pubkey for DH encryption
       aliceDelegatePrivateKey,
@@ -147,8 +168,11 @@ describe('Delegate Device Messaging', () => {
       createPublish('AliceDelegateSM'), // Session events are already signed
       alicePublicKey, // ownerPublicKey - delegate belongs to Alice
       {
-        ephemeralKeypair: aliceDelegateManager.getEphemeralKeypair()!,
-        sharedSecret: aliceDelegateManager.getSharedSecret()!,
+        ephemeralKeypair: {
+          publicKey: aliceDelegateInvite.inviterEphemeralPublicKey,
+          privateKey: aliceDelegateInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: aliceDelegateInvite.sharedSecret,
       },
       new InMemoryStorageAdapter(),
     )
@@ -173,6 +197,7 @@ describe('Delegate Device Messaging', () => {
     })
     await bobMainDeviceManager.init()
 
+    const bobMainInvite = bobMainDeviceManager.getInvite()!
     const bobMainSessionManager = new SessionManager(
       bobPublicKey,
       bobPrivateKey,
@@ -181,8 +206,11 @@ describe('Delegate Device Messaging', () => {
       createPublish('BobMainSM', bobPrivateKey),
       bobPublicKey, // ownerPublicKey
       {
-        ephemeralKeypair: bobMainDeviceManager.getEphemeralKeypair()!,
-        sharedSecret: bobMainDeviceManager.getSharedSecret()!,
+        ephemeralKeypair: {
+          publicKey: bobMainInvite.inviterEphemeralPublicKey,
+          privateKey: bobMainInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: bobMainInvite.sharedSecret,
       },
       new InMemoryStorageAdapter(),
     )
@@ -196,13 +224,29 @@ describe('Delegate Device Messaging', () => {
     // Step 4: Create Bob's delegate device
     // ============================================================
     console.log('Creating Bob delegate device...')
+    // Delegate devices now publish their own Invite events, which need signing
+    let bobDelegatePrivateKeyForSigning: Uint8Array | null = null
+    const bobDelegatePublish = async (event: any) => {
+      let signedEvent = event
+      if (!event.sig && bobDelegatePrivateKeyForSigning) {
+        signedEvent = finalizeEvent(event as UnsignedEvent, bobDelegatePrivateKeyForSigning)
+      }
+      if (!messageQueue.some((e: any) => e.id === signedEvent.id)) {
+        messageQueue.push(signedEvent)
+      }
+      return signedEvent
+    }
+
     const { manager: bobDelegateManager, payload: bobDelegatePayload } = DelegateDeviceManager.create({
       deviceId: generateDeviceId(),
       deviceLabel: 'Bob Delegate',
       nostrSubscribe: createSubscribe('BobDelegate'),
-      nostrPublish: createPublish('BobDelegate'), // No signing key needed for delegate DeviceManager
+      nostrPublish: bobDelegatePublish,
       storage: new InMemoryStorageAdapter(),
     })
+
+    // Set the signing key before init() so Invite can be published
+    bobDelegatePrivateKeyForSigning = bobDelegateManager.getIdentityKey() as Uint8Array
     await bobDelegateManager.init()
 
     // Start waiting for activation BEFORE main device adds the delegate
@@ -226,6 +270,7 @@ describe('Delegate Device Messaging', () => {
     // Create SessionManager for Bob delegate
     // NOTE: Delegate must use its OWN public key for DH encryption to work correctly
     const bobDelegatePublicKey = bobDelegateManager.getIdentityPublicKey()
+    const bobDelegateInvite = bobDelegateManager.getInvite()!
     const bobDelegateSessionManager = new SessionManager(
       bobDelegatePublicKey, // Use delegate's own pubkey for DH encryption
       bobDelegatePrivateKey,
@@ -234,8 +279,11 @@ describe('Delegate Device Messaging', () => {
       createPublish('BobDelegateSM'), // Session events are already signed
       bobPublicKey, // ownerPublicKey - delegate belongs to Bob
       {
-        ephemeralKeypair: bobDelegateManager.getEphemeralKeypair()!,
-        sharedSecret: bobDelegateManager.getSharedSecret()!,
+        ephemeralKeypair: {
+          publicKey: bobDelegateInvite.inviterEphemeralPublicKey,
+          privateKey: bobDelegateInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: bobDelegateInvite.sharedSecret,
       },
       new InMemoryStorageAdapter(),
     )
