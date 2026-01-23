@@ -222,14 +222,13 @@ export class Invite {
      * Called by the invitee. Accepts the invite and creates a new session with the inviter.
      *
      * @param nostrSubscribe - A function to subscribe to Nostr events
-     * @param inviteePublicKey - The invitee's public key
+     * @param inviteePublicKey - The invitee's identity public key (also serves as device ID)
      * @param encryptor - The invitee's secret key or a signing/encrypt function
-     * @param deviceId - Device ID to identify the invitee's device
      * @param ownerPublicKey - The invitee's owner/Nostr identity public key
      * @returns An object containing the new session and an event to be published
      *
      * 1. Inner event: No signature, content encrypted with DH(inviter, invitee).
-     *    Purpose: Authenticate invitee. Contains invitee session key, deviceId, and ownerPublicKey.
+     *    Purpose: Authenticate invitee. Contains invitee session key and ownerPublicKey.
      * 2. Envelope: No signature, content encrypted with DH(inviter, random key).
      *    Purpose: Contains inner event. Hides invitee from others who might have the shared Nostr key.
 
@@ -240,7 +239,6 @@ export class Invite {
         nostrSubscribe: NostrSubscribe,
         inviteePublicKey: string,
         encryptor: Uint8Array | EncryptFunction,
-        deviceId: string,
         ownerPublicKey: string,
     ): Promise<{ session: Session, event: VerifiedEvent }> {
         const inviteeSessionKeypair = generateEphemeralKeypair();
@@ -264,7 +262,6 @@ export class Invite {
             inviterPublicKey,
             inviterEphemeralPublicKey: this.inviterEphemeralPublicKey,
             sharedSecret: this.sharedSecret,
-            deviceId,
             ownerPublicKey,
             encrypt,
         });
@@ -272,7 +269,7 @@ export class Invite {
         return { session, event: finalizeEvent(encrypted.envelope, encrypted.randomSenderPrivateKey) };
     }
 
-    listen(decryptor: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (_session: Session, _identity: string, _deviceId?: string) => void): Unsubscribe {
+    listen(decryptor: Uint8Array | DecryptFunction, nostrSubscribe: NostrSubscribe, onSession: (_session: Session, _identity: string) => void): Unsubscribe {
         if (!this.inviterEphemeralPrivateKey) {
             throw new Error("Inviter session key is not available");
         }
@@ -311,7 +308,8 @@ export class Invite {
                     name: event.id,
                 });
 
-                onSession(session, decrypted.inviteeIdentity, decrypted.deviceId);
+                // inviteeIdentity serves as both identity and device ID
+                onSession(session, decrypted.inviteeIdentity);
             } catch {
             }
         });

@@ -11,6 +11,10 @@ import {
 import { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { MockRelay } from "./mockRelay"
 
+// Store delegate storage and keys for reuse across restarts
+const delegateStorages = new Map<string, InMemoryStorageAdapter>()
+const delegateKeys = new Map<string, Uint8Array>()
+
 export const createMockSessionManager = async (
   deviceId: string,
   sharedMockRelay?: MockRelay,
@@ -21,7 +25,10 @@ export const createMockSessionManager = async (
   const publicKey = getPublicKey(secretKey)
 
   const mockStorage = existingStorage || new InMemoryStorageAdapter()
-  const delegateStorage = new InMemoryStorageAdapter()
+  // Use existing delegate storage if available (for restarts)
+  const storageKey = `${publicKey}:${deviceId}`
+  const delegateStorage = delegateStorages.get(storageKey) || new InMemoryStorageAdapter()
+  delegateStorages.set(storageKey, delegateStorage)
   const storageSpy = {
     get: vi.spyOn(mockStorage, "get"),
     del: vi.spyOn(mockStorage, "del"),
@@ -84,20 +91,49 @@ export const createMockSessionManager = async (
     return signedEvent
   })
 
-  const { manager: delegateManager, payload } = DelegateManager.create({
-    nostrSubscribe: delegateSubscribe,
-    nostrPublish: delegatePublish,
-    storage: delegateStorage,
-  })
+  let delegateManager: DelegateManager
+  const existingDelegateKey = delegateKeys.get(storageKey)
 
-  delegatePrivateKey = delegateManager.getIdentityKey()
-  await delegateManager.init()
+  if (existingDelegateKey) {
+    // Restore existing delegate (for restarts)
+    delegateManager = DelegateManager.restore({
+      devicePublicKey: getPublicKey(existingDelegateKey),
+      devicePrivateKey: existingDelegateKey,
+      nostrSubscribe: delegateSubscribe,
+      nostrPublish: delegatePublish,
+      storage: delegateStorage,
+    })
+    delegatePrivateKey = existingDelegateKey
+    await delegateManager.init()
 
-  // Add device to InviteList
-  await deviceManager.addDevice(payload)
+    // Device is already activated, just need to activate with stored owner
+    const storedOwner = await delegateStorage.get<string>('v1/device-manager/owner-pubkey')
+    if (storedOwner) {
+      await delegateManager.activate(storedOwner)
+    } else {
+      // Fall back to waiting for activation
+      await delegateManager.waitForActivation(5000)
+    }
+  } else {
+    // Create new delegate
+    const createResult = DelegateManager.create({
+      nostrSubscribe: delegateSubscribe,
+      nostrPublish: delegatePublish,
+      storage: delegateStorage,
+    })
+    delegateManager = createResult.manager
+    const payload = createResult.payload
 
-  // Wait for activation
-  await delegateManager.waitForActivation(5000)
+    delegatePrivateKey = delegateManager.getIdentityKey()
+    delegateKeys.set(storageKey, delegatePrivateKey) // Save for future restarts
+    await delegateManager.init()
+
+    // Add device to InviteList
+    await deviceManager.addDevice(payload)
+
+    // Wait for activation
+    await delegateManager.waitForActivation(5000)
+  }
 
   // Create SessionManager using DelegateManager
   const manager = delegateManager.createSessionManager()

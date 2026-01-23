@@ -169,7 +169,8 @@ export class SessionManager {
 
           // Skip our own responses - this happens when we publish an invite response
           // and our own listener receives it back from relays
-          if (decrypted.deviceId === this.deviceId) {
+          // inviteeIdentity serves as the device ID
+          if (decrypted.inviteeIdentity === this.deviceId) {
             return
           }
 
@@ -180,26 +181,36 @@ export class SessionManager {
           // Verify the device is authorized by fetching owner's InviteList
           const inviteList = await this.fetchInviteList(claimedOwner)
           if (!inviteList) {
-            // Can't verify - reject the response
-            console.warn(`Rejecting invite response: no InviteList found for claimed owner ${claimedOwner}`)
-            return
-          }
+            // No InviteList found - check cached device identities as fallback
+            const cachedRecord = this.userRecords.get(claimedOwner)
+            const cachedIdentities = cachedRecord?.knownDeviceIdentities || []
 
-          // Check that the responding device is actually in the owner's InviteList
-          const deviceInList = inviteList.getAllDevices().some(
-            d => d.identityPubkey === decrypted.inviteeIdentity
-          )
-          if (!deviceInList) {
-            console.warn(`Rejecting invite response: device ${decrypted.inviteeIdentity} not in owner's InviteList`)
-            return
-          }
+            if (cachedIdentities.includes(decrypted.inviteeIdentity)) {
+              // Device is in cached list - allow (this handles restart scenarios)
+            } else if (decrypted.inviteeIdentity === claimedOwner) {
+              // Single-device user (device = owner), proceed without InviteList
+            } else {
+              console.warn(`Rejecting invite response: no InviteList found for claimed owner ${claimedOwner} and device ${decrypted.inviteeIdentity} is not the owner or cached`)
+              return
+            }
+          } else {
+            // Check that the responding device is actually in the owner's InviteList
+            const deviceInList = inviteList.getAllDevices().some(
+              d => d.identityPubkey === decrypted.inviteeIdentity
+            )
+            if (!deviceInList) {
+              console.warn(`Rejecting invite response: device ${decrypted.inviteeIdentity} not in owner's InviteList`)
+              return
+            }
 
-          // Update delegate mapping with verified InviteList
-          this.updateDelegateMapping(claimedOwner, inviteList)
+            // Update delegate mapping with verified InviteList
+            this.updateDelegateMapping(claimedOwner, inviteList)
+          }
 
           const ownerPubkey = claimedOwner
           const userRecord = this.getOrCreateUserRecord(ownerPubkey)
-          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
+          // inviteeIdentity serves as the device ID
+          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.inviteeIdentity)
 
           // Check for duplicate/stale responses using the persisted flag
           // This flag survives restarts and prevents creating duplicate RESPONDER sessions
@@ -252,17 +263,21 @@ export class SessionManager {
    * Fetch a user's InviteList from relays.
    * Returns null if not found within timeout.
    */
-  private fetchInviteList(pubkey: string, timeoutMs = 5000): Promise<InviteList | null> {
+  private fetchInviteList(pubkey: string, timeoutMs = 2000): Promise<InviteList | null> {
     return new Promise((resolve) => {
       let latestEvent: { created_at: number; inviteList: InviteList } | null = null
       let resolved = false
 
-      setTimeout(() => {
+      // Use a short initial delay before resolving to allow event delivery
+      const resolveResult = () => {
         if (resolved) return
         resolved = true
         unsubscribe()
         resolve(latestEvent?.inviteList ?? null)
-      }, timeoutMs)
+      }
+
+      // Start timeout
+      const timeout = setTimeout(resolveResult, timeoutMs)
 
       const unsubscribe = this.nostrSubscribe(
         {
@@ -277,6 +292,9 @@ export class SessionManager {
             if (!latestEvent || event.created_at > latestEvent.created_at) {
               latestEvent = { created_at: event.created_at, inviteList }
             }
+            // Resolve quickly after receiving an event (allow for more events to arrive)
+            clearTimeout(timeout)
+            setTimeout(resolveResult, 100) // Short delay to collect any late events
           } catch {
             // Invalid event, ignore
           }
@@ -484,11 +502,11 @@ export class SessionManager {
       const deviceRecord = this.upsertDeviceRecord(userRecord, device.identityPubkey)
 
       const encryptor = this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
+      // ourPublicKey serves as both identity and device ID
       const { session, event } = await invite.accept(
         this.nostrSubscribe,
         this.ourPublicKey,
         encryptor,
-        this.deviceId,
         this.ownerPublicKey
       )
       return this.nostrPublish(event)
