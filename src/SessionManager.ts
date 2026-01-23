@@ -39,6 +39,8 @@ export interface DeviceRecord {
 export interface UserRecord {
   publicKey: string
   devices: Map<string, DeviceRecord>
+  /** Device identity pubkeys from InviteList - used to rebuild delegateToOwner on load */
+  knownDeviceIdentities: string[]
 }
 
 type StoredSessionEntry = ReturnType<typeof serializeSessionState>
@@ -55,6 +57,7 @@ interface StoredDeviceRecord {
 interface StoredUserRecord {
   publicKey: string
   devices: StoredDeviceRecord[]
+  knownDeviceIdentities?: string[]
 }
 
 export class SessionManager {
@@ -170,8 +173,31 @@ export class SessionManager {
             return
           }
 
-          // Resolve delegate pubkey to owner for correct UserRecord attribution
-          const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
+          // Get owner pubkey from response (required for proper chat routing)
+          // If not present (old client), fall back to resolveToOwner
+          const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
+
+          // Verify the device is authorized by fetching owner's InviteList
+          const inviteList = await this.fetchInviteList(claimedOwner)
+          if (!inviteList) {
+            // Can't verify - reject the response
+            console.warn(`Rejecting invite response: no InviteList found for claimed owner ${claimedOwner}`)
+            return
+          }
+
+          // Check that the responding device is actually in the owner's InviteList
+          const deviceInList = inviteList.getAllDevices().some(
+            d => d.identityPubkey === decrypted.inviteeIdentity
+          )
+          if (!deviceInList) {
+            console.warn(`Rejecting invite response: device ${decrypted.inviteeIdentity} not in owner's InviteList`)
+            return
+          }
+
+          // Update delegate mapping with verified InviteList
+          this.updateDelegateMapping(claimedOwner, inviteList)
+
+          const ownerPubkey = claimedOwner
           const userRecord = this.getOrCreateUserRecord(ownerPubkey)
           const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
 
@@ -222,13 +248,50 @@ export class SessionManager {
     )
   }
 
+  /**
+   * Fetch a user's InviteList from relays.
+   * Returns null if not found within timeout.
+   */
+  private fetchInviteList(pubkey: string, timeoutMs = 5000): Promise<InviteList | null> {
+    return new Promise((resolve) => {
+      let latestEvent: { created_at: number; inviteList: InviteList } | null = null
+      let resolved = false
+
+      setTimeout(() => {
+        if (resolved) return
+        resolved = true
+        unsubscribe()
+        resolve(latestEvent?.inviteList ?? null)
+      }, timeoutMs)
+
+      const unsubscribe = this.nostrSubscribe(
+        {
+          kinds: [INVITE_LIST_EVENT_KIND],
+          authors: [pubkey],
+          "#d": ["double-ratchet/invite-list"],
+        },
+        (event) => {
+          if (resolved) return
+          try {
+            const inviteList = InviteList.fromEvent(event)
+            if (!latestEvent || event.created_at > latestEvent.created_at) {
+              latestEvent = { created_at: event.created_at, inviteList }
+            }
+          } catch {
+            // Invalid event, ignore
+          }
+        }
+      )
+    })
+  }
+
   // -------------------
   // User and Device Records helpers
   // -------------------
   private getOrCreateUserRecord(userPubkey: string): UserRecord {
     let rec = this.userRecords.get(userPubkey)
     if (!rec) {
-      rec = { publicKey: userPubkey, devices: new Map() }
+      rec = { publicKey: userPubkey, devices: new Map(), knownDeviceIdentities: [] }
       this.userRecords.set(userPubkey, rec)
     }
     return rec
@@ -282,13 +345,24 @@ export class SessionManager {
   /**
    * Update the delegate-to-owner mapping from an InviteList.
    * Extracts delegate device pubkeys and maps them to the owner.
+   * Persists the mapping in the user record for restart recovery.
    */
   private updateDelegateMapping(ownerPubkey: string, inviteList: InviteList): void {
-    for (const device of inviteList.getAllDevices()) {
-      if (device.identityPubkey) {
-        this.delegateToOwner.set(device.identityPubkey, ownerPubkey)
-      }
+    const userRecord = this.getOrCreateUserRecord(ownerPubkey)
+    const deviceIdentities = inviteList.getAllDevices()
+      .map(d => d.identityPubkey)
+      .filter(Boolean) as string[]
+
+    // Update user record with known device identities
+    userRecord.knownDeviceIdentities = deviceIdentities
+
+    // Update in-memory mapping
+    for (const identity of deviceIdentities) {
+      this.delegateToOwner.set(identity, ownerPubkey)
     }
+
+    // Persist
+    this.storeUserRecord(ownerPubkey).catch(console.error)
   }
 
   private subscribeToUserInviteList(
@@ -414,7 +488,8 @@ export class SessionManager {
         this.nostrSubscribe,
         this.ourPublicKey,
         encryptor,
-        this.deviceId
+        this.deviceId,
+        this.ownerPublicKey
       )
       return this.nostrPublish(event)
         .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
@@ -730,9 +805,10 @@ export class SessionManager {
   }
 
   private storeUserRecord(publicKey: string) {
+    const userRecord = this.userRecords.get(publicKey)
     const data: StoredUserRecord = {
       publicKey: publicKey,
-      devices: Array.from(this.userRecords.get(publicKey)?.devices.entries() || []).map(
+      devices: Array.from(userRecord?.devices.entries() || []).map(
         ([, device]) => ({
           deviceId: device.deviceId,
           activeSession: device.activeSession
@@ -746,6 +822,7 @@ export class SessionManager {
           hasResponderSession: device.hasResponderSession,
         })
       ),
+      knownDeviceIdentities: userRecord?.knownDeviceIdentities || [],
     }
     return this.storage.put(this.userRecordKey(publicKey), data)
   }
@@ -796,10 +873,18 @@ export class SessionManager {
           }
         }
 
+        const knownDeviceIdentities = data.knownDeviceIdentities || []
+
         this.userRecords.set(publicKey, {
           publicKey: data.publicKey,
           devices,
+          knownDeviceIdentities,
         })
+
+        // Rebuild delegateToOwner mapping from stored device identities
+        for (const identity of knownDeviceIdentities) {
+          this.delegateToOwner.set(identity, publicKey)
+        }
 
         for (const device of devices.values()) {
           const { deviceId, activeSession, inactiveSessions, staleAt } = device

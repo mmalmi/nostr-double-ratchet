@@ -224,11 +224,12 @@ export class Invite {
      * @param nostrSubscribe - A function to subscribe to Nostr events
      * @param inviteePublicKey - The invitee's public key
      * @param encryptor - The invitee's secret key or a signing/encrypt function
-     * @param deviceId - Optional device ID to identify the invitee's device
+     * @param deviceId - Device ID to identify the invitee's device
+     * @param ownerPublicKey - The invitee's owner/Nostr identity public key
      * @returns An object containing the new session and an event to be published
      *
      * 1. Inner event: No signature, content encrypted with DH(inviter, invitee).
-     *    Purpose: Authenticate invitee. Contains invitee session key and deviceId.
+     *    Purpose: Authenticate invitee. Contains invitee session key, deviceId, and ownerPublicKey.
      * 2. Envelope: No signature, content encrypted with DH(inviter, random key).
      *    Purpose: Contains inner event. Hides invitee from others who might have the shared Nostr key.
 
@@ -239,7 +240,8 @@ export class Invite {
         nostrSubscribe: NostrSubscribe,
         inviteePublicKey: string,
         encryptor: Uint8Array | EncryptFunction,
-        deviceId?: string,
+        deviceId: string,
+        ownerPublicKey: string,
     ): Promise<{ session: Session, event: VerifiedEvent }> {
         const inviteeSessionKeypair = generateEphemeralKeypair();
         const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
@@ -263,6 +265,7 @@ export class Invite {
             inviterEphemeralPublicKey: this.inviterEphemeralPublicKey,
             sharedSecret: this.sharedSecret,
             deviceId,
+            ownerPublicKey,
             encrypt,
         });
 
