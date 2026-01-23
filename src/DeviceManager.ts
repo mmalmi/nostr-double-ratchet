@@ -384,27 +384,11 @@ export class DelegateManager {
   /**
    * Wait for this device to be activated (added to an InviteList).
    * Returns the owner's public key once activated.
-   *
-   * @param timeoutMs - Timeout in milliseconds (default 60000)
-   * @param ownerPublicKey - Optional owner pubkey for immediate fetch (useful for main device)
+   * For delegate devices that don't know the owner ahead of time.
    */
-  async waitForActivation(timeoutMs = 60000, ownerPublicKey?: string): Promise<string> {
+  async waitForActivation(timeoutMs = 60000): Promise<string> {
     if (this.ownerPubkeyFromActivation) {
       return this.ownerPubkeyFromActivation
-    }
-
-    // If owner pubkey is provided, try fetching their InviteList directly first
-    // Use a longer timeout (2s) since relay round-trip can take time
-    if (ownerPublicKey) {
-      const inviteList = await this.fetchInviteList(ownerPublicKey, 2000)
-      if (inviteList) {
-        const device = inviteList.getDevice(this.devicePublicKey)
-        if (device) {
-          this.ownerPubkeyFromActivation = ownerPublicKey
-          await this.storage.put(this.ownerPubkeyKey(), ownerPublicKey)
-          return ownerPublicKey
-        }
-      }
     }
 
     return new Promise((resolve, reject) => {
