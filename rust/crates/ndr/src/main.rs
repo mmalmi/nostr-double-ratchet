@@ -103,9 +103,6 @@ enum InviteCommands {
         /// The acceptance event JSON
         event: String,
     },
-
-    /// Listen for invite acceptances
-    Listen,
 }
 
 #[derive(Subcommand)]
@@ -180,9 +177,6 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             }
             InviteCommands::Accept { invite_id, event } => {
                 commands::invite::accept(&invite_id, &event, &config, &storage, output).await
-            }
-            InviteCommands::Listen => {
-                commands::invite::listen(&config, &storage, output).await
             }
         },
         Commands::Chat(cmd) => match cmd {

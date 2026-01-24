@@ -204,7 +204,7 @@ pub async fn receive(
     anyhow::bail!("Could not decrypt message - no matching session found");
 }
 
-/// Listen for new messages
+/// Listen for new messages and invite responses
 pub async fn listen(
     chat_id: Option<&str>,
     config: &Config,
@@ -212,13 +212,17 @@ pub async fn listen(
     output: &Output,
 ) -> Result<()> {
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
-    use nostr_double_ratchet::MESSAGE_EVENT_KIND;
+    use nostr_double_ratchet::{MESSAGE_EVENT_KIND, INVITE_RESPONSE_KIND};
 
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
-    // Get the chats we're listening for
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey_hex = config.public_key()?;
+    let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
+
+    // Get the chats we're listening for (if any)
     let chats = if let Some(id) = chat_id {
         vec![storage.get_chat(id)?
             .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?]
@@ -226,11 +230,7 @@ pub async fn listen(
         storage.list_chats()?
     };
 
-    if chats.is_empty() {
-        anyhow::bail!("No chats to listen to. Join a chat first.");
-    }
-
-    // Collect all the public keys we need to listen for
+    // Collect all the public keys we need to listen for messages from
     let mut pubkeys_to_watch: Vec<nostr::PublicKey> = Vec::new();
     for chat in &chats {
         if let Ok(state) = serde_json::from_str::<nostr_double_ratchet::SessionState>(&chat.session_state) {
@@ -253,67 +253,126 @@ pub async fn listen(
     let scope = chat_id.map(|id| format!("chat {}", id))
         .unwrap_or_else(|| "all chats".to_string());
 
-    output.success_message("listen", &format!("Listening for messages on {}... (Ctrl+C to stop)", scope));
+    // Build filters
+    let mut filters = Vec::new();
 
-    // Subscribe to message events from our chat partners
-    let filter = Filter::new()
-        .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-        .authors(pubkeys_to_watch);
+    // Filter for messages (if we have chats)
+    if !pubkeys_to_watch.is_empty() {
+        filters.push(
+            Filter::new()
+                .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+                .authors(pubkeys_to_watch)
+        );
+    }
 
-    client.subscribe(vec![filter], None).await?;
+    // Filter for invite responses (always listen for these)
+    filters.push(
+        Filter::new()
+            .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
+            .pubkey(our_pubkey)
+    );
+
+    output.success_message("listen", &format!("Listening for messages and invite responses on {}... (Ctrl+C to stop)", scope));
+
+    client.subscribe(filters, None).await?;
 
     // Handle incoming events
     let mut notifications = client.notifications();
     while let Ok(notification) = notifications.recv().await {
         if let RelayPoolNotification::Event { event, .. } = notification {
-            // Try to decrypt with each session
-            for chat in storage.list_chats()? {
-                let session_state: nostr_double_ratchet::SessionState = match serde_json::from_str(&chat.session_state) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+            let event_kind = event.kind.as_u16() as u32;
 
-                let mut session = Session::new(session_state, chat.id.clone());
+            // Handle invite responses
+            if event_kind == INVITE_RESPONSE_KIND {
+                for stored_invite in storage.list_invites()? {
+                    let invite = match nostr_double_ratchet::Invite::deserialize(&stored_invite.serialized) {
+                        Ok(i) => i,
+                        Err(_) => continue,
+                    };
 
-                match session.receive(&event) {
-                    Ok(Some(decrypted_event_json)) => {
-                        let decrypted_event: serde_json::Value = serde_json::from_str(&decrypted_event_json)?;
-                        let content = decrypted_event["content"]
-                            .as_str()
-                            .unwrap_or(&decrypted_event_json)
-                            .to_string();
+                    match invite.process_invite_response(&event, our_private_key.clone()) {
+                        Ok(Some((session, their_pubkey, _device_id))) => {
+                            let session_state = serde_json::to_string(&session.state)?;
+                            let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                            let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
 
-                        let timestamp = event.created_at.as_u64();
-                        let sender_pubkey = event.pubkey;
+                            let chat = crate::storage::StoredChat {
+                                id: chat_id.clone(),
+                                their_pubkey: their_pubkey_hex.clone(),
+                                created_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)?
+                                    .as_secs(),
+                                last_message_at: None,
+                                session_state,
+                            };
 
-                        let msg_id = uuid::Uuid::new_v4().to_string();
-                        let stored = StoredMessage {
-                            id: msg_id,
-                            chat_id: chat.id.clone(),
-                            from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                            content: content.clone(),
-                            timestamp,
-                            is_outgoing: false,
-                        };
+                            storage.save_chat(&chat)?;
+                            storage.delete_invite(&stored_invite.id)?;
 
-                        storage.save_message(&stored)?;
+                            output.event("session_created", serde_json::json!({
+                                "invite_id": stored_invite.id,
+                                "chat_id": chat_id,
+                                "their_pubkey": their_pubkey_hex,
+                            }));
 
-                        // Update session state
-                        let mut updated_chat = chat.clone();
-                        updated_chat.last_message_at = Some(timestamp);
-                        updated_chat.session_state = serde_json::to_string(&session.state)?;
-                        storage.save_chat(&updated_chat)?;
-
-                        output.event("message", IncomingMessage {
-                            chat_id: updated_chat.id,
-                            from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                            content,
-                            timestamp,
-                        });
-
-                        break;
+                            break;
+                        }
+                        Ok(None) => continue,
+                        Err(_) => continue,
                     }
-                    _ => continue,
+                }
+                continue;
+            }
+
+            // Handle messages
+            if event_kind == MESSAGE_EVENT_KIND {
+                for chat in storage.list_chats()? {
+                    let session_state: nostr_double_ratchet::SessionState = match serde_json::from_str(&chat.session_state) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+
+                    let mut session = Session::new(session_state, chat.id.clone());
+
+                    match session.receive(&event) {
+                        Ok(Some(decrypted_event_json)) => {
+                            let decrypted_event: serde_json::Value = serde_json::from_str(&decrypted_event_json)?;
+                            let content = decrypted_event["content"]
+                                .as_str()
+                                .unwrap_or(&decrypted_event_json)
+                                .to_string();
+
+                            let timestamp = event.created_at.as_u64();
+                            let sender_pubkey = event.pubkey;
+
+                            let msg_id = uuid::Uuid::new_v4().to_string();
+                            let stored = StoredMessage {
+                                id: msg_id,
+                                chat_id: chat.id.clone(),
+                                from_pubkey: hex::encode(sender_pubkey.to_bytes()),
+                                content: content.clone(),
+                                timestamp,
+                                is_outgoing: false,
+                            };
+
+                            storage.save_message(&stored)?;
+
+                            let mut updated_chat = chat.clone();
+                            updated_chat.last_message_at = Some(timestamp);
+                            updated_chat.session_state = serde_json::to_string(&session.state)?;
+                            storage.save_chat(&updated_chat)?;
+
+                            output.event("message", IncomingMessage {
+                                chat_id: updated_chat.id,
+                                from_pubkey: hex::encode(sender_pubkey.to_bytes()),
+                                content,
+                                timestamp,
+                            });
+
+                            break;
+                        }
+                        _ => continue,
+                    }
                 }
             }
         }
