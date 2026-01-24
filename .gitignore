@@ -23,3 +23,7 @@ docs
 *.njsproj
 *.sln
 *.sw?
+
+# Rust
+target/
+Cargo.lock
