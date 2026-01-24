@@ -281,7 +281,7 @@ impl Session {
             .sending_chain_key
             .ok_or(Error::SessionNotReady)?;
 
-        let kdf_outputs = kdf(&sending_chain_key, &[1u8; 32], 2);
+        let kdf_outputs = kdf(&sending_chain_key, &[1u8], 2);
         self.state.sending_chain_key = Some(kdf_outputs[0]);
         let message_key = kdf_outputs[1];
 
@@ -318,7 +318,7 @@ impl Session {
 
         let receiving_chain_key = self.state.receiving_chain_key.unwrap();
 
-        let kdf_outputs = kdf(&receiving_chain_key, &[1u8; 32], 2);
+        let kdf_outputs = kdf(&receiving_chain_key, &[1u8], 2);
         self.state.receiving_chain_key = Some(kdf_outputs[0]);
         let message_key = kdf_outputs[1];
 
@@ -392,7 +392,7 @@ impl Session {
                 .receiving_chain_key
                 .ok_or(Error::SessionNotReady)?;
 
-            let kdf_outputs = kdf(&receiving_chain_key, &[1u8; 32], 2);
+            let kdf_outputs = kdf(&receiving_chain_key, &[1u8], 2);
             self.state.receiving_chain_key = Some(kdf_outputs[0]);
 
             entry
