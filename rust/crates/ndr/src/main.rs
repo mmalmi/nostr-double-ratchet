@@ -70,6 +70,12 @@ enum Commands {
         #[arg(short, long)]
         chat: Option<String>,
     },
+
+    /// Receive and decrypt a nostr event
+    Receive {
+        /// The nostr event JSON
+        event: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -88,6 +94,14 @@ enum InviteCommands {
     Delete {
         /// Invite ID
         id: String,
+    },
+
+    /// Process an invite acceptance event (creates chat session)
+    Accept {
+        /// Invite ID
+        invite_id: String,
+        /// The acceptance event JSON
+        event: String,
     },
 
     /// Listen for invite acceptances
@@ -164,6 +178,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             InviteCommands::Delete { id } => {
                 commands::invite::delete(&id, &storage, output).await
             }
+            InviteCommands::Accept { invite_id, event } => {
+                commands::invite::accept(&invite_id, &event, &config, &storage, output).await
+            }
             InviteCommands::Listen => {
                 commands::invite::listen(&config, &storage, output).await
             }
@@ -190,6 +207,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         }
         Commands::Listen { chat } => {
             commands::message::listen(chat.as_deref(), &config, &storage, output).await
+        }
+        Commands::Receive { event } => {
+            commands::message::receive(&event, &storage, output).await
         }
     }
 }

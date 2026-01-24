@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::output::Output;
-use crate::storage::{Storage, StoredInvite};
+use crate::storage::{Storage, StoredChat, StoredInvite};
 
 #[derive(Serialize)]
 struct InviteCreated {
@@ -92,6 +92,75 @@ pub async fn delete(id: &str, storage: &Storage, output: &Output) -> Result<()> 
     } else {
         anyhow::bail!("Invite not found: {}", id);
     }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct InviteAccepted {
+    invite_id: String,
+    chat_id: String,
+    their_pubkey: String,
+}
+
+/// Process an invite acceptance event (creates a chat session for the inviter)
+pub async fn accept(
+    invite_id: &str,
+    event_json: &str,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    // Get our private key
+    let our_private_key = config.private_key_bytes()?;
+
+    // Load the invite
+    let stored_invite = storage.get_invite(invite_id)?
+        .ok_or_else(|| anyhow::anyhow!("Invite not found: {}", invite_id))?;
+
+    // Deserialize the invite
+    let invite = nostr_double_ratchet::Invite::deserialize(&stored_invite.serialized)?;
+
+    // Parse the acceptance event
+    let event: nostr::Event = nostr::JsonUtil::from_json(event_json)
+        .map_err(|e| anyhow::anyhow!("Invalid event JSON: {}", e))?;
+
+    // Process the acceptance - creates session
+    let result = invite.process_invite_response(&event, our_private_key)?;
+
+    let (session, their_pubkey, _device_id) = result
+        .ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+
+    // Serialize session state
+    let session_state = serde_json::to_string(&session.state)?;
+
+    let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
+
+    let chat = StoredChat {
+        id: chat_id.clone(),
+        their_pubkey: their_pubkey_hex.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        last_message_at: None,
+        session_state,
+    };
+
+    storage.save_chat(&chat)?;
+
+    // Optionally delete the used invite
+    storage.delete_invite(invite_id)?;
+
+    output.success("invite.accept", InviteAccepted {
+        invite_id: invite_id.to_string(),
+        chat_id,
+        their_pubkey: their_pubkey_hex,
+    });
+
     Ok(())
 }
 

@@ -19,9 +19,10 @@ struct ChatInfo {
 }
 
 #[derive(Serialize)]
-struct ChatJoined {
+struct ChatJoinedWithEvent {
     id: String,
     their_pubkey: String,
+    response_event: String,
 }
 
 /// List all chats
@@ -57,8 +58,17 @@ pub async fn join(
     let invite = nostr_double_ratchet::Invite::from_url(url)?;
     let their_pubkey = hex::encode(invite.inviter.to_bytes());
 
-    // Accept the invite to create a session
-    // TODO: Actually publish the acceptance and create the session
+    // Get our keys
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey_hex = config.public_key()?;
+    let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
+
+    // Accept the invite - creates session and response event
+    let (session, response_event) = invite.accept(our_pubkey, our_private_key, None)?;
+
+    // Serialize session state
+    let session_state = serde_json::to_string(&session.state)?;
+
     let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
 
     let chat = StoredChat {
@@ -68,14 +78,17 @@ pub async fn join(
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
         last_message_at: None,
-        session_state: "{}".to_string(), // TODO: Serialize actual session
+        session_state,
     };
 
     storage.save_chat(&chat)?;
 
-    output.success("chat.join", ChatJoined {
+    // Return the response event that should be published to nostr
+    // For now we include it in the output so it can be published externally
+    output.success("chat.join", ChatJoinedWithEvent {
         id,
         their_pubkey,
+        response_event: nostr::JsonUtil::as_json(&response_event),
     });
 
     Ok(())
