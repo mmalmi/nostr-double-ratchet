@@ -208,22 +208,118 @@ pub async fn receive(
 pub async fn listen(
     chat_id: Option<&str>,
     config: &Config,
-    _storage: &Storage,
+    storage: &Storage,
     output: &Output,
 ) -> Result<()> {
+    use nostr_sdk::{Client, Filter, RelayPoolNotification};
+    use nostr_double_ratchet::MESSAGE_EVENT_KIND;
+
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
+
+    // Get the chats we're listening for
+    let chats = if let Some(id) = chat_id {
+        vec![storage.get_chat(id)?
+            .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?]
+    } else {
+        storage.list_chats()?
+    };
+
+    if chats.is_empty() {
+        anyhow::bail!("No chats to listen to. Join a chat first.");
+    }
+
+    // Collect all the public keys we need to listen for
+    let mut pubkeys_to_watch: Vec<nostr::PublicKey> = Vec::new();
+    for chat in &chats {
+        if let Ok(state) = serde_json::from_str::<nostr_double_ratchet::SessionState>(&chat.session_state) {
+            if let Some(pk) = state.their_current_nostr_public_key {
+                pubkeys_to_watch.push(pk);
+            }
+            if let Some(pk) = state.their_next_nostr_public_key {
+                pubkeys_to_watch.push(pk);
+            }
+        }
+    }
+
+    // Connect to relays
+    let client = Client::default();
+    for relay in &config.relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
 
     let scope = chat_id.map(|id| format!("chat {}", id))
         .unwrap_or_else(|| "all chats".to_string());
 
     output.success_message("listen", &format!("Listening for messages on {}... (Ctrl+C to stop)", scope));
 
-    // TODO: Implement actual listening with nostr-sdk
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // Subscribe to message events from our chat partners
+    let filter = Filter::new()
+        .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+        .authors(pubkeys_to_watch);
+
+    client.subscribe(vec![filter], None).await?;
+
+    // Handle incoming events
+    let mut notifications = client.notifications();
+    while let Ok(notification) = notifications.recv().await {
+        if let RelayPoolNotification::Event { event, .. } = notification {
+            // Try to decrypt with each session
+            for chat in storage.list_chats()? {
+                let session_state: nostr_double_ratchet::SessionState = match serde_json::from_str(&chat.session_state) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                let mut session = Session::new(session_state, chat.id.clone());
+
+                match session.receive(&event) {
+                    Ok(Some(decrypted_event_json)) => {
+                        let decrypted_event: serde_json::Value = serde_json::from_str(&decrypted_event_json)?;
+                        let content = decrypted_event["content"]
+                            .as_str()
+                            .unwrap_or(&decrypted_event_json)
+                            .to_string();
+
+                        let timestamp = event.created_at.as_u64();
+                        let sender_pubkey = event.pubkey;
+
+                        let msg_id = uuid::Uuid::new_v4().to_string();
+                        let stored = StoredMessage {
+                            id: msg_id,
+                            chat_id: chat.id.clone(),
+                            from_pubkey: hex::encode(sender_pubkey.to_bytes()),
+                            content: content.clone(),
+                            timestamp,
+                            is_outgoing: false,
+                        };
+
+                        storage.save_message(&stored)?;
+
+                        // Update session state
+                        let mut updated_chat = chat.clone();
+                        updated_chat.last_message_at = Some(timestamp);
+                        updated_chat.session_state = serde_json::to_string(&session.state)?;
+                        storage.save_chat(&updated_chat)?;
+
+                        output.event("message", IncomingMessage {
+                            chat_id: updated_chat.id,
+                            from_pubkey: hex::encode(sender_pubkey.to_bytes()),
+                            content,
+                            timestamp,
+                        });
+
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+        }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
