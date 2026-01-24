@@ -1,14 +1,21 @@
-[package]
-name = "nostr-double-ratchet"
+[workspace]
+resolver = "2"
+members = [
+    "crates/nostr-double-ratchet",
+    "crates/ndr",
+]
+
+[workspace.package]
 version = "0.0.38"
 edition = "2021"
 authors = ["Martti Malmi"]
 license = "MIT"
-description = "Nostr double ratchet library for Rust"
 repository = "https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/nostr-double-ratchet"
 
-[dependencies]
+[workspace.dependencies]
+nostr-double-ratchet = { path = "crates/nostr-double-ratchet" }
 nostr = { version = "0.37", default-features = false, features = ["std", "nip44"] }
+nostr-sdk = "0.37"
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,10 +28,7 @@ urlencoding = "2.1"
 rand = "0.8"
 crossbeam-channel = "0.5"
 uuid = { version = "1", features = ["v4"] }
-
-[dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-tempfile = "3"
-tokio-tungstenite = "0.24"
-futures-util = "0.3"
-chrono = "0.4"
+clap = { version = "4.5", features = ["derive", "env"] }
+dirs = "5"
+anyhow = "1"

@@ -1,0 +1,30 @@
+[package]
+name = "nostr-double-ratchet"
+description = "Nostr double ratchet library for Rust"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nostr.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+urlencoding.workspace = true
+rand.workspace = true
+crossbeam-channel.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile = "3"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+chrono = "0.4"
