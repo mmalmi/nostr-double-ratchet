@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Martti Malmi"]
 license = "MIT"
 description = "Nostr double ratchet library for Rust"
-repository = "https://github.com/mmalmi/nostr-double-ratchet"
+repository = "https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/nostr-double-ratchet"
 
 [dependencies]
 nostr = { version = "0.37", default-features = false, features = ["std", "nip44"] }
