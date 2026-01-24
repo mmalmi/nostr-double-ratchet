@@ -14,7 +14,6 @@
     "build": "vite build && tsc",
     "examples": "cd examples && vite build && tsc",
     "examples-dev": "cd examples && vite && tsc",
-    "docs": "typedoc --out docs src/index.ts",
     "lint": "eslint src --ext .ts --fix"
   },
   "repository": {
@@ -27,7 +26,6 @@
     "url": "https://github.com/mmalmi/nostr-double-ratchet/issues"
   },
   "homepage": "https://github.com/mmalmi/nostr-double-ratchet",
-  "documentation": "https://mmalmi.github.io/nostr-double-ratchet/",
   "files": [
     "src",
     "dist"
@@ -46,7 +44,6 @@
     "lodash": "^4.17.21",
     "react-blurhash": "^0.3.0",
     "tsx": "^4.19.4",
-    "typedoc": "^0.28.4",
     "typescript": "^5.8.3",
     "typescript-lru-cache": "^2.0.0",
     "vite": "^6.3.5",
