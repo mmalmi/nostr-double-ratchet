@@ -4,6 +4,8 @@
 
 Double ratchet encryption for Nostr with implementations in TypeScript and Rust.
 
+**Used by [chat.iris.to](https://chat.iris.to)** - a secure messaging app built on Nostr.
+
 - [x] 1-on-1 channel
 - [ ] Group channel
 - Invites for securely exchanging session keys

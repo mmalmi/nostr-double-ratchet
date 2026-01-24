@@ -2,6 +2,8 @@
 
 TypeScript implementation of the Double Ratchet protocol for Nostr.
 
+Powers the encryption in [chat.iris.to](https://chat.iris.to).
+
 ## Installation
 
 ```bash

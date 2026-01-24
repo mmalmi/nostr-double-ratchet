@@ -2,6 +2,8 @@
 
 Rust implementation of double ratchet encryption for Nostr.
 
+Used by [chat.iris.to](https://chat.iris.to) for forward-secure messaging.
+
 ## Crates
 
 | Crate | Description |

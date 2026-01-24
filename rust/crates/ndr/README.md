@@ -2,7 +2,7 @@
 
 CLI for encrypted Nostr messaging using the double ratchet protocol.
 
-Designed for humans, AI agents, and automation.
+Designed for humans, AI agents, and automation. Compatible with [chat.iris.to](https://chat.iris.to).
 
 ## Installation
 
