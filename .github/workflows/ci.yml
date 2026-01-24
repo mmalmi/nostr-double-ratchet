@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
 
 jobs:
   test-ts:
@@ -67,3 +67,51 @@ jobs:
 
     - name: Run clippy
       run: cargo clippy -- -D warnings
+
+  interop:
+    name: Interop Tests
+    runs-on: ubuntu-latest
+    needs: [test-ts, test-rust]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 9
+
+    - name: Use Node.js 20.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20.x
+        cache: 'pnpm'
+        cache-dependency-path: ts/pnpm-lock.yaml
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+
+    - name: Install TS dependencies
+      working-directory: ts
+      run: pnpm install --frozen-lockfile
+
+    - name: Generate TypeScript test vectors
+      working-directory: ts
+      run: pnpm vitest run tests/interop.test.ts
+
+    - name: Verify Rust can decrypt TypeScript vectors
+      working-directory: rust
+      run: cargo test test_decrypt_typescript -- --nocapture
+
+    - name: Generate Rust test vectors
+      working-directory: rust
+      run: cargo test test_generate_rust -- --nocapture
+
+    - name: Verify TypeScript can decrypt Rust vectors
+      working-directory: ts
+      run: pnpm vitest run tests/interop.test.ts
