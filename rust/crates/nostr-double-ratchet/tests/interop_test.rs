@@ -25,8 +25,13 @@ struct TestMessage {
 }
 
 fn get_test_vectors_path() -> PathBuf {
+    // Go up from crates/nostr-double-ratchet to rust/, then to repo root
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
+        .parent() // crates/
+        .unwrap()
+        .parent() // rust/
+        .unwrap()
+        .parent() // repo root
         .unwrap()
         .join("test-vectors")
 }
