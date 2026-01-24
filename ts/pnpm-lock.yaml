@@ -18,9 +18,6 @@ importers:
       '@nostr-dev-kit/ndk':
         specifier: 2.14.23
         version: 2.14.23(nostr-tools@2.20.0(typescript@5.9.3))
-      '@types/lodash':
-        specifier: ^4.17.17
-        version: 4.17.23
       '@types/node':
         specifier: ^22.15.21
         version: 22.19.7
@@ -42,21 +39,12 @@ importers:
       eslint-plugin-simple-import-sort:
         specifier: ^12.1.1
         version: 12.1.1(eslint@9.39.2)
-      lodash:
-        specifier: ^4.17.21
-        version: 4.17.23
-      react-blurhash:
-        specifier: ^0.3.0
-        version: 0.3.0(blurhash@2.0.5)(react@19.2.3)
       tsx:
         specifier: ^4.19.4
         version: 4.21.0
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
-      typescript-lru-cache:
-        specifier: ^2.0.0
-        version: 2.0.0
       vite:
         specifier: ^6.3.5
         version: 6.4.1(@types/node@22.19.7)(tsx@4.21.0)(yaml@2.8.2)
@@ -625,9 +613,6 @@ packages:
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
 
-  '@types/lodash@4.17.23':
-    resolution: {integrity: sha512-RDvF6wTulMPjrNdCoYRC8gNR880JNGT8uB+REUpC2Ns4pRqQJhGz90wh7rgdXDPpCczF3VGktDuFGVnz8zP7HA==}
-
   '@types/node@22.19.7':
     resolution: {integrity: sha512-MciR4AKGHWl7xwxkBa6xUGxQJ4VBOmPTF7sL+iGzuahOFaO0jHCsuEfS80pan1ef4gWId1oWOweIhrDEYLuaOw==}
 
@@ -745,9 +730,6 @@ packages:
 
   balanced-match@1.0.2:
     resolution: {integrity: sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==}
-
-  blurhash@2.0.5:
-    resolution: {integrity: sha512-cRygWd7kGBQO3VEhPiTgq4Wc43ctsM+o46urrmPOiuAe+07fzlSB9OJVdpgDL0jPqXUVQ9ht7aq7kxOeJHRK+w==}
 
   brace-expansion@1.1.12:
     resolution: {integrity: sha512-9T9UjW3r0UW5c1Q7GTwllptXwhvYmEzFhzMfZ9H7FQWt+uZePjZPjBP/W1ZEyZ1twGWom5/56TF4lPcqjnDHcg==}
@@ -1012,9 +994,6 @@ packages:
   lodash.merge@4.6.2:
     resolution: {integrity: sha512-0KpjqXRVvrYyCsX1swR/XTK0va6VQkQM6MNo7PqW77ByjAhoARA8EfrP1N4+KlKj8YS0ZUCtRT/YUuhyYDujIQ==}
 
-  lodash@4.17.23:
-    resolution: {integrity: sha512-LgVTMpQtIopCi79SJeDiP0TfWi5CNEc/L/aRdTh3yIvmZXTnheWpKjSZhnvMl8iXbC1tFg9gdHHDMLoV7CnG+w==}
-
   loupe@3.2.1:
     resolution: {integrity: sha512-CdzqowRJCeLU72bHvWqwRBBlLcMEtIvGrlvef74kMnV2AolS9Y8xUv1I0U/MNAWMhBlKIoyuEgoJ0t/bbwHbLQ==}
 
@@ -1108,16 +1087,6 @@ packages:
   punycode@2.3.1:
     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
     engines: {node: '>=6'}
-
-  react-blurhash@0.3.0:
-    resolution: {integrity: sha512-XlKr4Ns1iYFRnk6DkAblNbAwN/bTJvxTVoxMvmTcURdc5oLoXZwqAF9N3LZUh/HT+QFlq5n6IS6VsDGsviYAiQ==}
-    peerDependencies:
-      blurhash: ^2.0.3
-      react: '>=15'
-
-  react@19.2.3:
-    resolution: {integrity: sha512-Ku/hhYbVjOQnXDZFv2+RibmLFGwFdeeKHFcOTlrt7xplBnya5OGn/hIRDsqDiSUcfORsDC7MPxwork8jBwsIWA==}
-    engines: {node: '>=0.10.0'}
 
   resolve-from@4.0.0:
     resolution: {integrity: sha512-pb/MYmXstAkysRFx8piNI1tGFNQIFA3vkE3Gq4EuA1dF6gHp/+vgZqsCGJapvy8N3Q+4o7FwvquPJcnZ7RYy4g==}
@@ -1690,8 +1659,6 @@ snapshots:
 
   '@types/json-schema@7.0.15': {}
 
-  '@types/lodash@4.17.23': {}
-
   '@types/node@22.19.7':
     dependencies:
       undici-types: 6.21.0
@@ -1851,8 +1818,6 @@ snapshots:
   assertion-error@2.0.1: {}
 
   balanced-match@1.0.2: {}
-
-  blurhash@2.0.5: {}
 
   brace-expansion@1.1.12:
     dependencies:
@@ -2148,8 +2113,6 @@ snapshots:
 
   lodash.merge@4.6.2: {}
 
-  lodash@4.17.23: {}
-
   loupe@3.2.1: {}
 
   magic-string@0.30.21:
@@ -2232,13 +2195,6 @@ snapshots:
   prettier@3.8.1: {}
 
   punycode@2.3.1: {}
-
-  react-blurhash@0.3.0(blurhash@2.0.5)(react@19.2.3):
-    dependencies:
-      blurhash: 2.0.5
-      react: 19.2.3
-
-  react@19.2.3: {}
 
   resolve-from@4.0.0: {}
 
