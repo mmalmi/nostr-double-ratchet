@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nostr-double-ratchet",
     "crates/ndr",
+    "crates/ndr-ffi",
 ]
 
 [workspace.package]

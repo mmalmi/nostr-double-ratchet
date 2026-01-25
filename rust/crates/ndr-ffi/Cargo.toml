@@ -1,0 +1,27 @@
+[package]
+name = "ndr-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "UniFFI bindings for nostr-double-ratchet (iOS/Android)"
+repository.workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+name = "ndr_ffi"
+
+[dependencies]
+nostr-double-ratchet.workspace = true
+nostr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+uniffi = { version = "0.28", features = ["cli"] }
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[dev-dependencies]
+uniffi = { version = "0.28", features = ["bindgen-tests"] }
