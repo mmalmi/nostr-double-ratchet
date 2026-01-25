@@ -219,8 +219,6 @@ pub async fn listen(
     }
 
     let our_private_key = config.private_key_bytes()?;
-    let our_pubkey_hex = config.public_key()?;
-    let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
 
     // Get the chats we're listening for (if any)
     let chats = if let Some(id) = chat_id {
@@ -265,12 +263,24 @@ pub async fn listen(
         );
     }
 
-    // Filter for invite responses (always listen for these)
-    filters.push(
-        Filter::new()
-            .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
-            .pubkey(our_pubkey)
-    );
+    // Filter for invite responses - listen for responses to our stored invites
+    // Invite responses are tagged with "p" = the invite's ephemeral public key
+    let stored_invites = storage.list_invites()?;
+    let ephemeral_pubkeys: Vec<nostr::PublicKey> = stored_invites.iter()
+        .filter_map(|stored| {
+            nostr_double_ratchet::Invite::deserialize(&stored.serialized)
+                .ok()
+                .map(|invite| invite.inviter_ephemeral_public_key)
+        })
+        .collect();
+
+    if !ephemeral_pubkeys.is_empty() {
+        filters.push(
+            Filter::new()
+                .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
+                .pubkeys(ephemeral_pubkeys)
+        );
+    }
 
     output.success_message("listen", &format!("Listening for messages and invite responses on {}... (Ctrl+C to stop)", scope));
 
