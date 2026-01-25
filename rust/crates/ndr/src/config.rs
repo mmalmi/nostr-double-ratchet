@@ -83,6 +83,22 @@ impl Config {
         self.private_key.is_some()
     }
 
+    /// Ensure we have an identity, auto-generating one if needed.
+    /// Returns (public_key_hex, was_generated)
+    pub fn ensure_identity(&mut self) -> Result<(String, bool)> {
+        if self.private_key.is_some() {
+            return Ok((self.public_key()?, false));
+        }
+
+        // Generate a new keypair
+        let keys = nostr::Keys::generate();
+        let sk_hex = keys.secret_key().to_secret_hex();
+        self.private_key = Some(sk_hex);
+        self.save()?;
+
+        Ok((keys.public_key().to_hex(), true))
+    }
+
     /// Get the private key bytes
     pub fn private_key_bytes(&self) -> Result<[u8; 32]> {
         let key = self.private_key.as_ref()

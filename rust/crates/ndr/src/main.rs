@@ -152,8 +152,26 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
     // Ensure data directory exists
     std::fs::create_dir_all(&data_dir)?;
 
-    let config = config::Config::load(&data_dir)?;
+    let mut config = config::Config::load(&data_dir)?;
     let storage = storage::Storage::open(&data_dir)?;
+
+    // Commands that need identity - auto-generate if not logged in
+    let needs_identity = matches!(
+        &cli.command,
+        Commands::Invite(_)
+            | Commands::Chat(ChatCommands::Join { .. })
+            | Commands::Send { .. }
+            | Commands::Listen { .. }
+    );
+
+    if needs_identity {
+        let (pubkey, was_generated) = config.ensure_identity()?;
+        if was_generated {
+            let pk = nostr::PublicKey::from_hex(&pubkey)?;
+            let npub = nostr::ToBech32::to_bech32(&pk)?;
+            eprintln!("Generated new identity: {}", npub);
+        }
+    }
 
     match cli.command {
         Commands::Login { key } => {
