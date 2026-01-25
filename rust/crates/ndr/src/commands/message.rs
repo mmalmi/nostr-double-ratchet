@@ -1,5 +1,6 @@
 use anyhow::Result;
 use nostr_double_ratchet::Session;
+use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -87,6 +88,14 @@ pub async fn send(
     updated_chat.last_message_at = Some(timestamp);
     updated_chat.session_state = serde_json::to_string(&session.state)?;
     storage.save_chat(&updated_chat)?;
+
+    // Publish to relays
+    let client = Client::default();
+    for relay in &config.relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+    client.send_event(encrypted_event.clone()).await?;
 
     output.success("send", MessageSent {
         id: msg_id,

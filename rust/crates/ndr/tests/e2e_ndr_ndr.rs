@@ -10,8 +10,6 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
@@ -113,22 +111,11 @@ async fn test_ndr_to_ndr_session() {
     // Give Alice's listener time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Bob joins via the invite URL
+    // Bob joins via the invite URL (ndr chat join now publishes response to relay automatically)
     let result = run_ndr(bob_dir.path(), &["chat", "join", &invite_url]).await;
     assert_eq!(result["status"], "ok", "Bob join failed");
     let bob_chat_id = result["data"]["id"].as_str().unwrap().to_string();
-    let response_event = result["data"]["response_event"].as_str().unwrap().to_string();
     println!("Bob joined chat: {}", bob_chat_id);
-
-    // Bob needs to publish the response event to the relay
-    let (mut ws, _) = connect_async(&relay_url).await.expect("Failed to connect to relay");
-    let event_msg = format!(r#"["EVENT",{}]"#, response_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send response event");
-
-    // Wait for relay OK
-    if let Some(Ok(Message::Text(response))) = ws.next().await {
-        println!("Relay response to Bob's response event: {}", response);
-    }
 
     // Wait for Alice's listener to receive the session_created event
     let mut alice_chat_id = None;
@@ -168,14 +155,9 @@ async fn test_ndr_to_ndr_session() {
     let (mut alice_listen_child, mut alice_listen_reader) = start_ndr_listen(alice_dir.path(), Some(&alice_chat_id)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Bob sends a message
+    // Bob sends a message (ndr send now publishes to relay automatically)
     let result = run_ndr(bob_dir.path(), &["send", &bob_chat_id, "Hello from Bob!"]).await;
     assert_eq!(result["status"], "ok", "Bob send failed");
-    let bob_msg_event = result["data"]["event"].as_str().unwrap().to_string();
-
-    // Publish Bob's message to relay
-    let event_msg = format!(r#"["EVENT",{}]"#, bob_msg_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send message event");
 
     // Wait for Alice to receive the message
     let mut alice_received = false;
@@ -211,14 +193,9 @@ async fn test_ndr_to_ndr_session() {
     let (mut bob_listen_child, mut bob_listen_reader) = start_ndr_listen(bob_dir.path(), Some(&bob_chat_id)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Alice sends a message
+    // Alice sends a message (ndr send now publishes to relay automatically)
     let result = run_ndr(alice_dir.path(), &["send", &alice_chat_id, "Hello from Alice!"]).await;
     assert_eq!(result["status"], "ok", "Alice send failed");
-    let alice_msg_event = result["data"]["event"].as_str().unwrap().to_string();
-
-    // Publish Alice's message to relay
-    let event_msg = format!(r#"["EVENT",{}]"#, alice_msg_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send message event");
 
     // Wait for Bob to receive the message
     let mut bob_received = false;
@@ -247,7 +224,6 @@ async fn test_ndr_to_ndr_session() {
 
     // Cleanup
     let _ = bob_listen_child.kill().await;
-    ws.close(None).await.ok();
     relay.stop().await;
 
     assert!(bob_received, "Bob did not receive Alice's message");

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -83,8 +84,14 @@ pub async fn join(
 
     storage.save_chat(&chat)?;
 
-    // Return the response event that should be published to nostr
-    // For now we include it in the output so it can be published externally
+    // Publish response event to relays
+    let client = Client::default();
+    for relay in &config.relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+    client.send_event(response_event.clone()).await?;
+
     output.success("chat.join", ChatJoinedWithEvent {
         id,
         their_pubkey,
