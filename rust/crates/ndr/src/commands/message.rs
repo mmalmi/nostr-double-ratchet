@@ -213,6 +213,29 @@ pub async fn receive(
     anyhow::bail!("Could not decrypt message - no matching session found");
 }
 
+/// Helper to collect ephemeral pubkeys from chats for subscription
+fn collect_chat_pubkeys(storage: &Storage, chat_id: Option<&str>) -> Result<Vec<nostr::PublicKey>> {
+    let chats = if let Some(id) = chat_id {
+        vec![storage.get_chat(id)?
+            .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?]
+    } else {
+        storage.list_chats()?
+    };
+
+    let mut pubkeys: Vec<nostr::PublicKey> = Vec::new();
+    for chat in &chats {
+        if let Ok(state) = serde_json::from_str::<nostr_double_ratchet::SessionState>(&chat.session_state) {
+            if let Some(pk) = state.their_current_nostr_public_key {
+                pubkeys.push(pk);
+            }
+            if let Some(pk) = state.their_next_nostr_public_key {
+                pubkeys.push(pk);
+            }
+        }
+    }
+    Ok(pubkeys)
+}
+
 /// Listen for new messages and invite responses
 pub async fn listen(
     chat_id: Option<&str>,
@@ -222,33 +245,14 @@ pub async fn listen(
 ) -> Result<()> {
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
     use nostr_double_ratchet::{MESSAGE_EVENT_KIND, INVITE_RESPONSE_KIND};
+    use std::collections::HashSet;
 
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
     let our_private_key = config.private_key_bytes()?;
-
-    // Get the chats we're listening for (if any)
-    let chats = if let Some(id) = chat_id {
-        vec![storage.get_chat(id)?
-            .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?]
-    } else {
-        storage.list_chats()?
-    };
-
-    // Collect all the public keys we need to listen for messages from
-    let mut pubkeys_to_watch: Vec<nostr::PublicKey> = Vec::new();
-    for chat in &chats {
-        if let Ok(state) = serde_json::from_str::<nostr_double_ratchet::SessionState>(&chat.session_state) {
-            if let Some(pk) = state.their_current_nostr_public_key {
-                pubkeys_to_watch.push(pk);
-            }
-            if let Some(pk) = state.their_next_nostr_public_key {
-                pubkeys_to_watch.push(pk);
-            }
-        }
-    }
+    let chat_id_owned = chat_id.map(|s| s.to_string());
 
     // Connect to relays
     let client = Client::default();
@@ -260,20 +264,22 @@ pub async fn listen(
     let scope = chat_id.map(|id| format!("chat {}", id))
         .unwrap_or_else(|| "all chats".to_string());
 
-    // Build filters
+    // Track currently subscribed pubkeys to detect when we need to resubscribe
+    let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
+    let mut subscribed_pubkeys: HashSet<String> = pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
+
+    // Build initial filters
     let mut filters = Vec::new();
 
-    // Filter for messages (if we have chats)
     if !pubkeys_to_watch.is_empty() {
         filters.push(
             Filter::new()
                 .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                .authors(pubkeys_to_watch)
+                .authors(pubkeys_to_watch.clone())
         );
     }
 
-    // Filter for invite responses - listen for responses to our stored invites
-    // Invite responses are tagged with "p" = the invite's ephemeral public key
+    // Filter for invite responses
     let stored_invites = storage.list_invites()?;
     let ephemeral_pubkeys: Vec<nostr::PublicKey> = stored_invites.iter()
         .filter_map(|stored| {
@@ -312,11 +318,11 @@ pub async fn listen(
                     match invite.process_invite_response(&event, our_private_key.clone()) {
                         Ok(Some((session, their_pubkey, _device_id))) => {
                             let session_state = serde_json::to_string(&session.state)?;
-                            let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                            let new_chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
                             let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
 
                             let chat = crate::storage::StoredChat {
-                                id: chat_id.clone(),
+                                id: new_chat_id.clone(),
                                 their_pubkey: their_pubkey_hex.clone(),
                                 created_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)?
@@ -330,9 +336,19 @@ pub async fn listen(
 
                             output.event("session_created", serde_json::json!({
                                 "invite_id": stored_invite.id,
-                                "chat_id": chat_id,
+                                "chat_id": new_chat_id,
                                 "their_pubkey": their_pubkey_hex,
                             }));
+
+                            // Update subscription for new chat's ephemeral keys
+                            let new_pubkeys = collect_chat_pubkeys(storage, chat_id_owned.as_deref())?;
+                            if !new_pubkeys.is_empty() {
+                                let new_filter = Filter::new()
+                                    .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+                                    .authors(new_pubkeys.clone());
+                                client.subscribe(vec![new_filter], None).await?;
+                                subscribed_pubkeys = new_pubkeys.iter().map(|pk| pk.to_hex()).collect();
+                            }
 
                             break;
                         }
@@ -387,6 +403,20 @@ pub async fn listen(
                                 content,
                                 timestamp,
                             });
+
+                            // KEY FIX: Update subscription after receiving a message
+                            // because the ratchet may have rotated ephemeral keys
+                            let new_pubkeys = collect_chat_pubkeys(storage, chat_id_owned.as_deref())?;
+                            let new_pubkey_set: HashSet<String> = new_pubkeys.iter().map(|pk| pk.to_hex()).collect();
+
+                            if new_pubkey_set != subscribed_pubkeys {
+                                // Keys changed, resubscribe
+                                let new_filter = Filter::new()
+                                    .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+                                    .authors(new_pubkeys.clone());
+                                client.subscribe(vec![new_filter], None).await?;
+                                subscribed_pubkeys = new_pubkey_set;
+                            }
 
                             break;
                         }
