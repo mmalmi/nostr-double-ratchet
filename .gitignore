@@ -27,3 +27,4 @@ docs
 # Rust
 target/
 Cargo.lock
+.pnpm-store
