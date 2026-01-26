@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::output::Output;
-use crate::storage::{Storage, StoredMessage};
+use crate::storage::{Storage, StoredMessage, StoredReaction};
 
 #[derive(Serialize)]
 struct MessageSent {
@@ -21,6 +21,7 @@ struct MessageSent {
 struct MessageList {
     chat_id: String,
     messages: Vec<MessageInfo>,
+    reactions: Vec<ReactionInfo>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +40,44 @@ struct IncomingMessage {
     from_pubkey: String,
     content: String,
     timestamp: u64,
+}
+
+#[derive(Serialize)]
+struct IncomingReaction {
+    chat_id: String,
+    from_pubkey: String,
+    message_id: String,
+    emoji: String,
+    timestamp: u64,
+}
+
+#[derive(Serialize)]
+struct ReactionInfo {
+    id: String,
+    message_id: String,
+    from_pubkey: String,
+    emoji: String,
+    timestamp: u64,
+    is_outgoing: bool,
+}
+
+/// Parsed reaction payload from decrypted content
+#[derive(Debug)]
+struct ReactionPayload {
+    message_id: String,
+    emoji: String,
+}
+
+/// Try to parse content as a reaction payload
+fn parse_reaction(content: &str) -> Option<ReactionPayload> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    if parsed.get("type")?.as_str()? != "reaction" {
+        return None;
+    }
+    Some(ReactionPayload {
+        message_id: parsed.get("messageId")?.as_str()?.to_string(),
+        emoji: parsed.get("emoji")?.as_str()?.to_string(),
+    })
 }
 
 /// Send a message
@@ -136,6 +175,24 @@ pub async fn react(
     let encrypted_event = session.send_reaction(message_id, emoji)
         .map_err(|e| anyhow::anyhow!("Failed to encrypt reaction: {}", e))?;
 
+    let pubkey = config.public_key()?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    // Save outgoing reaction
+    let reaction_id = encrypted_event.id.to_hex();
+    let stored = StoredReaction {
+        id: reaction_id.clone(),
+        chat_id: chat_id.to_string(),
+        message_id: message_id.to_string(),
+        from_pubkey: pubkey,
+        emoji: emoji.to_string(),
+        timestamp,
+        is_outgoing: true,
+    };
+    storage.save_reaction(&stored)?;
+
     // Update chat with new session state
     let mut updated_chat = chat;
     updated_chat.session_state = serde_json::to_string(&session.state)?;
@@ -150,9 +207,11 @@ pub async fn react(
     client.send_event(encrypted_event.clone()).await?;
 
     output.success("react", serde_json::json!({
+        "id": reaction_id,
         "chat_id": chat_id,
         "message_id": message_id,
         "emoji": emoji,
+        "timestamp": timestamp,
         "event": nostr::JsonUtil::as_json(&encrypted_event),
     }));
 
@@ -170,6 +229,7 @@ pub async fn read(
         .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
 
     let messages = storage.get_messages(chat_id, limit)?;
+    let reactions = storage.get_reactions(chat_id, limit)?;
 
     let message_infos: Vec<MessageInfo> = messages
         .into_iter()
@@ -182,9 +242,22 @@ pub async fn read(
         })
         .collect();
 
+    let reaction_infos: Vec<ReactionInfo> = reactions
+        .into_iter()
+        .map(|r| ReactionInfo {
+            id: r.id,
+            message_id: r.message_id,
+            from_pubkey: r.from_pubkey,
+            emoji: r.emoji,
+            timestamp: r.timestamp,
+            is_outgoing: r.is_outgoing,
+        })
+        .collect();
+
     output.success("read", MessageList {
         chat_id: chat_id.to_string(),
         messages: message_infos,
+        reactions: reaction_infos,
     });
 
     Ok(())
@@ -510,32 +583,61 @@ pub async fn listen(
 
                             let timestamp = event.created_at.as_u64();
                             let sender_pubkey = event.pubkey;
+                            let from_pubkey_hex = hex::encode(sender_pubkey.to_bytes());
 
-                            // Use outer event ID as message ID (for reaction compatibility with iris-chat)
-                            let msg_id = event.id.to_hex();
-                            let stored = StoredMessage {
-                                id: msg_id.clone(),
-                                chat_id: chat.id.clone(),
-                                from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                                content: content.clone(),
-                                timestamp,
-                                is_outgoing: false,
-                            };
+                            // Check if this is a reaction
+                            if let Some(reaction_payload) = parse_reaction(&content) {
+                                let reaction_id = event.id.to_hex();
+                                let stored = StoredReaction {
+                                    id: reaction_id,
+                                    chat_id: chat.id.clone(),
+                                    message_id: reaction_payload.message_id.clone(),
+                                    from_pubkey: from_pubkey_hex.clone(),
+                                    emoji: reaction_payload.emoji.clone(),
+                                    timestamp,
+                                    is_outgoing: false,
+                                };
 
-                            storage.save_message(&stored)?;
+                                storage.save_reaction(&stored)?;
 
-                            let mut updated_chat = chat.clone();
-                            updated_chat.last_message_at = Some(timestamp);
-                            updated_chat.session_state = serde_json::to_string(&session.state)?;
-                            storage.save_chat(&updated_chat)?;
+                                let mut updated_chat = chat.clone();
+                                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                                storage.save_chat(&updated_chat)?;
 
-                            output.event("message", IncomingMessage {
-                                chat_id: updated_chat.id,
-                                message_id: msg_id,
-                                from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                                content,
-                                timestamp,
-                            });
+                                output.event("reaction", IncomingReaction {
+                                    chat_id: updated_chat.id,
+                                    from_pubkey: from_pubkey_hex,
+                                    message_id: reaction_payload.message_id,
+                                    emoji: reaction_payload.emoji,
+                                    timestamp,
+                                });
+                            } else {
+                                // Regular message - use outer event ID as message ID (for reaction compatibility with iris-chat)
+                                let msg_id = event.id.to_hex();
+                                let stored = StoredMessage {
+                                    id: msg_id.clone(),
+                                    chat_id: chat.id.clone(),
+                                    from_pubkey: from_pubkey_hex.clone(),
+                                    content: content.clone(),
+                                    timestamp,
+                                    is_outgoing: false,
+                                };
+
+                                storage.save_message(&stored)?;
+
+                                let mut updated_chat = chat.clone();
+                                updated_chat.last_message_at = Some(timestamp);
+                                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                                storage.save_chat(&updated_chat)?;
+
+                                output.event("message", IncomingMessage {
+                                    chat_id: updated_chat.id,
+                                    message_id: msg_id,
+                                    from_pubkey: from_pubkey_hex,
+                                    content,
+                                    timestamp,
+                                });
+                            }
 
                             // KEY FIX: Update subscription after receiving a message
                             // because the ratchet may have rotated ephemeral keys
