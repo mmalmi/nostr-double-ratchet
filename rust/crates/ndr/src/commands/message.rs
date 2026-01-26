@@ -35,6 +35,7 @@ struct MessageInfo {
 #[derive(Serialize)]
 struct IncomingMessage {
     chat_id: String,
+    message_id: String,
     from_pubkey: String,
     content: String,
     timestamp: u64,
@@ -249,6 +250,7 @@ pub async fn receive(
 
                 output.success("receive", IncomingMessage {
                     chat_id: updated_chat.id,
+                    message_id: msg_id,
                     from_pubkey: hex::encode(sender_pubkey.to_bytes()),
                     content,
                     timestamp,
@@ -512,7 +514,7 @@ pub async fn listen(
                             // Use outer event ID as message ID (for reaction compatibility with iris-chat)
                             let msg_id = event.id.to_hex();
                             let stored = StoredMessage {
-                                id: msg_id,
+                                id: msg_id.clone(),
                                 chat_id: chat.id.clone(),
                                 from_pubkey: hex::encode(sender_pubkey.to_bytes()),
                                 content: content.clone(),
@@ -529,6 +531,7 @@ pub async fn listen(
 
                             output.event("message", IncomingMessage {
                                 chat_id: updated_chat.id,
+                                message_id: msg_id,
                                 from_pubkey: hex::encode(sender_pubkey.to_bytes()),
                                 content,
                                 timestamp,
