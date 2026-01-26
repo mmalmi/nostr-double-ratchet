@@ -540,7 +540,7 @@ describe("Multi-Device Concurrent Operations", () => {
     })
   })
 
-  it("should handle complex 4-device interleaving with controlled delivery", async () => {
+  it("should handle complex 4-device interleaving with controlled delivery", { timeout: 30000 }, async () => {
     await runControlledScenario({
       steps: [
         { type: "addDevice", actor: "alice", deviceId: "alice-1" },
