@@ -246,6 +246,8 @@ pub async fn listen(
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
     use nostr_double_ratchet::{MESSAGE_EVENT_KIND, INVITE_RESPONSE_KIND};
     use std::collections::HashSet;
+    use notify::{Watcher, RecursiveMode, Event as NotifyEvent, EventKind};
+    use std::sync::mpsc;
 
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
@@ -254,56 +256,132 @@ pub async fn listen(
     let our_private_key = config.private_key_bytes()?;
     let chat_id_owned = chat_id.map(|s| s.to_string());
 
-    // Connect to relays
+    // Prepare client (don't connect until we have something to subscribe to)
     let client = Client::default();
     for relay in &config.relays {
         client.add_relay(relay).await?;
     }
-    client.connect().await;
+    let mut connected = false;
 
     let scope = chat_id.map(|id| format!("chat {}", id))
         .unwrap_or_else(|| "all chats".to_string());
 
-    // Track currently subscribed pubkeys to detect when we need to resubscribe
-    let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
-    let mut subscribed_pubkeys: HashSet<String> = pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
+    // Helper to build filters from current state
+    let build_filters = |storage: &Storage, chat_id: Option<&str>| -> Result<(Vec<Filter>, HashSet<String>)> {
+        let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
+        let subscribed_pubkeys: HashSet<String> = pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
+
+        let mut filters = Vec::new();
+
+        if !pubkeys_to_watch.is_empty() {
+            filters.push(
+                Filter::new()
+                    .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+                    .authors(pubkeys_to_watch)
+            );
+        }
+
+        let stored_invites = storage.list_invites()?;
+        let ephemeral_pubkeys: Vec<nostr::PublicKey> = stored_invites.iter()
+            .filter_map(|stored| {
+                nostr_double_ratchet::Invite::deserialize(&stored.serialized)
+                    .ok()
+                    .map(|invite| invite.inviter_ephemeral_public_key)
+            })
+            .collect();
+
+        if !ephemeral_pubkeys.is_empty() {
+            filters.push(
+                Filter::new()
+                    .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
+                    .pubkeys(ephemeral_pubkeys)
+            );
+        }
+
+        Ok((filters, subscribed_pubkeys))
+    };
 
     // Build initial filters
-    let mut filters = Vec::new();
-
-    if !pubkeys_to_watch.is_empty() {
-        filters.push(
-            Filter::new()
-                .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                .authors(pubkeys_to_watch.clone())
-        );
-    }
-
-    // Filter for invite responses
-    let stored_invites = storage.list_invites()?;
-    let ephemeral_pubkeys: Vec<nostr::PublicKey> = stored_invites.iter()
-        .filter_map(|stored| {
-            nostr_double_ratchet::Invite::deserialize(&stored.serialized)
-                .ok()
-                .map(|invite| invite.inviter_ephemeral_public_key)
-        })
-        .collect();
-
-    if !ephemeral_pubkeys.is_empty() {
-        filters.push(
-            Filter::new()
-                .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
-                .pubkeys(ephemeral_pubkeys)
-        );
-    }
+    let (mut filters, mut subscribed_pubkeys) = build_filters(storage, chat_id)?;
 
     output.success_message("listen", &format!("Listening for messages and invite responses on {}... (Ctrl+C to stop)", scope));
 
-    client.subscribe(filters, None).await?;
+    // Set up filesystem watcher for invites and chats directories
+    let (fs_tx, fs_rx) = mpsc::channel();
+    let mut _watcher = notify::recommended_watcher(move |res: Result<NotifyEvent, notify::Error>| {
+        if let Ok(event) = res {
+            if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+                let _ = fs_tx.send(());
+            }
+        }
+    })?;
 
-    // Handle incoming events
+    // Watch storage directories
+    let invites_dir = storage.data_dir().join("invites");
+    let chats_dir = storage.data_dir().join("chats");
+    if invites_dir.exists() {
+        _watcher.watch(&invites_dir, RecursiveMode::NonRecursive)?;
+    }
+    if chats_dir.exists() {
+        _watcher.watch(&chats_dir, RecursiveMode::NonRecursive)?;
+    }
+
+    // Subscribe only if we have filters
+    let mut has_subscription = !filters.is_empty();
+    if has_subscription {
+        if !connected {
+            client.connect().await;
+            connected = true;
+        }
+        client.subscribe(filters.clone(), None).await?;
+    }
+
+    // Wait for invites/chats if we have nothing to subscribe to yet
+    while !has_subscription {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Check for filesystem changes
+        while let Ok(()) = fs_rx.try_recv() {
+            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref())?;
+            if !new_filters.is_empty() {
+                filters = new_filters;
+                subscribed_pubkeys = new_pubkeys;
+                if !connected {
+                    client.connect().await;
+                    connected = true;
+                }
+                client.subscribe(filters.clone(), None).await?;
+                has_subscription = true;
+                break;
+            }
+        }
+    }
+
+    // Handle incoming events - only start after we have a subscription
     let mut notifications = client.notifications();
-    while let Ok(notification) = notifications.recv().await {
+    loop {
+        // Check for filesystem changes (new invites/chats created by other processes)
+        while let Ok(()) = fs_rx.try_recv() {
+            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref())?;
+            if !new_filters.is_empty() && (new_filters.len() != filters.len() || new_pubkeys != subscribed_pubkeys) {
+                filters = new_filters;
+                subscribed_pubkeys = new_pubkeys;
+                client.subscribe(filters.clone(), None).await?;
+            }
+        }
+
+        // Wait for relay notification with timeout to allow fs check
+        let notification = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            notifications.recv()
+        ).await;
+
+        let notification = match notification {
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) => break, // Channel closed
+            Err(_) => continue, // Timeout, loop to check fs
+        };
+
         if let RelayPoolNotification::Event { event, .. } = notification {
             let event_kind = event.kind.as_u16() as u32;
 
