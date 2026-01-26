@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey, VerifiedEvent } from "nostr-tools"
+import { generateSecretKey, getPublicKey } from "nostr-tools"
 import { InviteList, DeviceEntry } from "./InviteList"
 import { Invite } from "./Invite"
 import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, IdentityKey } from "./types"
@@ -87,9 +87,12 @@ export class DeviceManager {
     if (this.initialized) return
     this.initialized = true
 
-    // Load and merge InviteList
+    // Start continuous subscription first
+    this.subscribeToOwnInviteList()
+
+    // Load local and wait for remote
     const local = await this.loadInviteList()
-    const remote = await this.fetchInviteList(this.ownerPublicKey)
+    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
     const inviteList = this.mergeInviteLists(local, remote)
 
     this.inviteList = inviteList
@@ -100,8 +103,6 @@ export class DeviceManager {
     await this.nostrPublish(inviteListEvent).catch((error) => {
       console.error("Failed to publish InviteList:", error)
     })
-
-    this.subscribeToOwnInviteList()
   }
 
   getOwnerPublicKey(): string {
@@ -168,44 +169,6 @@ export class DeviceManager {
     await this.storage.put(this.inviteListKey(), list.serialize())
   }
 
-  private fetchInviteList(pubkey: string, timeoutMs = 500): Promise<InviteList | null> {
-    return new Promise((resolve) => {
-      let latestEvent: { event: VerifiedEvent; inviteList: InviteList } | null = null
-      let resolved = false
-
-      setTimeout(() => {
-        if (resolved) return
-        resolved = true
-        unsubscribe()
-        resolve(latestEvent?.inviteList ?? null)
-      }, timeoutMs)
-
-      let unsubscribe: () => void = () => {}
-      unsubscribe = this.nostrSubscribe(
-        {
-          kinds: [INVITE_LIST_EVENT_KIND],
-          authors: [pubkey],
-          "#d": ["double-ratchet/invite-list"],
-        },
-        (event) => {
-          if (resolved) return
-          try {
-            const inviteList = InviteList.fromEvent(event)
-            if (!latestEvent || event.created_at >= latestEvent.event.created_at) {
-              latestEvent = { event, inviteList }
-            }
-          } catch {
-            // Invalid event
-          }
-        }
-      )
-
-      if (resolved) {
-        unsubscribe()
-      }
-    })
-  }
-
   private mergeInviteLists(local: InviteList | null, remote: InviteList | null): InviteList {
     if (local && remote) return local.merge(remote)
     if (local) return local
@@ -214,7 +177,7 @@ export class DeviceManager {
   }
 
   private async modifyInviteList(change: (list: InviteList) => void): Promise<void> {
-    const remote = await this.fetchInviteList(this.ownerPublicKey)
+    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
     const merged = this.mergeInviteLists(this.inviteList, remote)
     change(merged)
 
@@ -225,21 +188,15 @@ export class DeviceManager {
   }
 
   private subscribeToOwnInviteList(): void {
-    const unsubscribe = this.nostrSubscribe(
-      {
-        kinds: [INVITE_LIST_EVENT_KIND],
-        authors: [this.ownerPublicKey],
-        "#d": ["double-ratchet/invite-list"],
-      },
-      (event) => {
-        try {
-          const remote = InviteList.fromEvent(event)
-          if (this.inviteList) {
-            this.inviteList = this.inviteList.merge(remote)
-            this.saveInviteList(this.inviteList).catch(console.error)
-          }
-        } catch {
-          // Invalid event, ignore
+    const unsubscribe = InviteList.fromUser(
+      this.ownerPublicKey,
+      this.nostrSubscribe,
+      (remote) => {
+        if (this.inviteList) {
+          this.inviteList = this.inviteList.merge(remote)
+          this.saveInviteList(this.inviteList).catch(console.error)
+        } else {
+          this.inviteList = remote
         }
       }
     )
@@ -433,7 +390,7 @@ export class DelegateManager {
     const ownerPubkey = this.getOwnerPublicKey()
     if (!ownerPubkey) return false
 
-    const inviteList = await this.fetchInviteList(ownerPubkey)
+    const inviteList = await InviteList.waitFor(ownerPubkey, this.nostrSubscribe, 500)
     if (!inviteList) return true
 
     const device = inviteList.getDevice(this.devicePublicKey)
@@ -503,44 +460,6 @@ export class DelegateManager {
 
   private async saveInvite(invite: Invite): Promise<void> {
     await this.storage.put(this.inviteKey(), invite.serialize())
-  }
-
-  private fetchInviteList(pubkey: string, timeoutMs = 500): Promise<InviteList | null> {
-    return new Promise((resolve) => {
-      let latestEvent: { event: VerifiedEvent; inviteList: InviteList } | null = null
-      let resolved = false
-
-      setTimeout(() => {
-        if (resolved) return
-        resolved = true
-        unsubscribe()
-        resolve(latestEvent?.inviteList ?? null)
-      }, timeoutMs)
-
-      let unsubscribe: () => void = () => {}
-      unsubscribe = this.nostrSubscribe(
-        {
-          kinds: [INVITE_LIST_EVENT_KIND],
-          authors: [pubkey],
-          "#d": ["double-ratchet/invite-list"],
-        },
-        (event) => {
-          if (resolved) return
-          try {
-            const inviteList = InviteList.fromEvent(event)
-            if (!latestEvent || event.created_at >= latestEvent.event.created_at) {
-              latestEvent = { event, inviteList }
-            }
-          } catch {
-            // Invalid event
-          }
-        }
-      )
-
-      if (resolved) {
-        unsubscribe()
-      }
-    })
   }
 }
 

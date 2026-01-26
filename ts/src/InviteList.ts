@@ -1,5 +1,5 @@
 import { VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
-import { INVITE_LIST_EVENT_KIND } from "./types"
+import { INVITE_LIST_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
 
 const now = () => Math.round(Date.now() / 1000)
 
@@ -207,5 +207,55 @@ export class InviteList {
       activeDevices,
       Array.from(mergedRemoved.values())
     )
+  }
+
+  /**
+   * Subscribe to InviteList events from a user.
+   * Similar to Invite.fromUser pattern.
+   */
+  static fromUser(
+    user: string,
+    subscribe: NostrSubscribe,
+    onInviteList: (inviteList: InviteList) => void
+  ): Unsubscribe {
+    return subscribe(
+      {
+        kinds: [INVITE_LIST_EVENT_KIND],
+        authors: [user],
+        "#d": ["double-ratchet/invite-list"],
+      },
+      (event) => {
+        if (event.pubkey !== user) return
+        try {
+          const inviteList = InviteList.fromEvent(event)
+          onInviteList(inviteList)
+        } catch {
+          // Invalid event
+        }
+      }
+    )
+  }
+
+  /**
+   * Wait for InviteList from a user with timeout.
+   * Returns the latest InviteList received within the timeout, or null.
+   */
+  static waitFor(
+    user: string,
+    subscribe: NostrSubscribe,
+    timeoutMs = 500
+  ): Promise<InviteList | null> {
+    return new Promise((resolve) => {
+      let latest: InviteList | null = null
+
+      setTimeout(() => {
+        unsubscribe()
+        resolve(latest)
+      }, timeoutMs)
+
+      const unsubscribe = InviteList.fromUser(user, subscribe, (list) => {
+        latest = latest ? latest.merge(list) : list
+      })
+    })
   }
 }
