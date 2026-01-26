@@ -37,8 +37,9 @@ describe('Invite', () => {
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
+    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     expect(session).toBeDefined()
     expect(event).toBeDefined()
@@ -53,8 +54,9 @@ describe('Invite', () => {
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
+    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -112,7 +114,8 @@ describe('Invite', () => {
       onSession
     )
 
-    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
+    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey, bobOwnerPublicKey)
     messageQueue.push(event)
 
     // Wait for Alice's session to be created
@@ -200,7 +203,8 @@ describe('Invite', () => {
       onSession
     )
 
-    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
+    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey, bobOwnerPublicKey)
     messageQueue.push(event)
 
     // Wait for Alice's session to be created
@@ -209,7 +213,7 @@ describe('Invite', () => {
     expect(aliceSession).toBeDefined()
 
     let aliceMessages = createEventStream(aliceSession!)
-    const bobMessages = createEventStream(bobSession)
+    const _bobMessages = createEventStream(bobSession)
 
     // Bob sends first message
     messageQueue.push(bobSession.send('Hello Alice!').event)
@@ -231,14 +235,15 @@ describe('Invite', () => {
     expect(messageQueue.length).toBe(0)
   })
 
-  it('should accept invite with deviceId parameter', async () => {
+  it('should accept invite with ownerPublicKey parameter', async () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, 'device-1')
+    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     expect(session).toBeDefined()
     expect(event).toBeDefined()
@@ -247,14 +252,15 @@ describe('Invite', () => {
     expect(event.tags).toEqual([['p', invite.inviterEphemeralPublicKey]])
   })
 
-  it('should pass deviceId to onSession callback', async () => {
+  it('should pass identity to onSession callback', async () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, 'device-1')
+    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -267,27 +273,27 @@ describe('Invite', () => {
 
     invite.listen(
       alicePrivateKey,
-      mockSubscribe, 
+      mockSubscribe,
       onSession
     )
 
     await new Promise(resolve => setTimeout(resolve, 100))
 
     expect(onSession).toHaveBeenCalledTimes(1)
-    const [session, identity, deviceId] = onSession.mock.calls[0]
+    const [session, identity] = onSession.mock.calls[0]
     expect(session).toBeDefined()
     expect(identity).toBe(bobPublicKey)
-    expect(deviceId).toBe('device-1')
   })
 
-  it('should use event.id as session name regardless of deviceId', async () => {
+  it('should use event.id as session name', async () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, 'device-1')
+    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -298,7 +304,7 @@ describe('Invite', () => {
 
     invite.listen(
       alicePrivateKey,
-      mockSubscribe, 
+      mockSubscribe,
       onSession
     )
 
@@ -309,14 +315,15 @@ describe('Invite', () => {
     expect(session.name).toBe(event.id)
   })
 
-  it('should maintain backward compatibility with invites without deviceId', async () => {
+  it('should use inviteePublicKey as device identity', async () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
+    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -327,31 +334,33 @@ describe('Invite', () => {
 
     invite.listen(
       alicePrivateKey,
-      mockSubscribe, 
+      mockSubscribe,
       onSession
     )
 
     await new Promise(resolve => setTimeout(resolve, 100))
 
     expect(onSession).toHaveBeenCalledTimes(1)
-    const [session, identity, deviceId] = onSession.mock.calls[0]
+    const [session, identity] = onSession.mock.calls[0]
     expect(session).toBeDefined()
+    // inviteePublicKey serves as both identity and device ID
     expect(identity).toBe(bobPublicKey)
-    expect(deviceId).toBeUndefined()
     expect(session.name).toBe(event.id)
   })
 
-  it('should handle mixed old and new format invitations', async () => {
+  it('should handle multiple invite acceptances', async () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
     const invite = Invite.createNew(alicePublicKey)
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
     const charlieSecretKey = generateSecretKey()
     const charliePublicKey = getPublicKey(charlieSecretKey)
+    const charlieOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event: bobEvent } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey)
-    const { event: charlieEvent } = await invite.accept(dummySubscribe, charliePublicKey, charlieSecretKey, 'device-1')
+    const { event: bobEvent } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { event: charlieEvent } = await invite.accept(dummySubscribe, charliePublicKey, charlieSecretKey, charlieOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -371,11 +380,15 @@ describe('Invite', () => {
     const bobCall = calls.find(([, identity]) => identity === bobPublicKey)
     const charlieCall = calls.find(([, identity]) => identity === charliePublicKey)
 
-    expect(bobCall[2]).toBeUndefined() // no deviceId
-    expect(bobCall[0].name).toBe(bobEvent.id) // session name is event ID
+    expect(bobCall).toBeDefined()
+    expect(charlieCall).toBeDefined()
 
-    expect(charlieCall[2]).toBe('device-1') // has deviceId
-    expect(charlieCall[0].name).toBe(charlieEvent.id) // session name is event ID
+    // Both use inviteePublicKey as identity (which is also their device ID)
+    expect(bobCall![1]).toBe(bobPublicKey)
+    expect(bobCall![0].name).toBe(bobEvent.id)
+
+    expect(charlieCall![1]).toBe(charliePublicKey)
+    expect(charlieCall![0].name).toBe(charlieEvent.id)
   })
 
   it('should create valid deletion/tombstone event', () => {
@@ -487,10 +500,12 @@ describe('Invite', () => {
         )
       })
 
+      const bobOwnerPublicKey = getPublicKey(generateSecretKey())
       const { session: bobSession, event: acceptanceEvent } = await bobInvite.accept(
         createSubscribe(),
         bobPublicKey,
-        bobPrivateKey
+        bobPrivateKey,
+        bobOwnerPublicKey
       )
 
       messageQueue.push(acceptanceEvent)

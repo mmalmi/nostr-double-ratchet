@@ -90,6 +90,7 @@ describe('inviteUtils', () => {
       const inviteePrivateKey = generateSecretKey()
       const inviteePublicKey = getPublicKey(inviteePrivateKey)
       const inviteeSessionKeypair = generateEphemeralKeypair()
+      const ownerPublicKey = getPublicKey(generateSecretKey()) // Invitee's owner key
 
       // Invitee encrypts response
       const encrypted = await encryptInviteResponse({
@@ -99,7 +100,7 @@ describe('inviteUtils', () => {
         inviterPublicKey,
         inviterEphemeralPublicKey: inviterEphemeralKeypair.publicKey,
         sharedSecret,
-        deviceId: 'test-device',
+        ownerPublicKey,
       })
 
       expect(encrypted.innerEvent).toBeDefined()
@@ -122,10 +123,10 @@ describe('inviteUtils', () => {
 
       expect(decrypted.inviteeIdentity).toBe(inviteePublicKey)
       expect(decrypted.inviteeSessionPublicKey).toBe(inviteeSessionKeypair.publicKey)
-      expect(decrypted.deviceId).toBe('test-device')
+      expect(decrypted.ownerPublicKey).toBe(ownerPublicKey)
     })
 
-    it('should work without deviceId', async () => {
+    it('should work with ownerPublicKey for chat routing', async () => {
       const inviterPrivateKey = generateSecretKey()
       const inviterPublicKey = getPublicKey(inviterPrivateKey)
       const inviterEphemeralKeypair = generateEphemeralKeypair()
@@ -134,6 +135,7 @@ describe('inviteUtils', () => {
       const inviteePrivateKey = generateSecretKey()
       const inviteePublicKey = getPublicKey(inviteePrivateKey)
       const inviteeSessionKeypair = generateEphemeralKeypair()
+      const ownerPublicKey = getPublicKey(generateSecretKey())
 
       const encrypted = await encryptInviteResponse({
         inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
@@ -142,6 +144,7 @@ describe('inviteUtils', () => {
         inviterPublicKey,
         inviterEphemeralPublicKey: inviterEphemeralKeypair.publicKey,
         sharedSecret,
+        ownerPublicKey,
       })
 
       const decrypted = await decryptInviteResponse({
@@ -154,7 +157,7 @@ describe('inviteUtils', () => {
 
       expect(decrypted.inviteeIdentity).toBe(inviteePublicKey)
       expect(decrypted.inviteeSessionPublicKey).toBe(inviteeSessionKeypair.publicKey)
-      expect(decrypted.deviceId).toBeUndefined()
+      expect(decrypted.ownerPublicKey).toBe(ownerPublicKey)
     })
 
     it('should use custom encrypt/decrypt functions when provided', async () => {
@@ -166,6 +169,7 @@ describe('inviteUtils', () => {
       const inviteePrivateKey = generateSecretKey()
       const inviteePublicKey = getPublicKey(inviteePrivateKey)
       const inviteeSessionKeypair = generateEphemeralKeypair()
+      const ownerPublicKey = getPublicKey(generateSecretKey())
 
       // Custom encrypt function
       const encrypt = async (plaintext: string, pubkey: string) => {
@@ -183,6 +187,7 @@ describe('inviteUtils', () => {
         inviterPublicKey,
         inviterEphemeralPublicKey: inviterEphemeralKeypair.publicKey,
         sharedSecret,
+        ownerPublicKey,
         encrypt,
       })
 
@@ -196,6 +201,7 @@ describe('inviteUtils', () => {
 
       expect(decrypted.inviteeIdentity).toBe(inviteePublicKey)
       expect(decrypted.inviteeSessionPublicKey).toBe(inviteeSessionKeypair.publicKey)
+      expect(decrypted.ownerPublicKey).toBe(ownerPublicKey)
     })
 
     it('should fail to decrypt with wrong ephemeral key', async () => {
@@ -208,6 +214,7 @@ describe('inviteUtils', () => {
       const inviteePrivateKey = generateSecretKey()
       const inviteePublicKey = getPublicKey(inviteePrivateKey)
       const inviteeSessionKeypair = generateEphemeralKeypair()
+      const ownerPublicKey = getPublicKey(generateSecretKey())
 
       const encrypted = await encryptInviteResponse({
         inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
@@ -216,6 +223,7 @@ describe('inviteUtils', () => {
         inviterPublicKey,
         inviterEphemeralPublicKey: inviterEphemeralKeypair.publicKey,
         sharedSecret,
+        ownerPublicKey,
       })
 
       await expect(
@@ -239,6 +247,7 @@ describe('inviteUtils', () => {
       const inviteePrivateKey = generateSecretKey()
       const inviteePublicKey = getPublicKey(inviteePrivateKey)
       const inviteeSessionKeypair = generateEphemeralKeypair()
+      const ownerPublicKey = getPublicKey(generateSecretKey())
 
       const encrypted = await encryptInviteResponse({
         inviteeSessionPublicKey: inviteeSessionKeypair.publicKey,
@@ -247,6 +256,7 @@ describe('inviteUtils', () => {
         inviterPublicKey,
         inviterEphemeralPublicKey: inviterEphemeralKeypair.publicKey,
         sharedSecret,
+        ownerPublicKey,
       })
 
       await expect(

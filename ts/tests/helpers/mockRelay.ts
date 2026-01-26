@@ -49,8 +49,11 @@ export class MockRelay {
       tags: ndkEvent.tags || [],
     } as VerifiedEvent
 
-    // Handle replaceable events (kinds 10000-19999): keep only latest per pubkey + d-tag
-    if (event.kind >= 10000 && event.kind < 20000) {
+    // Handle replaceable events (kinds 10000-19999) and parameterized replaceable events (30000-39999)
+    // Keep only latest per pubkey + kind + d-tag
+    const isReplaceable = (event.kind >= 10000 && event.kind < 20000) ||
+                          (event.kind >= 30000 && event.kind < 40000)
+    if (isReplaceable) {
       const dTag = event.tags?.find((t) => t[0] === "d")?.[1]
       this.events = this.events.filter((e) => {
         if (e.kind !== event.kind || e.pubkey !== event.pubkey) return true

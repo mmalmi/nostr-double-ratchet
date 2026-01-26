@@ -119,6 +119,19 @@ export class ControlledMockRelay {
   ): Promise<string> {
     const verifiedEvent = await this.signEvent(event, signerSecretKey)
 
+    // Handle replaceable events (kinds 10000-19999) and parameterized replaceable events (30000-39999)
+    // Keep only latest per pubkey + kind + d-tag
+    const isReplaceable = (event.kind >= 10000 && event.kind < 20000) ||
+                          (event.kind >= 30000 && event.kind < 40000)
+    if (isReplaceable) {
+      const dTag = event.tags?.find((t) => t[0] === "d")?.[1]
+      this.deliveredEvents = this.deliveredEvents.filter((e) => {
+        if (e.kind !== event.kind || e.pubkey !== event.pubkey) return true
+        const existingDTag = e.tags?.find((t: string[]) => t[0] === "d")?.[1]
+        return existingDTag !== dTag
+      })
+    }
+
     this.deliveredEvents.push(verifiedEvent)
     const activeSubs = Array.from(this.subscriptions.values()).filter(s => !s.closed)
     const subFilters = activeSubs.map(s => s.filters.map(f => f.authors?.map(a => a.slice(0, 8)).join(',') || 'none').join(';')).join(' | ')
