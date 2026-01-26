@@ -1,7 +1,8 @@
 import { vi } from "vitest"
-import { OwnerDeviceManager, DelegateDeviceManager } from "../../src/DeviceManager"
+import { DeviceManager, DelegateManager } from "../../src/DeviceManager"
 import {
   Filter,
+  finalizeEvent,
   generateSecretKey,
   getPublicKey,
   UnsignedEvent,
@@ -28,6 +29,7 @@ export const createControlledMockSessionManager = async (
   const publicKey = getPublicKey(secretKey)
 
   const mockStorage = existingStorage || new InMemoryStorageAdapter()
+  const delegateStorage = new InMemoryStorageAdapter()
   const storageSpy = {
     get: vi.spyOn(mockStorage, "get"),
     del: vi.spyOn(mockStorage, "del"),
@@ -57,12 +59,10 @@ export const createControlledMockSessionManager = async (
     }
   })
 
-  // Create DeviceManager first to handle InviteList
-  const deviceManager = new OwnerDeviceManager({
+  // Create DeviceManager for InviteList authority
+  const deviceManager = new DeviceManager({
     ownerPublicKey: publicKey,
     identityKey: secretKey,
-    deviceId,
-    deviceLabel: deviceId,
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: mockStorage,
@@ -70,8 +70,52 @@ export const createControlledMockSessionManager = async (
 
   await deviceManager.init()
 
-  // Use DeviceManager to create properly configured SessionManager
-  const manager = deviceManager.createSessionManager()
+  // Create DelegateManager for device identity (same flow as any device!)
+  // Need separate publish function that signs with delegate key
+  let delegatePrivateKey: Uint8Array | null = null
+
+  const delegateSubscribe = vi
+    .fn()
+    .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
+      const handle = mockRelay.subscribe(filter, onEvent)
+      return handle.close
+    })
+
+  const delegatePublish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
+    if ('sig' in event && event.sig) {
+      const verifiedEvent = event as VerifiedEvent
+      await mockRelay.publishAndDeliver(event as UnsignedEvent)
+      return verifiedEvent
+    }
+    if (!delegatePrivateKey) {
+      throw new Error("Delegate private key not set yet")
+    }
+    const signedEvent = finalizeEvent(event, delegatePrivateKey)
+    if (autoDeliver) {
+      await mockRelay.publishAndDeliver(signedEvent as UnsignedEvent)
+    } else {
+      await mockRelay.publish(signedEvent as UnsignedEvent)
+    }
+    return signedEvent
+  })
+
+  const { manager: delegateManager, payload } = DelegateManager.create({
+    nostrSubscribe: delegateSubscribe,
+    nostrPublish: delegatePublish,
+    storage: delegateStorage,
+  })
+
+  delegatePrivateKey = delegateManager.getIdentityKey()
+  await delegateManager.init()
+
+  // Add device to InviteList
+  await deviceManager.addDevice(payload)
+
+  // Wait for activation
+  await delegateManager.waitForActivation(5000)
+
+  // Create SessionManager using DelegateManager
+  const manager = delegateManager.createSessionManager()
   await manager.init()
 
   const onEvent = vi.fn()
@@ -80,6 +124,7 @@ export const createControlledMockSessionManager = async (
   return {
     manager,
     deviceManager,
+    delegateManager,
     subscribe,
     publish,
     onEvent,
@@ -94,7 +139,7 @@ export const createControlledMockSessionManager = async (
 export const createControlledMockDelegateSessionManager = async (
   deviceId: string,
   sharedMockRelay: ControlledMockRelay,
-  mainDeviceManager: OwnerDeviceManager
+  mainDeviceManager: DeviceManager
 ) => {
   const mockStorage = new InMemoryStorageAdapter()
   const storageSpy = {
@@ -104,7 +149,10 @@ export const createControlledMockDelegateSessionManager = async (
     list: vi.spyOn(mockStorage, "list"),
   }
 
-  // Create subscribe/publish functions that don't need signing (delegate uses its own keys)
+  // Context to hold the delegate's private key for signing
+  // Will be set after DelegateManager is created
+  let delegatePrivateKey: Uint8Array | null = null
+
   const subscribe = vi
     .fn()
     .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
@@ -113,37 +161,41 @@ export const createControlledMockDelegateSessionManager = async (
     })
 
   const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
-    // Delegate's SessionManager signs its own events, so we might receive already-signed events
+    // Already signed - use publishAndDeliver to add directly
     if ('sig' in event && event.sig) {
-      // Already signed - use publishAndDeliver to add directly
-      // For controlled relay, we need to handle this differently
       const verifiedEvent = event as VerifiedEvent
       await sharedMockRelay.publishAndDeliver(event as UnsignedEvent)
       return verifiedEvent
     }
-    // Unsigned event - this shouldn't happen for delegate but handle gracefully
-    throw new Error("Delegate publish received unsigned event")
+    // Unsigned event - sign with delegate's private key (for Invite events from DeviceManager)
+    if (!delegatePrivateKey) {
+      throw new Error("Delegate private key not set yet")
+    }
+    const signedEvent = finalizeEvent(event, delegatePrivateKey)
+    await sharedMockRelay.publishAndDeliver(signedEvent as UnsignedEvent)
+    return signedEvent
   })
 
-  // Create delegate DeviceManager
-  const { manager: delegateDeviceManager, payload } = DelegateDeviceManager.create({
-    deviceId,
-    deviceLabel: deviceId,
+  // Create delegate DelegateManager
+  const { manager: delegateManager, payload } = DelegateManager.create({
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: mockStorage,
   })
 
-  await delegateDeviceManager.init()
+  // Get the delegate's private key for signing
+  delegatePrivateKey = delegateManager.getIdentityKey()
+
+  await delegateManager.init()
 
   // Main device adds delegate to its InviteList
   await mainDeviceManager.addDevice(payload)
 
   // Delegate waits for activation
-  await delegateDeviceManager.waitForActivation(5000)
+  await delegateManager.waitForActivation(5000)
 
-  // Use DeviceManager to create properly configured SessionManager
-  const manager = delegateDeviceManager.createSessionManager()
+  // Use DelegateManager to create properly configured SessionManager
+  const manager = delegateManager.createSessionManager()
   await manager.init()
 
   const onEvent = vi.fn()
@@ -151,13 +203,13 @@ export const createControlledMockDelegateSessionManager = async (
 
   return {
     manager,
-    delegateDeviceManager,
+    delegateManager,
     subscribe,
     publish,
     onEvent,
     mockStorage,
     storageSpy,
-    publicKey: delegateDeviceManager.getIdentityPublicKey(),
+    publicKey: delegateManager.getIdentityPublicKey(),
     relay: sharedMockRelay,
   }
 }

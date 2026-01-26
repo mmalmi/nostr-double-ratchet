@@ -49,7 +49,7 @@ export function generateDeviceId(): string {
 export interface EncryptInviteResponseParams {
   /** The invitee's session public key */
   inviteeSessionPublicKey: string
-  /** The invitee's identity public key */
+  /** The invitee's identity public key (also serves as device ID) */
   inviteePublicKey: string
   /** The invitee's identity private key (optional if encrypt function provided) */
   inviteePrivateKey?: Uint8Array
@@ -59,8 +59,8 @@ export interface EncryptInviteResponseParams {
   inviterEphemeralPublicKey: string
   /** The shared secret for the invite */
   sharedSecret: string
-  /** Optional device ID for the invitee's device */
-  deviceId?: string
+  /** The invitee's owner/Nostr identity public key */
+  ownerPublicKey: string
   /** Optional custom encrypt function */
   encrypt?: EncryptFunction
 }
@@ -104,7 +104,7 @@ export async function encryptInviteResponse(params: EncryptInviteResponseParams)
     inviterPublicKey,
     inviterEphemeralPublicKey,
     sharedSecret,
-    deviceId,
+    ownerPublicKey,
     encrypt,
   } = params
 
@@ -119,9 +119,10 @@ export async function encryptInviteResponse(params: EncryptInviteResponseParams)
   })
 
   // Create the payload
+  // Note: deviceId is no longer needed - inviteePublicKey (identity) serves as device ID
   const payload = JSON.stringify({
     sessionKey: inviteeSessionPublicKey,
-    deviceId: deviceId,
+    ownerPublicKey: ownerPublicKey,
   })
 
   // Encrypt with DH key (invitee -> inviter)
@@ -172,12 +173,12 @@ export interface DecryptInviteResponseParams {
 }
 
 export interface DecryptedInviteResponse {
-  /** The invitee's identity public key */
+  /** The invitee's identity public key (also serves as device ID) */
   inviteeIdentity: string
   /** The invitee's session public key */
   inviteeSessionPublicKey: string
-  /** Optional device ID for the invitee's device */
-  deviceId?: string
+  /** The invitee's owner/Nostr identity public key (optional for backward compat) */
+  ownerPublicKey?: string
 }
 
 /**
@@ -219,12 +220,12 @@ export async function decryptInviteResponse(params: DecryptInviteResponseParams)
   const decryptedPayload = await decryptFn(dhEncrypted, inviteeIdentity)
 
   let inviteeSessionPublicKey: string
-  let deviceId: string | undefined
+  let ownerPublicKey: string | undefined
 
   try {
     const parsed = JSON.parse(decryptedPayload)
     inviteeSessionPublicKey = parsed.sessionKey
-    deviceId = parsed.deviceId
+    ownerPublicKey = parsed.ownerPublicKey
   } catch {
     // Backward compatibility: plain session key
     inviteeSessionPublicKey = decryptedPayload
@@ -233,7 +234,7 @@ export async function decryptInviteResponse(params: DecryptInviteResponseParams)
   return {
     inviteeIdentity,
     inviteeSessionPublicKey,
-    deviceId,
+    ownerPublicKey,
   }
 }
 
