@@ -1,7 +1,7 @@
 use crate::{
     utils::{kdf, pubkey_from_hex},
     Error, EventCallback, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry,
-    Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND,
+    Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND,
     pubsub::build_filter,
 };
 use nostr::PublicKey;
@@ -204,6 +204,35 @@ impl Session {
     pub fn send(&mut self, text: String) -> Result<nostr::Event> {
         let dummy_keys = Keys::generate();
         self.send_event(EventBuilder::text_note(text).build(dummy_keys.public_key()))
+    }
+
+    /// Send a reaction to a message through the encrypted session.
+    /// 
+    /// # Arguments
+    /// * `message_id` - The ID of the message being reacted to
+    /// * `emoji` - The emoji or reaction content (e.g., "👍", "❤️", "+1")
+    /// 
+    /// # Returns
+    /// A signed Nostr event containing the encrypted reaction.
+    pub fn send_reaction(&mut self, message_id: &str, emoji: &str) -> Result<nostr::Event> {
+        let dummy_keys = Keys::generate();
+        
+        // Create reaction payload matching TypeScript format
+        let payload = serde_json::json!({
+            "type": "reaction",
+            "messageId": message_id,
+            "emoji": emoji
+        });
+        
+        let event = EventBuilder::new(
+            nostr::Kind::from(REACTION_KIND as u16),
+            payload.to_string(),
+        )
+        .tag(Tag::parse(&["e".to_string(), message_id.to_string()])
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?)
+        .build(dummy_keys.public_key());
+        
+        self.send_event(event)
     }
 
     pub fn send_event(&mut self, mut event: UnsignedEvent) -> Result<nostr::Event> {

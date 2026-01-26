@@ -70,7 +70,8 @@ pub async fn send(
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
 
-    let msg_id = uuid::Uuid::new_v4().to_string();
+    // Use the outer event ID as message ID (for reaction compatibility with iris-chat)
+    let msg_id = encrypted_event.id.to_hex();
 
     let stored = StoredMessage {
         id: msg_id.clone(),
@@ -104,6 +105,55 @@ pub async fn send(
         timestamp,
         event: nostr::JsonUtil::as_json(&encrypted_event),
     });
+
+    Ok(())
+}
+
+/// React to a message
+pub async fn react(
+    chat_id: &str,
+    message_id: &str,
+    emoji: &str,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    let chat = storage.get_chat(chat_id)?
+        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+
+    // Load session state
+    let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
+        .map_err(|e| anyhow::anyhow!("Invalid session state: {}. Chat may not be properly initialized.", e))?;
+
+    let mut session = Session::new(session_state, chat_id.to_string());
+
+    // Send the reaction
+    let encrypted_event = session.send_reaction(message_id, emoji)
+        .map_err(|e| anyhow::anyhow!("Failed to encrypt reaction: {}", e))?;
+
+    // Update chat with new session state
+    let mut updated_chat = chat;
+    updated_chat.session_state = serde_json::to_string(&session.state)?;
+    storage.save_chat(&updated_chat)?;
+
+    // Publish to relays
+    let client = Client::default();
+    for relay in &config.relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+    client.send_event(encrypted_event.clone()).await?;
+
+    output.success("react", serde_json::json!({
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "emoji": emoji,
+        "event": nostr::JsonUtil::as_json(&encrypted_event),
+    }));
 
     Ok(())
 }
@@ -178,7 +228,8 @@ pub async fn receive(
 
                 let timestamp = event.created_at.as_u64();
 
-                let msg_id = uuid::Uuid::new_v4().to_string();
+                // Use outer event ID as message ID (for reaction compatibility with iris-chat)
+                let msg_id = event.id.to_hex();
                 let stored = StoredMessage {
                     id: msg_id.clone(),
                     chat_id: chat.id.clone(),
@@ -458,7 +509,8 @@ pub async fn listen(
                             let timestamp = event.created_at.as_u64();
                             let sender_pubkey = event.pubkey;
 
-                            let msg_id = uuid::Uuid::new_v4().to_string();
+                            // Use outer event ID as message ID (for reaction compatibility with iris-chat)
+                            let msg_id = event.id.to_hex();
                             let stored = StoredMessage {
                                 id: msg_id,
                                 chat_id: chat.id.clone(),

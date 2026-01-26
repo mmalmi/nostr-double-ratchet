@@ -9,8 +9,9 @@ import {
   MESSAGE_EVENT_KIND,
   Rumor,
   CHAT_MESSAGE_KIND,
+  REACTION_KIND,
 } from "./types";
-import { kdf, deepCopyState } from "./utils";
+import { kdf, deepCopyState, createReactionPayload } from "./utils";
 
 const MAX_SKIP = 1000;
 
@@ -110,6 +111,21 @@ export class Session {
     return this.sendEvent({
       content: text,
       kind: CHAT_MESSAGE_KIND
+    });
+  }
+
+  /**
+   * Sends a reaction to a message through the encrypted session.
+   * @param messageId The ID of the message being reacted to
+   * @param emoji The emoji or reaction content (e.g., "👍", "❤️", "+1")
+   * @returns A verified Nostr event containing the encrypted reaction. You need to publish this event to the Nostr network.
+   * @throws Error if we are not the initiator and trying to send the first message
+   */
+  sendReaction(messageId: string, emoji: string): {event: VerifiedEvent, innerEvent: Rumor} {
+    return this.sendEvent({
+      content: createReactionPayload(messageId, emoji),
+      kind: REACTION_KIND,
+      tags: [["e", messageId]]
     });
   }
 
