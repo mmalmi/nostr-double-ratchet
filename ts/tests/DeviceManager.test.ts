@@ -369,6 +369,7 @@ describe("DeviceManager - Authority", () => {
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         nostrPublish,
+        isAuthority: true,
       })
 
       expect(manager).toBeInstanceOf(DeviceManager)
@@ -381,6 +382,7 @@ describe("DeviceManager - Authority", () => {
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         nostrPublish,
+        isAuthority: true,
       })
 
       await manager.init()
@@ -403,6 +405,7 @@ describe("DeviceManager - Authority", () => {
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         nostrPublish,
+        isAuthority: true,
       })
 
       await manager.init()
@@ -422,6 +425,7 @@ describe("DeviceManager - Authority", () => {
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         nostrPublish,
+        isAuthority: true,
       })
       await manager.init()
 
@@ -452,6 +456,7 @@ describe("DeviceManager - Authority", () => {
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         nostrPublish,
+        isAuthority: true,
       })
       await manager.init()
 
@@ -479,6 +484,7 @@ describe("DeviceManager - Authority", () => {
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         nostrPublish,
+        isAuthority: true,
       })
       await manager.init()
 
@@ -504,6 +510,7 @@ describe("DeviceManager - Authority", () => {
         ownerPublicKey,
         identityKey: ownerPrivateKey,
         nostrPublish,
+        isAuthority: true,
       })
       await manager.init()
     })
@@ -620,6 +627,7 @@ describe("DeviceManager Integration", () => {
       identityKey: ownerPrivateKey,
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
+      isAuthority: true,
     })
 
     await deviceManager.init()
@@ -652,6 +660,7 @@ describe("DeviceManager Integration", () => {
       identityKey: ownerPrivateKey,
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
+      isAuthority: true,
     })
     await deviceManager.init()
 
@@ -702,6 +711,7 @@ describe("DeviceManager Integration", () => {
       identityKey: ownerPrivateKey,
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
+      isAuthority: true,
     })
 
     await deviceManager.init()
@@ -753,6 +763,7 @@ describe("DeviceManager Integration", () => {
       ownerPublicKey,
       identityKey: ownerPrivateKey,
       nostrPublish: createNostrPublish(),
+      isAuthority: true,
     })
 
     await deviceManager.init()

@@ -37,6 +37,7 @@ describe('Delegate Device Architecture', () => {
       identityKey: ownerPrivateKey,
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
+      isAuthority: true,
     })
     await deviceManager.init()
 
@@ -88,6 +89,7 @@ describe('Delegate Device Architecture', () => {
       identityKey: ownerPrivateKey,
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
+      isAuthority: true,
     })
     await deviceManager.init()
 
@@ -136,6 +138,7 @@ describe('Delegate Device Architecture', () => {
       identityKey: ownerPrivateKey,
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
+      isAuthority: true,
     })
     await deviceManager.init()
 

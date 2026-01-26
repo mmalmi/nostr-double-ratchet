@@ -61,6 +61,7 @@ export const createMockSessionManager = async (
       identityKey: secretKey,
       nostrPublish: publish,
       storage: mockStorage,
+      isAuthority: true,
     })
 
     await deviceManager.init()
