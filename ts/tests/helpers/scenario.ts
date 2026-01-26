@@ -1,10 +1,10 @@
 import { MockRelay } from "./mockRelay"
-import { createMockSessionManager, createMockDelegateSessionManager } from "./mockSessionManager"
+import { createMockSessionManager, createMockDelegateSessionManager, clearMockSessionManagerCache } from "./mockSessionManager"
 import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { generateSecretKey, getPublicKey } from "nostr-tools"
-import { DeviceManager } from "../../src/DeviceManager"
+import { DeviceManager, DelegateManager } from "../../src/DeviceManager"
 
 export type ActorId = "alice" | "bob"
 
@@ -37,7 +37,7 @@ interface DeviceState {
   waiters: MessageWaiter[]
   unsub?: () => void
   isDelegate?: boolean
-  delegateDeviceManager?: DeviceManager
+  delegateManager?: DelegateManager
 }
 
 interface ActorDeviceRef {
@@ -69,6 +69,9 @@ type ScenarioDefinition = {
 }
 
 export async function runScenario(def: ScenarioDefinition): Promise<ScenarioContext> {
+  // Clear cached state from previous scenarios
+  clearMockSessionManagerCache()
+
   const relay = new MockRelay()
   const context: ScenarioContext = {
     relay,
@@ -331,7 +334,7 @@ async function addDelegateDevice(
     throw new Error(`No main DeviceManager found for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, delegateDeviceManager } = await createMockDelegateSessionManager(
+  const { manager, mockStorage, delegateManager } = await createMockDelegateSessionManager(
     deviceId,
     context.relay,
     actor.mainDeviceManager
@@ -339,7 +342,7 @@ async function addDelegateDevice(
 
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
   deviceState.isDelegate = true
-  deviceState.delegateDeviceManager = delegateDeviceManager
+  deviceState.delegateManager = delegateManager
   actor.devices.set(deviceId, deviceState)
   return deviceState
 }

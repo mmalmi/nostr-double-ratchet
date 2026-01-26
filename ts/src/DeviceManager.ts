@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools"
 import { InviteList, DeviceEntry } from "./InviteList"
 import { Invite } from "./Invite"
-import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, IdentityKey } from "./types"
+import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, IdentityKey, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
@@ -20,7 +20,6 @@ export interface DelegatePayload {
 export interface DeviceManagerOptions {
   ownerPublicKey: string
   identityKey: IdentityKey  // Main key for signing InviteList only
-  nostrSubscribe: NostrSubscribe
   nostrPublish: NostrPublish
   storage?: StorageAdapter
 }
@@ -56,10 +55,10 @@ export interface CreateDelegateManagerResult {
 /**
  * DeviceManager - Authority for InviteList.
  * Uses main key ONLY for signing InviteList events.
+ * Trusts local storage only - no merging with remote.
  * Does NOT have device identity (no Invite, no SessionManager creation).
  */
 export class DeviceManager {
-  private readonly nostrSubscribe: NostrSubscribe
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
   private readonly ownerPublicKey: string
@@ -68,7 +67,6 @@ export class DeviceManager {
 
   private inviteList: InviteList | null = null
   private initialized = false
-  private subscriptions: Unsubscribe[] = []
 
   private readonly storageVersion = "3" // Bump for simplified architecture
   private get versionPrefix(): string {
@@ -76,7 +74,6 @@ export class DeviceManager {
   }
 
   constructor(options: DeviceManagerOptions) {
-    this.nostrSubscribe = options.nostrSubscribe
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
     this.ownerPublicKey = options.ownerPublicKey
@@ -87,19 +84,12 @@ export class DeviceManager {
     if (this.initialized) return
     this.initialized = true
 
-    // Start continuous subscription first
-    this.subscribeToOwnInviteList()
-
-    // Load local and wait for remote
-    const local = await this.loadInviteList()
-    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
-    const inviteList = this.mergeInviteLists(local, remote)
-
-    this.inviteList = inviteList
-    await this.saveInviteList(inviteList)
+    // Load local or create new - trust local only
+    this.inviteList = await this.loadInviteList() || new InviteList(this.ownerPublicKey)
+    await this.saveInviteList(this.inviteList)
 
     // Publish InviteList
-    const inviteListEvent = inviteList.getEvent()
+    const inviteListEvent = this.inviteList.getEvent()
     await this.nostrPublish(inviteListEvent).catch((error) => {
       console.error("Failed to publish InviteList:", error)
     })
@@ -144,13 +134,6 @@ export class DeviceManager {
     })
   }
 
-  close(): void {
-    for (const unsubscribe of this.subscriptions) {
-      unsubscribe()
-    }
-    this.subscriptions = []
-  }
-
   private inviteListKey(): string {
     return `${this.versionPrefix}/device-manager/invite-list`
   }
@@ -169,39 +152,15 @@ export class DeviceManager {
     await this.storage.put(this.inviteListKey(), list.serialize())
   }
 
-  private mergeInviteLists(local: InviteList | null, remote: InviteList | null): InviteList {
-    if (local && remote) return local.merge(remote)
-    if (local) return local
-    if (remote) return remote
-    return new InviteList(this.ownerPublicKey)
-  }
-
   private async modifyInviteList(change: (list: InviteList) => void): Promise<void> {
-    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
-    const merged = this.mergeInviteLists(this.inviteList, remote)
-    change(merged)
+    if (!this.inviteList) {
+      this.inviteList = new InviteList(this.ownerPublicKey)
+    }
+    change(this.inviteList)
 
-    const event = merged.getEvent()
+    const event = this.inviteList.getEvent()
     await this.nostrPublish(event)
-    await this.saveInviteList(merged)
-    this.inviteList = merged
-  }
-
-  private subscribeToOwnInviteList(): void {
-    const unsubscribe = InviteList.fromUser(
-      this.ownerPublicKey,
-      this.nostrSubscribe,
-      (remote) => {
-        if (this.inviteList) {
-          this.inviteList = this.inviteList.merge(remote)
-          this.saveInviteList(this.inviteList).catch(console.error)
-        } else {
-          this.inviteList = remote
-        }
-      }
-    )
-
-    this.subscriptions.push(unsubscribe)
+    await this.saveInviteList(this.inviteList)
   }
 }
 
