@@ -67,8 +67,10 @@ impl Storage {
 
     pub fn save_invite(&self, invite: &StoredInvite) -> Result<()> {
         let path = self.invites_dir.join(format!("{}.json", invite.id));
+        let temp_path = self.invites_dir.join(format!("{}.json.tmp", invite.id));
         let content = serde_json::to_string_pretty(invite)?;
-        fs::write(path, content)?;
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
@@ -109,8 +111,10 @@ impl Storage {
 
     pub fn save_chat(&self, chat: &StoredChat) -> Result<()> {
         let path = self.chats_dir.join(format!("{}.json", chat.id));
+        let temp_path = self.chats_dir.join(format!("{}.json.tmp", chat.id));
         let content = serde_json::to_string_pretty(chat)?;
-        fs::write(path, content)?;
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
@@ -201,7 +205,11 @@ impl Storage {
         day_messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
         let content = serde_json::to_string_pretty(&day_messages)?;
-        fs::write(path, content)?;
+
+        // Atomic write: write to temp file then rename to avoid corruption on crash
+        let temp_path = dir.join(format!("{}.json.tmp", date));
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
