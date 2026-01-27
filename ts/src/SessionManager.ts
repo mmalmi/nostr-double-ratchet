@@ -579,12 +579,7 @@ export class SessionManager {
       const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
       console.log(`[SetupUser] Received InviteList for user=${userPubkey.slice(0,8)}, devices=[${devices.map(d => d.identityPubkey.slice(0,8)).join(', ')}]`)
 
-      // Handle explicitly removed devices
-      for (const removed of inviteList.getRemovedDevices()) {
-        await this.cleanupDevice(userPubkey, removed.identityPubkey)
-      }
-
-      // Handle devices no longer in list (e.g., InviteList recreated from scratch)
+      // Handle devices no longer in list (revoked or InviteList recreated from scratch)
       const userRecord = this.userRecords.get(userPubkey)
       if (userRecord) {
         for (const [deviceId, device] of userRecord.devices) {

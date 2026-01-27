@@ -79,25 +79,17 @@ describe('InviteList', () => {
       expect(list.getDevice(device.identityPubkey)).toBeUndefined()
     })
 
-    it('should track removed devices', () => {
+    it('should allow re-adding a device after removal', () => {
       const device = createTestDevice()
       const list = new InviteList([device])
 
       list.removeDevice(device.identityPubkey)
-
-      const removedDevices = list.getRemovedDevices()
-      expect(removedDevices.some(r => r.identityPubkey === device.identityPubkey)).toBe(true)
-    })
-
-    it('should not allow re-adding a removed device', () => {
-      const device = createTestDevice()
-      const list = new InviteList([device])
-
-      list.removeDevice(device.identityPubkey)
-      list.addDevice(device) // Try to re-add
-
       expect(list.getAllDevices()).toHaveLength(0)
-      expect(list.getDevice(device.identityPubkey)).toBeUndefined()
+
+      list.addDevice(device) // Re-add should work now
+
+      expect(list.getAllDevices()).toHaveLength(1)
+      expect(list.getDevice(device.identityPubkey)).toEqual(device)
     })
 
     it('should get device by identityPubkey', () => {
@@ -137,19 +129,17 @@ describe('InviteList', () => {
       expect(deviceTag![2]).toBe(String(device.createdAt))
     })
 
-    it('should include removed devices in event tags with removedAt timestamp', () => {
+    it('should not include removed tags in event (devices are simply deleted)', () => {
       const device = createTestDevice()
       const list = new InviteList([device])
 
       list.removeDevice(device.identityPubkey)
       const event = list.getEvent()
 
-      // Simplified removed tag format: ["removed", identityPubkey, removedAt]
-      const removedTag = event.tags.find(t => t[0] === 'removed' && t[1] === device.identityPubkey)
-      expect(removedTag).toBeDefined()
-      expect(removedTag!.length).toBe(3)
-      // removedAt should be a valid timestamp string
-      expect(parseInt(removedTag![2], 10)).toBeGreaterThan(0)
+      // No "removed" tags - device is simply not in the list
+      const removedTag = event.tags.find(t => t[0] === 'removed')
+      expect(removedTag).toBeUndefined()
+      expect(event.tags.filter(t => t[0] === 'device')).toHaveLength(0)
     })
 
     it('should parse InviteList from event', () => {
@@ -169,7 +159,7 @@ describe('InviteList', () => {
       expect(signedEvent.pubkey).toBe(ownerPublicKey)
     })
 
-    it('should parse removed devices from event', () => {
+    it('should parse event after device removal (device is simply gone)', () => {
       const ownerPrivateKey = generateSecretKey()
       const device = createTestDevice()
       const list = new InviteList([device])
@@ -181,7 +171,6 @@ describe('InviteList', () => {
       const parsed = InviteList.fromEvent(signedEvent)
 
       expect(parsed.getAllDevices()).toHaveLength(0)
-      expect(parsed.getRemovedDevices().some(r => r.identityPubkey === device.identityPubkey)).toBe(true)
     })
 
     it('should throw on unsigned event', () => {
@@ -207,7 +196,7 @@ describe('InviteList', () => {
       expect(restored.getAllDevices()[0].identityPubkey).toBe(device.identityPubkey)
     })
 
-    it('should preserve removed devices in serialization', () => {
+    it('should serialize empty list after device removal', () => {
       const device = createTestDevice()
       const list = new InviteList([device])
       list.removeDevice(device.identityPubkey)
@@ -215,7 +204,7 @@ describe('InviteList', () => {
       const json = list.serialize()
       const restored = InviteList.deserialize(json)
 
-      expect(restored.getRemovedDevices().some(r => r.identityPubkey === device.identityPubkey)).toBe(true)
+      expect(restored.getAllDevices()).toHaveLength(0)
     })
   })
 
@@ -234,7 +223,7 @@ describe('InviteList', () => {
       expect(merged.getDevice(device2.identityPubkey)).toBeDefined()
     })
 
-    it('should union removed devices', () => {
+    it('should merge two empty lists after removals', () => {
       const device1 = createTestDevice()
       const device2 = createTestDevice()
 
@@ -246,26 +235,25 @@ describe('InviteList', () => {
 
       const merged = list1.merge(list2)
 
-      const removedDevices = merged.getRemovedDevices()
-      expect(removedDevices.some(r => r.identityPubkey === device1.identityPubkey)).toBe(true)
-      expect(removedDevices.some(r => r.identityPubkey === device2.identityPubkey)).toBe(true)
+      // Both lists are empty after removal, merged is also empty
+      expect(merged.getAllDevices()).toHaveLength(0)
     })
 
-    it('should exclude removed devices from active list', () => {
+    it('should include device from one list when other list has removed it', () => {
       const device = createTestDevice()
 
       // List1 has the device
       const list1 = new InviteList([device])
 
-      // List2 has removed the device
+      // List2 has removed the device (so it's empty)
       const list2 = new InviteList([device])
       list2.removeDevice(device.identityPubkey)
 
       const merged = list1.merge(list2)
 
-      // Device should be removed (removal wins)
-      expect(merged.getAllDevices()).toHaveLength(0)
-      expect(merged.getRemovedDevices().some(r => r.identityPubkey === device.identityPubkey)).toBe(true)
+      // Device is in list1, so it appears in merged (no explicit revocation tracking)
+      expect(merged.getAllDevices()).toHaveLength(1)
+      expect(merged.getDevice(device.identityPubkey)).toBeDefined()
     })
 
     it('should prefer earlier createdAt during merge for same identityPubkey', () => {

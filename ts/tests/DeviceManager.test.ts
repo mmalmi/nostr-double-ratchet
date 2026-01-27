@@ -315,7 +315,7 @@ describe("DelegateManager", () => {
 
       await activationPromise
 
-      // Simplified removed tag format: ["removed", identityPubkey, removedAt]
+      // Device is revoked by simply not being in the list anymore
       const revokedInviteListEvent = finalizeEvent(
         {
           kind: INVITE_LIST_EVENT_KIND,
@@ -323,7 +323,7 @@ describe("DelegateManager", () => {
           tags: [
             ["d", "double-ratchet/invite-list"],
             ["version", "3"],
-            ["removed", payload.identityPubkey, String(Math.floor(Date.now() / 1000))],
+            // No device tags - the device is simply not present
           ],
           content: "",
         },
