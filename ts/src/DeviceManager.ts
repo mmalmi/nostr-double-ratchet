@@ -82,22 +82,11 @@ export class DeviceManager {
     if (this.initialized) return
     this.initialized = true
 
-    // Start continuous subscription first
-    this.subscribeToOwnInviteList()
-
-    // Load local and wait for remote
-    const local = await this.loadInviteList()
-    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
-    const inviteList = this.mergeInviteLists(local, remote)
-
-    this.inviteList = inviteList
-    await this.saveInviteList(inviteList)
-
-    // Publish InviteList
-    const inviteListEvent = inviteList.getEvent()
-    await this.nostrPublish(inviteListEvent).catch((error) => {
-      console.error("Failed to publish InviteList:", error)
-    })
+    // Load local only - no auto-subscribe, no auto-publish, no auto-merge
+    this.inviteList = await this.loadInviteList()
+    if (!this.inviteList) {
+      this.inviteList = new InviteList(this.ownerPublicKey)
+    }
   }
 
   getOwnerPublicKey(): string {
@@ -115,28 +104,65 @@ export class DeviceManager {
   /**
    * Add a device to the InviteList.
    * Only adds identity info - the device publishes its own Invite separately.
+   * This is a local-only operation - call publish() to publish to relays.
    */
-  async addDevice(payload: DelegatePayload): Promise<void> {
-    await this.init()
+  addDevice(payload: DelegatePayload): void {
+    if (!this.inviteList) {
+      this.inviteList = new InviteList(this.ownerPublicKey)
+    }
 
-    await this.modifyInviteList((list) => {
-      const device: DeviceEntry = {
-        identityPubkey: payload.identityPubkey,
-        createdAt: Math.floor(Date.now() / 1000),
-      }
-      list.addDevice(device)
-    })
+    const device: DeviceEntry = {
+      identityPubkey: payload.identityPubkey,
+      createdAt: Math.floor(Date.now() / 1000),
+    }
+    this.inviteList.addDevice(device)
+    this.saveInviteList(this.inviteList).catch(console.error)
   }
 
   /**
    * Revoke a device from the InviteList.
+   * This is a local-only operation - call publish() to publish to relays.
    */
-  async revokeDevice(identityPubkey: string): Promise<void> {
-    await this.init()
+  revokeDevice(identityPubkey: string): void {
+    if (!this.inviteList) return
 
-    await this.modifyInviteList((list) => {
-      list.removeDevice(identityPubkey)
-    })
+    this.inviteList.removeDevice(identityPubkey)
+    this.saveInviteList(this.inviteList).catch(console.error)
+  }
+
+  /**
+   * Publish the current InviteList to relays.
+   * This is the only way to publish - addDevice/revokeDevice are local-only.
+   */
+  async publish(): Promise<void> {
+    if (!this.inviteList) {
+      this.inviteList = new InviteList(this.ownerPublicKey)
+    }
+
+    const event = this.inviteList.getEvent()
+    await this.nostrPublish(event)
+  }
+
+  /**
+   * Replace the local InviteList with the given list and save to storage.
+   * Used for authority transfer - receive list from another device, then call publish().
+   */
+  async setInviteList(list: InviteList): Promise<void> {
+    this.inviteList = list
+    await this.saveInviteList(list)
+  }
+
+  /**
+   * Subscribe to InviteList events from own account.
+   * Client can use this to receive updates, but merging is client responsibility.
+   */
+  subscribeToOwnInviteList(onInviteList: (list: InviteList) => void): void {
+    const unsubscribe = InviteList.fromUser(
+      this.ownerPublicKey,
+      this.nostrSubscribe,
+      onInviteList
+    )
+    this.subscriptions.push(unsubscribe)
   }
 
   close(): void {
@@ -162,41 +188,6 @@ export class DeviceManager {
 
   private async saveInviteList(list: InviteList): Promise<void> {
     await this.storage.put(this.inviteListKey(), list.serialize())
-  }
-
-  private mergeInviteLists(local: InviteList | null, remote: InviteList | null): InviteList {
-    if (local && remote) return local.merge(remote)
-    if (local) return local
-    if (remote) return remote
-    return new InviteList(this.ownerPublicKey)
-  }
-
-  private async modifyInviteList(change: (list: InviteList) => void): Promise<void> {
-    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
-    const merged = this.mergeInviteLists(this.inviteList, remote)
-    change(merged)
-
-    const event = merged.getEvent()
-    await this.nostrPublish(event)
-    await this.saveInviteList(merged)
-    this.inviteList = merged
-  }
-
-  private subscribeToOwnInviteList(): void {
-    const unsubscribe = InviteList.fromUser(
-      this.ownerPublicKey,
-      this.nostrSubscribe,
-      (remote) => {
-        if (this.inviteList) {
-          this.inviteList = this.inviteList.merge(remote)
-          this.saveInviteList(this.inviteList).catch(console.error)
-        } else {
-          this.inviteList = remote
-        }
-      }
-    )
-
-    this.subscriptions.push(unsubscribe)
   }
 }
 
