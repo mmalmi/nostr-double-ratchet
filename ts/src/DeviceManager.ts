@@ -57,7 +57,7 @@ export class DeviceManager {
   private inviteList: InviteList | null = null
   private initialized = false
 
-  private readonly storageVersion = "4"
+  private readonly storageVersion = "3"
   private get versionPrefix(): string {
     return `v${this.storageVersion}`
   }
