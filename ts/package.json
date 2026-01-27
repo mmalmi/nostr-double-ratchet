@@ -8,8 +8,8 @@
   "module": "dist/nostr-double-ratchet.es.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "test": "vitest --exclude '**/*.integration.test.ts'",
-    "test:once": "vitest run --exclude '**/*.integration.test.ts'",
+    "test": "vitest run --exclude '**/*.integration.test.ts'",
+    "test:watch": "vitest --exclude '**/*.integration.test.ts'",
     "test:integration": "DEBUG='ndk:*' vitest '**/*.integration.test.ts'",
     "build": "vite build && tsc",
     "lint": "eslint src --ext .ts --fix"
