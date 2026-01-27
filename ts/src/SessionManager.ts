@@ -576,11 +576,23 @@ export class SessionManager {
 
     this.attachInviteListSubscription(userPubkey, async (inviteList) => {
       const devices = inviteList.getAllDevices()
+      const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
       console.log(`[SetupUser] Received InviteList for user=${userPubkey.slice(0,8)}, devices=[${devices.map(d => d.identityPubkey.slice(0,8)).join(', ')}]`)
 
-      // Handle removed devices (source of truth for revocation)
+      // Handle explicitly removed devices
       for (const removed of inviteList.getRemovedDevices()) {
         await this.cleanupDevice(userPubkey, removed.identityPubkey)
+      }
+
+      // Handle devices no longer in list (e.g., InviteList recreated from scratch)
+      const userRecord = this.userRecords.get(userPubkey)
+      if (userRecord) {
+        for (const [deviceId, device] of userRecord.devices) {
+          if (!activeDeviceIds.has(deviceId) && device.staleAt === undefined) {
+            console.log(`[SetupUser] Device ${deviceId.slice(0,8)} no longer in InviteList, cleaning up`)
+            await this.cleanupDevice(userPubkey, deviceId)
+          }
+        }
       }
 
       // For each device in InviteList, subscribe to their Invite event
