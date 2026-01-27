@@ -64,10 +64,8 @@ describe("SessionManager", () => {
     const msg1 = "Hello Bob from Alice device 1"
     const msg2 = "Hello Bob from Alice device 2"
 
-    await aliceDevice1.sendMessage(bobPubkey, msg1)
-    await aliceDevice2.sendMessage(bobPubkey, msg2)
-
-    const bobReceivedMessages = await new Promise((resolve) => {
+    // Register the event handler BEFORE sending to avoid missing events
+    const bobReceivedMessages = new Promise<string[]>((resolve) => {
       const received: string[] = []
       bobDevice1.onEvent((event) => {
         if (event.content === msg1 || event.content === msg2) {
@@ -77,7 +75,13 @@ describe("SessionManager", () => {
       })
     })
 
-    expect(bobReceivedMessages)
+    await aliceDevice1.sendMessage(bobPubkey, msg1)
+    await aliceDevice2.sendMessage(bobPubkey, msg2)
+
+    const result = await bobReceivedMessages
+    expect(result).toHaveLength(2)
+    expect(result).toContain(msg1)
+    expect(result).toContain(msg2)
   })
 
   it("should deliver messages to all sender and recipient devices", async () => {

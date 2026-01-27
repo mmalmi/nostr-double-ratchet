@@ -171,6 +171,7 @@ export class ControlledMockRelay {
 
     return {
       ...event,
+      pubkey: ndkEvent.pubkey, // Use signed pubkey (signer sets this)
       id: ndkEvent.id!,
       sig: ndkEvent.sig!,
       tags: ndkEvent.tags || [],

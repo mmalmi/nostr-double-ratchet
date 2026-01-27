@@ -17,21 +17,15 @@ describe('InviteList', () => {
 
   describe('constructor and basic properties', () => {
     it('should create an empty InviteList', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const list = new InviteList()
 
-      const list = new InviteList(ownerPublicKey)
-
-      expect(list.ownerPublicKey).toBe(ownerPublicKey)
       expect(list.getAllDevices()).toHaveLength(0)
     })
 
     it('should create InviteList with initial devices', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
 
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       expect(list.getAllDevices()).toHaveLength(1)
       expect(list.getAllDevices()[0].identityPubkey).toBe(device.identityPubkey)
@@ -40,9 +34,7 @@ describe('InviteList', () => {
 
   describe('device management', () => {
     it('should add a device', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
       const device = createTestDevice()
 
       list.addDevice(device)
@@ -52,9 +44,7 @@ describe('InviteList', () => {
     })
 
     it('should add multiple devices', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const device1 = createTestDevice()
       const device2 = createTestDevice()
@@ -68,9 +58,7 @@ describe('InviteList', () => {
     })
 
     it('should not add duplicate device (same identityPubkey)', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
       const device = createTestDevice()
 
       list.addDevice(device)
@@ -80,10 +68,8 @@ describe('InviteList', () => {
     })
 
     it('should remove a device', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       expect(list.getAllDevices()).toHaveLength(1)
 
@@ -94,10 +80,8 @@ describe('InviteList', () => {
     })
 
     it('should track removed devices', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       list.removeDevice(device.identityPubkey)
 
@@ -106,10 +90,8 @@ describe('InviteList', () => {
     })
 
     it('should not allow re-adding a removed device', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       list.removeDevice(device.identityPubkey)
       list.addDevice(device) // Try to re-add
@@ -119,11 +101,9 @@ describe('InviteList', () => {
     })
 
     it('should get device by identityPubkey', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device1 = createTestDevice()
       const device2 = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device1, device2])
+      const list = new InviteList([device1, device2])
 
       const found = list.getDevice(device2.identityPubkey)
 
@@ -131,9 +111,7 @@ describe('InviteList', () => {
     })
 
     it('should return undefined for non-existent device', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       expect(list.getDevice('non-existent-pubkey')).toBeUndefined()
     })
@@ -141,15 +119,13 @@ describe('InviteList', () => {
 
   describe('event serialization', () => {
     it('should create a valid unsigned event', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       const event = list.getEvent()
 
       expect(event.kind).toBe(INVITE_LIST_EVENT_KIND)
-      expect(event.pubkey).toBe(ownerPublicKey)
+      expect(event.pubkey).toBe('') // Signer will set this
       expect(event.tags).toContainEqual(['d', 'double-ratchet/invite-list'])
       expect(event.tags).toContainEqual(['version', '3']) // New version for simplified format
 
@@ -162,10 +138,8 @@ describe('InviteList', () => {
     })
 
     it('should include removed devices in event tags with removedAt timestamp', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       list.removeDevice(device.identityPubkey)
       const event = list.getEvent()
@@ -182,23 +156,23 @@ describe('InviteList', () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       const event = list.getEvent()
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
 
       const parsed = InviteList.fromEvent(signedEvent)
 
-      expect(parsed.ownerPublicKey).toBe(ownerPublicKey)
       expect(parsed.getAllDevices()).toHaveLength(1)
       expect(parsed.getAllDevices()[0].identityPubkey).toBe(device.identityPubkey)
+      // ownerPublicKey comes from the signed event
+      expect(signedEvent.pubkey).toBe(ownerPublicKey)
     })
 
     it('should parse removed devices from event', () => {
       const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
       list.removeDevice(device.identityPubkey)
 
       const event = list.getEvent()
@@ -211,9 +185,7 @@ describe('InviteList', () => {
     })
 
     it('should throw on unsigned event', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const event = list.getEvent()
       // Event without signature
@@ -225,24 +197,19 @@ describe('InviteList', () => {
 
   describe('serialization for persistence', () => {
     it('should serialize and deserialize', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
 
       const json = list.serialize()
       const restored = InviteList.deserialize(json)
 
-      expect(restored.ownerPublicKey).toBe(ownerPublicKey)
       expect(restored.getAllDevices()).toHaveLength(1)
       expect(restored.getAllDevices()[0].identityPubkey).toBe(device.identityPubkey)
     })
 
     it('should preserve removed devices in serialization', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new InviteList(ownerPublicKey, [device])
+      const list = new InviteList([device])
       list.removeDevice(device.identityPubkey)
 
       const json = list.serialize()
@@ -254,14 +221,11 @@ describe('InviteList', () => {
 
   describe('merge (conflict resolution)', () => {
     it('should merge two lists with different devices', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-
       const device1 = createTestDevice()
       const device2 = createTestDevice()
 
-      const list1 = new InviteList(ownerPublicKey, [device1])
-      const list2 = new InviteList(ownerPublicKey, [device2])
+      const list1 = new InviteList([device1])
+      const list2 = new InviteList([device2])
 
       const merged = list1.merge(list2)
 
@@ -271,16 +235,13 @@ describe('InviteList', () => {
     })
 
     it('should union removed devices', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-
       const device1 = createTestDevice()
       const device2 = createTestDevice()
 
-      const list1 = new InviteList(ownerPublicKey, [device1])
+      const list1 = new InviteList([device1])
       list1.removeDevice(device1.identityPubkey)
 
-      const list2 = new InviteList(ownerPublicKey, [device2])
+      const list2 = new InviteList([device2])
       list2.removeDevice(device2.identityPubkey)
 
       const merged = list1.merge(list2)
@@ -291,16 +252,13 @@ describe('InviteList', () => {
     })
 
     it('should exclude removed devices from active list', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-
       const device = createTestDevice()
 
       // List1 has the device
-      const list1 = new InviteList(ownerPublicKey, [device])
+      const list1 = new InviteList([device])
 
       // List2 has removed the device
-      const list2 = new InviteList(ownerPublicKey, [device])
+      const list2 = new InviteList([device])
       list2.removeDevice(device.identityPubkey)
 
       const merged = list1.merge(list2)
@@ -311,9 +269,6 @@ describe('InviteList', () => {
     })
 
     it('should prefer earlier createdAt during merge for same identityPubkey', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-
       const identityPubkey = getPublicKey(generateSecretKey())
       const earlierDevice: DeviceEntry = {
         identityPubkey,
@@ -324,8 +279,8 @@ describe('InviteList', () => {
         createdAt: 2000,
       }
 
-      const list1 = new InviteList(ownerPublicKey, [laterDevice])
-      const list2 = new InviteList(ownerPublicKey, [earlierDevice])
+      const list1 = new InviteList([laterDevice])
+      const list2 = new InviteList([earlierDevice])
 
       const merged = list1.merge(list2)
 
@@ -335,10 +290,8 @@ describe('InviteList', () => {
 
   describe('createDeviceEntry helper', () => {
     it('should create a device entry with identity info', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const identityPubkey = getPublicKey(generateSecretKey())
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const now = Math.floor(Date.now() / 1000)
       const device = list.createDeviceEntry(identityPubkey)
@@ -352,9 +305,7 @@ describe('InviteList', () => {
 
   describe('DeviceEntry with identityPubkey', () => {
     it('should add device with identityPubkey', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -368,9 +319,7 @@ describe('InviteList', () => {
     })
 
     it('should include identityPubkey in event tags', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -387,8 +336,7 @@ describe('InviteList', () => {
 
     it('should parse identityPubkey from event', () => {
       const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -406,9 +354,7 @@ describe('InviteList', () => {
     })
 
     it('should preserve identityPubkey in serialization', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -424,15 +370,12 @@ describe('InviteList', () => {
     })
 
     it('should preserve identityPubkey in merge', () => {
-      const ownerPrivateKey = generateSecretKey()
-      const ownerPublicKey = getPublicKey(ownerPrivateKey)
-
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
       const device = createTestDevice(delegatePublicKey)
 
-      const list1 = new InviteList(ownerPublicKey, [device])
-      const list2 = new InviteList(ownerPublicKey)
+      const list1 = new InviteList([device])
+      const list2 = new InviteList()
 
       const merged = list1.merge(list2)
 
@@ -444,7 +387,7 @@ describe('InviteList', () => {
     it('should handle mixed devices (with different identityPubkeys)', () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new InviteList(ownerPublicKey)
+      const list = new InviteList()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)

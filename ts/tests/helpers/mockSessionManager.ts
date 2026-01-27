@@ -11,6 +11,22 @@ import {
 import { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { MockRelay } from "./mockRelay"
 
+// Track DeviceManagers per owner (by publicKey) and relay to share InviteList across devices
+// Key format: `${relayId}:${publicKey}` where relayId is a unique ID assigned to each relay
+const deviceManagers = new Map<string, DeviceManager>()
+const deviceManagerStorages = new Map<string, InMemoryStorageAdapter>()
+const relayIds = new WeakMap<MockRelay, string>()
+let relayCounter = 0
+
+function getRelayId(relay: MockRelay): string {
+  let id = relayIds.get(relay)
+  if (!id) {
+    id = `relay-${++relayCounter}`
+    relayIds.set(relay, id)
+  }
+  return id
+}
+
 // Store delegate storage and keys for reuse across restarts
 const delegateStorages = new Map<string, InMemoryStorageAdapter>()
 const delegateKeys = new Map<string, Uint8Array>()
@@ -24,11 +40,40 @@ export const createMockSessionManager = async (
   const secretKey = existingSecretKey || generateSecretKey()
   const publicKey = getPublicKey(secretKey)
 
-  const mockStorage = existingStorage || new InMemoryStorageAdapter()
+  const mockRelay = sharedMockRelay || new MockRelay()
+
   // Use existing delegate storage if available (for restarts)
   const storageKey = `${publicKey}:${deviceId}`
   const delegateStorage = delegateStorages.get(storageKey) || new InMemoryStorageAdapter()
   delegateStorages.set(storageKey, delegateStorage)
+
+  // Get or create DeviceManager for this owner+relay (shared across all devices of same owner on same relay)
+  const relayId = getRelayId(mockRelay)
+  const deviceManagerKey = `${relayId}:${publicKey}`
+  let deviceManager = deviceManagers.get(deviceManagerKey)
+  let deviceManagerStorage = deviceManagerStorages.get(deviceManagerKey)
+
+  if (!deviceManager || !deviceManagerStorage) {
+    deviceManagerStorage = existingStorage || new InMemoryStorageAdapter()
+    deviceManagerStorages.set(deviceManagerKey, deviceManagerStorage)
+
+    // DeviceManager publish signs with owner's secret key
+    // Use mockRelay.publish() to properly handle replaceable events
+    const deviceManagerPublish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
+      return await mockRelay.publish(event, secretKey)
+    })
+
+    // Create DeviceManager for InviteList authority (only needs nostrPublish)
+    deviceManager = new DeviceManager({
+      nostrPublish: deviceManagerPublish,
+      storage: deviceManagerStorage,
+    })
+
+    await deviceManager.init()
+    deviceManagers.set(deviceManagerKey, deviceManager)
+  }
+
+  const mockStorage = deviceManagerStorage!
   const storageSpy = {
     get: vi.spyOn(mockStorage, "get"),
     del: vi.spyOn(mockStorage, "del"),
@@ -36,31 +81,13 @@ export const createMockSessionManager = async (
     list: vi.spyOn(mockStorage, "list"),
   }
 
-  const mockRelay = sharedMockRelay || new MockRelay()
-
   const subscribe = vi
     .fn()
     .mockImplementation((filter: Filter, onEvent: (event: VerifiedEvent) => void) => {
       return mockRelay.subscribe(filter, onEvent)
     })
 
-  const publish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
-    return await mockRelay.publish(event, secretKey)
-  })
-
-  // Create DeviceManager for InviteList authority
-  const deviceManager = new DeviceManager({
-    ownerPublicKey: publicKey,
-    identityKey: secretKey,
-    nostrSubscribe: subscribe,
-    nostrPublish: publish,
-    storage: mockStorage,
-  })
-
-  await deviceManager.init()
-
-  // Create DelegateManager for device identity (same flow as any device!)
-  // Need separate publish function that signs with delegate key
+  // Create DelegateManager for device identity
   let delegatePrivateKey: Uint8Array | null = null
 
   const delegateSubscribe = vi
@@ -71,24 +98,13 @@ export const createMockSessionManager = async (
 
   const delegatePublish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
     if ('sig' in event && event.sig) {
-      const verifiedEvent = event as VerifiedEvent
-      // Manually add to relay's events array since we bypass the normal publish flow
-      ;(mockRelay as any).events.push(verifiedEvent)
-      for (const sub of (mockRelay as any).subscribers.values()) {
-        ;(mockRelay as any).deliverToSubscriber(sub, verifiedEvent)
-      }
-      return verifiedEvent
+      // Already signed - use mockRelay.publish() which will handle it
+      return await mockRelay.publish(event as UnsignedEvent)
     }
     if (!delegatePrivateKey) {
       throw new Error("Delegate private key not set yet")
     }
-    const signedEvent = finalizeEvent(event, delegatePrivateKey)
-    // Add signed event to relay
-    ;(mockRelay as any).events.push(signedEvent)
-    for (const sub of (mockRelay as any).subscribers.values()) {
-      ;(mockRelay as any).deliverToSubscriber(sub, signedEvent)
-    }
-    return signedEvent
+    return await mockRelay.publish(event, delegatePrivateKey)
   })
 
   let delegateManager: DelegateManager
@@ -128,8 +144,9 @@ export const createMockSessionManager = async (
     delegateKeys.set(storageKey, delegatePrivateKey) // Save for future restarts
     await delegateManager.init()
 
-    // Add device to InviteList
-    await deviceManager.addDevice(payload)
+    // Add device to InviteList and publish
+    deviceManager.addDevice(payload)
+    await deviceManager.publish() // Publish InviteList to relay
 
     // Wait for activation
     await delegateManager.waitForActivation(5000)
@@ -147,7 +164,7 @@ export const createMockSessionManager = async (
     deviceManager,
     delegateManager,
     subscribe,
-    publish,
+    publish: delegatePublish,
     onEvent,
     mockStorage,
     storageSpy,
@@ -158,7 +175,7 @@ export const createMockSessionManager = async (
 }
 
 export const createMockDelegateSessionManager = async (
-  deviceId: string,
+  _deviceId: string,
   sharedMockRelay: MockRelay,
   mainDeviceManager: DeviceManager
 ) => {
@@ -171,7 +188,6 @@ export const createMockDelegateSessionManager = async (
   }
 
   // Context to hold the delegate's private key for signing
-  // Will be set after DelegateManager is created
   let delegatePrivateKey: Uint8Array | null = null
 
   const subscribe = vi
@@ -181,27 +197,14 @@ export const createMockDelegateSessionManager = async (
     })
 
   const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
-    // Already signed, just add to relay
     if ('sig' in event && event.sig) {
-      const verifiedEvent = event as VerifiedEvent
-      // Manually add to relay's events array since we bypass the normal publish flow
-      ;(sharedMockRelay as any).events.push(verifiedEvent)
-      for (const sub of (sharedMockRelay as any).subscribers.values()) {
-        ;(sharedMockRelay as any).deliverToSubscriber(sub, verifiedEvent)
-      }
-      return verifiedEvent
+      // Already signed - use mockRelay.publish() which will handle it
+      return await sharedMockRelay.publish(event as UnsignedEvent)
     }
-    // Unsigned event - sign with delegate's private key (for Invite events from DeviceManager)
     if (!delegatePrivateKey) {
       throw new Error("Delegate private key not set yet")
     }
-    const signedEvent = finalizeEvent(event, delegatePrivateKey)
-    // Add signed event to relay
-    ;(sharedMockRelay as any).events.push(signedEvent)
-    for (const sub of (sharedMockRelay as any).subscribers.values()) {
-      ;(sharedMockRelay as any).deliverToSubscriber(sub, signedEvent)
-    }
-    return signedEvent
+    return await sharedMockRelay.publish(event, delegatePrivateKey)
   })
 
   // Create delegate DelegateManager
@@ -216,8 +219,9 @@ export const createMockDelegateSessionManager = async (
 
   await delegateManager.init()
 
-  // Main device adds delegate to its InviteList
-  await mainDeviceManager.addDevice(payload)
+  // Main device adds delegate to its InviteList and publishes
+  mainDeviceManager.addDevice(payload)
+  await mainDeviceManager.publish()
 
   // Delegate waits for activation
   await delegateManager.waitForActivation(5000)
@@ -240,4 +244,12 @@ export const createMockDelegateSessionManager = async (
     publicKey: delegateManager.getIdentityPublicKey(),
     relay: sharedMockRelay,
   }
+}
+
+// Reset all tracked state - call this in afterEach/beforeEach
+export const resetMockSessionManagerState = () => {
+  deviceManagers.clear()
+  deviceManagerStorages.clear()
+  delegateStorages.clear()
+  delegateKeys.clear()
 }

@@ -24,6 +24,7 @@ export const createControlledMockSessionManager = async (
   options: ControlledMockSessionManagerOptions = {}
 ) => {
   const { autoDeliver = true } = options // Default to auto-deliver for easier setup
+  void deviceId // unused but kept for API compatibility
 
   const secretKey = existingSecretKey || generateSecretKey()
   const publicKey = getPublicKey(secretKey)
@@ -46,8 +47,8 @@ export const createControlledMockSessionManager = async (
       return handle.close
     })
 
-  const publish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
-    // Use publishAndDeliver for auto-delivery mode, otherwise just queue
+  // DeviceManager publish signs with owner's secret key
+  const deviceManagerPublish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
     if (autoDeliver) {
       const eventId = await mockRelay.publishAndDeliver(event, secretKey)
       const allEvents = mockRelay.getAllEvents()
@@ -59,19 +60,15 @@ export const createControlledMockSessionManager = async (
     }
   })
 
-  // Create DeviceManager for InviteList authority
+  // Create DeviceManager for InviteList authority (only needs nostrPublish)
   const deviceManager = new DeviceManager({
-    ownerPublicKey: publicKey,
-    identityKey: secretKey,
-    nostrSubscribe: subscribe,
-    nostrPublish: publish,
+    nostrPublish: deviceManagerPublish,
     storage: mockStorage,
   })
 
   await deviceManager.init()
 
-  // Create DelegateManager for device identity (same flow as any device!)
-  // Need separate publish function that signs with delegate key
+  // Create DelegateManager for device identity
   let delegatePrivateKey: Uint8Array | null = null
 
   const delegateSubscribe = vi
@@ -108,8 +105,9 @@ export const createControlledMockSessionManager = async (
   delegatePrivateKey = delegateManager.getIdentityKey()
   await delegateManager.init()
 
-  // Add device to InviteList
-  await deviceManager.addDevice(payload)
+  // Add device to InviteList and publish
+  deviceManager.addDevice(payload)
+  await deviceManager.publish() // Publish InviteList to relay
 
   // Wait for activation
   await delegateManager.waitForActivation(5000)
@@ -126,7 +124,7 @@ export const createControlledMockSessionManager = async (
     deviceManager,
     delegateManager,
     subscribe,
-    publish,
+    publish: deviceManagerPublish,
     onEvent,
     mockStorage,
     storageSpy,
@@ -137,7 +135,7 @@ export const createControlledMockSessionManager = async (
 }
 
 export const createControlledMockDelegateSessionManager = async (
-  deviceId: string,
+  _deviceId: string,
   sharedMockRelay: ControlledMockRelay,
   mainDeviceManager: DeviceManager
 ) => {
@@ -150,7 +148,6 @@ export const createControlledMockDelegateSessionManager = async (
   }
 
   // Context to hold the delegate's private key for signing
-  // Will be set after DelegateManager is created
   let delegatePrivateKey: Uint8Array | null = null
 
   const subscribe = vi
@@ -167,7 +164,7 @@ export const createControlledMockDelegateSessionManager = async (
       await sharedMockRelay.publishAndDeliver(event as UnsignedEvent)
       return verifiedEvent
     }
-    // Unsigned event - sign with delegate's private key (for Invite events from DeviceManager)
+    // Unsigned event - sign with delegate's private key
     if (!delegatePrivateKey) {
       throw new Error("Delegate private key not set yet")
     }
@@ -188,8 +185,9 @@ export const createControlledMockDelegateSessionManager = async (
 
   await delegateManager.init()
 
-  // Main device adds delegate to its InviteList
-  await mainDeviceManager.addDevice(payload)
+  // Main device adds delegate to its InviteList and publishes
+  mainDeviceManager.addDevice(payload)
+  await mainDeviceManager.publish()
 
   // Delegate waits for activation
   await delegateManager.waitForActivation(5000)

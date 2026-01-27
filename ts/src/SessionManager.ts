@@ -705,21 +705,29 @@ export class SessionManager {
     deviceId: string
   ): Promise<void> {
     const history = this.messageHistory.get(recipientPublicKey) || []
+    console.log(`[SendMessageHistory] recipient=${recipientPublicKey.slice(0,8)}, device=${deviceId.slice(0,8)}, historyCount=${history.length}`)
     const userRecord = this.userRecords.get(recipientPublicKey)
     if (!userRecord) {
+      console.log(`[SendMessageHistory] No userRecord for recipient`)
       return
     }
     const device = userRecord.devices.get(deviceId)
     if (!device) {
+      console.log(`[SendMessageHistory] No device record for deviceId`)
       return
     }
     if (device.staleAt !== undefined) {
+      console.log(`[SendMessageHistory] Device is stale`)
       return
     }
     for (const event of history) {
       const { activeSession } = device
 
-      if (!activeSession) continue
+      if (!activeSession) {
+        console.log(`[SendMessageHistory] No activeSession for device`)
+        continue
+      }
+      console.log(`[SendMessageHistory] Sending queued message to device=${deviceId.slice(0,8)}`)
       const { event: verifiedEvent } = activeSession.sendEvent(event)
       await this.nostrPublish(verifiedEvent)
       await this.storeUserRecord(recipientPublicKey)
