@@ -35,9 +35,9 @@ describe('Delegate Device Architecture', () => {
     const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
+      nostrSubscribe: createSubscribe(),
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
-      isAuthority: true,
     })
     await deviceManager.init()
 
@@ -87,9 +87,9 @@ describe('Delegate Device Architecture', () => {
     const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
+      nostrSubscribe: createSubscribe(),
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
-      isAuthority: true,
     })
     await deviceManager.init()
 
@@ -136,9 +136,9 @@ describe('Delegate Device Architecture', () => {
     const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
+      nostrSubscribe: createSubscribe(),
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
-      isAuthority: true,
     })
     await deviceManager.init()
 

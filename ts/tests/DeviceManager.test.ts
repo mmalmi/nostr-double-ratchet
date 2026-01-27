@@ -349,13 +349,24 @@ describe("DelegateManager", () => {
 describe("DeviceManager - Authority", () => {
   let ownerPrivateKey: Uint8Array
   let ownerPublicKey: string
+  let nostrSubscribe: NostrSubscribe
   let nostrPublish: NostrPublish
   let publishedEvents: any[]
+  let subscriptions: Map<string, (event: any) => void>
 
   beforeEach(() => {
     ownerPrivateKey = generateSecretKey()
     ownerPublicKey = getPublicKey(ownerPrivateKey)
     publishedEvents = []
+    subscriptions = new Map()
+
+    nostrSubscribe = vi.fn((filter, onEvent) => {
+      const key = JSON.stringify(filter)
+      subscriptions.set(key, onEvent)
+      return () => {
+        subscriptions.delete(key)
+      }
+    }) as unknown as NostrSubscribe
 
     nostrPublish = vi.fn(async (event) => {
       publishedEvents.push(event)
@@ -368,8 +379,8 @@ describe("DeviceManager - Authority", () => {
       const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
+        nostrSubscribe,
         nostrPublish,
-        isAuthority: true,
       })
 
       expect(manager).toBeInstanceOf(DeviceManager)
@@ -381,8 +392,8 @@ describe("DeviceManager - Authority", () => {
       const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
+        nostrSubscribe,
         nostrPublish,
-        isAuthority: true,
       })
 
       await manager.init()
@@ -404,8 +415,8 @@ describe("DeviceManager - Authority", () => {
       const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
+        nostrSubscribe,
         nostrPublish,
-        isAuthority: true,
       })
 
       await manager.init()
@@ -424,8 +435,8 @@ describe("DeviceManager - Authority", () => {
       const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
+        nostrSubscribe,
         nostrPublish,
-        isAuthority: true,
       })
       await manager.init()
 
@@ -455,8 +466,8 @@ describe("DeviceManager - Authority", () => {
       const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
+        nostrSubscribe,
         nostrPublish,
-        isAuthority: true,
       })
       await manager.init()
 
@@ -483,8 +494,8 @@ describe("DeviceManager - Authority", () => {
       const manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
+        nostrSubscribe,
         nostrPublish,
-        isAuthority: true,
       })
       await manager.init()
 
@@ -509,8 +520,8 @@ describe("DeviceManager - Authority", () => {
       manager = new DeviceManager({
         ownerPublicKey,
         identityKey: ownerPrivateKey,
+        nostrSubscribe,
         nostrPublish,
-        isAuthority: true,
       })
       await manager.init()
     })
@@ -625,9 +636,9 @@ describe("DeviceManager Integration", () => {
     const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
+      nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
-      isAuthority: true,
     })
 
     await deviceManager.init()
@@ -658,9 +669,9 @@ describe("DeviceManager Integration", () => {
     const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
+      nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
-      isAuthority: true,
     })
     await deviceManager.init()
 
@@ -709,9 +720,9 @@ describe("DeviceManager Integration", () => {
     const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
+      nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
-      isAuthority: true,
     })
 
     await deviceManager.init()
@@ -762,8 +773,8 @@ describe("DeviceManager Integration", () => {
     const deviceManager = new DeviceManager({
       ownerPublicKey,
       identityKey: ownerPrivateKey,
+      nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
-      isAuthority: true,
     })
 
     await deviceManager.init()

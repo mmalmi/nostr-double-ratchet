@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest"
-import { createMockSessionManager, clearMockSessionManagerCache } from "./helpers/mockSessionManager"
+import { describe, it, expect } from "vitest"
+import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { createControlledMockSessionManager } from "./helpers/controlledMockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
 import { ControlledMockRelay } from "./helpers/ControlledMockRelay"
@@ -18,10 +18,6 @@ const extractDeviceRecords = (manager: unknown): DeviceRecordSnapshot[] => {
 }
 
 describe("SessionManager", () => {
-  beforeEach(() => {
-    clearMockSessionManagerCache()
-  })
-
   it("should receive a message", async () => {
     const sharedRelay = new MockRelay()
 

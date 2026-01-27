@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools"
 import { InviteList, DeviceEntry } from "./InviteList"
 import { Invite } from "./Invite"
-import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, IdentityKey, Unsubscribe } from "./types"
+import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, IdentityKey } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
@@ -15,22 +15,13 @@ export interface DelegatePayload {
 }
 
 /**
- * Callback for device list changes
- */
-export type DevicesChangedCallback = (devices: DeviceEntry[]) => void
-
-/**
- * Options for DeviceManager
+ * Options for DeviceManager (authority for InviteList)
  */
 export interface DeviceManagerOptions {
   ownerPublicKey: string
-  isAuthority: boolean
-  // Authority mode requires these:
-  identityKey?: IdentityKey  // Main key for signing InviteList
-  nostrPublish?: NostrPublish  // For publishing InviteList
-  // Non-authority mode requires this:
-  nostrSubscribe?: NostrSubscribe  // For subscribing to InviteList
-  // Both modes:
+  identityKey: IdentityKey  // Main key for signing InviteList only
+  nostrSubscribe: NostrSubscribe
+  nostrPublish: NostrPublish
   storage?: StorageAdapter
 }
 
@@ -63,149 +54,74 @@ export interface CreateDelegateManagerResult {
 }
 
 /**
- * DeviceManager - Manages device InviteList.
- *
- * Authority mode (isAuthority: true):
- * - Uses main key for signing InviteList events
- * - Trusts local storage only - no merging with remote
- * - Can add/remove devices
- *
- * Non-authority mode (isAuthority: false):
- * - Subscribes to InviteList from relay (read-only)
- * - Cannot add/remove devices
+ * DeviceManager - Authority for InviteList.
+ * Uses main key ONLY for signing InviteList events.
+ * Does NOT have device identity (no Invite, no SessionManager creation).
  */
 export class DeviceManager {
-  private readonly isAuthority: boolean
-  private readonly nostrPublish?: NostrPublish
-  private readonly nostrSubscribe?: NostrSubscribe
+  private readonly nostrSubscribe: NostrSubscribe
+  private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
   private readonly ownerPublicKey: string
-  protected readonly identityKey?: IdentityKey
+  // Note: identityKey stored for signing InviteList events (signing handled by nostrPublish)
+  protected readonly identityKey: IdentityKey
 
   private inviteList: InviteList | null = null
   private initialized = false
-  private subscription: Unsubscribe | null = null
-  private devicesChangedCallbacks: DevicesChangedCallback[] = []
+  private subscriptions: Unsubscribe[] = []
 
-  private readonly storageVersion = "3"
+  private readonly storageVersion = "3" // Bump for simplified architecture
   private get versionPrefix(): string {
     return `v${this.storageVersion}`
   }
 
   constructor(options: DeviceManagerOptions) {
-    this.isAuthority = options.isAuthority
+    this.nostrSubscribe = options.nostrSubscribe
+    this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
     this.ownerPublicKey = options.ownerPublicKey
-
-    if (options.isAuthority) {
-      if (!options.identityKey) {
-        throw new Error("Authority mode requires identityKey")
-      }
-      if (!options.nostrPublish) {
-        throw new Error("Authority mode requires nostrPublish")
-      }
-      this.identityKey = options.identityKey
-      this.nostrPublish = options.nostrPublish
-    } else {
-      if (!options.nostrSubscribe) {
-        throw new Error("Non-authority mode requires nostrSubscribe")
-      }
-      this.nostrSubscribe = options.nostrSubscribe
-    }
+    this.identityKey = options.identityKey
   }
 
   async init(): Promise<void> {
     if (this.initialized) return
     this.initialized = true
 
-    if (this.isAuthority) {
-      await this.initAuthority()
-    } else {
-      await this.initNonAuthority()
-    }
-  }
+    // Start continuous subscription first
+    this.subscribeToOwnInviteList()
 
-  private async initAuthority(): Promise<void> {
-    // Load local or create new - trust local only
-    this.inviteList = await this.loadInviteList() || new InviteList(this.ownerPublicKey)
-    await this.saveInviteList(this.inviteList)
+    // Load local and wait for remote
+    const local = await this.loadInviteList()
+    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
+    const inviteList = this.mergeInviteLists(local, remote)
+
+    this.inviteList = inviteList
+    await this.saveInviteList(inviteList)
 
     // Publish InviteList
-    const inviteListEvent = this.inviteList.getEvent()
-    await this.nostrPublish!(inviteListEvent).catch((error) => {
+    const inviteListEvent = inviteList.getEvent()
+    await this.nostrPublish(inviteListEvent).catch((error) => {
       console.error("Failed to publish InviteList:", error)
     })
-
-    this.notifyDevicesChanged()
-  }
-
-  private async initNonAuthority(): Promise<void> {
-    // Subscribe to InviteList from relay
-    this.subscription = InviteList.fromUser(
-      this.ownerPublicKey,
-      this.nostrSubscribe!,
-      (inviteList) => {
-        this.inviteList = inviteList
-        this.notifyDevicesChanged()
-      }
-    )
   }
 
   getOwnerPublicKey(): string {
     return this.ownerPublicKey
   }
 
-  getIsAuthority(): boolean {
-    return this.isAuthority
-  }
-
   getInviteList(): InviteList | null {
     return this.inviteList
   }
 
-  getDevices(): DeviceEntry[] {
-    return this.inviteList?.getAllDevices() || []
-  }
-
-  /**
-   * @deprecated Use getDevices() instead
-   */
   getOwnDevices(): DeviceEntry[] {
-    return this.getDevices()
-  }
-
-  /**
-   * Subscribe to device list changes.
-   * Returns an unsubscribe function.
-   */
-  onDevicesChanged(callback: DevicesChangedCallback): Unsubscribe {
-    this.devicesChangedCallbacks.push(callback)
-    // Immediately call with current devices
-    callback(this.getDevices())
-    return () => {
-      const index = this.devicesChangedCallbacks.indexOf(callback)
-      if (index > -1) {
-        this.devicesChangedCallbacks.splice(index, 1)
-      }
-    }
-  }
-
-  private notifyDevicesChanged(): void {
-    const devices = this.getDevices()
-    for (const callback of this.devicesChangedCallbacks) {
-      callback(devices)
-    }
+    return this.inviteList?.getAllDevices() || []
   }
 
   /**
    * Add a device to the InviteList.
    * Only adds identity info - the device publishes its own Invite separately.
-   * @throws Error if not in authority mode
    */
   async addDevice(payload: DelegatePayload): Promise<void> {
-    if (!this.isAuthority) {
-      throw new Error("Only authority can add devices")
-    }
     await this.init()
 
     await this.modifyInviteList((list) => {
@@ -219,12 +135,8 @@ export class DeviceManager {
 
   /**
    * Revoke a device from the InviteList.
-   * @throws Error if not in authority mode
    */
   async revokeDevice(identityPubkey: string): Promise<void> {
-    if (!this.isAuthority) {
-      throw new Error("Only authority can revoke devices")
-    }
     await this.init()
 
     await this.modifyInviteList((list) => {
@@ -232,15 +144,11 @@ export class DeviceManager {
     })
   }
 
-  /**
-   * Close the DeviceManager and clean up subscriptions.
-   */
   close(): void {
-    if (this.subscription) {
-      this.subscription()
-      this.subscription = null
+    for (const unsubscribe of this.subscriptions) {
+      unsubscribe()
     }
-    this.devicesChangedCallbacks = []
+    this.subscriptions = []
   }
 
   private inviteListKey(): string {
@@ -261,16 +169,39 @@ export class DeviceManager {
     await this.storage.put(this.inviteListKey(), list.serialize())
   }
 
-  private async modifyInviteList(change: (list: InviteList) => void): Promise<void> {
-    if (!this.inviteList) {
-      this.inviteList = new InviteList(this.ownerPublicKey)
-    }
-    change(this.inviteList)
+  private mergeInviteLists(local: InviteList | null, remote: InviteList | null): InviteList {
+    if (local && remote) return local.merge(remote)
+    if (local) return local
+    if (remote) return remote
+    return new InviteList(this.ownerPublicKey)
+  }
 
-    const event = this.inviteList.getEvent()
-    await this.nostrPublish!(event)
-    await this.saveInviteList(this.inviteList)
-    this.notifyDevicesChanged()
+  private async modifyInviteList(change: (list: InviteList) => void): Promise<void> {
+    const remote = await InviteList.waitFor(this.ownerPublicKey, this.nostrSubscribe, 500)
+    const merged = this.mergeInviteLists(this.inviteList, remote)
+    change(merged)
+
+    const event = merged.getEvent()
+    await this.nostrPublish(event)
+    await this.saveInviteList(merged)
+    this.inviteList = merged
+  }
+
+  private subscribeToOwnInviteList(): void {
+    const unsubscribe = InviteList.fromUser(
+      this.ownerPublicKey,
+      this.nostrSubscribe,
+      (remote) => {
+        if (this.inviteList) {
+          this.inviteList = this.inviteList.merge(remote)
+          this.saveInviteList(this.inviteList).catch(console.error)
+        } else {
+          this.inviteList = remote
+        }
+      }
+    )
+
+    this.subscriptions.push(unsubscribe)
   }
 }
 

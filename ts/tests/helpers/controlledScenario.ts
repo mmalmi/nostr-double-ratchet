@@ -3,7 +3,6 @@ import { ControlledMockRelay } from "./ControlledMockRelay"
 import {
   createControlledMockSessionManager,
   createControlledMockDelegateSessionManager,
-  clearControlledMockSessionManagerCache,
 } from "./controlledMockSessionManager"
 import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
@@ -154,9 +153,6 @@ export type ControlledScenarioDefinition = {
 export async function runControlledScenario(
   def: ControlledScenarioDefinition
 ): Promise<ControlledScenarioContext> {
-  // Clear cached state from previous scenarios
-  clearControlledMockSessionManagerCache()
-
   const relay = new ControlledMockRelay({ debug: def.debug })
   const context: ControlledScenarioContext = {
     relay,
