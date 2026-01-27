@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools"
 import { InviteList, DeviceEntry } from "./InviteList"
 import { Invite } from "./Invite"
-import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, IdentityKey } from "./types"
+import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
@@ -14,7 +14,6 @@ export interface DelegatePayload {
  */
 export interface DeviceManagerOptions {
   ownerPublicKey: string
-  identityKey: IdentityKey  // Main key for signing InviteList only
   nostrSubscribe: NostrSubscribe
   nostrPublish: NostrPublish
   storage?: StorageAdapter
@@ -58,14 +57,12 @@ export class DeviceManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
   private readonly ownerPublicKey: string
-  // Note: identityKey stored for signing InviteList events (signing handled by nostrPublish)
-  protected readonly identityKey: IdentityKey
 
   private inviteList: InviteList | null = null
   private initialized = false
   private subscriptions: Unsubscribe[] = []
 
-  private readonly storageVersion = "3" // Bump for simplified architecture
+  private readonly storageVersion = "3"
   private get versionPrefix(): string {
     return `v${this.storageVersion}`
   }
@@ -75,7 +72,6 @@ export class DeviceManager {
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
     this.ownerPublicKey = options.ownerPublicKey
-    this.identityKey = options.identityKey
   }
 
   async init(): Promise<void> {
