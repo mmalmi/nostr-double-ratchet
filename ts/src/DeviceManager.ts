@@ -13,8 +13,6 @@ export interface DelegatePayload {
  * Options for DeviceManager (authority for InviteList)
  */
 export interface DeviceManagerOptions {
-  ownerPublicKey: string
-  nostrSubscribe: NostrSubscribe
   nostrPublish: NostrPublish
   storage?: StorageAdapter
 }
@@ -49,29 +47,24 @@ export interface CreateDelegateManagerResult {
 
 /**
  * DeviceManager - Authority for InviteList.
- * Uses main key ONLY for signing InviteList events.
+ * Manages local InviteList and publishes to relays.
  * Does NOT have device identity (no Invite, no SessionManager creation).
  */
 export class DeviceManager {
-  private readonly nostrSubscribe: NostrSubscribe
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
-  private readonly ownerPublicKey: string
 
   private inviteList: InviteList | null = null
   private initialized = false
-  private subscriptions: Unsubscribe[] = []
 
-  private readonly storageVersion = "3"
+  private readonly storageVersion = "4"
   private get versionPrefix(): string {
     return `v${this.storageVersion}`
   }
 
   constructor(options: DeviceManagerOptions) {
-    this.nostrSubscribe = options.nostrSubscribe
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
-    this.ownerPublicKey = options.ownerPublicKey
   }
 
   async init(): Promise<void> {
@@ -81,12 +74,8 @@ export class DeviceManager {
     // Load local only - no auto-subscribe, no auto-publish, no auto-merge
     this.inviteList = await this.loadInviteList()
     if (!this.inviteList) {
-      this.inviteList = new InviteList(this.ownerPublicKey)
+      this.inviteList = new InviteList()
     }
-  }
-
-  getOwnerPublicKey(): string {
-    return this.ownerPublicKey
   }
 
   getInviteList(): InviteList | null {
@@ -104,7 +93,7 @@ export class DeviceManager {
    */
   addDevice(payload: DelegatePayload): void {
     if (!this.inviteList) {
-      this.inviteList = new InviteList(this.ownerPublicKey)
+      this.inviteList = new InviteList()
     }
 
     const device: DeviceEntry = {
@@ -132,7 +121,7 @@ export class DeviceManager {
    */
   async publish(): Promise<void> {
     if (!this.inviteList) {
-      this.inviteList = new InviteList(this.ownerPublicKey)
+      this.inviteList = new InviteList()
     }
 
     const event = this.inviteList.getEvent()
@@ -149,23 +138,10 @@ export class DeviceManager {
   }
 
   /**
-   * Subscribe to InviteList events from own account.
-   * Client can use this to receive updates, but merging is client responsibility.
+   * Cleanup resources. Currently a no-op but kept for API consistency.
    */
-  subscribeToOwnInviteList(onInviteList: (list: InviteList) => void): void {
-    const unsubscribe = InviteList.fromUser(
-      this.ownerPublicKey,
-      this.nostrSubscribe,
-      onInviteList
-    )
-    this.subscriptions.push(unsubscribe)
-  }
-
   close(): void {
-    for (const unsubscribe of this.subscriptions) {
-      unsubscribe()
-    }
-    this.subscriptions = []
+    // No-op - no subscriptions to clean up
   }
 
   private inviteListKey(): string {

@@ -48,13 +48,15 @@ interface RemovedDevice {
  * Manages a consolidated list of device invites (kind 30078, d-tag "double-ratchet/invite-list").
  * Single atomic event containing all device invites for a user.
  * Uses union merge strategy for conflict resolution.
+ *
+ * Note: ownerPublicKey is not stored - it's passed to getEvent() when publishing,
+ * and NDK's signer sets the correct pubkey during signing anyway.
  */
 export class InviteList {
   private devices: Map<string, DeviceEntry> = new Map()
   private removedDevices: Map<string, RemovedDevice> = new Map()
 
   constructor(
-    public readonly ownerPublicKey: string,
     devices: DeviceEntry[] = [],
     removedDevices: RemovedDevice[] = [],
   ) {
@@ -106,14 +108,12 @@ export class InviteList {
   }
 
   getEvent(): UnsignedEvent {
-    // Simplified tag format: ["device", identityPubkey, createdAt]
     const deviceTags = this.getAllDevices().map((device) => [
       "device",
       device.identityPubkey,
       String(device.createdAt),
     ])
 
-    // Simplified removed tag format: ["removed", identityPubkey, removedAt]
     const removedTags = this.getRemovedDevices().map((removed) => [
       "removed",
       removed.identityPubkey,
@@ -122,12 +122,12 @@ export class InviteList {
 
     return {
       kind: INVITE_LIST_EVENT_KIND,
-      pubkey: this.ownerPublicKey,
+      pubkey: "", // Signer will set this
       content: "",
       created_at: now(),
       tags: [
         ["d", "double-ratchet/invite-list"],
-        ["version", "3"], // Bump version for simplified format
+        ["version", "3"],
         ...deviceTags,
         ...removedTags,
       ],
@@ -158,12 +158,11 @@ export class InviteList {
         removedAt: parseInt(removedAt, 10) || event.created_at,
       }))
 
-    return new InviteList(event.pubkey, devices, removedDevices)
+    return new InviteList(devices, removedDevices)
   }
 
   serialize(): string {
     return JSON.stringify({
-      ownerPublicKey: this.ownerPublicKey,
       devices: this.getAllDevices(),
       removedDevices: this.getRemovedDevices(),
     })
@@ -171,11 +170,10 @@ export class InviteList {
 
   static deserialize(json: string): InviteList {
     const data = JSON.parse(json) as {
-      ownerPublicKey: string
       devices: DeviceEntry[]
       removedDevices?: RemovedDevice[]
     }
-    return new InviteList(data.ownerPublicKey, data.devices, data.removedDevices || [])
+    return new InviteList(data.devices, data.removedDevices || [])
   }
 
   merge(other: InviteList): InviteList {
@@ -203,7 +201,6 @@ export class InviteList {
       .filter((device) => !mergedRemoved.has(device.identityPubkey))
 
     return new InviteList(
-      this.ownerPublicKey,
       activeDevices,
       Array.from(mergedRemoved.values())
     )
