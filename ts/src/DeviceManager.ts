@@ -5,12 +5,7 @@ import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe, Iden
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
-/**
- * Simplified payload for adding a device to the owner's InviteList.
- * Contains only the identity pubkey - the device identifier.
- */
 export interface DelegatePayload {
-  /** Identity public key for this device (64 hex chars) - also serves as device identifier */
   identityPubkey: string
 }
 
@@ -223,7 +218,7 @@ export class DelegateManager {
   private initialized = false
   private subscriptions: Unsubscribe[] = []
 
-  private readonly storageVersion = "3" // Bump for simplified architecture
+  private readonly storageVersion = "1"
   private get versionPrefix(): string {
     return `v${this.storageVersion}`
   }
