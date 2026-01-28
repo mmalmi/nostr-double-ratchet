@@ -512,17 +512,20 @@ async function restartDelegateDevice(
     return signedEvent
   })
 
-  // Restore the delegate DelegateManager with saved keys
+  // Restore the delegate DelegateManager using same storage (auto-restores keys)
   // The Invite is stored separately and will be loaded from storage during init()
-  const newDelegateManager = DelegateManager.restore({
+  const newDelegateManager = new DelegateManager({
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: device.storage,
-    devicePublicKey,
-    devicePrivateKey,
   })
 
   await newDelegateManager.init()
+
+  // Verify keys were restored correctly
+  if (newDelegateManager.getIdentityPublicKey() !== devicePublicKey) {
+    throw new Error("Identity keys were not restored correctly from storage")
+  }
 
   // Create new SessionManager
   const newManager = newDelegateManager.createSessionManager()
@@ -628,6 +631,32 @@ async function addDevice(
     throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
   }
 
+  // If there's already a mainDeviceManager, add as delegate device
+  // This ensures all devices for an actor share the same InviteList
+  if (actor.mainDeviceManager) {
+    const { manager, mockStorage, delegateManager } =
+      await createControlledMockDelegateSessionManager(
+        deviceId,
+        context.relay,
+        actor.mainDeviceManager
+      )
+
+    const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
+    deviceState.isDelegate = true
+
+    // Track subscription ID
+    const subs = context.relay.getSubscriptions()
+    const latestSub = subs[subs.length - 1]
+    if (latestSub) {
+      deviceState.subscriptionId = latestSub.id
+      context.subscriptionRefs.set(`${actorId}/${deviceId}`, latestSub.id)
+    }
+
+    actor.devices.set(deviceId, deviceState)
+    return deviceState
+  }
+
+  // First device - create new DeviceManager and DelegateManager
   const { manager, mockStorage, deviceManager, delegateManager } = await createControlledMockSessionManager(
     deviceId,
     context.relay,
@@ -635,9 +664,7 @@ async function addDevice(
   )
 
   // Track the first device's DeviceManager as the main one for this actor
-  if (!actor.mainDeviceManager) {
-    actor.mainDeviceManager = deviceManager
-  }
+  actor.mainDeviceManager = deviceManager
 
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
 

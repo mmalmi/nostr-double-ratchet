@@ -26,24 +26,6 @@ export interface DelegateManagerOptions {
   storage?: StorageAdapter
 }
 
-/**
- * Options for restoring a DelegateManager from stored keys
- */
-export interface RestoreDelegateManagerOptions {
-  devicePublicKey: string
-  devicePrivateKey: Uint8Array
-  nostrSubscribe: NostrSubscribe
-  nostrPublish: NostrPublish
-  storage?: StorageAdapter
-}
-
-/**
- * Result of creating a new DelegateManager
- */
-export interface CreateDelegateManagerResult {
-  manager: DelegateManager
-  payload: DelegatePayload
-}
 
 /**
  * DeviceManager - Authority for InviteList.
@@ -173,8 +155,8 @@ export class DelegateManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
 
-  private readonly devicePublicKey: string
-  private readonly devicePrivateKey: Uint8Array
+  private devicePublicKey: string = ""
+  private devicePrivateKey: Uint8Array = new Uint8Array()
 
   private invite: Invite | null = null
   private ownerPubkeyFromActivation?: string
@@ -186,59 +168,29 @@ export class DelegateManager {
     return `v${this.storageVersion}`
   }
 
-  protected constructor(
-    nostrSubscribe: NostrSubscribe,
-    nostrPublish: NostrPublish,
-    storage: StorageAdapter,
-    devicePublicKey: string,
-    devicePrivateKey: Uint8Array,
-  ) {
-    this.nostrSubscribe = nostrSubscribe
-    this.nostrPublish = nostrPublish
-    this.storage = storage
-    this.devicePublicKey = devicePublicKey
-    this.devicePrivateKey = devicePrivateKey
-  }
-
-  /**
-   * Create a new DelegateManager with fresh identity keys.
-   */
-  static create(options: DelegateManagerOptions): CreateDelegateManagerResult {
-    const devicePrivateKey = generateSecretKey()
-    const devicePublicKey = getPublicKey(devicePrivateKey)
-
-    const manager = new DelegateManager(
-      options.nostrSubscribe,
-      options.nostrPublish,
-      options.storage || new InMemoryStorageAdapter(),
-      devicePublicKey,
-      devicePrivateKey,
-    )
-
-    // Simplified payload - only identity pubkey needed
-    const payload: DelegatePayload = {
-      identityPubkey: devicePublicKey,
-    }
-
-    return { manager, payload }
-  }
-
-  /**
-   * Restore a DelegateManager from stored keys.
-   */
-  static restore(options: RestoreDelegateManagerOptions): DelegateManager {
-    return new DelegateManager(
-      options.nostrSubscribe,
-      options.nostrPublish,
-      options.storage || new InMemoryStorageAdapter(),
-      options.devicePublicKey,
-      options.devicePrivateKey,
-    )
+  constructor(options: DelegateManagerOptions) {
+    this.nostrSubscribe = options.nostrSubscribe
+    this.nostrPublish = options.nostrPublish
+    this.storage = options.storage || new InMemoryStorageAdapter()
   }
 
   async init(): Promise<void> {
     if (this.initialized) return
     this.initialized = true
+
+    // Load or generate identity keys
+    const storedPublicKey = await this.storage.get<string>(this.identityPublicKeyKey())
+    const storedPrivateKey = await this.storage.get<number[]>(this.identityPrivateKeyKey())
+
+    if (storedPublicKey && storedPrivateKey) {
+      this.devicePublicKey = storedPublicKey
+      this.devicePrivateKey = new Uint8Array(storedPrivateKey)
+    } else {
+      this.devicePrivateKey = generateSecretKey()
+      this.devicePublicKey = getPublicKey(this.devicePrivateKey)
+      await this.storage.put(this.identityPublicKeyKey(), this.devicePublicKey)
+      await this.storage.put(this.identityPrivateKeyKey(), Array.from(this.devicePrivateKey))
+    }
 
     const storedOwnerPubkey = await this.storage.get<string>(this.ownerPubkeyKey())
     if (storedOwnerPubkey) {
@@ -255,6 +207,14 @@ export class DelegateManager {
     await this.nostrPublish(inviteEvent).catch((error) => {
       console.error("Failed to publish Invite:", error)
     })
+  }
+
+  /**
+   * Get the registration payload for adding this device to a DeviceManager.
+   * Must be called after init().
+   */
+  getRegistrationPayload(): DelegatePayload {
+    return { identityPubkey: this.devicePublicKey }
   }
 
   getIdentityPublicKey(): string {
@@ -418,6 +378,14 @@ export class DelegateManager {
 
   private async saveInvite(invite: Invite): Promise<void> {
     await this.storage.put(this.inviteKey(), invite.serialize())
+  }
+
+  private identityPublicKeyKey(): string {
+    return `${this.versionPrefix}/device-manager/identity-public-key`
+  }
+
+  private identityPrivateKeyKey(): string {
+    return `${this.versionPrefix}/device-manager/identity-private-key`
   }
 }
 

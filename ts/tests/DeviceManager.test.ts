@@ -29,9 +29,9 @@ describe("DelegateManager", () => {
     }) as unknown as NostrPublish
   })
 
-  describe("create()", () => {
-    it("should create a DelegateManager", () => {
-      const { manager } = DelegateManager.create({
+  describe("constructor and init()", () => {
+    it("should create a DelegateManager", async () => {
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
@@ -39,11 +39,14 @@ describe("DelegateManager", () => {
       expect(manager).toBeInstanceOf(DelegateManager)
     })
 
-    it("should generate identity keypair", () => {
-      const { manager, payload } = DelegateManager.create({
+    it("should generate identity keypair on init", async () => {
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
+
+      await manager.init()
+      const payload = manager.getRegistrationPayload()
 
       expect(payload.identityPubkey).toBeDefined()
       expect(payload.identityPubkey).toHaveLength(64)
@@ -54,11 +57,14 @@ describe("DelegateManager", () => {
       expect((privkey as Uint8Array).length).toBe(32)
     })
 
-    it("should return simplified payload with only identityPubkey", () => {
-      const { payload } = DelegateManager.create({
+    it("should return simplified payload with only identityPubkey", async () => {
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
+
+      await manager.init()
+      const payload = manager.getRegistrationPayload()
 
       // Simplified payload only contains identityPubkey
       expect(payload.identityPubkey).toBeDefined()
@@ -72,7 +78,7 @@ describe("DelegateManager", () => {
 
   describe("init()", () => {
     it("should publish Invite event (not InviteList)", async () => {
-      const { manager } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
@@ -95,7 +101,7 @@ describe("DelegateManager", () => {
     it("should create and store Invite on init", async () => {
       const storage = new InMemoryStorageAdapter()
 
-      const { manager } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
         storage,
@@ -117,7 +123,7 @@ describe("DelegateManager", () => {
       // DelegateManager uses v1 for storage version
       await storage.put("v1/device-manager/owner-pubkey", ownerPubkey)
 
-      const { manager } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
         storage,
@@ -127,11 +133,36 @@ describe("DelegateManager", () => {
 
       expect(manager.getOwnerPublicKey()).toBe(ownerPubkey)
     })
+
+    it("should restore identity keys from storage on restart", async () => {
+      const storage = new InMemoryStorageAdapter()
+
+      // First instance - generates keys
+      const manager1 = new DelegateManager({
+        nostrSubscribe,
+        nostrPublish,
+        storage,
+      })
+      await manager1.init()
+      const originalPubkey = manager1.getIdentityPublicKey()
+      const originalPrivkey = manager1.getIdentityKey()
+
+      // Second instance with same storage - should restore keys
+      const manager2 = new DelegateManager({
+        nostrSubscribe,
+        nostrPublish,
+        storage,
+      })
+      await manager2.init()
+
+      expect(manager2.getIdentityPublicKey()).toBe(originalPubkey)
+      expect(Array.from(manager2.getIdentityKey())).toEqual(Array.from(originalPrivkey))
+    })
   })
 
   describe("waitForActivation()", () => {
     it("should subscribe to InviteList events", async () => {
-      const { manager } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
@@ -154,12 +185,13 @@ describe("DelegateManager", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
 
       await manager.init()
+      const payload = manager.getRegistrationPayload()
 
       const activationPromise = manager.waitForActivation(5000)
 
@@ -203,7 +235,7 @@ describe("DelegateManager", () => {
       // DelegateManager uses v1 for storage version
       await storage.put("v1/device-manager/owner-pubkey", ownerPubkey)
 
-      const { manager } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
         storage,
@@ -221,12 +253,13 @@ describe("DelegateManager", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
 
       await manager.init()
+      const payload = manager.getRegistrationPayload()
 
       const activationPromise = manager.waitForActivation(5000)
       await new Promise((resolve) => setTimeout(resolve, 50))
@@ -278,12 +311,13 @@ describe("DelegateManager", () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
-      const { manager, payload } = DelegateManager.create({
+      const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
       })
 
       await manager.init()
+      const payload = manager.getRegistrationPayload()
 
       const activationPromise = manager.waitForActivation(5000)
       await new Promise((resolve) => setTimeout(resolve, 50))
@@ -577,16 +611,18 @@ describe("DeviceManager Integration", () => {
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
     // 1. Create DelegateManager (device identity)
-    const { manager: delegateManager, payload } = DelegateManager.create({
+    const delegateManager = new DelegateManager({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
     })
 
+    await delegateManager.init()
+    const payload = delegateManager.getRegistrationPayload()
+
     // Register delegate's signing key
     registerSigningKey(delegateManager.getIdentityPublicKey(), delegateManager.getIdentityKey())
 
-    await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
     // 2. Create DeviceManager (authority) - only needs nostrPublish
@@ -648,14 +684,16 @@ describe("DeviceManager Integration", () => {
     await deviceManager.init()
 
     // 2. Create DelegateManager for main device identity (same flow as delegate!)
-    const { manager: mainDelegateManager, payload: mainPayload } = DelegateManager.create({
+    const mainDelegateManager = new DelegateManager({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
     })
 
-    registerSigningKey(mainDelegateManager.getIdentityPublicKey(), mainDelegateManager.getIdentityKey())
     await mainDelegateManager.init()
+    const mainPayload = mainDelegateManager.getRegistrationPayload()
+
+    registerSigningKey(mainDelegateManager.getIdentityPublicKey(), mainDelegateManager.getIdentityKey())
 
     // 3. Add main device to InviteList (same as adding any device) then publish
     deviceManager.addDevice(mainPayload)
@@ -679,15 +717,17 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { manager: delegateManager, payload } = DelegateManager.create({
+    const delegateManager = new DelegateManager({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
     })
 
+    await delegateManager.init()
+    const payload = delegateManager.getRegistrationPayload()
+
     registerSigningKey(delegateManager.getIdentityPublicKey(), delegateManager.getIdentityKey())
 
-    await delegateManager.init()
     const activationPromise = delegateManager.waitForActivation(5000)
 
     // Create DeviceManager with signed publish
@@ -726,15 +766,15 @@ describe("DeviceManager Integration", () => {
   })
 
   it("delegate cannot activate if not added to InviteList", async () => {
-    const { manager: delegateManager } = DelegateManager.create({
+    const delegateManager = new DelegateManager({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
       storage: new InMemoryStorageAdapter(),
     })
 
-    registerSigningKey(delegateManager.getIdentityPublicKey(), delegateManager.getIdentityKey())
-
     await delegateManager.init()
+
+    registerSigningKey(delegateManager.getIdentityPublicKey(), delegateManager.getIdentityKey())
 
     await expect(delegateManager.waitForActivation(200)).rejects.toThrow(
       "Activation timeout"
@@ -747,10 +787,12 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    const { payload } = DelegateManager.create({
+    const delegateManager = new DelegateManager({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
     })
+    await delegateManager.init()
+    const payload = delegateManager.getRegistrationPayload()
 
     // Create DeviceManager with signed publish
     const deviceManagerPublish = createNostrPublish()

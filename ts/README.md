@@ -22,12 +22,13 @@ Main device initializes messaging for the first time.
 import { DeviceManager, DelegateManager } from "nostr-double-ratchet"
 
 // Create device identity
-const { manager: delegate, payload } = DelegateManager.create({
+const delegate = new DelegateManager({
   nostrSubscribe,
   nostrPublish,
   storage,
 })
 await delegate.init()
+const payload = delegate.getRegistrationPayload()
 
 // Create InviteList authority and add ourselves
 const deviceManager = new DeviceManager({ nostrPublish, storage })
@@ -51,12 +52,13 @@ User logs in on a new device using their main Nostr secret key.
 import { DeviceManager, DelegateManager, InviteList } from "nostr-double-ratchet"
 
 // Create device identity for this device
-const { manager: delegate, payload } = DelegateManager.create({
+const delegate = new DelegateManager({
   nostrSubscribe,
   nostrPublish,
   storage,
 })
 await delegate.init()
+const payload = delegate.getRegistrationPayload()
 
 // Create InviteList authority
 const deviceManager = new DeviceManager({ nostrPublish, storage })
@@ -82,31 +84,25 @@ await sessionManager.init()
 
 A secondary device that doesn't have authority over the InviteList. Requires coordination with a main device.
 
-#### Step 1: Create Device Identity
+#### Step 1: Create and Initialize Device Identity
 
 On the new delegate device:
 
 ```typescript
 import { DelegateManager } from "nostr-double-ratchet"
 
-const { manager: delegate, payload } = DelegateManager.create({
+const delegate = new DelegateManager({
   nostrSubscribe,
   nostrPublish,
   storage,
 })
+await delegate.init()
+const payload = delegate.getRegistrationPayload()
 
 // payload = { identityPubkey: "abc123..." }
 ```
 
-#### Step 2: Initialize
-
-This generates ephemeral keys, creates an Invite, and publishes it to relays.
-
-```typescript
-await delegate.init()
-```
-
-#### Step 3: Transfer Payload to Main Device
+#### Step 2: Transfer Payload to Main Device
 
 Display `payload.identityPubkey` to user via QR code, copy-paste, NFC, etc.
 
@@ -114,7 +110,7 @@ Display `payload.identityPubkey` to user via QR code, copy-paste, NFC, etc.
 console.log("Add this device on your main device:", payload.identityPubkey)
 ```
 
-#### Step 4: Main Device Adds Delegate
+#### Step 3: Main Device Adds Delegate
 
 On the main device (which has `DeviceManager`):
 
@@ -125,7 +121,7 @@ deviceManager.addDevice(delegatePayload)
 await deviceManager.publish()
 ```
 
-#### Step 5: Wait for Activation
+#### Step 4: Wait for Activation
 
 Back on the delegate device:
 
@@ -135,7 +131,7 @@ const ownerPublicKey = await delegate.waitForActivation(60000)
 // Returns the owner's pubkey (the InviteList author)
 ```
 
-#### Step 6: Create SessionManager
+#### Step 5: Create SessionManager
 
 ```typescript
 const sessionManager = delegate.createSessionManager()
@@ -147,21 +143,22 @@ await sessionManager.init()
 ```typescript
 import { DelegateManager } from "nostr-double-ratchet"
 
-// 1-2. Create and initialize
-const { manager: delegate, payload } = DelegateManager.create({
+// 1. Create and initialize
+const delegate = new DelegateManager({
   nostrSubscribe,
   nostrPublish,
   storage,
 })
 await delegate.init()
+const payload = delegate.getRegistrationPayload()
 
-// 3. Show to user for transfer to main device
+// 2. Show to user for transfer to main device
 displayQRCode(payload.identityPubkey)
 
-// 5. Wait for main device to add us
+// 3. Wait for main device to add us
 const ownerPublicKey = await delegate.waitForActivation(60000)
 
-// 6. Create SessionManager
+// 4. Create SessionManager
 const sessionManager = delegate.createSessionManager()
 await sessionManager.init()
 ```
@@ -180,28 +177,20 @@ sessionManager.onEvent((event, from) => {
 await sessionManager.sendMessage(recipientPubkey, "Hello!")
 ```
 
-## Persisting Device Keys
+## Automatic Key Persistence
 
-For delegate devices, persist keys to restore on restart:
+Identity keys are automatically stored in your `StorageAdapter` and restored on restart:
 
 ```typescript
-// After creation, save keys
-const keysToStore = {
-  devicePublicKey: delegate.getIdentityPublicKey(),
-  devicePrivateKey: delegate.getIdentityKey(), // Uint8Array
-}
-
-// On restart, restore instead of creating new
-import { DelegateManager } from "nostr-double-ratchet"
-
-const delegate = DelegateManager.restore({
-  devicePublicKey: stored.devicePublicKey,
-  devicePrivateKey: stored.devicePrivateKey,
-  nostrSubscribe,
-  nostrPublish,
-  storage,
-})
+// First run - generates new keys
+const delegate = new DelegateManager({ nostrSubscribe, nostrPublish, storage })
 await delegate.init()
+// Keys saved to storage automatically
+
+// After restart - same storage = keys restored automatically
+const delegate = new DelegateManager({ nostrSubscribe, nostrPublish, storage })
+await delegate.init()
+// Same identity keys, no manual persistence needed
 ```
 
 ## Architecture Overview
@@ -239,14 +228,12 @@ await delegate.init()
 All devices use this for identity.
 
 ```typescript
-// Create new
-DelegateManager.create(options): { manager, payload }
-
-// Restore existing
-DelegateManager.restore(options): DelegateManager
+// Create
+new DelegateManager(options)
 
 // Methods
-delegate.init(): Promise<void>
+delegate.init(): Promise<void>                    // Loads or generates keys
+delegate.getRegistrationPayload(): DelegatePayload // Get payload for DeviceManager
 delegate.getIdentityPublicKey(): string
 delegate.getIdentityKey(): Uint8Array
 delegate.getOwnerPublicKey(): string | null

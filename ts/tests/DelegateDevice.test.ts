@@ -39,26 +39,30 @@ describe('Delegate Device Architecture', () => {
     await deviceManager.init()
 
     // 2. Create DelegateManager for main device (same flow as any device!)
-    let delegatePrivateKey: Uint8Array | null = null
+    // Use a holder object to capture the manager reference for the publish closure
+    const managerHolder: { manager: DelegateManager | null } = { manager: null }
     const delegatePublish = vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
       if ('sig' in event && event.sig) {
         await relay.publishAndDeliver(event as UnsignedEvent)
         return event
       }
-      if (!delegatePrivateKey) throw new Error('No delegate key')
-      const signedEvent = finalizeEvent(event, delegatePrivateKey)
+      // Get key from manager (available after keys are generated during init)
+      const privKey = managerHolder.manager?.getIdentityKey()
+      if (!privKey) throw new Error('No delegate key')
+      const signedEvent = finalizeEvent(event, privKey)
       await relay.publishAndDeliver(signedEvent as UnsignedEvent)
       return signedEvent
     })
 
-    const { manager: mainDelegateManager, payload: mainPayload } = DelegateManager.create({
+    const mainDelegateManager = new DelegateManager({
       nostrSubscribe: createSubscribe(),
       nostrPublish: delegatePublish,
       storage: new InMemoryStorageAdapter(),
     })
+    managerHolder.manager = mainDelegateManager
 
-    delegatePrivateKey = mainDelegateManager.getIdentityKey()
     await mainDelegateManager.init()
+    const mainPayload = mainDelegateManager.getRegistrationPayload()
 
     // 3. Add main device to InviteList (local) and publish
     deviceManager.addDevice(mainPayload)
@@ -89,26 +93,28 @@ describe('Delegate Device Architecture', () => {
     await deviceManager.init()
 
     // Create delegate DelegateManager
-    let delegatePrivateKey: Uint8Array | null = null
+    const managerHolder: { manager: DelegateManager | null } = { manager: null }
     const delegatePublish = vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
       if ('sig' in event && event.sig) {
         await relay.publishAndDeliver(event as UnsignedEvent)
         return event
       }
-      if (!delegatePrivateKey) throw new Error('No delegate key')
-      const signedEvent = finalizeEvent(event, delegatePrivateKey)
+      const privKey = managerHolder.manager?.getIdentityKey()
+      if (!privKey) throw new Error('No delegate key')
+      const signedEvent = finalizeEvent(event, privKey)
       await relay.publishAndDeliver(signedEvent as UnsignedEvent)
       return signedEvent
     })
 
-    const { manager: delegateManager, payload } = DelegateManager.create({
+    const delegateManager = new DelegateManager({
       nostrSubscribe: createSubscribe(),
       nostrPublish: delegatePublish,
       storage: new InMemoryStorageAdapter(),
     })
+    managerHolder.manager = delegateManager
 
-    delegatePrivateKey = delegateManager.getIdentityKey()
     await delegateManager.init()
+    const payload = delegateManager.getRegistrationPayload()
 
     // Start waiting for activation BEFORE adding to InviteList
     const activationPromise = delegateManager.waitForActivation(5000)
@@ -135,26 +141,28 @@ describe('Delegate Device Architecture', () => {
     })
     await deviceManager.init()
 
-    let delegatePrivateKey: Uint8Array | null = null
+    const managerHolder: { manager: DelegateManager | null } = { manager: null }
     const delegatePublish = vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
       if ('sig' in event && event.sig) {
         await relay.publishAndDeliver(event as UnsignedEvent)
         return event
       }
-      if (!delegatePrivateKey) throw new Error('No delegate key')
-      const signedEvent = finalizeEvent(event, delegatePrivateKey)
+      const privKey = managerHolder.manager?.getIdentityKey()
+      if (!privKey) throw new Error('No delegate key')
+      const signedEvent = finalizeEvent(event, privKey)
       await relay.publishAndDeliver(signedEvent as UnsignedEvent)
       return signedEvent
     })
 
-    const { manager: delegateManager, payload } = DelegateManager.create({
+    const delegateManager = new DelegateManager({
       nostrSubscribe: createSubscribe(),
       nostrPublish: delegatePublish,
       storage: new InMemoryStorageAdapter(),
     })
+    managerHolder.manager = delegateManager
 
-    delegatePrivateKey = delegateManager.getIdentityKey()
     await delegateManager.init()
+    const payload = delegateManager.getRegistrationPayload()
 
     // Add and activate device
     const activationPromise = delegateManager.waitForActivation(5000)

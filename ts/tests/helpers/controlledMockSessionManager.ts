@@ -69,7 +69,8 @@ export const createControlledMockSessionManager = async (
   await deviceManager.init()
 
   // Create DelegateManager for device identity
-  let delegatePrivateKey: Uint8Array | null = null
+  // Use a holder so the publish function can access the manager's key during init
+  const managerHolder: { manager: DelegateManager | null } = { manager: null }
 
   const delegateSubscribe = vi
     .fn()
@@ -84,6 +85,7 @@ export const createControlledMockSessionManager = async (
       await mockRelay.publishAndDeliver(event as UnsignedEvent)
       return verifiedEvent
     }
+    const delegatePrivateKey = managerHolder.manager?.getIdentityKey()
     if (!delegatePrivateKey) {
       throw new Error("Delegate private key not set yet")
     }
@@ -96,14 +98,15 @@ export const createControlledMockSessionManager = async (
     return signedEvent
   })
 
-  const { manager: delegateManager, payload } = DelegateManager.create({
+  const delegateManager = new DelegateManager({
     nostrSubscribe: delegateSubscribe,
     nostrPublish: delegatePublish,
     storage: delegateStorage,
   })
+  managerHolder.manager = delegateManager
 
-  delegatePrivateKey = delegateManager.getIdentityKey()
   await delegateManager.init()
+  const payload = delegateManager.getRegistrationPayload()
 
   // Add device to InviteList and publish
   deviceManager.addDevice(payload)
@@ -147,8 +150,8 @@ export const createControlledMockDelegateSessionManager = async (
     list: vi.spyOn(mockStorage, "list"),
   }
 
-  // Context to hold the delegate's private key for signing
-  let delegatePrivateKey: Uint8Array | null = null
+  // Use a holder so the publish function can access the manager's key during init
+  const managerHolder: { manager: DelegateManager | null } = { manager: null }
 
   const subscribe = vi
     .fn()
@@ -165,6 +168,7 @@ export const createControlledMockDelegateSessionManager = async (
       return verifiedEvent
     }
     // Unsigned event - sign with delegate's private key
+    const delegatePrivateKey = managerHolder.manager?.getIdentityKey()
     if (!delegatePrivateKey) {
       throw new Error("Delegate private key not set yet")
     }
@@ -174,16 +178,15 @@ export const createControlledMockDelegateSessionManager = async (
   })
 
   // Create delegate DelegateManager
-  const { manager: delegateManager, payload } = DelegateManager.create({
+  const delegateManager = new DelegateManager({
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: mockStorage,
   })
-
-  // Get the delegate's private key for signing
-  delegatePrivateKey = delegateManager.getIdentityKey()
+  managerHolder.manager = delegateManager
 
   await delegateManager.init()
+  const payload = delegateManager.getRegistrationPayload()
 
   // Main device adds delegate to its InviteList and publishes
   mainDeviceManager.addDevice(payload)

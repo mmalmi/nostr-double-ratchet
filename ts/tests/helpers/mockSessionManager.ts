@@ -2,7 +2,6 @@ import { vi } from "vitest"
 import { DeviceManager, DelegateManager } from "../../src/DeviceManager"
 import {
   Filter,
-  finalizeEvent,
   generateSecretKey,
   getPublicKey,
   UnsignedEvent,
@@ -27,9 +26,8 @@ function getRelayId(relay: MockRelay): string {
   return id
 }
 
-// Store delegate storage and keys for reuse across restarts
+// Store delegate storage for reuse across restarts
 const delegateStorages = new Map<string, InMemoryStorageAdapter>()
-const delegateKeys = new Map<string, Uint8Array>()
 
 export const createMockSessionManager = async (
   deviceId: string,
@@ -87,8 +85,8 @@ export const createMockSessionManager = async (
       return mockRelay.subscribe(filter, onEvent)
     })
 
-  // Create DelegateManager for device identity
-  let delegatePrivateKey: Uint8Array | null = null
+  // Use a holder so the publish function can access the manager's key during init
+  const managerHolder: { manager: DelegateManager | null } = { manager: null }
 
   const delegateSubscribe = vi
     .fn()
@@ -101,54 +99,32 @@ export const createMockSessionManager = async (
       // Already signed - use mockRelay.publish() which will handle it
       return await mockRelay.publish(event as UnsignedEvent)
     }
+    const delegatePrivateKey = managerHolder.manager?.getIdentityKey()
     if (!delegatePrivateKey) {
       throw new Error("Delegate private key not set yet")
     }
     return await mockRelay.publish(event, delegatePrivateKey)
   })
 
-  let delegateManager: DelegateManager
-  const existingDelegateKey = delegateKeys.get(storageKey)
+  // Create or restore DelegateManager using same storage (auto-restores keys)
+  const delegateManager = new DelegateManager({
+    nostrSubscribe: delegateSubscribe,
+    nostrPublish: delegatePublish,
+    storage: delegateStorage,
+  })
+  managerHolder.manager = delegateManager
 
-  if (existingDelegateKey) {
-    // Restore existing delegate (for restarts)
-    delegateManager = DelegateManager.restore({
-      devicePublicKey: getPublicKey(existingDelegateKey),
-      devicePrivateKey: existingDelegateKey,
-      nostrSubscribe: delegateSubscribe,
-      nostrPublish: delegatePublish,
-      storage: delegateStorage,
-    })
-    delegatePrivateKey = existingDelegateKey
-    await delegateManager.init()
+  await delegateManager.init()
 
-    // Device is already activated, just need to activate with stored owner
-    const storedOwner = await delegateStorage.get<string>('v1/device-manager/owner-pubkey')
-    if (storedOwner) {
-      await delegateManager.activate(storedOwner)
-    } else {
-      // Fall back to waiting for activation
-      await delegateManager.waitForActivation(5000)
-    }
+  // Check if already activated
+  const storedOwner = await delegateStorage.get<string>('v1/device-manager/owner-pubkey')
+  if (storedOwner) {
+    // Already activated, nothing more to do
   } else {
-    // Create new delegate
-    const createResult = DelegateManager.create({
-      nostrSubscribe: delegateSubscribe,
-      nostrPublish: delegatePublish,
-      storage: delegateStorage,
-    })
-    delegateManager = createResult.manager
-    const payload = createResult.payload
-
-    delegatePrivateKey = delegateManager.getIdentityKey()
-    delegateKeys.set(storageKey, delegatePrivateKey) // Save for future restarts
-    await delegateManager.init()
-
-    // Add device to InviteList and publish
+    // New delegate - add to InviteList and wait for activation
+    const payload = delegateManager.getRegistrationPayload()
     deviceManager.addDevice(payload)
     await deviceManager.publish() // Publish InviteList to relay
-
-    // Wait for activation
     await delegateManager.waitForActivation(5000)
   }
 
@@ -187,8 +163,8 @@ export const createMockDelegateSessionManager = async (
     list: vi.spyOn(mockStorage, "list"),
   }
 
-  // Context to hold the delegate's private key for signing
-  let delegatePrivateKey: Uint8Array | null = null
+  // Use a holder so the publish function can access the manager's key during init
+  const managerHolder: { manager: DelegateManager | null } = { manager: null }
 
   const subscribe = vi
     .fn()
@@ -201,6 +177,7 @@ export const createMockDelegateSessionManager = async (
       // Already signed - use mockRelay.publish() which will handle it
       return await sharedMockRelay.publish(event as UnsignedEvent)
     }
+    const delegatePrivateKey = managerHolder.manager?.getIdentityKey()
     if (!delegatePrivateKey) {
       throw new Error("Delegate private key not set yet")
     }
@@ -208,16 +185,15 @@ export const createMockDelegateSessionManager = async (
   })
 
   // Create delegate DelegateManager
-  const { manager: delegateManager, payload } = DelegateManager.create({
+  const delegateManager = new DelegateManager({
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: mockStorage,
   })
-
-  // Get the delegate's private key for signing
-  delegatePrivateKey = delegateManager.getIdentityKey()
+  managerHolder.manager = delegateManager
 
   await delegateManager.init()
+  const payload = delegateManager.getRegistrationPayload()
 
   // Main device adds delegate to its InviteList and publishes
   mainDeviceManager.addDevice(payload)
@@ -251,5 +227,4 @@ export const resetMockSessionManagerState = () => {
   deviceManagers.clear()
   deviceManagerStorages.clear()
   delegateStorages.clear()
-  delegateKeys.clear()
 }
