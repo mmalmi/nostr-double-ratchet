@@ -172,7 +172,7 @@ describe("DelegateManager", () => {
           created_at: Math.floor(Date.now() / 1000),
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "3"],
+            ["version", "1"],
             [
               "device",
               payload.identityPubkey,
@@ -237,7 +237,7 @@ describe("DelegateManager", () => {
           created_at: Math.floor(Date.now() / 1000),
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "3"],
+            ["version", "1"],
             [
               "device",
               payload.identityPubkey,
@@ -294,7 +294,7 @@ describe("DelegateManager", () => {
           created_at: Math.floor(Date.now() / 1000),
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "3"],
+            ["version", "1"],
             [
               "device",
               payload.identityPubkey,
@@ -322,7 +322,7 @@ describe("DelegateManager", () => {
           created_at: Math.floor(Date.now() / 1000) + 1,
           tags: [
             ["d", "double-ratchet/invite-list"],
-            ["version", "3"],
+            ["version", "1"],
             // No device tags - the device is simply not present
           ],
           content: "",

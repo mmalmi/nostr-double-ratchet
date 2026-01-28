@@ -119,7 +119,7 @@ describe('InviteList', () => {
       expect(event.kind).toBe(INVITE_LIST_EVENT_KIND)
       expect(event.pubkey).toBe('') // Signer will set this
       expect(event.tags).toContainEqual(['d', 'double-ratchet/invite-list'])
-      expect(event.tags).toContainEqual(['version', '3']) // New version for simplified format
+      expect(event.tags).toContainEqual(['version', '1'])
 
       // Simplified tag format: ["device", identityPubkey, createdAt]
       const deviceTag = event.tags.find(t => t[0] === 'device' && t[1] === device.identityPubkey)

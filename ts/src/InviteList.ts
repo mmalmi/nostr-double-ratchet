@@ -86,7 +86,7 @@ export class InviteList {
       created_at: now(),
       tags: [
         ["d", "double-ratchet/invite-list"],
-        ["version", "3"],
+        ["version", "1"],
         ...deviceTags,
       ],
     }
