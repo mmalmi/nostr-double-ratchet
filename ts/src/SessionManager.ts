@@ -174,30 +174,22 @@ export class SessionManager {
             return
           }
 
-          console.log(`[InviteResponse] Received from device=${decrypted.inviteeIdentity.slice(0,8)}, ownerPublicKey=${decrypted.ownerPublicKey?.slice(0,8) || 'none'}, sessionKey=${decrypted.inviteeSessionPublicKey.slice(0,8)}`)
-
           // Get owner pubkey from response (required for proper chat routing)
           // If not present (old client), fall back to resolveToOwner
           const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
-          console.log(`[InviteResponse] claimedOwner=${claimedOwner.slice(0,8)}, ourDevice=${this.deviceId.slice(0,8)}, ourOwner=${this.ownerPublicKey.slice(0,8)}`)
 
           // Verify the device is authorized by fetching owner's InviteList
-          console.log(`[InviteResponse] Fetching InviteList for owner=${claimedOwner.slice(0,8)}...`)
           const inviteList = await this.fetchInviteList(claimedOwner)
-          console.log(`[InviteResponse] InviteList fetch result: ${inviteList ? `found with ${inviteList.getAllDevices().length} devices` : 'NOT FOUND'}`)
 
           if (!inviteList) {
             // No InviteList found - check cached device identities as fallback
             const cachedRecord = this.userRecords.get(claimedOwner)
             const cachedIdentities = cachedRecord?.knownDeviceIdentities || []
-            console.log(`[InviteResponse] No InviteList, checking cache: cachedIdentities=[${cachedIdentities.map(i => i.slice(0,8)).join(', ')}]`)
 
             if (cachedIdentities.includes(decrypted.inviteeIdentity)) {
               // Device is in cached list - allow (this handles restart scenarios)
-              console.log(`[InviteResponse] ALLOWED: device found in cached identities`)
             } else if (decrypted.inviteeIdentity === claimedOwner) {
               // Single-device user (device = owner), proceed without InviteList
-              console.log(`[InviteResponse] ALLOWED: single-device user (device === owner)`)
             } else {
               console.warn(`[InviteResponse] REJECTED: no InviteList found for claimed owner ${claimedOwner.slice(0,8)} and device ${decrypted.inviteeIdentity.slice(0,8)} is not the owner or cached`)
               return
@@ -207,12 +199,10 @@ export class SessionManager {
             const deviceInList = inviteList.getAllDevices().some(
               d => d.identityPubkey === decrypted.inviteeIdentity
             )
-            console.log(`[InviteResponse] InviteList devices: [${inviteList.getAllDevices().map(d => d.identityPubkey.slice(0,8)).join(', ')}]`)
             if (!deviceInList) {
               console.warn(`[InviteResponse] REJECTED: device ${decrypted.inviteeIdentity.slice(0,8)} not in owner's InviteList`)
               return
             }
-            console.log(`[InviteResponse] ALLOWED: device found in InviteList`)
 
             // Update delegate mapping with verified InviteList
             this.updateDelegateMapping(claimedOwner, inviteList)
@@ -261,7 +251,6 @@ export class SessionManager {
           deviceRecord.hasResponderSession = true
 
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
-          console.log(`[InviteResponse] SUCCESS: Created RESPONDER session for owner=${ownerPubkey.slice(0,8)}, device=${decrypted.inviteeIdentity.slice(0,8)}, sessionName=${session.name.slice(0,8)}`)
           // Persist the flag
           this.storeUserRecord(ownerPubkey).catch(console.error)
         } catch (err) {
@@ -509,7 +498,6 @@ export class SessionManager {
       device: DeviceEntry,
       invite: Invite
     ) => {
-      console.log(`[AcceptInvite] Accepting invite from user=${userPubkey.slice(0,8)}, device=${device.identityPubkey.slice(0,8)}`)
       // Add device record IMMEDIATELY to prevent duplicate acceptance from race conditions
       // Use identityPubkey as the device identifier
       const deviceRecord = this.upsertDeviceRecord(userRecord, device.identityPubkey)
@@ -522,11 +510,9 @@ export class SessionManager {
         encryptor,
         this.ownerPublicKey
       )
-      console.log(`[AcceptInvite] Sending invite response: ourDevice=${this.ourPublicKey.slice(0,8)}, ourOwner=${this.ownerPublicKey.slice(0,8)}, sessionName=${session.name.slice(0,8)}`)
       return this.nostrPublish(event)
         .then(() => {
           this.attachSessionSubscription(userPubkey, deviceRecord, session)
-          console.log(`[AcceptInvite] SUCCESS: Created INITIATOR session for user=${userPubkey.slice(0,8)}, device=${device.identityPubkey.slice(0,8)}`)
         })
         .then(() => this.sendMessageHistory(userPubkey, device.identityPubkey))
         .catch((err) => console.error(`[AcceptInvite] ERROR:`, err))
@@ -555,16 +541,13 @@ export class SessionManager {
 
       // Subscribe to this device's Invite event
       const unsub = Invite.fromUser(device.identityPubkey, this.nostrSubscribe, async (invite) => {
-        console.log(`[SetupUser] Received Invite from device=${device.identityPubkey.slice(0,8)}, inviteDeviceId=${invite.deviceId?.slice(0,8)}`)
         // Verify the invite is for this device (identityPubkey is the device identifier)
         if (invite.deviceId !== device.identityPubkey) {
-          console.log(`[SetupUser] SKIP: Invite deviceId mismatch (expected ${device.identityPubkey.slice(0,8)}, got ${invite.deviceId?.slice(0,8)})`)
           return
         }
 
         // Skip if we already have a device record (race condition guard)
         if (userRecord.devices.has(device.identityPubkey)) {
-          console.log(`[SetupUser] SKIP: Already have device record for ${device.identityPubkey.slice(0,8)}`)
           return
         }
 
@@ -577,14 +560,12 @@ export class SessionManager {
     this.attachInviteListSubscription(userPubkey, async (inviteList) => {
       const devices = inviteList.getAllDevices()
       const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
-      console.log(`[SetupUser] Received InviteList for user=${userPubkey.slice(0,8)}, devices=[${devices.map(d => d.identityPubkey.slice(0,8)).join(', ')}]`)
 
       // Handle devices no longer in list (revoked or InviteList recreated from scratch)
       const userRecord = this.userRecords.get(userPubkey)
       if (userRecord) {
         for (const [deviceId, device] of userRecord.devices) {
           if (!activeDeviceIds.has(deviceId) && device.staleAt === undefined) {
-            console.log(`[SetupUser] Device ${deviceId.slice(0,8)} no longer in InviteList, cleaning up`)
             await this.cleanupDevice(userPubkey, deviceId)
           }
         }
@@ -592,7 +573,6 @@ export class SessionManager {
 
       // For each device in InviteList, subscribe to their Invite event
       for (const device of devices) {
-        console.log(`[SetupUser] Subscribing to Invite for device=${device.identityPubkey.slice(0,8)} of user=${userPubkey.slice(0,8)}`)
         subscribeToDeviceInvite(device)
       }
     })
@@ -700,29 +680,23 @@ export class SessionManager {
     deviceId: string
   ): Promise<void> {
     const history = this.messageHistory.get(recipientPublicKey) || []
-    console.log(`[SendMessageHistory] recipient=${recipientPublicKey.slice(0,8)}, device=${deviceId.slice(0,8)}, historyCount=${history.length}`)
     const userRecord = this.userRecords.get(recipientPublicKey)
     if (!userRecord) {
-      console.log(`[SendMessageHistory] No userRecord for recipient`)
       return
     }
     const device = userRecord.devices.get(deviceId)
     if (!device) {
-      console.log(`[SendMessageHistory] No device record for deviceId`)
       return
     }
     if (device.staleAt !== undefined) {
-      console.log(`[SendMessageHistory] Device is stale`)
       return
     }
     for (const event of history) {
       const { activeSession } = device
 
       if (!activeSession) {
-        console.log(`[SendMessageHistory] No activeSession for device`)
         continue
       }
-      console.log(`[SendMessageHistory] Sending queued message to device=${deviceId.slice(0,8)}`)
       const { event: verifiedEvent } = activeSession.sendEvent(event)
       await this.nostrPublish(verifiedEvent)
       await this.storeUserRecord(recipientPublicKey)
@@ -765,18 +739,13 @@ export class SessionManager {
     }
     const devices = Array.from(deviceMap.values())
 
-    console.log(`[SendEvent] to recipient=${recipientIdentityKey.slice(0,8)}, recipientDevices=[${recipientDevices.map(d => d.deviceId.slice(0,8) + (d.activeSession ? '✓' : '✗')).join(', ')}], ownDevices=[${ownDevices.map(d => d.deviceId.slice(0,8) + (d.activeSession ? '✓' : '✗')).join(', ')}]`)
-    console.log(`[SendEvent] Final target devices (excl self ${this.deviceId.slice(0,8)}): [${devices.map(d => d.deviceId.slice(0,8) + (d.activeSession ? '✓' : '✗')).join(', ')}]`)
-
     // Send to all devices in background (if sessions exist)
     Promise.allSettled(
       devices.map(async (device) => {
         const { activeSession } = device
         if (!activeSession) {
-          console.log(`[SendEvent] SKIP device=${device.deviceId.slice(0,8)} - no activeSession`)
           return
         }
-        console.log(`[SendEvent] Sending to device=${device.deviceId.slice(0,8)} via session=${activeSession.name.slice(0,8)}`)
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         await this.nostrPublish(verifiedEvent).catch(console.error)
       })
@@ -785,8 +754,9 @@ export class SessionManager {
         // Store recipient's user record
         this.storeUserRecord(recipientIdentityKey)
         // Also store owner's record if different (for sibling device sessions)
-        // This ensures session state is persisted after ratcheting
-        // TODO: check if really necessary, if yes, why?
+        // This ensures session state is persisted after ratcheting for both:
+        // - recipientDevices stored under recipientIdentityKey
+        // - Own sibling devices stored under ownerPublicKey
         if (this.ownerPublicKey !== recipientIdentityKey) {
           this.storeUserRecord(this.ownerPublicKey)
         }
