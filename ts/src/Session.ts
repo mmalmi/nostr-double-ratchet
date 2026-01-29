@@ -321,6 +321,7 @@ export class Session {
 
 
   private handleNostrEvent(e: { tags: string[][]; pubkey: string; content: string }) {
+    console.log(`[Session.handleNostrEvent] from=${e.pubkey.slice(0,8)}`)
     const snapshot = deepCopyState(this.state);
     let pendingSwitch = false;
 
@@ -339,6 +340,7 @@ export class Session {
         }
       } else {
         if (!this.state.skippedKeys[e.pubkey]?.messageKeys[header.number]) {
+          console.log('[Session] discarded: skipped key not found', e.pubkey.slice(0,8))
           return;
         }
       }
@@ -347,10 +349,12 @@ export class Session {
       const innerEvent = JSON.parse(text);
 
       if (!validateEvent(innerEvent)) {
+        console.log('[Session] discarded: invalid event', e.pubkey.slice(0,8))
         this.state = snapshot;
         return;
       }
       if (innerEvent.id !== getEventHash(innerEvent)) {
+        console.log('[Session] discarded: hash mismatch', e.pubkey.slice(0,8))
         this.state = snapshot;
         return;
       }
@@ -364,17 +368,20 @@ export class Session {
         );
       }
 
+      console.log(`[Session] delivered kind=${innerEvent.kind} from=${e.pubkey.slice(0,8)}`)
       this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));
     } catch (error) {
       this.state = snapshot;
       if (error instanceof Error) {
         if (error.message.includes("Failed to decrypt header")) {
+          console.log('[Session] discarded: header decrypt failed', e.pubkey.slice(0,8))
           return;
         }
 
         if (error.message === "invalid MAC") {
           // Duplicate or stale ciphertexts can hit decrypt() again after a state restore.
           // nip44 throws "invalid MAC" in that case, but the message has already been handled.
+          console.log('[Session] discarded: invalid MAC', e.pubkey.slice(0,8))
           return;
         }
       }

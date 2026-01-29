@@ -453,6 +453,7 @@ export class SessionManager {
     }
 
     const unsub = session.onEvent((event) => {
+      console.log(`[SessionManager.onEvent] from=${userPubkey.slice(0,8)} kind=${event.kind}`)
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       rotateSession(session)
       this.storeUserRecord(userPubkey).catch(console.error)
@@ -483,6 +484,8 @@ export class SessionManager {
 
     // Track which device identities we've subscribed to for invites
     const subscribedDeviceIdentities = new Set<string>()
+    // Track devices currently being accepted (to prevent duplicate acceptance)
+    const pendingAcceptances = new Set<string>()
 
     /**
      * Accept an invite from a device.
@@ -519,33 +522,57 @@ export class SessionManager {
       // identityPubkey is the device identifier
       const deviceKey = device.identityPubkey
       if (subscribedDeviceIdentities.has(deviceKey)) {
+        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} already in subscribedDeviceIdentities, skipping`)
         return
       }
       subscribedDeviceIdentities.add(deviceKey)
 
-      // Already have a record for this device? Skip.
-      if (userRecord.devices.has(device.identityPubkey)) {
+      // Already have a record with active session for this device? Skip.
+      const existingRecord = userRecord.devices.get(device.identityPubkey)
+      if (existingRecord?.activeSession) {
+        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} already has active session, skipping`)
         return
+      }
+      if (existingRecord) {
+        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} has device record but no active session, will re-subscribe`)
       }
 
       const inviteSubKey = `invite:${device.identityPubkey}`
       if (this.inviteSubscriptions.has(inviteSubKey)) {
+        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} already has invite subscription, skipping`)
         return
       }
+      console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} subscribing to invite`)
 
       // Subscribe to this device's Invite event
       const unsub = Invite.fromUser(device.identityPubkey, this.nostrSubscribe, async (invite) => {
+        console.log(`[InviteCallback] Received invite from ${device.identityPubkey.slice(0,8)}, invite.deviceId=${invite.deviceId?.slice(0,8)}`)
         // Verify the invite is for this device (identityPubkey is the device identifier)
         if (invite.deviceId !== device.identityPubkey) {
+          console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} deviceId mismatch, skipping`)
           return
         }
 
-        // Skip if we already have a device record (race condition guard)
-        if (userRecord.devices.has(device.identityPubkey)) {
+        // Skip if we already have an active session (race condition guard)
+        const existingDeviceRecord = userRecord.devices.get(device.identityPubkey)
+        if (existingDeviceRecord?.activeSession) {
+          console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} already has active session, skipping`)
           return
         }
 
-        await acceptInviteFromDevice(device, invite)
+        // Skip if acceptance is already in progress (race condition guard)
+        if (pendingAcceptances.has(device.identityPubkey)) {
+          console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} acceptance already in progress, skipping`)
+          return
+        }
+
+        console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} accepting invite`)
+        pendingAcceptances.add(device.identityPubkey)
+        try {
+          await acceptInviteFromDevice(device, invite)
+        } finally {
+          pendingAcceptances.delete(device.identityPubkey)
+        }
       })
 
       this.inviteSubscriptions.set(inviteSubKey, unsub)
@@ -554,13 +581,26 @@ export class SessionManager {
     this.attachInviteListSubscription(userPubkey, async (inviteList) => {
       const devices = inviteList.getAllDevices()
       const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
+      const userRecordDevices = Array.from(this.userRecords.get(userPubkey)?.devices.keys() || [])
+      console.log(`[InviteList] Callback for ${userPubkey.slice(0,8)}: activeDevices=[${Array.from(activeDeviceIds).map(d => d.slice(0,8)).join(',')}], userRecordDevices=[${userRecordDevices.map(d => d.slice(0,8)).join(',')}]`)
 
       // Handle devices no longer in list (revoked or InviteList recreated from scratch)
       const userRecord = this.userRecords.get(userPubkey)
       if (userRecord) {
         for (const [deviceId] of userRecord.devices) {
           if (!activeDeviceIds.has(deviceId)) {
+            console.log(`[InviteList] Device ${deviceId.slice(0,8)} removed from list, cleaning up`)
+            // Remove from tracking so device can be re-subscribed if re-added
+            subscribedDeviceIdentities.delete(deviceId)
+            const inviteSubKey = `invite:${deviceId}`
+            const inviteUnsub = this.inviteSubscriptions.get(inviteSubKey)
+            if (inviteUnsub) {
+              inviteUnsub()
+              this.inviteSubscriptions.delete(inviteSubKey)
+              console.log(`[InviteList] Unsubscribed from ${deviceId.slice(0,8)} invite`)
+            }
             await this.cleanupDevice(userPubkey, deviceId)
+            console.log(`[InviteList] Device ${deviceId.slice(0,8)} cleanup complete`)
           }
         }
       }
@@ -730,6 +770,13 @@ export class SessionManager {
     }
     const devices = Array.from(deviceMap.values())
 
+    console.log(`[SendEvent] to=${recipientIdentityKey.slice(0,8)} devices=${devices.length}`, {
+      recipientDevices: recipientDevices.map(d => d.deviceId.slice(0,8)),
+      ownDevices: ownDevices.map(d => d.deviceId.slice(0,8)),
+      allTargets: devices.map(d => d.deviceId.slice(0,8)),
+      hasSession: devices.map(d => !!d.activeSession),
+    })
+
     // Send to all devices in background (if sessions exist)
     Promise.allSettled(
       devices.map(async (device) => {
@@ -737,6 +784,7 @@ export class SessionManager {
         if (!activeSession) {
           return
         }
+        console.log(`[SendEvent] publishing to ${device.deviceId.slice(0,8)}`)
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         await this.nostrPublish(verifiedEvent).catch(console.error)
       })
