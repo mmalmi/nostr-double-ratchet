@@ -186,29 +186,18 @@ export class SessionManager {
           // Verify the device is authorized by fetching owner's ApplicationKeys
           const applicationKeys = await this.fetchApplicationKeys(claimedOwner)
 
-          if (!applicationKeys) {
-            // No ApplicationKeys found - check cached device identities as fallback
-            const cachedRecord = this.userRecords.get(claimedOwner)
-            const cachedIdentities = cachedRecord?.knownDeviceIdentities || []
-
-            if (cachedIdentities.includes(decrypted.inviteeIdentity)) {
-              // Device is in cached list - allow (this handles restart scenarios)
-            } else if (decrypted.inviteeIdentity === claimedOwner) {
-              // Single-device user (device = owner), proceed without ApplicationKeys
-            } else {
-              return
-            }
-          } else {
-            // Check that the responding device is actually in the owner's ApplicationKeys
+          if (applicationKeys) {
             const deviceInList = applicationKeys.getAllDevices().some(
               d => d.identityPubkey === decrypted.inviteeIdentity
             )
-            if (!deviceInList) {
-              return
-            }
-
-            // Update delegate mapping with verified ApplicationKeys
+            if (!deviceInList) return
             this.updateDelegateMapping(claimedOwner, applicationKeys)
+          } else {
+            // No ApplicationKeys - check cached identities or single-device case
+            const cachedIdentities = this.userRecords.get(claimedOwner)?.knownDeviceIdentities || []
+            const isCached = cachedIdentities.includes(decrypted.inviteeIdentity)
+            const isSingleDevice = decrypted.inviteeIdentity === claimedOwner
+            if (!isCached && !isSingleDevice) return
           }
 
           const ownerPubkey = claimedOwner
