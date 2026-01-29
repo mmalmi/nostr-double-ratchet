@@ -6,6 +6,9 @@ export type Header = {
   nextPublicKey: string;
 }
 
+/**
+ * A keypair used for encryption and decryption.
+ */
 export type KeyPair = {
   publicKey: string;
   privateKey: Uint8Array;
@@ -54,6 +57,9 @@ export interface SessionState {
   };
 }
 
+/**
+ * Unsubscribe from a subscription or event listener.
+ */
 export type Unsubscribe = () => void;
 
 /** 
@@ -73,13 +79,21 @@ export type NostrPublish = (_event: UnsignedEvent) => Promise<VerifiedEvent>;
 
 export type Rumor = UnsignedEvent & { id: string }
 
+/**
+ * Callback function for handling decrypted messages
+ * @param _event - The decrypted message object (Rumor)
+ * @param _outerEvent - The outer Nostr event (VerifiedEvent)
+ */
 export type EventCallback = (_event: Rumor, _outerEvent: VerifiedEvent) => void;
 
+/**
+ * Message event kind
+ */
 export const MESSAGE_EVENT_KIND = 1060;
 
-// Both use kind 30078 (parameterized replaceable), differentiated by d-tag:
-// - Invite: d-tag = "double-ratchet/invites/{deviceId}"
-// - ApplicationKeys: d-tag = "double-ratchet/application-keys"
+/**
+ * Invite event kind
+ */
 export const INVITE_EVENT_KIND = 30078;
 
 export const INVITE_RESPONSE_KIND = 1059;
@@ -99,10 +113,19 @@ export type NostrEvent = {
   sig: string;
 }
 
+/**
+ * Payload for reaction messages sent through NDR.
+ * Reactions are regular messages with a JSON payload indicating they're a reaction.
+ */
 export interface ReactionPayload {
   type: 'reaction';
+  /** ID of the message being reacted to */
   messageId: string;
+  /** Emoji or reaction content */
   emoji: string;
 }
 
+/**
+ * Kind constant for reaction inner events
+ */
 export const REACTION_KIND = 7;

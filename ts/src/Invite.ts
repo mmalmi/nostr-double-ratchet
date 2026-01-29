@@ -134,6 +134,7 @@ export class Invite {
         const seenIds = new Set<string>()
         const unsub = subscribe(filter, (event) => {
             if (event.pubkey !== user) {
+                console.error("Got invite event from wrong user", event.pubkey, "expected", user)
                 return;
             }
             if (seenIds.has(event.id)) return
