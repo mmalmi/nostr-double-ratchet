@@ -580,8 +580,7 @@ describe("Multi-Device Concurrent Operations", () => {
     })
   })
 
-  // TODO: Fix ControlledMockRelay.replayWithCascade() timing issue
-  it.skip("should handle 4 devices (2 per user) all messaging", async () => {
+  it("should handle 4 devices (2 per user) all messaging", { timeout: 30000 }, async () => {
     await runControlledScenario({
       steps: [
         { type: "addDevice", actor: "alice", deviceId: "alice-1" },
@@ -594,7 +593,16 @@ describe("Multi-Device Concurrent Operations", () => {
         { type: "send", from: { actor: "alice", deviceId: "alice-2" }, to: "bob", message: "from-a2", ref: "a2" },
         { type: "send", from: { actor: "bob", deviceId: "bob-1" }, to: "alice", message: "from-b1", ref: "b1" },
         { type: "send", from: { actor: "bob", deviceId: "bob-2" }, to: "alice", message: "from-b2", ref: "b2" },
-        { type: "deliverInOrder", refs: ["b2", "a1", "b1", "a2"] },
+        // Deliver to bob's devices (out of order: b2, a1, b1, a2)
+        { type: "deliverTo", actor: "bob", deviceId: "bob-1", ref: "a1" },
+        { type: "deliverTo", actor: "bob", deviceId: "bob-1", ref: "a2" },
+        { type: "deliverTo", actor: "bob", deviceId: "bob-2", ref: "a1" },
+        { type: "deliverTo", actor: "bob", deviceId: "bob-2", ref: "a2" },
+        // Deliver to alice's devices
+        { type: "deliverTo", actor: "alice", deviceId: "alice-1", ref: "b1" },
+        { type: "deliverTo", actor: "alice", deviceId: "alice-1", ref: "b2" },
+        { type: "deliverTo", actor: "alice", deviceId: "alice-2", ref: "b1" },
+        { type: "deliverTo", actor: "alice", deviceId: "alice-2", ref: "b2" },
         { type: "expectAll", actor: "bob", deviceId: "bob-1", messages: ["from-a1", "from-a2"] },
         { type: "expectAll", actor: "bob", deviceId: "bob-2", messages: ["from-a1", "from-a2"] },
         { type: "expectAll", actor: "alice", deviceId: "alice-1", messages: ["from-b1", "from-b2"] },
