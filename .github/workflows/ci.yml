@@ -39,7 +39,7 @@ jobs:
       run: pnpm build
 
     - name: Run tests
-      run: pnpm test:once
+      run: pnpm test
 
   test-rust:
     name: Rust
