@@ -30,7 +30,6 @@ export interface DeviceRecord {
   activeSession?: Session
   inactiveSessions: Session[]
   createdAt: number
-  staleAt?: number
   // Set to true when we've processed an invite response from this device
   // This survives restarts and prevents duplicate RESPONDER session creation
   hasResponderSession?: boolean
@@ -50,7 +49,6 @@ interface StoredDeviceRecord {
   activeSession: StoredSessionEntry | null
   inactiveSessions: StoredSessionEntry[]
   createdAt: number
-  staleAt?: number
   hasResponderSession?: boolean
 }
 
@@ -414,10 +412,6 @@ export class SessionManager {
     // Set to true if only handshake -> not yet sendable -> will be promoted on message
     inactive: boolean = false
   ): void {
-    if (deviceRecord.staleAt !== undefined) {
-      return
-    }
-
     const key = this.sessionKey(userPubkey, deviceRecord.deviceId, session.name)
     if (this.sessionSubscriptions.has(key)) {
       return
@@ -564,8 +558,8 @@ export class SessionManager {
       // Handle devices no longer in list (revoked or InviteList recreated from scratch)
       const userRecord = this.userRecords.get(userPubkey)
       if (userRecord) {
-        for (const [deviceId, device] of userRecord.devices) {
-          if (!activeDeviceIds.has(deviceId) && device.staleAt === undefined) {
+        for (const [deviceId] of userRecord.devices) {
+          if (!activeDeviceIds.has(deviceId)) {
             await this.cleanupDevice(userPubkey, deviceId)
           }
         }
@@ -688,9 +682,6 @@ export class SessionManager {
     if (!device) {
       return
     }
-    if (device.staleAt !== undefined) {
-      return
-    }
     for (const event of history) {
       const { activeSession } = device
 
@@ -726,8 +717,8 @@ export class SessionManager {
     // Use ownerPublicKey to setup sessions with sibling devices
     this.setupUser(this.ownerPublicKey)
 
-    const recipientDevices = Array.from(userRecord.devices.values()).filter(d => d.staleAt === undefined)
-    const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
+    const recipientDevices = Array.from(userRecord.devices.values())
+    const ownDevices = Array.from(ourUserRecord.devices.values())
 
     // Merge and deduplicate by deviceId, excluding our own sending device
     // This fixes the self-message bug where sending to yourself would duplicate devices
@@ -803,21 +794,18 @@ export class SessionManager {
     const userRecord = this.userRecords.get(publicKey)
     if (!userRecord) return
     const deviceRecord = userRecord.devices.get(deviceId)
-
     if (!deviceRecord) return
 
+    // Unsubscribe from sessions
     if (deviceRecord.activeSession) {
       this.removeSessionSubscription(publicKey, deviceId, deviceRecord.activeSession.name)
     }
-
     for (const session of deviceRecord.inactiveSessions) {
       this.removeSessionSubscription(publicKey, deviceId, session.name)
     }
 
-    deviceRecord.activeSession = undefined
-    deviceRecord.inactiveSessions = []
-    deviceRecord.staleAt = Date.now()
-
+    // Delete the device record entirely
+    userRecord.devices.delete(deviceId)
     await this.storeUserRecord(publicKey).catch(console.error)
   }
 
@@ -848,7 +836,6 @@ export class SessionManager {
             serializeSessionState(session.state)
           ),
           createdAt: device.createdAt,
-          staleAt: device.staleAt,
           hasResponderSession: device.hasResponderSession,
         })
       ),
@@ -871,7 +858,6 @@ export class SessionManager {
             activeSession: serializedActive,
             inactiveSessions: serializedInactive,
             createdAt,
-            staleAt,
             hasResponderSession,
           } = deviceData
 
@@ -892,7 +878,6 @@ export class SessionManager {
               activeSession,
               inactiveSessions,
               createdAt,
-              staleAt,
               hasResponderSession,
             })
           } catch (e) {
@@ -917,8 +902,8 @@ export class SessionManager {
         }
 
         for (const device of devices.values()) {
-          const { deviceId, activeSession, inactiveSessions, staleAt } = device
-          if (!deviceId || staleAt !== undefined) continue
+          const { deviceId, activeSession, inactiveSessions } = device
+          if (!deviceId) continue
 
           for (const session of inactiveSessions.reverse()) {
             this.attachSessionSubscription(publicKey, device, session)
