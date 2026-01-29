@@ -39,16 +39,10 @@ export interface UserRecord {
   knownDeviceIdentities: string[]
 }
 
-// v1 format: just the serialized state string
-type StoredSessionEntryV1 = string
-
-// v2 format: includes session name for stable identity across restarts
-interface StoredSessionEntryV2 {
+interface StoredSessionEntry {
   name: string
-  state: string  // serialized SessionState
+  state: string
 }
-
-type StoredSessionEntry = StoredSessionEntryV1 | StoredSessionEntryV2
 
 interface StoredDeviceRecord {
   deviceId: string
@@ -862,8 +856,7 @@ export class SessionManager {
   private storeUserRecord(publicKey: string) {
     const userRecord = this.userRecords.get(publicKey)
     const devices = Array.from(userRecord?.devices.entries() || [])
-    // Helper to serialize session with name (v2 format)
-    const serializeSession = (session: Session): StoredSessionEntryV2 => ({
+    const serializeSession = (session: Session): StoredSessionEntry => ({
       name: session.name,
       state: serializeSessionState(session.state)
     })
@@ -893,19 +886,11 @@ export class SessionManager {
 
         const devices = new Map<string, DeviceRecord>()
 
-        // Helper to deserialize session from v1 (string) or v2 (object) format
         const deserializeSession = (entry: StoredSessionEntry): Session => {
-          if (typeof entry === 'string') {
-            // v1 format: just the serialized state, session gets random name
-            return new Session(this.nostrSubscribe, deserializeSessionState(entry))
-          } else {
-            // v2 format: includes session name
-            const session = new Session(this.nostrSubscribe, deserializeSessionState(entry.state))
-            session.name = entry.name  // Restore original name
-            // Track that we've already processed this session (prevents duplicate from replayed InviteResponse)
-            this.processedInviteResponses.add(entry.name)
-            return session
-          }
+          const session = new Session(this.nostrSubscribe, deserializeSessionState(entry.state))
+          session.name = entry.name
+          this.processedInviteResponses.add(entry.name)
+          return session
         }
 
         for (const deviceData of data.devices) {
