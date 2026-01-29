@@ -83,7 +83,7 @@ export class ApplicationManager {
       createdAt: Math.floor(Date.now() / 1000),
     }
     this.applicationKeys.addDevice(device)
-    this.saveApplicationKeys(this.applicationKeys).catch(console.error)
+    this.saveApplicationKeys(this.applicationKeys).catch(() => {})
   }
 
   /**
@@ -94,7 +94,7 @@ export class ApplicationManager {
     if (!this.applicationKeys) return
 
     this.applicationKeys.removeDevice(identityPubkey)
-    this.saveApplicationKeys(this.applicationKeys).catch(console.error)
+    this.saveApplicationKeys(this.applicationKeys).catch(() => {})
   }
 
   /**
@@ -204,8 +204,8 @@ export class DelegateManager {
 
     // Publish Invite event (signed by this device's identity key)
     const inviteEvent = this.invite.getEvent()
-    await this.nostrPublish(inviteEvent).catch((error) => {
-      console.error("Failed to publish Invite:", error)
+    await this.nostrPublish(inviteEvent).catch(() => {
+      // Failed to publish Invite
     })
   }
 
@@ -318,10 +318,6 @@ export class DelegateManager {
         const device = applicationKeys.getDevice(this.devicePublicKey)
         // Device is revoked if not in list
         return !device
-      }
-      // No ApplicationKeys found - retry if we have attempts left
-      if (attempt < retries) {
-        console.log(`[isRevoked] No ApplicationKeys found, retrying (attempt ${attempt + 1}/${retries})`)
       }
     }
 

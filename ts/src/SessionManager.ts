@@ -126,12 +126,12 @@ export class SessionManager {
     if (this.initialized) return
     this.initialized = true
 
-    await this.runMigrations().catch((error) => {
-      console.error("Failed to run migrations:", error)
+    await this.runMigrations().catch(() => {
+      // Failed to run migrations
     })
 
-    await this.loadAllUserRecords().catch((error) => {
-      console.error("Failed to load user records:", error)
+    await this.loadAllUserRecords().catch(() => {
+      // Failed to load user records
     })
 
     // Add our own device to user record to prevent accepting our own invite
@@ -202,7 +202,6 @@ export class SessionManager {
             } else if (decrypted.inviteeIdentity === claimedOwner) {
               // Single-device user (device = owner), proceed without InviteList
             } else {
-              console.warn(`[InviteResponse] REJECTED: no ApplicationKeys found for claimed owner ${claimedOwner.slice(0,8)} and device ${decrypted.inviteeIdentity.slice(0,8)} is not the owner or cached`)
               return
             }
           } else {
@@ -211,7 +210,6 @@ export class SessionManager {
               d => d.identityPubkey === decrypted.inviteeIdentity
             )
             if (!deviceInList) {
-              console.warn(`[InviteResponse] REJECTED: device ${decrypted.inviteeIdentity.slice(0,8)} not in owner's ApplicationKeys`)
               return
             }
 
@@ -233,11 +231,10 @@ export class SessionManager {
             name: event.id,
           })
 
-          console.log(`[DR:SessionManager] InviteResponse -> NEW SESSION owner=${ownerPubkey.slice(0,8)} device=${decrypted.inviteeIdentity.slice(0,8)} session=${session.name} theirKey=${decrypted.inviteeSessionPublicKey.slice(0,8)} deviceRecord.deviceId=${deviceRecord.deviceId.slice(0,8)}`)
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
-          this.storeUserRecord(ownerPubkey).catch(console.error)
-        } catch (err) {
-          console.error(`[InviteResponse] ERROR decrypting invite response:`, err)
+          this.storeUserRecord(ownerPubkey).catch(() => {})
+        } catch {
+          // Failed to decrypt invite response
         }
       }
     )
@@ -366,7 +363,7 @@ export class SessionManager {
     }
 
     // Persist
-    this.storeUserRecord(ownerPubkey).catch(console.error)
+    this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
   private subscribeToUserApplicationKeys(
@@ -403,11 +400,8 @@ export class SessionManager {
   ): void {
     const key = this.sessionKey(userPubkey, deviceRecord.deviceId, session.name)
     if (this.sessionSubscriptions.has(key)) {
-      console.log(`[DR:SessionManager] attachSession SKIP (already exists) user=${userPubkey.slice(0,8)} device=${deviceRecord.deviceId.slice(0,8)} session=${session.name} inactive=${inactive}`)
       return
     }
-
-    console.log(`[DR:SessionManager] attachSession user=${userPubkey.slice(0,8)} device=${deviceRecord.deviceId.slice(0,8)} session=${session.name} inactive=${inactive} currentActive=${deviceRecord.activeSession?.name || 'none'} inactiveCount=${deviceRecord.inactiveSessions.length}`)
 
     const dr = deviceRecord
 
@@ -421,8 +415,6 @@ export class SessionManager {
         return
       }
 
-      console.log(`[DR:SessionManager] PROMOTE session=${nextSession.name} user=${userPubkey.slice(0,8)} device=${dr.deviceId.slice(0,8)} previousActive=${current?.name || 'none'}`)
-
       // Remove nextSession from inactive if present
       dr.inactiveSessions = dr.inactiveSessions.filter(
         (s) => s !== nextSession && s.name !== nextSession.name
@@ -430,7 +422,6 @@ export class SessionManager {
 
       // Move current active to top of inactive queue
       if (current) {
-        console.log(`[DR:SessionManager] DEMOTE session=${current.name} -> inactive[0]`)
         dr.inactiveSessions.unshift(current)
       }
 
@@ -440,7 +431,6 @@ export class SessionManager {
       // Trim inactive queue to max size (remove oldest from end)
       if (dr.inactiveSessions.length > SessionManager.MAX_INACTIVE_SESSIONS) {
         const removed = dr.inactiveSessions.splice(SessionManager.MAX_INACTIVE_SESSIONS)
-        console.log(`[DR:SessionManager] TRIM inactive queue, removed ${removed.length} sessions: ${removed.map(s => s.name).join(', ')}`)
         // Unsubscribe from removed sessions
         for (const s of removed) {
           this.removeSessionSubscription(userPubkey, dr.deviceId, s.name)
@@ -454,19 +444,15 @@ export class SessionManager {
         (s) => s === session || s.name === session.name
       )
       if (!alreadyTracked) {
-        console.log(`[DR:SessionManager] ADD to inactive queue session=${session.name} position=0`)
         // Add to top of inactive queue
         dr.inactiveSessions.unshift(session)
         // Trim to max size
         if (dr.inactiveSessions.length > SessionManager.MAX_INACTIVE_SESSIONS) {
           const removed = dr.inactiveSessions.splice(SessionManager.MAX_INACTIVE_SESSIONS)
-          console.log(`[DR:SessionManager] TRIM inactive queue, removed ${removed.length} sessions`)
           for (const s of removed) {
             this.removeSessionSubscription(userPubkey, dr.deviceId, s.name)
           }
         }
-      } else {
-        console.log(`[DR:SessionManager] SKIP add to inactive (already tracked) session=${session.name}`)
       }
     } else {
       promoteToActive(session)
@@ -474,12 +460,11 @@ export class SessionManager {
 
     // Subscribe to session events - when message received, promote to active
     const unsub = session.onEvent((event) => {
-      console.log(`[SessionManager.onEvent] from=${userPubkey.slice(0,8)} kind=${event.kind} content=${event.content?.slice(0,30)}`)
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       promoteToActive(session)
-      this.storeUserRecord(userPubkey).catch(console.error)
+      this.storeUserRecord(userPubkey).catch(() => {})
     })
-    this.storeUserRecord(userPubkey).catch(console.error)
+    this.storeUserRecord(userPubkey).catch(() => {})
     this.sessionSubscriptions.set(key, unsub)
   }
 
@@ -520,7 +505,6 @@ export class SessionManager {
       // Another concurrent call may have already established a session
       const existingRecord = userRecord.devices.get(device.identityPubkey)
       if (existingRecord?.activeSession) {
-        console.log(`[AcceptInvite] ${device.identityPubkey.slice(0,8)} already has active session, skipping`)
         return
       }
 
@@ -536,13 +520,12 @@ export class SessionManager {
         encryptor,
         this.ownerPublicKey
       )
-      console.log(`[DR:SessionManager] AcceptInvite -> NEW SESSION user=${userPubkey.slice(0,8)} device=${device.identityPubkey.slice(0,8)} session=${session.name} ourKey=${session.state.ourNextNostrKey.publicKey.slice(0,8)} theirKey=${session.state.theirNextNostrPublicKey?.slice(0,8)}`)
       return this.nostrPublish(event)
         .then(() => {
           this.attachSessionSubscription(userPubkey, deviceRecord, session)
         })
         .then(() => this.sendMessageHistory(userPubkey, device.identityPubkey))
-        .catch((err) => console.error(`[AcceptInvite] ERROR:`, err))
+        .catch(() => {})
     }
 
     /**
@@ -552,7 +535,6 @@ export class SessionManager {
       // identityPubkey is the device identifier
       const deviceKey = device.identityPubkey
       if (subscribedDeviceIdentities.has(deviceKey)) {
-        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} already in subscribedDeviceIdentities, skipping`)
         return
       }
       subscribedDeviceIdentities.add(deviceKey)
@@ -560,43 +542,32 @@ export class SessionManager {
       // Already have a record with active session for this device? Skip.
       const existingRecord = userRecord.devices.get(device.identityPubkey)
       if (existingRecord?.activeSession) {
-        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} already has active session, skipping`)
         return
-      }
-      if (existingRecord) {
-        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} has device record but no active session, will re-subscribe`)
       }
 
       const inviteSubKey = `invite:${device.identityPubkey}`
       if (this.inviteSubscriptions.has(inviteSubKey)) {
-        console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} already has invite subscription, skipping`)
         return
       }
-      console.log(`[subscribeToDeviceInvite] ${deviceKey.slice(0,8)} subscribing to invite`)
 
       // Subscribe to this device's Invite event
       const unsub = Invite.fromUser(device.identityPubkey, this.nostrSubscribe, async (invite) => {
-        console.log(`[InviteCallback] Received invite from ${device.identityPubkey.slice(0,8)}, invite.deviceId=${invite.deviceId?.slice(0,8)}`)
         // Verify the invite is for this device (identityPubkey is the device identifier)
         if (invite.deviceId !== device.identityPubkey) {
-          console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} deviceId mismatch, skipping`)
           return
         }
 
         // Skip if we already have an active session (race condition guard)
         const existingDeviceRecord = userRecord.devices.get(device.identityPubkey)
         if (existingDeviceRecord?.activeSession) {
-          console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} already has active session, skipping`)
           return
         }
 
         // Skip if acceptance is already in progress (race condition guard)
         if (pendingAcceptances.has(device.identityPubkey)) {
-          console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} acceptance already in progress, skipping`)
           return
         }
 
-        console.log(`[InviteCallback] ${device.identityPubkey.slice(0,8)} accepting invite`)
         pendingAcceptances.add(device.identityPubkey)
         try {
           await acceptInviteFromDevice(device, invite)
@@ -611,15 +582,12 @@ export class SessionManager {
     this.attachApplicationKeysSubscription(userPubkey, async (applicationKeys) => {
       const devices = applicationKeys.getAllDevices()
       const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
-      const userRecordDevices = Array.from(this.userRecords.get(userPubkey)?.devices.keys() || [])
-      console.log(`[ApplicationKeys] Callback for ${userPubkey.slice(0,8)}: activeDevices=[${Array.from(activeDeviceIds).map(d => d.slice(0,8)).join(',')}], userRecordDevices=[${userRecordDevices.map(d => d.slice(0,8)).join(',')}]`)
 
       // Handle devices no longer in list (revoked or ApplicationKeys recreated from scratch)
       const userRecord = this.userRecords.get(userPubkey)
       if (userRecord) {
         for (const [deviceId] of userRecord.devices) {
           if (!activeDeviceIds.has(deviceId)) {
-            console.log(`[ApplicationKeys] Device ${deviceId.slice(0,8)} removed from list, cleaning up`)
             // Remove from tracking so device can be re-subscribed if re-added
             subscribedDeviceIdentities.delete(deviceId)
             const inviteSubKey = `invite:${deviceId}`
@@ -627,10 +595,8 @@ export class SessionManager {
             if (inviteUnsub) {
               inviteUnsub()
               this.inviteSubscriptions.delete(inviteSubKey)
-              console.log(`[ApplicationKeys] Unsubscribed from ${deviceId.slice(0,8)} invite`)
             }
             await this.cleanupDevice(userPubkey, deviceId)
-            console.log(`[ApplicationKeys] Device ${deviceId.slice(0,8)} cleanup complete`)
           }
         }
       }
@@ -679,7 +645,7 @@ export class SessionManager {
         device.activeSession = undefined
       }
     }
-    this.storeUserRecord(publicKey).catch(console.error)
+    this.storeUserRecord(publicKey).catch(() => {})
   }
 
   async deleteUser(userPubkey: string): Promise<void> {
@@ -744,25 +710,20 @@ export class SessionManager {
     deviceId: string
   ): Promise<void> {
     const history = this.messageHistory.get(recipientPublicKey) || []
-    console.log(`[sendMessageHistory] to=${recipientPublicKey.slice(0,8)} device=${deviceId.slice(0,8)} history=${history.length}`)
     const userRecord = this.userRecords.get(recipientPublicKey)
     if (!userRecord) {
-      console.log(`[sendMessageHistory] no userRecord, skipping`)
       return
     }
     const device = userRecord.devices.get(deviceId)
     if (!device) {
-      console.log(`[sendMessageHistory] no device record, skipping`)
       return
     }
     for (const event of history) {
       const { activeSession } = device
 
       if (!activeSession) {
-        console.log(`[sendMessageHistory] no activeSession for event, skipping`)
         continue
       }
-      console.log(`[sendMessageHistory] sending history event: ${event.content?.slice(0,20)}`)
       const { event: verifiedEvent } = activeSession.sendEvent(event)
       await this.nostrPublish(verifiedEvent)
       await this.storeUserRecord(recipientPublicKey)
@@ -805,13 +766,6 @@ export class SessionManager {
     }
     const devices = Array.from(deviceMap.values())
 
-    console.log(`[SendEvent] to=${recipientIdentityKey.slice(0,8)} devices=${devices.length}`, {
-      recipientDevices: recipientDevices.map(d => d.deviceId.slice(0,8)),
-      ownDevices: ownDevices.map(d => d.deviceId.slice(0,8)),
-      allTargets: devices.map(d => d.deviceId.slice(0,8)),
-      hasSession: devices.map(d => !!d.activeSession),
-    })
-
     // Send to all devices and await completion before returning
     // This ensures session state is ratcheted and persisted before function returns
     await Promise.allSettled(
@@ -820,9 +774,8 @@ export class SessionManager {
         if (!activeSession) {
           return
         }
-        console.log(`[DR:SessionManager] SEND to device=${device.deviceId.slice(0,8)} session=${activeSession.name} ourKey=${activeSession.state.ourCurrentNostrKey?.publicKey.slice(0,8) || 'none'} theirKey=${activeSession.state.theirNextNostrPublicKey?.slice(0,8)}`)
         const { event: verifiedEvent } = activeSession.sendEvent(event)
-        await this.nostrPublish(verifiedEvent).catch(console.error)
+        await this.nostrPublish(verifiedEvent).catch(() => {})
       })
     )
 
@@ -869,7 +822,7 @@ export class SessionManager {
     // Use sendEvent for actual sending (includes queueing)
     // Note: sendEvent is not awaited to maintain backward compatibility
     // The message is queued and will be sent when sessions are established
-    this.sendEvent(recipientPublicKey, rumor).catch(console.error)
+    this.sendEvent(recipientPublicKey, rumor).catch(() => {})
 
     return rumor
   }
@@ -890,7 +843,7 @@ export class SessionManager {
 
     // Delete the device record entirely
     userRecord.devices.delete(deviceId)
-    await this.storeUserRecord(publicKey).catch(console.error)
+    await this.storeUserRecord(publicKey).catch(() => {})
   }
 
   private buildMessageTags(
@@ -909,11 +862,6 @@ export class SessionManager {
   private storeUserRecord(publicKey: string) {
     const userRecord = this.userRecords.get(publicKey)
     const devices = Array.from(userRecord?.devices.entries() || [])
-    for (const [, device] of devices) {
-      if (device.activeSession) {
-        console.log(`[DR:SessionManager] STORE user=${publicKey.slice(0,8)} device=${device.deviceId.slice(0,8)} session=${device.activeSession.name} keys={ourCurrent=${device.activeSession.state.ourCurrentNostrKey?.publicKey?.slice(0,8) || 'none'}, theirNext=${device.activeSession.state.theirNextNostrPublicKey?.slice(0,8)}}`)
-      }
-    }
     // Helper to serialize session with name (v2 format)
     const serializeSession = (session: Session): StoredSessionEntryV2 => ({
       name: session.name,
@@ -981,11 +929,8 @@ export class SessionManager {
               inactiveSessions,
               createdAt,
             })
-          } catch (e) {
-            console.error(
-              `Failed to deserialize session for user ${publicKey}, device ${deviceId}:`,
-              e
-            )
+          } catch {
+            // Failed to deserialize session
           }
         }
 
@@ -1006,11 +951,6 @@ export class SessionManager {
           const { deviceId, activeSession, inactiveSessions } = device
           if (!deviceId) continue
 
-          if (activeSession) {
-            console.log(`[DR:SessionManager] RESTORE user=${publicKey.slice(0,8)} device=${deviceId.slice(0,8)} active=${activeSession.name} inactive=${inactiveSessions.length} keys={ourCurrent=${activeSession.state.ourCurrentNostrKey?.publicKey?.slice(0,8) || 'none'}, ourNext=${activeSession.state.ourNextNostrKey?.publicKey?.slice(0,8)}, theirCurrent=${activeSession.state.theirCurrentNostrPublicKey?.slice(0,8) || 'none'}, theirNext=${activeSession.state.theirNextNostrPublicKey?.slice(0,8)}}`)
-          } else {
-            console.log(`[DR:SessionManager] RESTORE user=${publicKey.slice(0,8)} device=${deviceId.slice(0,8)} active=none inactive=${inactiveSessions.length}`)
-          }
           for (const session of inactiveSessions.reverse()) {
             this.attachSessionSubscription(publicKey, device, session, true)  // Restore as inactive
           }
@@ -1019,8 +959,8 @@ export class SessionManager {
           }
         }
       })
-      .catch((error) => {
-        console.error(`Failed to load user record for ${publicKey}:`, error)
+      .catch(() => {
+        // Failed to load user record
       })
   }
 
@@ -1069,8 +1009,8 @@ export class SessionManager {
               await this.storage.put(newKey, newUserRecordData)
               await this.storage.del(key)
             }
-          } catch (e) {
-            console.error("Migration error for user record:", e)
+          } catch {
+            // Migration error for user record
           }
         })
       )
