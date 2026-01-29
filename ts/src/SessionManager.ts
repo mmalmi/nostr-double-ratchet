@@ -200,7 +200,7 @@ export class SessionManager {
             if (cachedIdentities.includes(decrypted.inviteeIdentity)) {
               // Device is in cached list - allow (this handles restart scenarios)
             } else if (decrypted.inviteeIdentity === claimedOwner) {
-              // Single-device user (device = owner), proceed without InviteList
+              // Single-device user (device = owner), proceed without ApplicationKeys
             } else {
               return
             }

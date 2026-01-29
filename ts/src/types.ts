@@ -91,21 +91,17 @@ export type EventCallback = (_event: Rumor, _outerEvent: VerifiedEvent) => void;
  */
 export const MESSAGE_EVENT_KIND = 1060;
 
-/**
- * Invite event kind
- */
+// Both use kind 30078 (parameterized replaceable), differentiated by d-tag:
+// - Invite: d-tag = "double-ratchet/invites/{deviceId}"
+// - ApplicationKeys: d-tag = "double-ratchet/application-keys"
 export const INVITE_EVENT_KIND = 30078;
 
 export const INVITE_RESPONSE_KIND = 1059;
 
-/**
- * Application keys event kind (parameterized replaceable - uses d-tag for namespacing)
- */
 export const APPLICATION_KEYS_EVENT_KIND = 30078;
 
 export const CHAT_MESSAGE_KIND = 14;
 
-export const MAX_SKIP = 100;
 
 export type NostrEvent = {
   id: string;
