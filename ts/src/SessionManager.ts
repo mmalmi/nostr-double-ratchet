@@ -372,6 +372,8 @@ export class SessionManager {
     )
   }
 
+  private static MAX_INACTIVE_SESSIONS = 10
+
   private attachSessionSubscription(
     userPubkey: string,
     deviceRecord: DeviceRecord,
@@ -385,44 +387,65 @@ export class SessionManager {
     }
 
     const dr = deviceRecord
-    const rotateSession = (nextSession: Session) => {
+
+    // Promote a session to active when it receives a message
+    // Current active goes to top of inactive queue
+    const promoteToActive = (nextSession: Session) => {
       const current = dr.activeSession
 
-      if (!current) {
-        dr.activeSession = nextSession
+      // Already active, nothing to do
+      if (current === nextSession || current?.name === nextSession.name) {
         return
       }
 
-      if (current === nextSession || current.name === nextSession.name) {
-        dr.activeSession = nextSession
-        return
-      }
-
+      // Remove nextSession from inactive if present
       dr.inactiveSessions = dr.inactiveSessions.filter(
-        (session) => session !== current && session.name !== current.name
+        (s) => s !== nextSession && s.name !== nextSession.name
       )
 
-      dr.inactiveSessions.push(current)
-      dr.inactiveSessions = dr.inactiveSessions.slice(-1)
+      // Move current active to top of inactive queue
+      if (current) {
+        dr.inactiveSessions.unshift(current)
+      }
+
+      // Set new active
       dr.activeSession = nextSession
+
+      // Trim inactive queue to max size (remove oldest from end)
+      if (dr.inactiveSessions.length > SessionManager.MAX_INACTIVE_SESSIONS) {
+        const removed = dr.inactiveSessions.splice(SessionManager.MAX_INACTIVE_SESSIONS)
+        // Unsubscribe from removed sessions
+        for (const s of removed) {
+          this.removeSessionSubscription(userPubkey, dr.deviceId, s.name)
+        }
+      }
     }
 
+    // Add new session: if inactive, add to top of inactive queue; otherwise set as active
     if (inactive) {
       const alreadyTracked = dr.inactiveSessions.some(
-        (tracked) => tracked === session || tracked.name === session.name
+        (s) => s === session || s.name === session.name
       )
       if (!alreadyTracked) {
-        dr.inactiveSessions.push(session)
-        dr.inactiveSessions = dr.inactiveSessions.slice(-1)
+        // Add to top of inactive queue
+        dr.inactiveSessions.unshift(session)
+        // Trim to max size
+        if (dr.inactiveSessions.length > SessionManager.MAX_INACTIVE_SESSIONS) {
+          const removed = dr.inactiveSessions.splice(SessionManager.MAX_INACTIVE_SESSIONS)
+          for (const s of removed) {
+            this.removeSessionSubscription(userPubkey, dr.deviceId, s.name)
+          }
+        }
       }
     } else {
-      rotateSession(session)
+      promoteToActive(session)
     }
 
+    // Subscribe to session events - when message received, promote to active
     const unsub = session.onEvent((event) => {
       console.log(`[SessionManager.onEvent] from=${userPubkey.slice(0,8)} kind=${event.kind}`)
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
-      rotateSession(session)
+      promoteToActive(session)
       this.storeUserRecord(userPubkey).catch(console.error)
     })
     this.storeUserRecord(userPubkey).catch(console.error)
