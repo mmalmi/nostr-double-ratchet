@@ -39,7 +39,16 @@ export interface UserRecord {
   knownDeviceIdentities: string[]
 }
 
-type StoredSessionEntry = ReturnType<typeof serializeSessionState>
+// v1 format: just the serialized state string
+type StoredSessionEntryV1 = string
+
+// v2 format: includes session name for stable identity across restarts
+interface StoredSessionEntryV2 {
+  name: string
+  state: string  // serialized SessionState
+}
+
+type StoredSessionEntry = StoredSessionEntryV1 | StoredSessionEntryV2
 
 interface StoredDeviceRecord {
   deviceId: string
@@ -77,6 +86,8 @@ export class SessionManager {
   private messageHistory: Map<string, Rumor[]> = new Map()
   // Map delegate device pubkeys to their owner's pubkey
   private delegateToOwner: Map<string, string> = new Map()
+  // Track processed InviteResponse event IDs to prevent replay
+  private processedInviteResponses: Set<string> = new Set()
 
   // Subscriptions
   private ourInviteResponseSubscription: Unsubscribe | null = null
@@ -151,6 +162,12 @@ export class SessionManager {
         "#p": [ephemeralPubkey],
       },
       async (event) => {
+        // Skip already processed InviteResponses (prevents replay issues on restart)
+        if (this.processedInviteResponses.has(event.id)) {
+          return
+        }
+        this.processedInviteResponses.add(event.id)
+
         try {
           const decrypted = await decryptInviteResponse({
             envelopeContent: event.content,
@@ -897,17 +914,21 @@ export class SessionManager {
         console.log(`[DR:SessionManager] STORE user=${publicKey.slice(0,8)} device=${device.deviceId.slice(0,8)} session=${device.activeSession.name} keys={ourCurrent=${device.activeSession.state.ourCurrentNostrKey?.publicKey?.slice(0,8) || 'none'}, theirNext=${device.activeSession.state.theirNextNostrPublicKey?.slice(0,8)}}`)
       }
     }
+    // Helper to serialize session with name (v2 format)
+    const serializeSession = (session: Session): StoredSessionEntryV2 => ({
+      name: session.name,
+      state: serializeSessionState(session.state)
+    })
+
     const data: StoredUserRecord = {
       publicKey: publicKey,
       devices: devices.map(
         ([, device]) => ({
           deviceId: device.deviceId,
           activeSession: device.activeSession
-            ? serializeSessionState(device.activeSession.state)
+            ? serializeSession(device.activeSession)
             : null,
-          inactiveSessions: device.inactiveSessions.map((session) =>
-            serializeSessionState(session.state)
-          ),
+          inactiveSessions: device.inactiveSessions.map(serializeSession),
           createdAt: device.createdAt,
         })
       ),
@@ -924,6 +945,21 @@ export class SessionManager {
 
         const devices = new Map<string, DeviceRecord>()
 
+        // Helper to deserialize session from v1 (string) or v2 (object) format
+        const deserializeSession = (entry: StoredSessionEntry): Session => {
+          if (typeof entry === 'string') {
+            // v1 format: just the serialized state, session gets random name
+            return new Session(this.nostrSubscribe, deserializeSessionState(entry))
+          } else {
+            // v2 format: includes session name
+            const session = new Session(this.nostrSubscribe, deserializeSessionState(entry.state))
+            session.name = entry.name  // Restore original name
+            // Track that we've already processed this session (prevents duplicate from replayed InviteResponse)
+            this.processedInviteResponses.add(entry.name)
+            return session
+          }
+        }
+
         for (const deviceData of data.devices) {
           const {
             deviceId,
@@ -934,15 +970,10 @@ export class SessionManager {
 
           try {
             const activeSession = serializedActive
-              ? new Session(
-                  this.nostrSubscribe,
-                  deserializeSessionState(serializedActive)
-                )
+              ? deserializeSession(serializedActive)
               : undefined
 
-            const inactiveSessions = serializedInactive.map(
-              (entry) => new Session(this.nostrSubscribe, deserializeSessionState(entry))
-            )
+            const inactiveSessions = serializedInactive.map(deserializeSession)
 
             devices.set(deviceId, {
               deviceId,
