@@ -30,9 +30,6 @@ export interface DeviceRecord {
   activeSession?: Session
   inactiveSessions: Session[]
   createdAt: number
-  // Set to true when we've processed an invite response from this device
-  // This survives restarts and prevents duplicate RESPONDER session creation
-  hasResponderSession?: boolean
 }
 
 export interface UserRecord {
@@ -49,7 +46,6 @@ interface StoredDeviceRecord {
   activeSession: StoredSessionEntry | null
   inactiveSessions: StoredSessionEntry[]
   createdAt: number
-  hasResponderSession?: boolean
 }
 
 interface StoredUserRecord {
@@ -211,30 +207,6 @@ export class SessionManager {
           // inviteeIdentity serves as the device ID
           const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.inviteeIdentity)
 
-          // Check for duplicate/stale responses using the persisted flag
-          // This flag survives restarts and prevents creating duplicate RESPONDER sessions
-          if (deviceRecord.hasResponderSession) {
-            return
-          }
-
-          // Also check session state as a fallback (for existing sessions before the flag was added)
-          const responseSessionKey = decrypted.inviteeSessionPublicKey
-          const existingSession = deviceRecord.activeSession
-          const existingInactive = deviceRecord.inactiveSessions || []
-          const allSessions = existingSession ? [existingSession, ...existingInactive] : existingInactive
-
-          // Check if any existing session can already receive from this device:
-          // - Has receivingChainKey set (RESPONDER session has received messages)
-          // - Has the same theirNextNostrPublicKey (same session, duplicate response)
-          const canAlreadyReceive = allSessions.some(s =>
-            s.state?.receivingChainKey !== undefined ||
-            s.state?.theirNextNostrPublicKey === responseSessionKey ||
-            s.state?.theirCurrentNostrPublicKey === responseSessionKey
-          )
-          if (canAlreadyReceive) {
-            return
-          }
-
           const session = createSessionFromAccept({
             nostrSubscribe: this.nostrSubscribe,
             theirPublicKey: decrypted.inviteeSessionPublicKey,
@@ -244,12 +216,7 @@ export class SessionManager {
             name: event.id,
           })
 
-          // Mark that we've processed a responder session for this device
-          // This flag is persisted and survives restarts
-          deviceRecord.hasResponderSession = true
-
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
-          // Persist the flag
           this.storeUserRecord(ownerPubkey).catch(console.error)
         } catch (err) {
           console.error(`[InviteResponse] ERROR decrypting invite response:`, err)
@@ -884,7 +851,6 @@ export class SessionManager {
             serializeSessionState(session.state)
           ),
           createdAt: device.createdAt,
-          hasResponderSession: device.hasResponderSession,
         })
       ),
       knownDeviceIdentities: userRecord?.knownDeviceIdentities || [],
@@ -906,7 +872,6 @@ export class SessionManager {
             activeSession: serializedActive,
             inactiveSessions: serializedInactive,
             createdAt,
-            hasResponderSession,
           } = deviceData
 
           try {
@@ -926,7 +891,6 @@ export class SessionManager {
               activeSession,
               inactiveSessions,
               createdAt,
-              hasResponderSession,
             })
           } catch (e) {
             console.error(
