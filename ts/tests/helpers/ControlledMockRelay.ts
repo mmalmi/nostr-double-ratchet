@@ -265,18 +265,33 @@ export class ControlledMockRelay {
 
   /**
    * Deliver a specific event by ID.
+   * Checks both pending queue and already-delivered events.
+   * For already-delivered events, re-delivers to any subscriptions that haven't received it.
    * @returns true if the event was found and delivered
    */
   deliverEvent(eventId: string): boolean {
+    // First check pending events
     const index = this.pendingEvents.findIndex((p) => p.event.id === eventId)
-    if (index === -1) {
-      this.log(`deliverEvent: event ${eventId} not found in pending queue`)
-      return false
+    if (index !== -1) {
+      const [pending] = this.pendingEvents.splice(index, 1)
+      this.deliverPendingEvent(pending)
+      return true
     }
 
-    const [pending] = this.pendingEvents.splice(index, 1)
-    this.deliverPendingEvent(pending)
-    return true
+    // Check already delivered events and re-deliver to any subscriptions that missed it
+    const delivered = this.deliveredEvents.find((e) => e.id === eventId)
+    if (delivered) {
+      this.log(`deliverEvent: event ${eventId} already delivered, re-delivering to any new subscriptions`)
+      for (const sub of this.subscriptions.values()) {
+        if (!sub.closed) {
+          this.deliverEventToSubscriber(sub, delivered)
+        }
+      }
+      return true
+    }
+
+    this.log(`deliverEvent: event ${eventId} not found`)
+    return false
   }
 
   /**

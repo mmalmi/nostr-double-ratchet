@@ -241,6 +241,7 @@ export class Invite {
         encryptor: Uint8Array | EncryptFunction,
         ownerPublicKey: string,
     ): Promise<{ session: Session, event: VerifiedEvent }> {
+        console.log(`[DR:Invite] Accepting invite from=${this.inviter?.slice(0,8)} device=${this.deviceId?.slice(0,8)} ephemeral=${this.inviterEphemeralPublicKey.slice(0,8)}`)
         const inviteeSessionKeypair = generateEphemeralKeypair();
         const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
 
@@ -266,6 +267,7 @@ export class Invite {
             encrypt,
         });
 
+        console.log(`[DR:Invite] Accepted, created session=${session.name} ourKey=${session.state.ourNextNostrKey.publicKey.slice(0,8)} theirKey=${session.state.theirNextNostrPublicKey?.slice(0,8)}`)
         return { session, event: finalizeEvent(encrypted.envelope, encrypted.randomSenderPrivateKey) };
     }
 
@@ -297,6 +299,7 @@ export class Invite {
                     decrypt,
                 });
 
+                console.log(`[DR:Invite] Received invite response from=${decrypted.inviteeIdentity.slice(0,8)} owner=${decrypted.ownerPublicKey?.slice(0,8)} sessionKey=${decrypted.inviteeSessionPublicKey.slice(0,8)}`)
                 this.usedBy.push(decrypted.inviteeIdentity);
 
                 const session = createSessionFromAccept({
@@ -308,9 +311,11 @@ export class Invite {
                     name: event.id,
                 });
 
+                console.log(`[DR:Invite] Created session from response session=${session.name} ourKey=${session.state.ourNextNostrKey.publicKey.slice(0,8)} theirKey=${session.state.theirNextNostrPublicKey?.slice(0,8)}`)
                 // inviteeIdentity serves as both identity and device ID
                 onSession(session, decrypted.inviteeIdentity);
-            } catch {
+            } catch (e) {
+                console.log(`[DR:Invite] Failed to process invite response:`, e)
             }
         });
     }

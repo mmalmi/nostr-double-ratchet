@@ -195,7 +195,9 @@ export class InviteList {
           if (event.pubkey !== user) return
           try {
             const list = InviteList.fromEvent(event)
-            if (!latest || event.created_at > latest.createdAt) {
+            // Use >= to prefer later-delivered events when timestamps are equal
+            // This handles replaceable events created within the same second
+            if (!latest || event.created_at >= latest.createdAt) {
               latest = { list, createdAt: event.created_at }
             }
           } catch {

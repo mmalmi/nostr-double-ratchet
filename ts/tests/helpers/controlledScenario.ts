@@ -218,6 +218,7 @@ async function executeStep(
       break
     case "deliverEvent": {
       const eventId = getEventRef(context, step.ref)
+      console.log(`[executeStep] deliverEvent ref=${step.ref} eventId=${eventId?.slice(0,8)}`)
       context.relay.deliverEvent(eventId)
       break
     }
@@ -379,9 +380,14 @@ async function sendMessage(
   // Send the message (with auto-deliver mode in sessionManager, it delivers immediately)
   await senderDevice.manager.sendMessage(recipientActor.publicKey, message)
 
+  // Small delay to allow async publishing to complete
+  await new Promise(r => setTimeout(r, 0))
+
   // Find the event ID of what we just sent (most recent event)
   const allEvents = context.relay.getAllEvents()
   const sentEvent = allEvents[allEvents.length - 1]
+
+  console.log(`[sendMessage] sent "${message.slice(0,30)}" ref=${ref} eventCount=${allEvents.length} lastEvent=${sentEvent?.id?.slice(0,8)}`)
 
   if (sentEvent && ref) {
     context.eventRefs.set(ref, sentEvent.id)
@@ -390,11 +396,13 @@ async function sendMessage(
   // Handle wait behavior
   if (waitOn === "auto") {
     // Wait for all recipient devices to receive
+    // Use existingOk: true because message might be delivered before waiter is set up
+    // (when session establishment completes synchronously in mock relay)
     const waitTargets = resolveWaitTargets(context, "all-recipient-devices", recipientActor)
     await Promise.all(
       waitTargets.map((device) =>
         waitForMessage(device, deviceLabel(recipientActor, device), message, {
-          existingOk: false,
+          existingOk: true,
         })
       )
     )
@@ -404,7 +412,7 @@ async function sendMessage(
     await Promise.all(
       waitTargets.map((device) =>
         waitForMessage(device, deviceLabel(recipientActor, device), message, {
-          existingOk: false,
+          existingOk: true,
         })
       )
     )
@@ -542,6 +550,7 @@ function attachManagerListener(_actor: ActorState, device: DeviceState): () => v
     const content = event.content ?? ""
     const currentCount = device.messageCounts.get(content) ?? 0
     const nextCount = currentCount + 1
+    console.log(`[TestListener] device=${device.deviceId} content="${content.slice(0,30)}" count=${nextCount}`)
     device.messageCounts.set(content, nextCount)
     resolveWaiters(device, content, nextCount)
   }
@@ -554,8 +563,12 @@ function attachManagerListener(_actor: ActorState, device: DeviceState): () => v
 
 function resolveWaiters(device: DeviceState, content: string, count: number) {
   const pending = device.waiters.slice()
+  if (pending.length > 0) {
+    console.log(`[resolveWaiters] device=${device.deviceId} content="${content.slice(0,30)}" count=${count} waiters=${pending.length} waitingFor=[${pending.map(w => `"${w.message.slice(0,20)}"@${w.targetCount}`).join(',')}]`)
+  }
   for (const waiter of pending) {
     if (waiter.message === content && count >= waiter.targetCount) {
+      console.log(`[resolveWaiters] RESOLVING waiter for "${content.slice(0,30)}"`)
       waiter.resolve()
     }
   }
@@ -569,7 +582,9 @@ function waitForMessage(
 ): Promise<void> {
   const { existingOk } = options
   const currentCount = device.messageCounts.get(message) ?? 0
+  console.log(`[waitForMessage] device=${device.deviceId} message="${message.slice(0,30)}" currentCount=${currentCount} existingOk=${existingOk}`)
   if (existingOk && currentCount > 0) {
+    console.log(`[waitForMessage] immediately resolved (already exists)`)
     return Promise.resolve()
   }
 

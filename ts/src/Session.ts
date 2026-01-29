@@ -94,9 +94,10 @@ export class Session {
       previousSendingChainMessageCount: 0,
       skippedKeys: {},
     };
-    
+
     const session = new Session(nostrSubscribe, state);
     if (name) session.name = name;
+    console.log(`[DR:Session] INIT ${session.name} isInitiator=${isInitiator} ourCurrent=${ourCurrentNostrKey?.publicKey?.slice(0,8) || 'none'} ourNext=${ourNextNostrKey.publicKey.slice(0,8)} theirNext=${theirEphemeralNostrPublicKey.slice(0,8)}`)
     return session;
   }
 
@@ -225,6 +226,7 @@ export class Session {
   }
 
   private ratchetStep() {
+    const oldOurNext = this.state.ourNextNostrKey.publicKey;
     this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber;
     this.state.sendingChainMessageNumber = 0;
     this.state.receivingChainMessageNumber = 0;
@@ -245,6 +247,7 @@ export class Session {
     const [rootKey, sendingChainKey] = kdf(theirRootKey, conversationKey2, 2);
     this.state.rootKey = rootKey;
     this.state.sendingChainKey = sendingChainKey;
+    console.log(`[DR:Session] ${this.name} RATCHET ourCurrent=${oldOurNext.slice(0,8)} -> ourNext=${this.state.ourNextNostrKey.publicKey.slice(0,8)} theirNext=${this.state.theirNextNostrPublicKey?.slice(0,8)}`)
   }
 
   // 3. MESSAGE KEY FUNCTIONS
@@ -344,6 +347,7 @@ export class Session {
     try {
       const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
       if (!isSkipped && this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
+        console.log(`[Session] pendingSwitch: theirNext ${this.state.theirNextNostrPublicKey?.slice(0,8)} -> ${header.nextPublicKey?.slice(0,8)}`)
         this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
         this.state.theirNextNostrPublicKey = header.nextPublicKey;
         pendingSwitch = true;
@@ -376,6 +380,7 @@ export class Session {
       }
 
       if (pendingSwitch) {
+        console.log(`[Session] subscribing to new theirNext: ${this.state.theirNextNostrPublicKey?.slice(0,8)}`)
         this.nostrUnsubscribe?.();
         this.nostrUnsubscribe = this.nostrNextUnsubscribe;
         this.nostrNextUnsubscribe = this.nostrSubscribe(
@@ -407,6 +412,7 @@ export class Session {
 
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
+    console.log(`[DR:Session] ${this.name} SUBSCRIBE theirNext=${this.state.theirNextNostrPublicKey?.slice(0,8)} theirCurrent=${this.state.theirCurrentNostrPublicKey?.slice(0,8) || 'none'} skipped=${Object.keys(this.state.skippedKeys).length}`)
     this.nostrNextUnsubscribe = this.nostrSubscribe(
       {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
@@ -424,7 +430,7 @@ export class Session {
       this.skippedSubscription = this.nostrSubscribe(
         {authors: skippedAuthors, kinds: [MESSAGE_EVENT_KIND]},
         (e) => this.handleNostrEvent(e)
-      );  
+      );
     }
   }
 }

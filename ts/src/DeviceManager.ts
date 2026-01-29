@@ -303,17 +303,30 @@ export class DelegateManager {
 
   /**
    * Check if this device has been revoked from the owner's InviteList.
+   * @param options.timeoutMs - Timeout for each attempt (default 2000ms)
+   * @param options.retries - Number of retry attempts (default 2)
    */
-  async isRevoked(): Promise<boolean> {
+  async isRevoked(options: { timeoutMs?: number; retries?: number } = {}): Promise<boolean> {
+    const { timeoutMs = 2000, retries = 2 } = options
     const ownerPubkey = this.getOwnerPublicKey()
     if (!ownerPubkey) return false
 
-    const inviteList = await InviteList.waitFor(ownerPubkey, this.nostrSubscribe, 500)
-    if (!inviteList) return true
+    // Retry loop to handle slow relays
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const inviteList = await InviteList.waitFor(ownerPubkey, this.nostrSubscribe, timeoutMs)
+      if (inviteList) {
+        const device = inviteList.getDevice(this.devicePublicKey)
+        // Device is revoked if not in list
+        return !device
+      }
+      // No InviteList found - retry if we have attempts left
+      if (attempt < retries) {
+        console.log(`[isRevoked] No InviteList found, retrying (attempt ${attempt + 1}/${retries})`)
+      }
+    }
 
-    const device = inviteList.getDevice(this.devicePublicKey)
-    // Device is revoked if not in list
-    return !device
+    // No InviteList found after all retries - assume revoked
+    return true
   }
 
   close(): void {
