@@ -99,9 +99,9 @@ export const INVITE_EVENT_KIND = 30078;
 export const INVITE_RESPONSE_KIND = 1059;
 
 /**
- * Invite list event kind (parameterized replaceable - uses d-tag for namespacing)
+ * Application keys event kind (parameterized replaceable - uses d-tag for namespacing)
  */
-export const INVITE_LIST_EVENT_KIND = 30078;
+export const APPLICATION_KEYS_EVENT_KIND = 30078;
 
 export const CHAT_MESSAGE_KIND = 14;
 

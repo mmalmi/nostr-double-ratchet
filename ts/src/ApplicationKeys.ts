@@ -1,5 +1,5 @@
 import { VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
-import { INVITE_LIST_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
+import { APPLICATION_KEYS_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
 
 const now = () => Math.round(Date.now() / 1000)
 
@@ -28,14 +28,14 @@ export interface DeviceEntry {
 }
 
 /**
- * Manages a consolidated list of device invites (kind 30078, d-tag "double-ratchet/invite-list").
+ * Manages a consolidated list of device invites (kind 30078, d-tag "double-ratchet/application-keys").
  * Single atomic event containing all device invites for a user.
  * Uses union merge strategy for conflict resolution.
  *
  * Note: ownerPublicKey is not stored - it's passed to getEvent() when publishing,
  * and NDK's signer sets the correct pubkey during signing anyway.
  */
-export class InviteList {
+export class ApplicationKeys {
   private devices: Map<string, DeviceEntry> = new Map()
 
   constructor(devices: DeviceEntry[] = []) {
@@ -80,19 +80,19 @@ export class InviteList {
     ])
 
     return {
-      kind: INVITE_LIST_EVENT_KIND,
+      kind: APPLICATION_KEYS_EVENT_KIND,
       pubkey: "", // Signer will set this
       content: "",
       created_at: now(),
       tags: [
-        ["d", "double-ratchet/invite-list"],
+        ["d", "double-ratchet/application-keys"],
         ["version", "1"],
         ...deviceTags,
       ],
     }
   }
 
-  static fromEvent(event: VerifiedEvent): InviteList {
+  static fromEvent(event: VerifiedEvent): ApplicationKeys {
     if (!event.sig) {
       throw new Error("Event is not signed")
     }
@@ -109,7 +109,7 @@ export class InviteList {
         createdAt: parseInt(createdAt, 10) || event.created_at,
       }))
 
-    return new InviteList(devices)
+    return new ApplicationKeys(devices)
   }
 
   serialize(): string {
@@ -118,14 +118,14 @@ export class InviteList {
     })
   }
 
-  static deserialize(json: string): InviteList {
+  static deserialize(json: string): ApplicationKeys {
     const data = JSON.parse(json) as {
       devices: DeviceEntry[]
     }
-    return new InviteList(data.devices)
+    return new ApplicationKeys(data.devices)
   }
 
-  merge(other: InviteList): InviteList {
+  merge(other: ApplicationKeys): ApplicationKeys {
     // Merge devices, preferring the one with earlier createdAt for same identityPubkey
     const mergedDevices = [...this.devices.values(), ...other.devices.values()]
       .reduce((map, device) => {
@@ -136,29 +136,29 @@ export class InviteList {
         return map
       }, new Map<string, DeviceEntry>())
 
-    return new InviteList(Array.from(mergedDevices.values()))
+    return new ApplicationKeys(Array.from(mergedDevices.values()))
   }
 
   /**
-   * Subscribe to InviteList events from a user.
+   * Subscribe to ApplicationKeys events from a user.
    * Similar to Invite.fromUser pattern.
    */
   static fromUser(
     user: string,
     subscribe: NostrSubscribe,
-    onInviteList: (inviteList: InviteList) => void
+    onApplicationKeysList: (applicationKeys: ApplicationKeys) => void
   ): Unsubscribe {
     return subscribe(
       {
-        kinds: [INVITE_LIST_EVENT_KIND],
+        kinds: [APPLICATION_KEYS_EVENT_KIND],
         authors: [user],
-        "#d": ["double-ratchet/invite-list"],
+        "#d": ["double-ratchet/application-keys"],
       },
       (event) => {
         if (event.pubkey !== user) return
         try {
-          const inviteList = InviteList.fromEvent(event)
-          onInviteList(inviteList)
+          const applicationKeys = ApplicationKeys.fromEvent(event)
+          onApplicationKeysList(applicationKeys)
         } catch {
           // Invalid event
         }
@@ -167,8 +167,8 @@ export class InviteList {
   }
 
   /**
-   * Wait for InviteList from a user with timeout.
-   * Returns the most recent InviteList received within the timeout, or null.
+   * Wait for ApplicationKeys from a user with timeout.
+   * Returns the most recent ApplicationKeys received within the timeout, or null.
    * Note: Uses the most recent event by created_at, not merging, since
    * device revocation is determined by absence from the list.
    */
@@ -176,9 +176,9 @@ export class InviteList {
     user: string,
     subscribe: NostrSubscribe,
     timeoutMs = 500
-  ): Promise<InviteList | null> {
+  ): Promise<ApplicationKeys | null> {
     return new Promise((resolve) => {
-      let latest: { list: InviteList; createdAt: number } | null = null
+      let latest: { list: ApplicationKeys; createdAt: number } | null = null
 
       setTimeout(() => {
         unsubscribe()
@@ -187,14 +187,14 @@ export class InviteList {
 
       const unsubscribe = subscribe(
         {
-          kinds: [INVITE_LIST_EVENT_KIND],
+          kinds: [APPLICATION_KEYS_EVENT_KIND],
           authors: [user],
-          "#d": ["double-ratchet/invite-list"],
+          "#d": ["double-ratchet/application-keys"],
         },
         (event) => {
           if (event.pubkey !== user) return
           try {
-            const list = InviteList.fromEvent(event)
+            const list = ApplicationKeys.fromEvent(event)
             // Use >= to prefer later-delivered events when timestamps are equal
             // This handles replaceable events created within the same second
             if (!latest || event.created_at >= latest.createdAt) {

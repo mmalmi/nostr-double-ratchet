@@ -534,8 +534,8 @@ describe("SessionManager (Controlled Relay)", () => {
   })
 })
 
-describe("SessionManager InviteList Respect", () => {
-  it("should not send messages to devices removed from InviteList via replacement", async () => {
+describe("SessionManager ApplicationKeys Respect", () => {
+  it("should not send messages to devices removed from ApplicationKeys via replacement", async () => {
     const sharedRelay = new MockRelay()
 
     // Create Alice with her own device
@@ -548,7 +548,7 @@ describe("SessionManager InviteList Respect", () => {
     const {
       manager: bobManager,
       publicKey: bobPubkey,
-      deviceManager: bobDeviceManager,
+      applicationManager: bobApplicationManager,
     } = await createMockSessionManager("bob-device-1", sharedRelay)
 
     // Establish session
@@ -571,22 +571,22 @@ describe("SessionManager InviteList Respect", () => {
     await bobManager.sendMessage(alicePubkey, msg2)
     await aliceReceived
 
-    // Bob replaces his InviteList with empty list (without using removeDevice)
-    const emptyInviteList = new (await import("../src/InviteList")).InviteList()
-    await bobDeviceManager.setInviteList(emptyInviteList)
-    await bobDeviceManager.publish()
+    // Bob replaces his ApplicationKeys with empty list (without using removeDevice)
+    const emptyApplicationKeys = new (await import("../src/ApplicationKeys")).ApplicationKeys()
+    await bobApplicationManager.setApplicationKeys(emptyApplicationKeys)
+    await bobApplicationManager.publish()
 
-    // Wait for Alice to process the InviteList update
+    // Wait for Alice to process the ApplicationKeys update
     await new Promise((resolve) => setTimeout(resolve, 200))
 
-    // Track messages Bob receives after the InviteList change
+    // Track messages Bob receives after the ApplicationKeys change
     const messagesAfterChange: string[] = []
     bobManager.onEvent((event) => {
       messagesAfterChange.push(event.content)
     })
 
     // Alice sends a new message - it should NOT be delivered to Bob's device
-    // because the device is no longer in the InviteList
+    // because the device is no longer in the ApplicationKeys
     const msg3 = "This should not be delivered"
     await aliceManager.sendMessage(bobPubkey, msg3)
 

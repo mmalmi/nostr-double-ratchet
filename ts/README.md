@@ -12,14 +12,14 @@ pnpm add nostr-double-ratchet
 
 All devices need two things:
 - **DelegateManager**: Device identity (all devices use this)
-- **DeviceManager**: InviteList authority (only devices with main nsec)
+- **ApplicationManager**: ApplicationKeys authority (only devices with main nsec)
 
 ### Use Case 1: First-Time Setup (New User)
 
 Main device initializes messaging for the first time.
 
 ```typescript
-import { DeviceManager, DelegateManager } from "nostr-double-ratchet"
+import { ApplicationManager, DelegateManager } from "nostr-double-ratchet"
 
 // Create device identity
 const delegate = new DelegateManager({
@@ -30,11 +30,11 @@ const delegate = new DelegateManager({
 await delegate.init()
 const payload = delegate.getRegistrationPayload()
 
-// Create InviteList authority and add ourselves
-const deviceManager = new DeviceManager({ nostrPublish, storage })
-await deviceManager.init()
-deviceManager.addDevice(payload)
-await deviceManager.publish()
+// Create ApplicationKeys authority and add ourselves
+const applicationManager = new ApplicationManager({ nostrPublish, storage })
+await applicationManager.init()
+applicationManager.addDevice(payload)
+await applicationManager.publish()
 
 // Activate (we know the owner - it's us)
 await delegate.activate(ownerPublicKey)
@@ -49,7 +49,7 @@ await sessionManager.init()
 User logs in on a new device using their main Nostr secret key.
 
 ```typescript
-import { DeviceManager, DelegateManager, InviteList } from "nostr-double-ratchet"
+import { ApplicationManager, DelegateManager, ApplicationKeys } from "nostr-double-ratchet"
 
 // Create device identity for this device
 const delegate = new DelegateManager({
@@ -60,19 +60,19 @@ const delegate = new DelegateManager({
 await delegate.init()
 const payload = delegate.getRegistrationPayload()
 
-// Create InviteList authority
-const deviceManager = new DeviceManager({ nostrPublish, storage })
-await deviceManager.init()
+// Create ApplicationKeys authority
+const applicationManager = new ApplicationManager({ nostrPublish, storage })
+await applicationManager.init()
 
-// Fetch existing InviteList from relays and merge
-const existing = await InviteList.waitFor(ownerPublicKey, nostrSubscribe, 2000)
+// Fetch existing ApplicationKeys from relays and merge
+const existing = await ApplicationKeys.waitFor(ownerPublicKey, nostrSubscribe, 2000)
 if (existing) {
-  await deviceManager.setInviteList(existing)
+  await applicationManager.setApplicationKeys(existing)
 }
 
 // Add this device and publish
-deviceManager.addDevice(payload)
-await deviceManager.publish()
+applicationManager.addDevice(payload)
+await applicationManager.publish()
 
 // Activate and create SessionManager
 await delegate.activate(ownerPublicKey)
@@ -82,7 +82,7 @@ await sessionManager.init()
 
 ### Use Case 3: Delegate-Only Device (No Main nsec)
 
-A secondary device that doesn't have authority over the InviteList. Requires coordination with a main device.
+A secondary device that doesn't have authority over the ApplicationKeys. Requires coordination with a main device.
 
 #### Step 1: Create and Initialize Device Identity
 
@@ -112,13 +112,13 @@ console.log("Add this device on your main device:", payload.identityPubkey)
 
 #### Step 3: Main Device Adds Delegate
 
-On the main device (which has `DeviceManager`):
+On the main device (which has `ApplicationManager`):
 
 ```typescript
 const delegatePayload = { identityPubkey: "abc123..." }
 
-deviceManager.addDevice(delegatePayload)
-await deviceManager.publish()
+applicationManager.addDevice(delegatePayload)
+await applicationManager.publish()
 ```
 
 #### Step 4: Wait for Activation
@@ -127,8 +127,8 @@ Back on the delegate device:
 
 ```typescript
 const ownerPublicKey = await delegate.waitForActivation(60000)
-// Subscribes to InviteList events until it finds one containing its identityPubkey
-// Returns the owner's pubkey (the InviteList author)
+// Subscribes to ApplicationKeys events until it finds one containing its identityPubkey
+// Returns the owner's pubkey (the ApplicationKeys author)
 ```
 
 #### Step 5: Create SessionManager
@@ -199,23 +199,23 @@ await delegate.init()
 
 | Event | Kind | Purpose |
 |-------|------|---------|
-| InviteList | 30078 (d: "double-ratchet/invite-list") | Lists all devices for a user |
+| ApplicationKeys | 30078 (d: "double-ratchet/application-keys") | Lists all devices for a user |
 | Invite | 30078 (d: "double-ratchet/invite/{id}") | Per-device ephemeral keys for DH |
 | Invite Response | 1059 | Encrypted session establishment |
 
 ### Key Concepts
 
-- **InviteList**: Published by owner, contains `identityPubkey` for each authorized device
+- **ApplicationKeys**: Published by owner, contains `identityPubkey` for each authorized device
 - **Invite**: Published by each device, contains ephemeral keys and shared secret for session establishment
 - **identityPubkey**: Serves as both device identity and device ID
 - **ownerPublicKey**: The user's main Nostr pubkey (npub)
 
 ### Session Establishment Flow
 
-1. Alice's device publishes InviteList with her devices
+1. Alice's device publishes ApplicationKeys with her devices
 2. Each of Alice's devices publishes its own Invite
 3. Bob wants to message Alice:
-   - Fetches Alice's InviteList
+   - Fetches Alice's ApplicationKeys
    - For each device, fetches its Invite
    - Accepts invite, creating encrypted session
 4. Alice's devices receive invite responses and establish sessions
@@ -233,7 +233,7 @@ new DelegateManager(options)
 
 // Methods
 delegate.init(): Promise<void>                    // Loads or generates keys
-delegate.getRegistrationPayload(): DelegatePayload // Get payload for DeviceManager
+delegate.getRegistrationPayload(): DelegatePayload // Get payload for ApplicationManager
 delegate.getIdentityPublicKey(): string
 delegate.getIdentityKey(): Uint8Array
 delegate.getOwnerPublicKey(): string | null
@@ -245,23 +245,23 @@ delegate.createSessionManager(storage?): SessionManager
 delegate.close(): void
 ```
 
-### DeviceManager
+### ApplicationManager
 
-Only for devices with main nsec (InviteList authority).
+Only for devices with main nsec (ApplicationKeys authority).
 
 ```typescript
 // Create
-new DeviceManager(options)
+new ApplicationManager(options)
 
 // Methods
-deviceManager.init(): Promise<void>
-deviceManager.addDevice(payload): void           // Local only
-deviceManager.revokeDevice(identityPubkey): void // Local only
-deviceManager.publish(): Promise<void>           // Publishes to relays
-deviceManager.setInviteList(list): Promise<void> // For authority transfer
-deviceManager.getInviteList(): InviteList | null
-deviceManager.getAllDevices(): DeviceEntry[]
-deviceManager.close(): void
+applicationManager.init(): Promise<void>
+applicationManager.addDevice(payload): void           // Local only
+applicationManager.revokeDevice(identityPubkey): void // Local only
+applicationManager.publish(): Promise<void>           // Publishes to relays
+applicationManager.setApplicationKeys(list): Promise<void> // For authority transfer
+applicationManager.getApplicationKeys(): ApplicationKeys | null
+applicationManager.getAllDevices(): DeviceEntry[]
+applicationManager.close(): void
 ```
 
 ### SessionManager

@@ -200,7 +200,7 @@ export class Invite {
     /**
      * Creates a tombstone event that replaces the invite, signaling device revocation.
      * The tombstone has the same d-tag but no keys, making it invalid as an invite.
-     * Used during migration to InviteList or when revoking a device.
+     * Used during migration to ApplicationKeys or when revoking a device.
      */
     getDeletionEvent(): UnsignedEvent {
         if (!this.deviceId) {

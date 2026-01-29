@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { DeviceManager, DelegateManager, DelegatePayload } from "../src/DeviceManager"
-import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, INVITE_EVENT_KIND } from "../src/types"
+import { ApplicationManager, DelegateManager, DelegatePayload } from "../src/ApplicationManager"
+import { NostrSubscribe, NostrPublish, APPLICATION_KEYS_EVENT_KIND, INVITE_EVENT_KIND } from "../src/types"
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
-import { InviteList } from "../src/InviteList"
+import { ApplicationKeys } from "../src/ApplicationKeys"
 
 describe("DelegateManager", () => {
   let nostrSubscribe: NostrSubscribe
@@ -77,7 +77,7 @@ describe("DelegateManager", () => {
   })
 
   describe("init()", () => {
-    it("should publish Invite event (not InviteList)", async () => {
+    it("should publish Invite event (not ApplicationKeys)", async () => {
       const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
@@ -85,11 +85,11 @@ describe("DelegateManager", () => {
 
       await manager.init()
 
-      // Should NOT publish InviteList (only DeviceManager does that)
-      const inviteListEvents = publishedEvents.filter(
-        (e) => e.kind === INVITE_LIST_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/invite-list")
+      // Should NOT publish ApplicationKeys (only ApplicationManager does that)
+      const applicationKeysEvents = publishedEvents.filter(
+        (e) => e.kind === APPLICATION_KEYS_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/application-keys")
       )
-      expect(inviteListEvents.length).toBe(0)
+      expect(applicationKeysEvents.length).toBe(0)
 
       // Should publish its own Invite event
       const inviteEvents = publishedEvents.filter(
@@ -161,7 +161,7 @@ describe("DelegateManager", () => {
   })
 
   describe("waitForActivation()", () => {
-    it("should subscribe to InviteList events", async () => {
+    it("should subscribe to ApplicationKeys events", async () => {
       const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
@@ -173,15 +173,15 @@ describe("DelegateManager", () => {
 
       expect(nostrSubscribe).toHaveBeenCalled()
       const calls = (nostrSubscribe as any).mock.calls
-      const inviteListCall = calls.find(
-        (call: any) => call[0].kinds?.includes(INVITE_LIST_EVENT_KIND)
+      const applicationKeysCall = calls.find(
+        (call: any) => call[0].kinds?.includes(APPLICATION_KEYS_EVENT_KIND)
       )
-      expect(inviteListCall).toBeDefined()
+      expect(applicationKeysCall).toBeDefined()
 
       await expect(activationPromise).rejects.toThrow("Activation timeout")
     })
 
-    it("should resolve when own identityPubkey appears in an InviteList", async () => {
+    it("should resolve when own identityPubkey appears in an ApplicationKeys", async () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
@@ -198,12 +198,12 @@ describe("DelegateManager", () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
 
       // Simplified tag format: ["device", identityPubkey, createdAt]
-      const inviteListEvent = finalizeEvent(
+      const applicationKeysEvent = finalizeEvent(
         {
-          kind: INVITE_LIST_EVENT_KIND,
+          kind: APPLICATION_KEYS_EVENT_KIND,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["d", "double-ratchet/invite-list"],
+            ["d", "double-ratchet/application-keys"],
             ["version", "1"],
             [
               "device",
@@ -217,11 +217,11 @@ describe("DelegateManager", () => {
       )
 
       const subscriptionKey = Array.from(subscriptions.keys()).find((key) =>
-        key.includes(String(INVITE_LIST_EVENT_KIND))
+        key.includes(String(APPLICATION_KEYS_EVENT_KIND))
       )
       if (subscriptionKey) {
         const sub = subscriptions.get(subscriptionKey)
-        sub?.callback(inviteListEvent)
+        sub?.callback(applicationKeysEvent)
       }
 
       const result = await activationPromise
@@ -249,7 +249,7 @@ describe("DelegateManager", () => {
   })
 
   describe("isRevoked()", () => {
-    it("should return false when device is in InviteList", async () => {
+    it("should return false when device is in ApplicationKeys", async () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
@@ -264,12 +264,12 @@ describe("DelegateManager", () => {
       const activationPromise = manager.waitForActivation(5000)
       await new Promise((resolve) => setTimeout(resolve, 50))
 
-      const inviteListEvent = finalizeEvent(
+      const applicationKeysEvent = finalizeEvent(
         {
-          kind: INVITE_LIST_EVENT_KIND,
+          kind: APPLICATION_KEYS_EVENT_KIND,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["d", "double-ratchet/invite-list"],
+            ["d", "double-ratchet/application-keys"],
             ["version", "1"],
             [
               "device",
@@ -283,20 +283,20 @@ describe("DelegateManager", () => {
       )
 
       let subscriptionKey = Array.from(subscriptions.keys()).find((key) =>
-        key.includes(String(INVITE_LIST_EVENT_KIND))
+        key.includes(String(APPLICATION_KEYS_EVENT_KIND))
       )
       if (subscriptionKey) {
-        subscriptions.get(subscriptionKey)?.callback(inviteListEvent)
+        subscriptions.get(subscriptionKey)?.callback(applicationKeysEvent)
       }
 
       await activationPromise
 
       const isRevokedSubscribe = vi.fn((filter, onEvent) => {
         if (
-          filter.kinds?.includes(INVITE_LIST_EVENT_KIND) &&
+          filter.kinds?.includes(APPLICATION_KEYS_EVENT_KIND) &&
           filter.authors?.includes(ownerPublicKey)
         ) {
-          setTimeout(() => onEvent(inviteListEvent), 10)
+          setTimeout(() => onEvent(applicationKeysEvent), 10)
         }
         return () => {}
       }) as unknown as NostrSubscribe
@@ -307,7 +307,7 @@ describe("DelegateManager", () => {
       expect(revoked).toBe(false)
     })
 
-    it("should return true when device is removed from InviteList", async () => {
+    it("should return true when device is removed from ApplicationKeys", async () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
@@ -322,12 +322,12 @@ describe("DelegateManager", () => {
       const activationPromise = manager.waitForActivation(5000)
       await new Promise((resolve) => setTimeout(resolve, 50))
 
-      const inviteListEvent = finalizeEvent(
+      const applicationKeysEvent = finalizeEvent(
         {
-          kind: INVITE_LIST_EVENT_KIND,
+          kind: APPLICATION_KEYS_EVENT_KIND,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["d", "double-ratchet/invite-list"],
+            ["d", "double-ratchet/application-keys"],
             ["version", "1"],
             [
               "device",
@@ -341,21 +341,21 @@ describe("DelegateManager", () => {
       )
 
       let subscriptionKey = Array.from(subscriptions.keys()).find((key) =>
-        key.includes(String(INVITE_LIST_EVENT_KIND))
+        key.includes(String(APPLICATION_KEYS_EVENT_KIND))
       )
       if (subscriptionKey) {
-        subscriptions.get(subscriptionKey)?.callback(inviteListEvent)
+        subscriptions.get(subscriptionKey)?.callback(applicationKeysEvent)
       }
 
       await activationPromise
 
       // Device is revoked by simply not being in the list anymore
-      const revokedInviteListEvent = finalizeEvent(
+      const revokedApplicationKeysEvent = finalizeEvent(
         {
-          kind: INVITE_LIST_EVENT_KIND,
+          kind: APPLICATION_KEYS_EVENT_KIND,
           created_at: Math.floor(Date.now() / 1000) + 1,
           tags: [
-            ["d", "double-ratchet/invite-list"],
+            ["d", "double-ratchet/application-keys"],
             ["version", "1"],
             // No device tags - the device is simply not present
           ],
@@ -366,10 +366,10 @@ describe("DelegateManager", () => {
 
       const isRevokedSubscribe = vi.fn((filter, onEvent) => {
         if (
-          filter.kinds?.includes(INVITE_LIST_EVENT_KIND) &&
+          filter.kinds?.includes(APPLICATION_KEYS_EVENT_KIND) &&
           filter.authors?.includes(ownerPublicKey)
         ) {
-          setTimeout(() => onEvent(revokedInviteListEvent), 10)
+          setTimeout(() => onEvent(revokedApplicationKeysEvent), 10)
         }
         return () => {}
       }) as unknown as NostrSubscribe
@@ -382,7 +382,7 @@ describe("DelegateManager", () => {
   })
 })
 
-describe("DeviceManager - Authority", () => {
+describe("ApplicationManager - Authority", () => {
   let nostrPublish: NostrPublish
   let publishedEvents: any[]
 
@@ -396,18 +396,18 @@ describe("DeviceManager - Authority", () => {
   })
 
   describe("constructor", () => {
-    it("should create a DeviceManager", () => {
-      const manager = new DeviceManager({
+    it("should create a ApplicationManager", () => {
+      const manager = new ApplicationManager({
         nostrPublish,
       })
 
-      expect(manager).toBeInstanceOf(DeviceManager)
+      expect(manager).toBeInstanceOf(ApplicationManager)
     })
   })
 
   describe("init()", () => {
-    it("should not auto-publish InviteList on init", async () => {
-      const manager = new DeviceManager({
+    it("should not auto-publish ApplicationKeys on init", async () => {
+      const manager = new ApplicationManager({
         nostrPublish,
       })
 
@@ -418,31 +418,31 @@ describe("DeviceManager - Authority", () => {
 
       // Calling publish() will publish
       await manager.publish()
-      const inviteListEvents = publishedEvents.filter(
-        (e) => e.kind === INVITE_LIST_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/invite-list")
+      const applicationKeysEvents = publishedEvents.filter(
+        (e) => e.kind === APPLICATION_KEYS_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/application-keys")
       )
-      expect(inviteListEvents.length).toBe(1)
+      expect(applicationKeysEvents.length).toBe(1)
     })
 
     it("should start with empty device list", async () => {
-      const manager = new DeviceManager({
+      const manager = new ApplicationManager({
         nostrPublish,
       })
 
       await manager.init()
 
-      const inviteList = manager.getInviteList()
-      expect(inviteList).not.toBeNull()
+      const applicationKeys = manager.getApplicationKeys()
+      expect(applicationKeys).not.toBeNull()
 
-      // DeviceManager no longer auto-adds a device (client must add via DelegateManager flow)
+      // ApplicationManager no longer auto-adds a device (client must add via DelegateManager flow)
       const devices = manager.getOwnDevices()
       expect(devices.length).toBe(0)
     })
   })
 
   describe("addDevice()", () => {
-    it("should add device to InviteList (local only - publish separately)", async () => {
-      const manager = new DeviceManager({
+    it("should add device to ApplicationKeys (local only - publish separately)", async () => {
+      const manager = new ApplicationManager({
         nostrPublish,
       })
       await manager.init()
@@ -468,7 +468,7 @@ describe("DeviceManager - Authority", () => {
     })
 
     it("should use identityPubkey as device identifier", async () => {
-      const manager = new DeviceManager({
+      const manager = new ApplicationManager({
         nostrPublish,
       })
       await manager.init()
@@ -485,15 +485,15 @@ describe("DeviceManager - Authority", () => {
       expect(devices[0].identityPubkey).toBe(delegateIdentityPubkey)
 
       // Can retrieve by identityPubkey
-      const device = manager.getInviteList()?.getDevice(delegateIdentityPubkey)
+      const device = manager.getApplicationKeys()?.getDevice(delegateIdentityPubkey)
       expect(device).toBeDefined()
       expect(device?.identityPubkey).toBe(delegateIdentityPubkey)
     })
   })
 
   describe("revokeDevice()", () => {
-    it("should remove device from InviteList by identityPubkey", async () => {
-      const manager = new DeviceManager({
+    it("should remove device from ApplicationKeys by identityPubkey", async () => {
+      const manager = new ApplicationManager({
         nostrPublish,
       })
       await manager.init()
@@ -513,23 +513,23 @@ describe("DeviceManager - Authority", () => {
   })
 
   describe("getters", () => {
-    let manager: DeviceManager
+    let manager: ApplicationManager
 
     beforeEach(async () => {
-      manager = new DeviceManager({
+      manager = new ApplicationManager({
         nostrPublish,
       })
       await manager.init()
     })
 
-    it("getInviteList() should return InviteList", () => {
-      const list = manager.getInviteList()
+    it("getApplicationKeys() should return ApplicationKeys", () => {
+      const list = manager.getApplicationKeys()
       expect(list).not.toBeNull()
     })
   })
 })
 
-describe("DeviceManager Integration", () => {
+describe("ApplicationManager Integration", () => {
   let publishedEvents: any[]
   let subscribers: Array<{ filter: any; callback: (event: any) => void }>
   let signingKeys: Map<string, Uint8Array>
@@ -604,7 +604,7 @@ describe("DeviceManager Integration", () => {
     signingKeys = new Map()
   })
 
-  it("DeviceManager adds delegate, delegate activates via waitForActivation", async () => {
+  it("ApplicationManager adds delegate, delegate activates via waitForActivation", async () => {
     const ownerPrivateKey = generateSecretKey()
     const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
@@ -625,7 +625,7 @@ describe("DeviceManager Integration", () => {
 
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    // 2. Create DeviceManager (authority) - only needs nostrPublish
+    // 2. Create ApplicationManager (authority) - only needs nostrPublish
     // The signing is done by the publish implementation that uses signingKeys
     const deviceManagerPublish = createNostrPublish()
     const originalPublish = deviceManagerPublish
@@ -637,7 +637,7 @@ describe("DeviceManager Integration", () => {
       return originalPublish(signedEvent)
     }) as unknown as NostrPublish
 
-    const deviceManager = new DeviceManager({
+    const deviceManager = new ApplicationManager({
       nostrPublish: signedPublish,
       storage: new InMemoryStorageAdapter(),
     })
@@ -667,7 +667,7 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(ownerPublicKey, ownerPrivateKey)
 
-    // 1. Create DeviceManager (authority) with signed publish
+    // 1. Create ApplicationManager (authority) with signed publish
     const deviceManagerPublish = createNostrPublish()
     const originalPublish = deviceManagerPublish
     const signedPublish = vi.fn(async (event) => {
@@ -677,7 +677,7 @@ describe("DeviceManager Integration", () => {
       return originalPublish(signedEvent)
     }) as unknown as NostrPublish
 
-    const deviceManager = new DeviceManager({
+    const deviceManager = new ApplicationManager({
       nostrPublish: signedPublish,
       storage: new InMemoryStorageAdapter(),
     })
@@ -695,7 +695,7 @@ describe("DeviceManager Integration", () => {
 
     registerSigningKey(mainDelegateManager.getIdentityPublicKey(), mainDelegateManager.getIdentityKey())
 
-    // 3. Add main device to InviteList (same as adding any device) then publish
+    // 3. Add main device to ApplicationKeys (same as adding any device) then publish
     deviceManager.addDevice(mainPayload)
     await deviceManager.publish()
 
@@ -711,7 +711,7 @@ describe("DeviceManager Integration", () => {
     expect(mainDelegateManager.getIdentityPublicKey()).not.toBe(ownerPublicKey)
   })
 
-  it("DeviceManager revokes delegate, delegate detects revocation", async () => {
+  it("ApplicationManager revokes delegate, delegate detects revocation", async () => {
     const ownerPrivateKey = generateSecretKey()
     const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
@@ -730,7 +730,7 @@ describe("DeviceManager Integration", () => {
 
     const activationPromise = delegateManager.waitForActivation(5000)
 
-    // Create DeviceManager with signed publish
+    // Create ApplicationManager with signed publish
     const deviceManagerPublish = createNostrPublish()
     const originalPublish = deviceManagerPublish
     const signedPublish = vi.fn(async (event) => {
@@ -740,7 +740,7 @@ describe("DeviceManager Integration", () => {
       return originalPublish(signedEvent)
     }) as unknown as NostrPublish
 
-    const deviceManager = new DeviceManager({
+    const deviceManager = new ApplicationManager({
       nostrPublish: signedPublish,
       storage: new InMemoryStorageAdapter(),
     })
@@ -765,7 +765,7 @@ describe("DeviceManager Integration", () => {
     expect(revoked).toBe(true)
   })
 
-  it("delegate cannot activate if not added to InviteList", async () => {
+  it("delegate cannot activate if not added to ApplicationKeys", async () => {
     const delegateManager = new DelegateManager({
       nostrSubscribe: createNostrSubscribe(),
       nostrPublish: createNostrPublish(),
@@ -781,7 +781,7 @@ describe("DeviceManager Integration", () => {
     )
   })
 
-  it("external user can discover delegate via owner's InviteList", async () => {
+  it("external user can discover delegate via owner's ApplicationKeys", async () => {
     const ownerPrivateKey = generateSecretKey()
     const ownerPublicKey = getPublicKey(ownerPrivateKey)
 
@@ -794,7 +794,7 @@ describe("DeviceManager Integration", () => {
     await delegateManager.init()
     const payload = delegateManager.getRegistrationPayload()
 
-    // Create DeviceManager with signed publish
+    // Create ApplicationManager with signed publish
     const deviceManagerPublish = createNostrPublish()
     const originalPublish = deviceManagerPublish
     const signedPublish = vi.fn(async (event) => {
@@ -804,7 +804,7 @@ describe("DeviceManager Integration", () => {
       return originalPublish(signedEvent)
     }) as unknown as NostrPublish
 
-    const deviceManager = new DeviceManager({
+    const deviceManager = new ApplicationManager({
       nostrPublish: signedPublish,
     })
 
@@ -816,13 +816,13 @@ describe("DeviceManager Integration", () => {
 
     const externalSubscribe = createNostrSubscribe()
 
-    const fetchedList = await new Promise<InviteList | null>((resolve) => {
+    const fetchedList = await new Promise<ApplicationKeys | null>((resolve) => {
       let latestEvent: any = null
       const unsub = externalSubscribe(
         {
-          kinds: [INVITE_LIST_EVENT_KIND],
+          kinds: [APPLICATION_KEYS_EVENT_KIND],
           authors: [ownerPublicKey],
-          "#d": ["double-ratchet/invite-list"],
+          "#d": ["double-ratchet/application-keys"],
         },
         (event) => {
           try {
@@ -839,7 +839,7 @@ describe("DeviceManager Integration", () => {
         unsub()
         if (latestEvent) {
           try {
-            resolve(InviteList.fromEvent(latestEvent))
+            resolve(ApplicationKeys.fromEvent(latestEvent))
           } catch {
             resolve(null)
           }

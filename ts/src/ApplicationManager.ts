@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools"
-import { InviteList, DeviceEntry } from "./InviteList"
+import { ApplicationKeys, DeviceEntry } from "./ApplicationKeys"
 import { Invite } from "./Invite"
-import { NostrSubscribe, NostrPublish, INVITE_LIST_EVENT_KIND, Unsubscribe } from "./types"
+import { NostrSubscribe, NostrPublish, APPLICATION_KEYS_EVENT_KIND, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
@@ -10,9 +10,9 @@ export interface DelegatePayload {
 }
 
 /**
- * Options for DeviceManager (authority for InviteList)
+ * Options for ApplicationManager (authority for ApplicationKeys)
  */
-export interface DeviceManagerOptions {
+export interface ApplicationManagerOptions {
   nostrPublish: NostrPublish
   storage?: StorageAdapter
 }
@@ -28,15 +28,15 @@ export interface DelegateManagerOptions {
 
 
 /**
- * DeviceManager - Authority for InviteList.
- * Manages local InviteList and publishes to relays.
+ * ApplicationManager - Authority for ApplicationKeys.
+ * Manages local ApplicationKeys and publishes to relays.
  * Does NOT have device identity (no Invite, no SessionManager creation).
  */
-export class DeviceManager {
+export class ApplicationManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
 
-  private inviteList: InviteList | null = null
+  private applicationKeys: ApplicationKeys | null = null
   private initialized = false
 
   private readonly storageVersion = "3"
@@ -44,7 +44,7 @@ export class DeviceManager {
     return `v${this.storageVersion}`
   }
 
-  constructor(options: DeviceManagerOptions) {
+  constructor(options: ApplicationManagerOptions) {
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
   }
@@ -54,69 +54,69 @@ export class DeviceManager {
     this.initialized = true
 
     // Load local only - no auto-subscribe, no auto-publish, no auto-merge
-    this.inviteList = await this.loadInviteList()
-    if (!this.inviteList) {
-      this.inviteList = new InviteList()
+    this.applicationKeys = await this.loadApplicationKeys()
+    if (!this.applicationKeys) {
+      this.applicationKeys = new ApplicationKeys()
     }
   }
 
-  getInviteList(): InviteList | null {
-    return this.inviteList
+  getApplicationKeys(): ApplicationKeys | null {
+    return this.applicationKeys
   }
 
   getOwnDevices(): DeviceEntry[] {
-    return this.inviteList?.getAllDevices() || []
+    return this.applicationKeys?.getAllDevices() || []
   }
 
   /**
-   * Add a device to the InviteList.
+   * Add a device to the ApplicationKeys.
    * Only adds identity info - the device publishes its own Invite separately.
    * This is a local-only operation - call publish() to publish to relays.
    */
   addDevice(payload: DelegatePayload): void {
-    if (!this.inviteList) {
-      this.inviteList = new InviteList()
+    if (!this.applicationKeys) {
+      this.applicationKeys = new ApplicationKeys()
     }
 
     const device: DeviceEntry = {
       identityPubkey: payload.identityPubkey,
       createdAt: Math.floor(Date.now() / 1000),
     }
-    this.inviteList.addDevice(device)
-    this.saveInviteList(this.inviteList).catch(console.error)
+    this.applicationKeys.addDevice(device)
+    this.saveApplicationKeys(this.applicationKeys).catch(console.error)
   }
 
   /**
-   * Revoke a device from the InviteList.
+   * Revoke a device from the ApplicationKeys.
    * This is a local-only operation - call publish() to publish to relays.
    */
   revokeDevice(identityPubkey: string): void {
-    if (!this.inviteList) return
+    if (!this.applicationKeys) return
 
-    this.inviteList.removeDevice(identityPubkey)
-    this.saveInviteList(this.inviteList).catch(console.error)
+    this.applicationKeys.removeDevice(identityPubkey)
+    this.saveApplicationKeys(this.applicationKeys).catch(console.error)
   }
 
   /**
-   * Publish the current InviteList to relays.
+   * Publish the current ApplicationKeys to relays.
    * This is the only way to publish - addDevice/revokeDevice are local-only.
    */
   async publish(): Promise<void> {
-    if (!this.inviteList) {
-      this.inviteList = new InviteList()
+    if (!this.applicationKeys) {
+      this.applicationKeys = new ApplicationKeys()
     }
 
-    const event = this.inviteList.getEvent()
+    const event = this.applicationKeys.getEvent()
     await this.nostrPublish(event)
   }
 
   /**
-   * Replace the local InviteList with the given list and save to storage.
+   * Replace the local ApplicationKeys with the given list and save to storage.
    * Used for authority transfer - receive list from another device, then call publish().
    */
-  async setInviteList(list: InviteList): Promise<void> {
-    this.inviteList = list
-    await this.saveInviteList(list)
+  async setApplicationKeys(list: ApplicationKeys): Promise<void> {
+    this.applicationKeys = list
+    await this.saveApplicationKeys(list)
   }
 
   /**
@@ -126,22 +126,22 @@ export class DeviceManager {
     // No-op - no subscriptions to clean up
   }
 
-  private inviteListKey(): string {
-    return `${this.versionPrefix}/device-manager/invite-list`
+  private applicationKeysKey(): string {
+    return `${this.versionPrefix}/application-manager/application-keys`
   }
 
-  private async loadInviteList(): Promise<InviteList | null> {
-    const data = await this.storage.get<string>(this.inviteListKey())
+  private async loadApplicationKeys(): Promise<ApplicationKeys | null> {
+    const data = await this.storage.get<string>(this.applicationKeysKey())
     if (!data) return null
     try {
-      return InviteList.deserialize(data)
+      return ApplicationKeys.deserialize(data)
     } catch {
       return null
     }
   }
 
-  private async saveInviteList(list: InviteList): Promise<void> {
-    await this.storage.put(this.inviteListKey(), list.serialize())
+  private async saveApplicationKeys(list: ApplicationKeys): Promise<void> {
+    await this.storage.put(this.applicationKeysKey(), list.serialize())
   }
 }
 
@@ -210,7 +210,7 @@ export class DelegateManager {
   }
 
   /**
-   * Get the registration payload for adding this device to a DeviceManager.
+   * Get the registration payload for adding this device to an ApplicationManager.
    * Must be called after init().
    */
   getRegistrationPayload(): DelegatePayload {
@@ -257,7 +257,7 @@ export class DelegateManager {
   }
 
   /**
-   * Wait for this device to be activated (added to an InviteList).
+   * Wait for this device to be activated (added to an ApplicationKeys).
    * Returns the owner's public key once activated.
    * For delegate devices that don't know the owner ahead of time.
    */
@@ -272,16 +272,16 @@ export class DelegateManager {
         reject(new Error("Activation timeout"))
       }, timeoutMs)
 
-      // Subscribe to all InviteList events and look for our identityPubkey
+      // Subscribe to all ApplicationKeys events and look for our identityPubkey
       const unsubscribe = this.nostrSubscribe(
         {
-          kinds: [INVITE_LIST_EVENT_KIND],
-          "#d": ["double-ratchet/invite-list"],
+          kinds: [APPLICATION_KEYS_EVENT_KIND],
+          "#d": ["double-ratchet/application-keys"],
         },
         async (event) => {
           try {
-            const inviteList = InviteList.fromEvent(event)
-            const device = inviteList.getDevice(this.devicePublicKey)
+            const applicationKeys = ApplicationKeys.fromEvent(event)
+            const device = applicationKeys.getDevice(this.devicePublicKey)
 
             // Check that our identity pubkey is in the list
             if (device) {
@@ -292,7 +292,7 @@ export class DelegateManager {
               resolve(event.pubkey)
             }
           } catch {
-            // Invalid InviteList
+            // Invalid ApplicationKeys
           }
         }
       )
@@ -302,7 +302,7 @@ export class DelegateManager {
   }
 
   /**
-   * Check if this device has been revoked from the owner's InviteList.
+   * Check if this device has been revoked from the owner's ApplicationKeys.
    * @param options.timeoutMs - Timeout for each attempt (default 2000ms)
    * @param options.retries - Number of retry attempts (default 2)
    */
@@ -313,19 +313,19 @@ export class DelegateManager {
 
     // Retry loop to handle slow relays
     for (let attempt = 0; attempt <= retries; attempt++) {
-      const inviteList = await InviteList.waitFor(ownerPubkey, this.nostrSubscribe, timeoutMs)
-      if (inviteList) {
-        const device = inviteList.getDevice(this.devicePublicKey)
+      const applicationKeys = await ApplicationKeys.waitFor(ownerPubkey, this.nostrSubscribe, timeoutMs)
+      if (applicationKeys) {
+        const device = applicationKeys.getDevice(this.devicePublicKey)
         // Device is revoked if not in list
         return !device
       }
-      // No InviteList found - retry if we have attempts left
+      // No ApplicationKeys found - retry if we have attempts left
       if (attempt < retries) {
-        console.log(`[isRevoked] No InviteList found, retrying (attempt ${attempt + 1}/${retries})`)
+        console.log(`[isRevoked] No ApplicationKeys found, retrying (attempt ${attempt + 1}/${retries})`)
       }
     }
 
-    // No InviteList found after all retries - assume revoked
+    // No ApplicationKeys found after all retries - assume revoked
     return true
   }
 
