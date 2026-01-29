@@ -131,8 +131,10 @@ export class Invite {
             authors: [user],
             "#l": ["double-ratchet/invites"]
         };
+        console.log(`[DR:Invite] fromUser SUBSCRIBE user=${user.slice(0,8)} kind=${INVITE_EVENT_KIND}`)
         const seenIds = new Set<string>()
         const unsub = subscribe(filter, (event) => {
+            console.log(`[DR:Invite] fromUser GOT EVENT user=${user.slice(0,8)} event.pubkey=${event.pubkey.slice(0,8)} id=${event.id.slice(0,8)}`)
             if (event.pubkey !== user) {
                 console.error("Got invite event from wrong user", event.pubkey, "expected", user)
                 return;
@@ -142,7 +144,8 @@ export class Invite {
             try {
                 const inviteLink = Invite.fromEvent(event);
                 onInvite(inviteLink);
-            } catch {
+            } catch (e) {
+                console.log(`[DR:Invite] fromUser PARSE ERROR user=${user.slice(0,8)}`, e)
             }
         });
 
@@ -240,6 +243,7 @@ export class Invite {
         encryptor: Uint8Array | EncryptFunction,
         ownerPublicKey?: string,
     ): Promise<{ session: Session, event: VerifiedEvent }> {
+        console.log(`[DR:Invite] Accepting invite from=${this.inviter?.slice(0,8)} device=${this.deviceId?.slice(0,8)} ephemeral=${this.inviterEphemeralPublicKey.slice(0,8)}`)
         const inviteeSessionKeypair = generateEphemeralKeypair();
         const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
 
@@ -265,6 +269,7 @@ export class Invite {
             encrypt,
         });
 
+        console.log(`[DR:Invite] Accepted, created session=${session.name} ourKey=${session.state.ourNextNostrKey.publicKey.slice(0,8)} theirKey=${session.state.theirNextNostrPublicKey?.slice(0,8)}`)
         return { session, event: finalizeEvent(encrypted.envelope, encrypted.randomSenderPrivateKey) };
     }
 
