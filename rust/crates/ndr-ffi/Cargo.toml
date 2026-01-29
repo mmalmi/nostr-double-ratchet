@@ -11,6 +11,10 @@ repository.workspace = true
 crate-type = ["lib", "cdylib", "staticlib"]
 name = "ndr_ffi"
 
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
 [dependencies]
 nostr-double-ratchet.workspace = true
 nostr.workspace = true
