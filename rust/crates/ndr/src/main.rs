@@ -55,6 +55,16 @@ enum Commands {
         message: String,
     },
 
+    /// React to a message
+    React {
+        /// Chat ID
+        chat_id: String,
+        /// Message ID to react to
+        message_id: String,
+        /// Emoji reaction (e.g., 👍, ❤️, +1)
+        emoji: String,
+    },
+
     /// Read messages from a chat
     Read {
         /// Chat ID
@@ -213,6 +223,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         },
         Commands::Send { chat_id, message } => {
             commands::message::send(&chat_id, &message, &config, &storage, output).await
+        }
+        Commands::React { chat_id, message_id, emoji } => {
+            commands::message::react(&chat_id, &message_id, &emoji, &config, &storage, output).await
         }
         Commands::Read { chat_id, limit } => {
             commands::message::read(&chat_id, limit, &storage, output).await

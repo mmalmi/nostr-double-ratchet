@@ -1,5 +1,5 @@
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
-import { Rumor, SessionState } from "./types";
+import { Rumor, SessionState, ReactionPayload } from "./types";
 import { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -198,4 +198,45 @@ export function getMillisecondTimestamp(event: Rumor) {
     return parseInt(msTag[1]);
   }
   return event.created_at * 1000;
+}
+
+/**
+ * Check if a message content is a reaction payload.
+ * @param content The message content to check
+ * @returns The parsed ReactionPayload if valid, null otherwise
+ */
+export function parseReaction(content: string): ReactionPayload | null {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed.type === 'reaction' && typeof parsed.messageId === 'string' && typeof parsed.emoji === 'string') {
+      return parsed as ReactionPayload;
+    }
+  } catch {
+    // Not JSON or invalid structure
+  }
+  return null;
+}
+
+/**
+ * Check if a message content is a reaction.
+ * @param content The message content to check
+ * @returns true if the content is a reaction payload
+ */
+export function isReaction(content: string): boolean {
+  return parseReaction(content) !== null;
+}
+
+/**
+ * Create a reaction payload JSON string.
+ * @param messageId The ID of the message being reacted to
+ * @param emoji The emoji or reaction content
+ * @returns JSON string of the reaction payload
+ */
+export function createReactionPayload(messageId: string, emoji: string): string {
+  const payload: ReactionPayload = {
+    type: 'reaction',
+    messageId,
+    emoji
+  };
+  return JSON.stringify(payload);
 }

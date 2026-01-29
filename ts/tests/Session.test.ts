@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from '../src/Session'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
-import { MESSAGE_EVENT_KIND } from '../src/types';
-import { createEventStream } from '../src/utils';
+import { MESSAGE_EVENT_KIND, REACTION_KIND } from '../src/types';
+import { createEventStream, parseReaction, isReaction, createReactionPayload } from '../src/utils';
 import { serializeSessionState, deserializeSessionState } from '../src/utils';
 
 describe('Session', () => {
@@ -383,5 +383,79 @@ describe('Session', () => {
     expect(bobSecondMessage.value?.content).toBe('Message 2');
 
     expect(messageQueue.length).toBe(0);
+  });
+
+  it('should send and receive reactions correctly', async () => {
+    const messageQueue: any[] = [];
+
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+        setTimeout(checkQueue, 100);
+      };
+      checkQueue();
+      return () => {};
+    };
+
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+
+    const aliceMessages = createEventStream(alice);
+    const bobMessages = createEventStream(bob);
+
+    // Alice sends a message
+    const { event: messageEvent, innerEvent: messageInner } = alice.send('Hello Bob!');
+    messageQueue.push(messageEvent);
+    const bobFirstMessage = await bobMessages.next();
+    expect(bobFirstMessage.value?.content).toBe('Hello Bob!');
+
+    // Bob sends a reaction to Alice's message
+    const messageId = messageInner.id;
+    const { event: reactionEvent, innerEvent: reactionInner } = bob.sendReaction(messageId, '👍');
+    
+    // Verify reaction event structure
+    expect(reactionInner.kind).toBe(REACTION_KIND);
+    expect(reactionInner.tags).toContainEqual(['e', messageId]);
+    
+    // Verify reaction payload
+    const payload = parseReaction(reactionInner.content);
+    expect(payload).not.toBeNull();
+    expect(payload?.type).toBe('reaction');
+    expect(payload?.messageId).toBe(messageId);
+    expect(payload?.emoji).toBe('👍');
+    expect(isReaction(reactionInner.content)).toBe(true);
+
+    // Alice receives the reaction
+    messageQueue.push(reactionEvent);
+    const aliceReaction = await aliceMessages.next();
+    expect(isReaction(aliceReaction.value?.content)).toBe(true);
+    const receivedPayload = parseReaction(aliceReaction.value?.content);
+    expect(receivedPayload?.emoji).toBe('👍');
+    expect(receivedPayload?.messageId).toBe(messageId);
+  });
+
+  it('should correctly identify reaction vs regular messages', () => {
+    // Test reaction payload
+    const reactionContent = createReactionPayload('abc123', '❤️');
+    expect(isReaction(reactionContent)).toBe(true);
+    const parsed = parseReaction(reactionContent);
+    expect(parsed?.type).toBe('reaction');
+    expect(parsed?.messageId).toBe('abc123');
+    expect(parsed?.emoji).toBe('❤️');
+
+    // Test regular message content
+    expect(isReaction('Hello world')).toBe(false);
+    expect(parseReaction('Hello world')).toBeNull();
+
+    // Test invalid JSON
+    expect(isReaction('{invalid json')).toBe(false);
+    expect(parseReaction('{invalid json')).toBeNull();
+
+    // Test valid JSON but not a reaction
+    expect(isReaction('{"foo": "bar"}')).toBe(false);
+    expect(parseReaction('{"foo": "bar"}')).toBeNull();
   });
 })

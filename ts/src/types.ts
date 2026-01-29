@@ -116,3 +116,20 @@ export type NostrEvent = {
   content: string;
   sig: string;
 }
+
+/**
+ * Payload for reaction messages sent through NDR.
+ * Reactions are regular messages with a JSON payload indicating they're a reaction.
+ */
+export interface ReactionPayload {
+  type: 'reaction';
+  /** ID of the message being reacted to */
+  messageId: string;
+  /** Emoji or reaction content */
+  emoji: string;
+}
+
+/**
+ * Kind constant for reaction inner events
+ */
+export const REACTION_KIND = 7;

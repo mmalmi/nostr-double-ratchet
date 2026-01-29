@@ -34,6 +34,18 @@ pub struct StoredMessage {
     pub is_outgoing: bool,
 }
 
+/// Stored reaction data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredReaction {
+    pub id: String,
+    pub chat_id: String,
+    pub message_id: String,
+    pub from_pubkey: String,
+    pub emoji: String,
+    pub timestamp: u64,
+    pub is_outgoing: bool,
+}
+
 /// File-based storage (agent-friendly - can read JSON directly)
 pub struct Storage {
     #[allow(dead_code)]
@@ -41,6 +53,7 @@ pub struct Storage {
     invites_dir: PathBuf,
     chats_dir: PathBuf,
     messages_dir: PathBuf,
+    reactions_dir: PathBuf,
 }
 
 impl Storage {
@@ -50,16 +63,19 @@ impl Storage {
         let invites_dir = base_dir.join("invites");
         let chats_dir = base_dir.join("chats");
         let messages_dir = base_dir.join("messages");
+        let reactions_dir = base_dir.join("reactions");
 
         fs::create_dir_all(&invites_dir)?;
         fs::create_dir_all(&chats_dir)?;
         fs::create_dir_all(&messages_dir)?;
+        fs::create_dir_all(&reactions_dir)?;
 
         Ok(Self {
             base_dir,
             invites_dir,
             chats_dir,
             messages_dir,
+            reactions_dir,
         })
     }
 
@@ -67,8 +83,10 @@ impl Storage {
 
     pub fn save_invite(&self, invite: &StoredInvite) -> Result<()> {
         let path = self.invites_dir.join(format!("{}.json", invite.id));
+        let temp_path = self.invites_dir.join(format!("{}.json.tmp", invite.id));
         let content = serde_json::to_string_pretty(invite)?;
-        fs::write(path, content)?;
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
@@ -109,8 +127,10 @@ impl Storage {
 
     pub fn save_chat(&self, chat: &StoredChat) -> Result<()> {
         let path = self.chats_dir.join(format!("{}.json", chat.id));
+        let temp_path = self.chats_dir.join(format!("{}.json.tmp", chat.id));
         let content = serde_json::to_string_pretty(chat)?;
-        fs::write(path, content)?;
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
@@ -201,7 +221,11 @@ impl Storage {
         day_messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
         let content = serde_json::to_string_pretty(&day_messages)?;
-        fs::write(path, content)?;
+
+        // Atomic write: write to temp file then rename to avoid corruption on crash
+        let temp_path = dir.join(format!("{}.json.tmp", date));
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
@@ -238,6 +262,54 @@ impl Storage {
         Ok(messages)
     }
 
+    // === Reaction operations ===
+    // Reactions are stored per chat: reactions/<chat_id>.json
+
+    pub fn save_reaction(&self, reaction: &StoredReaction) -> Result<()> {
+        let path = self.reactions_dir.join(format!("{}.json", reaction.chat_id));
+
+        // Load existing reactions for this chat, or start fresh
+        let mut reactions: Vec<StoredReaction> = if path.exists() {
+            let content = fs::read_to_string(&path)?;
+            serde_json::from_str(&content)?
+        } else {
+            Vec::new()
+        };
+
+        // Remove any existing reaction with same id (update case)
+        reactions.retain(|r| r.id != reaction.id);
+        reactions.push(reaction.clone());
+
+        // Sort by timestamp
+        reactions.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        let content = serde_json::to_string_pretty(&reactions)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn get_reactions(&self, chat_id: &str, limit: usize) -> Result<Vec<StoredReaction>> {
+        let path = self.reactions_dir.join(format!("{}.json", chat_id));
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(&path)?;
+        let mut reactions: Vec<StoredReaction> = serde_json::from_str(&content)?;
+
+        // Sort by timestamp descending, take limit, reverse
+        reactions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        reactions.truncate(limit);
+        reactions.reverse();
+
+        Ok(reactions)
+    }
+
+    pub fn get_reactions_for_message(&self, chat_id: &str, message_id: &str) -> Result<Vec<StoredReaction>> {
+        let reactions = self.get_reactions(chat_id, usize::MAX)?;
+        Ok(reactions.into_iter().filter(|r| r.message_id == message_id).collect())
+    }
+
     /// Clear all data (for logout)
     pub fn clear_all(&self) -> Result<()> {
         if self.invites_dir.exists() {
@@ -249,11 +321,15 @@ impl Storage {
         if self.messages_dir.exists() {
             fs::remove_dir_all(&self.messages_dir)?;
         }
+        if self.reactions_dir.exists() {
+            fs::remove_dir_all(&self.reactions_dir)?;
+        }
 
         // Recreate dirs
         fs::create_dir_all(&self.invites_dir)?;
         fs::create_dir_all(&self.chats_dir)?;
         fs::create_dir_all(&self.messages_dir)?;
+        fs::create_dir_all(&self.reactions_dir)?;
 
         Ok(())
     }

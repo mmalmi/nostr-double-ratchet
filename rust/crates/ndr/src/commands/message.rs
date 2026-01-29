@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::output::Output;
-use crate::storage::{Storage, StoredMessage};
+use crate::storage::{Storage, StoredMessage, StoredReaction};
 
 #[derive(Serialize)]
 struct MessageSent {
@@ -21,6 +21,7 @@ struct MessageSent {
 struct MessageList {
     chat_id: String,
     messages: Vec<MessageInfo>,
+    reactions: Vec<ReactionInfo>,
 }
 
 #[derive(Serialize)]
@@ -35,9 +36,48 @@ struct MessageInfo {
 #[derive(Serialize)]
 struct IncomingMessage {
     chat_id: String,
+    message_id: String,
     from_pubkey: String,
     content: String,
     timestamp: u64,
+}
+
+#[derive(Serialize)]
+struct IncomingReaction {
+    chat_id: String,
+    from_pubkey: String,
+    message_id: String,
+    emoji: String,
+    timestamp: u64,
+}
+
+#[derive(Serialize)]
+struct ReactionInfo {
+    id: String,
+    message_id: String,
+    from_pubkey: String,
+    emoji: String,
+    timestamp: u64,
+    is_outgoing: bool,
+}
+
+/// Parsed reaction payload from decrypted content
+#[derive(Debug)]
+struct ReactionPayload {
+    message_id: String,
+    emoji: String,
+}
+
+/// Try to parse content as a reaction payload
+fn parse_reaction(content: &str) -> Option<ReactionPayload> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    if parsed.get("type")?.as_str()? != "reaction" {
+        return None;
+    }
+    Some(ReactionPayload {
+        message_id: parsed.get("messageId")?.as_str()?.to_string(),
+        emoji: parsed.get("emoji")?.as_str()?.to_string(),
+    })
 }
 
 /// Send a message
@@ -70,7 +110,8 @@ pub async fn send(
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
 
-    let msg_id = uuid::Uuid::new_v4().to_string();
+    // Use the outer event ID as message ID (for reaction compatibility with iris-chat)
+    let msg_id = encrypted_event.id.to_hex();
 
     let stored = StoredMessage {
         id: msg_id.clone(),
@@ -108,6 +149,75 @@ pub async fn send(
     Ok(())
 }
 
+/// React to a message
+pub async fn react(
+    chat_id: &str,
+    message_id: &str,
+    emoji: &str,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    let chat = storage.get_chat(chat_id)?
+        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+
+    // Load session state
+    let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
+        .map_err(|e| anyhow::anyhow!("Invalid session state: {}. Chat may not be properly initialized.", e))?;
+
+    let mut session = Session::new(session_state, chat_id.to_string());
+
+    // Send the reaction
+    let encrypted_event = session.send_reaction(message_id, emoji)
+        .map_err(|e| anyhow::anyhow!("Failed to encrypt reaction: {}", e))?;
+
+    let pubkey = config.public_key()?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    // Save outgoing reaction
+    let reaction_id = encrypted_event.id.to_hex();
+    let stored = StoredReaction {
+        id: reaction_id.clone(),
+        chat_id: chat_id.to_string(),
+        message_id: message_id.to_string(),
+        from_pubkey: pubkey,
+        emoji: emoji.to_string(),
+        timestamp,
+        is_outgoing: true,
+    };
+    storage.save_reaction(&stored)?;
+
+    // Update chat with new session state
+    let mut updated_chat = chat;
+    updated_chat.session_state = serde_json::to_string(&session.state)?;
+    storage.save_chat(&updated_chat)?;
+
+    // Publish to relays
+    let client = Client::default();
+    for relay in &config.relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+    client.send_event(encrypted_event.clone()).await?;
+
+    output.success("react", serde_json::json!({
+        "id": reaction_id,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "emoji": emoji,
+        "timestamp": timestamp,
+        "event": nostr::JsonUtil::as_json(&encrypted_event),
+    }));
+
+    Ok(())
+}
+
 /// Read messages from a chat
 pub async fn read(
     chat_id: &str,
@@ -119,6 +229,7 @@ pub async fn read(
         .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
 
     let messages = storage.get_messages(chat_id, limit)?;
+    let reactions = storage.get_reactions(chat_id, limit)?;
 
     let message_infos: Vec<MessageInfo> = messages
         .into_iter()
@@ -131,9 +242,22 @@ pub async fn read(
         })
         .collect();
 
+    let reaction_infos: Vec<ReactionInfo> = reactions
+        .into_iter()
+        .map(|r| ReactionInfo {
+            id: r.id,
+            message_id: r.message_id,
+            from_pubkey: r.from_pubkey,
+            emoji: r.emoji,
+            timestamp: r.timestamp,
+            is_outgoing: r.is_outgoing,
+        })
+        .collect();
+
     output.success("read", MessageList {
         chat_id: chat_id.to_string(),
         messages: message_infos,
+        reactions: reaction_infos,
     });
 
     Ok(())
@@ -178,7 +302,8 @@ pub async fn receive(
 
                 let timestamp = event.created_at.as_u64();
 
-                let msg_id = uuid::Uuid::new_v4().to_string();
+                // Use outer event ID as message ID (for reaction compatibility with iris-chat)
+                let msg_id = event.id.to_hex();
                 let stored = StoredMessage {
                     id: msg_id.clone(),
                     chat_id: chat.id.clone(),
@@ -198,6 +323,7 @@ pub async fn receive(
 
                 output.success("receive", IncomingMessage {
                     chat_id: updated_chat.id,
+                    message_id: msg_id,
                     from_pubkey: hex::encode(sender_pubkey.to_bytes()),
                     content,
                     timestamp,
@@ -246,6 +372,8 @@ pub async fn listen(
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
     use nostr_double_ratchet::{MESSAGE_EVENT_KIND, INVITE_RESPONSE_KIND};
     use std::collections::HashSet;
+    use notify::{Watcher, RecursiveMode, Event as NotifyEvent, EventKind};
+    use std::sync::mpsc;
 
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
@@ -254,56 +382,132 @@ pub async fn listen(
     let our_private_key = config.private_key_bytes()?;
     let chat_id_owned = chat_id.map(|s| s.to_string());
 
-    // Connect to relays
+    // Prepare client (don't connect until we have something to subscribe to)
     let client = Client::default();
     for relay in &config.relays {
         client.add_relay(relay).await?;
     }
-    client.connect().await;
+    let mut connected = false;
 
     let scope = chat_id.map(|id| format!("chat {}", id))
         .unwrap_or_else(|| "all chats".to_string());
 
-    // Track currently subscribed pubkeys to detect when we need to resubscribe
-    let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
-    let mut subscribed_pubkeys: HashSet<String> = pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
+    // Helper to build filters from current state
+    let build_filters = |storage: &Storage, chat_id: Option<&str>| -> Result<(Vec<Filter>, HashSet<String>)> {
+        let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
+        let subscribed_pubkeys: HashSet<String> = pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
+
+        let mut filters = Vec::new();
+
+        if !pubkeys_to_watch.is_empty() {
+            filters.push(
+                Filter::new()
+                    .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+                    .authors(pubkeys_to_watch)
+            );
+        }
+
+        let stored_invites = storage.list_invites()?;
+        let ephemeral_pubkeys: Vec<nostr::PublicKey> = stored_invites.iter()
+            .filter_map(|stored| {
+                nostr_double_ratchet::Invite::deserialize(&stored.serialized)
+                    .ok()
+                    .map(|invite| invite.inviter_ephemeral_public_key)
+            })
+            .collect();
+
+        if !ephemeral_pubkeys.is_empty() {
+            filters.push(
+                Filter::new()
+                    .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
+                    .pubkeys(ephemeral_pubkeys)
+            );
+        }
+
+        Ok((filters, subscribed_pubkeys))
+    };
 
     // Build initial filters
-    let mut filters = Vec::new();
-
-    if !pubkeys_to_watch.is_empty() {
-        filters.push(
-            Filter::new()
-                .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                .authors(pubkeys_to_watch.clone())
-        );
-    }
-
-    // Filter for invite responses
-    let stored_invites = storage.list_invites()?;
-    let ephemeral_pubkeys: Vec<nostr::PublicKey> = stored_invites.iter()
-        .filter_map(|stored| {
-            nostr_double_ratchet::Invite::deserialize(&stored.serialized)
-                .ok()
-                .map(|invite| invite.inviter_ephemeral_public_key)
-        })
-        .collect();
-
-    if !ephemeral_pubkeys.is_empty() {
-        filters.push(
-            Filter::new()
-                .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
-                .pubkeys(ephemeral_pubkeys)
-        );
-    }
+    let (mut filters, mut subscribed_pubkeys) = build_filters(storage, chat_id)?;
 
     output.success_message("listen", &format!("Listening for messages and invite responses on {}... (Ctrl+C to stop)", scope));
 
-    client.subscribe(filters, None).await?;
+    // Set up filesystem watcher for invites and chats directories
+    let (fs_tx, fs_rx) = mpsc::channel();
+    let mut _watcher = notify::recommended_watcher(move |res: Result<NotifyEvent, notify::Error>| {
+        if let Ok(event) = res {
+            if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+                let _ = fs_tx.send(());
+            }
+        }
+    })?;
 
-    // Handle incoming events
+    // Watch storage directories
+    let invites_dir = storage.data_dir().join("invites");
+    let chats_dir = storage.data_dir().join("chats");
+    if invites_dir.exists() {
+        _watcher.watch(&invites_dir, RecursiveMode::NonRecursive)?;
+    }
+    if chats_dir.exists() {
+        _watcher.watch(&chats_dir, RecursiveMode::NonRecursive)?;
+    }
+
+    // Subscribe only if we have filters
+    let mut has_subscription = !filters.is_empty();
+    if has_subscription {
+        if !connected {
+            client.connect().await;
+            connected = true;
+        }
+        client.subscribe(filters.clone(), None).await?;
+    }
+
+    // Wait for invites/chats if we have nothing to subscribe to yet
+    while !has_subscription {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Check for filesystem changes
+        while let Ok(()) = fs_rx.try_recv() {
+            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref())?;
+            if !new_filters.is_empty() {
+                filters = new_filters;
+                subscribed_pubkeys = new_pubkeys;
+                if !connected {
+                    client.connect().await;
+                    connected = true;
+                }
+                client.subscribe(filters.clone(), None).await?;
+                has_subscription = true;
+                break;
+            }
+        }
+    }
+
+    // Handle incoming events - only start after we have a subscription
     let mut notifications = client.notifications();
-    while let Ok(notification) = notifications.recv().await {
+    loop {
+        // Check for filesystem changes (new invites/chats created by other processes)
+        while let Ok(()) = fs_rx.try_recv() {
+            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref())?;
+            if !new_filters.is_empty() && (new_filters.len() != filters.len() || new_pubkeys != subscribed_pubkeys) {
+                filters = new_filters;
+                subscribed_pubkeys = new_pubkeys;
+                client.subscribe(filters.clone(), None).await?;
+            }
+        }
+
+        // Wait for relay notification with timeout to allow fs check
+        let notification = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            notifications.recv()
+        ).await;
+
+        let notification = match notification {
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) => break, // Channel closed
+            Err(_) => continue, // Timeout, loop to check fs
+        };
+
         if let RelayPoolNotification::Event { event, .. } = notification {
             let event_kind = event.kind.as_u16() as u32;
 
@@ -379,30 +583,61 @@ pub async fn listen(
 
                             let timestamp = event.created_at.as_u64();
                             let sender_pubkey = event.pubkey;
+                            let from_pubkey_hex = hex::encode(sender_pubkey.to_bytes());
 
-                            let msg_id = uuid::Uuid::new_v4().to_string();
-                            let stored = StoredMessage {
-                                id: msg_id,
-                                chat_id: chat.id.clone(),
-                                from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                                content: content.clone(),
-                                timestamp,
-                                is_outgoing: false,
-                            };
+                            // Check if this is a reaction
+                            if let Some(reaction_payload) = parse_reaction(&content) {
+                                let reaction_id = event.id.to_hex();
+                                let stored = StoredReaction {
+                                    id: reaction_id,
+                                    chat_id: chat.id.clone(),
+                                    message_id: reaction_payload.message_id.clone(),
+                                    from_pubkey: from_pubkey_hex.clone(),
+                                    emoji: reaction_payload.emoji.clone(),
+                                    timestamp,
+                                    is_outgoing: false,
+                                };
 
-                            storage.save_message(&stored)?;
+                                storage.save_reaction(&stored)?;
 
-                            let mut updated_chat = chat.clone();
-                            updated_chat.last_message_at = Some(timestamp);
-                            updated_chat.session_state = serde_json::to_string(&session.state)?;
-                            storage.save_chat(&updated_chat)?;
+                                let mut updated_chat = chat.clone();
+                                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                                storage.save_chat(&updated_chat)?;
 
-                            output.event("message", IncomingMessage {
-                                chat_id: updated_chat.id,
-                                from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                                content,
-                                timestamp,
-                            });
+                                output.event("reaction", IncomingReaction {
+                                    chat_id: updated_chat.id,
+                                    from_pubkey: from_pubkey_hex,
+                                    message_id: reaction_payload.message_id,
+                                    emoji: reaction_payload.emoji,
+                                    timestamp,
+                                });
+                            } else {
+                                // Regular message - use outer event ID as message ID (for reaction compatibility with iris-chat)
+                                let msg_id = event.id.to_hex();
+                                let stored = StoredMessage {
+                                    id: msg_id.clone(),
+                                    chat_id: chat.id.clone(),
+                                    from_pubkey: from_pubkey_hex.clone(),
+                                    content: content.clone(),
+                                    timestamp,
+                                    is_outgoing: false,
+                                };
+
+                                storage.save_message(&stored)?;
+
+                                let mut updated_chat = chat.clone();
+                                updated_chat.last_message_at = Some(timestamp);
+                                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                                storage.save_chat(&updated_chat)?;
+
+                                output.event("message", IncomingMessage {
+                                    chat_id: updated_chat.id,
+                                    message_id: msg_id,
+                                    from_pubkey: from_pubkey_hex,
+                                    content,
+                                    timestamp,
+                                });
+                            }
 
                             // KEY FIX: Update subscription after receiving a message
                             // because the ratchet may have rotated ephemeral keys
