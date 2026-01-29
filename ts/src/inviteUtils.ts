@@ -59,8 +59,8 @@ export interface EncryptInviteResponseParams {
   inviterEphemeralPublicKey: string
   /** The shared secret for the invite */
   sharedSecret: string
-  /** The invitee's owner/Nostr identity public key */
-  ownerPublicKey: string
+  /** The invitee's owner/Nostr identity public key (optional for single-device users) */
+  ownerPublicKey?: string
   /** Optional custom encrypt function */
   encrypt?: EncryptFunction
 }
@@ -122,7 +122,7 @@ export async function encryptInviteResponse(params: EncryptInviteResponseParams)
   // Note: deviceId is no longer needed - inviteePublicKey (identity) serves as device ID
   const payload = JSON.stringify({
     sessionKey: inviteeSessionPublicKey,
-    ownerPublicKey: ownerPublicKey,
+    ...(ownerPublicKey && { ownerPublicKey }),
   })
 
   // Encrypt with DH key (invitee -> inviter)

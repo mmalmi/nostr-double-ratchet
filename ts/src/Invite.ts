@@ -199,7 +199,6 @@ export class Invite {
     /**
      * Creates a tombstone event that replaces the invite, signaling device revocation.
      * The tombstone has the same d-tag but no keys, making it invalid as an invite.
-     * Used during migration to ApplicationKeys or when revoking a device.
      */
     getDeletionEvent(): UnsignedEvent {
         if (!this.deviceId) {
@@ -223,7 +222,7 @@ export class Invite {
      * @param nostrSubscribe - A function to subscribe to Nostr events
      * @param inviteePublicKey - The invitee's identity public key (also serves as device ID)
      * @param encryptor - The invitee's secret key or a signing/encrypt function
-     * @param ownerPublicKey - The invitee's owner/Nostr identity public key
+     * @param ownerPublicKey - The invitee's owner/Nostr identity public key (optional for single-device users)
      * @returns An object containing the new session and an event to be published
      *
      * 1. Inner event: No signature, content encrypted with DH(inviter, invitee).
@@ -238,7 +237,7 @@ export class Invite {
         nostrSubscribe: NostrSubscribe,
         inviteePublicKey: string,
         encryptor: Uint8Array | EncryptFunction,
-        ownerPublicKey: string,
+        ownerPublicKey?: string,
     ): Promise<{ session: Session, event: VerifiedEvent }> {
         const inviteeSessionKeypair = generateEphemeralKeypair();
         const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
