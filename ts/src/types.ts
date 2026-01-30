@@ -139,3 +139,8 @@ export const RECEIPT_KIND = 15;
  * Kind constant for typing indicator inner events
  */
 export const TYPING_KIND = 25;
+
+/**
+ * Kind constant for shared channel events (group invite exchange)
+ */
+export const SHARED_CHANNEL_KIND = 10444;
