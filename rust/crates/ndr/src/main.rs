@@ -65,6 +65,16 @@ enum Commands {
         emoji: String,
     },
 
+    /// Send a delivery/read receipt
+    Receipt {
+        /// Chat ID
+        chat_id: String,
+        /// Receipt type: "delivered" or "seen"
+        receipt_type: String,
+        /// Message IDs to acknowledge
+        message_ids: Vec<String>,
+    },
+
     /// Read messages from a chat
     Read {
         /// Chat ID
@@ -171,6 +181,8 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Invite(_)
             | Commands::Chat(ChatCommands::Join { .. })
             | Commands::Send { .. }
+            | Commands::React { .. }
+            | Commands::Receipt { .. }
             | Commands::Listen { .. }
     );
 
@@ -226,6 +238,10 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         }
         Commands::React { chat_id, message_id, emoji } => {
             commands::message::react(&chat_id, &message_id, &emoji, &config, &storage, output).await
+        }
+        Commands::Receipt { chat_id, receipt_type, message_ids } => {
+            let ids: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
+            commands::message::receipt(&chat_id, &receipt_type, &ids, &config, &storage, output).await
         }
         Commands::Read { chat_id, limit } => {
             commands::message::read(&chat_id, limit, &storage, output).await

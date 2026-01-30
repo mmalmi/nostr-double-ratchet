@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nostr_double_ratchet::Session;
+use nostr_double_ratchet::{Session, REACTION_KIND, RECEIPT_KIND, CHAT_MESSAGE_KIND};
 use nostr_sdk::Client;
 use serde::Serialize;
 
@@ -61,24 +61,6 @@ struct ReactionInfo {
     is_outgoing: bool,
 }
 
-/// Parsed reaction payload from decrypted content
-#[derive(Debug)]
-struct ReactionPayload {
-    message_id: String,
-    emoji: String,
-}
-
-/// Try to parse content as a reaction payload
-fn parse_reaction(content: &str) -> Option<ReactionPayload> {
-    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
-    if parsed.get("type")?.as_str()? != "reaction" {
-        return None;
-    }
-    Some(ReactionPayload {
-        message_id: parsed.get("messageId")?.as_str()?.to_string(),
-        emoji: parsed.get("emoji")?.as_str()?.to_string(),
-    })
-}
 
 /// Send a message
 pub async fn send(
@@ -213,6 +195,60 @@ pub async fn react(
         "emoji": emoji,
         "timestamp": timestamp,
         "event": nostr::JsonUtil::as_json(&encrypted_event),
+    }));
+
+    Ok(())
+}
+
+/// Send a delivery/read receipt
+pub async fn receipt(
+    chat_id: &str,
+    receipt_type: &str,
+    message_ids: &[&str],
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    if receipt_type != "delivered" && receipt_type != "seen" {
+        anyhow::bail!("Receipt type must be 'delivered' or 'seen'");
+    }
+
+    if message_ids.is_empty() {
+        anyhow::bail!("At least one message ID is required");
+    }
+
+    let chat = storage.get_chat(chat_id)?
+        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+
+    let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
+        .map_err(|e| anyhow::anyhow!("Invalid session state: {}. Chat may not be properly initialized.", e))?;
+
+    let mut session = Session::new(session_state, chat_id.to_string());
+
+    let encrypted_event = session.send_receipt(receipt_type, message_ids)
+        .map_err(|e| anyhow::anyhow!("Failed to encrypt receipt: {}", e))?;
+
+    // Update chat with new session state
+    let mut updated_chat = chat;
+    updated_chat.session_state = serde_json::to_string(&session.state)?;
+    storage.save_chat(&updated_chat)?;
+
+    // Publish to relays
+    let client = Client::default();
+    for relay in &config.relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+    client.send_event(encrypted_event.clone()).await?;
+
+    output.success("receipt", serde_json::json!({
+        "chat_id": chat_id,
+        "type": receipt_type,
+        "message_ids": message_ids,
     }));
 
     Ok(())
@@ -576,6 +612,9 @@ pub async fn listen(
                     match session.receive(&event) {
                         Ok(Some(decrypted_event_json)) => {
                             let decrypted_event: serde_json::Value = serde_json::from_str(&decrypted_event_json)?;
+                            let rumor_kind = decrypted_event["kind"]
+                                .as_u64()
+                                .unwrap_or(CHAT_MESSAGE_KIND as u64) as u32;
                             let content = decrypted_event["content"]
                                 .as_str()
                                 .unwrap_or(&decrypted_event_json)
@@ -585,15 +624,57 @@ pub async fn listen(
                             let sender_pubkey = event.pubkey;
                             let from_pubkey_hex = hex::encode(sender_pubkey.to_bytes());
 
-                            // Check if this is a reaction
-                            if let Some(reaction_payload) = parse_reaction(&content) {
+                            // Dispatch on inner event kind
+                            if rumor_kind == RECEIPT_KIND {
+                                // Receipt - just update session state, don't store
+                                let receipt_type = content.clone();
+                                let message_ids: Vec<String> = decrypted_event["tags"]
+                                    .as_array()
+                                    .map(|tags| tags.iter()
+                                        .filter_map(|t| {
+                                            let arr = t.as_array()?;
+                                            if arr.first()?.as_str()? == "e" {
+                                                arr.get(1)?.as_str().map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect())
+                                    .unwrap_or_default();
+
+                                let mut updated_chat = chat.clone();
+                                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                                storage.save_chat(&updated_chat)?;
+
+                                output.event("receipt", serde_json::json!({
+                                    "chat_id": updated_chat.id,
+                                    "from_pubkey": from_pubkey_hex,
+                                    "type": receipt_type,
+                                    "message_ids": message_ids,
+                                    "timestamp": timestamp,
+                                }));
+                            } else if rumor_kind == REACTION_KIND {
+                                // Extract message_id from e tag
+                                let message_id = decrypted_event["tags"]
+                                    .as_array()
+                                    .and_then(|tags| tags.iter()
+                                        .find_map(|t| {
+                                            let arr = t.as_array()?;
+                                            if arr.first()?.as_str()? == "e" {
+                                                arr.get(1)?.as_str().map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        }))
+                                    .unwrap_or_default();
+
                                 let reaction_id = event.id.to_hex();
                                 let stored = StoredReaction {
                                     id: reaction_id,
                                     chat_id: chat.id.clone(),
-                                    message_id: reaction_payload.message_id.clone(),
+                                    message_id: message_id.clone(),
                                     from_pubkey: from_pubkey_hex.clone(),
-                                    emoji: reaction_payload.emoji.clone(),
+                                    emoji: content.clone(),
                                     timestamp,
                                     is_outgoing: false,
                                 };
@@ -607,12 +688,12 @@ pub async fn listen(
                                 output.event("reaction", IncomingReaction {
                                     chat_id: updated_chat.id,
                                     from_pubkey: from_pubkey_hex,
-                                    message_id: reaction_payload.message_id,
-                                    emoji: reaction_payload.emoji,
+                                    message_id,
+                                    emoji: content,
                                     timestamp,
                                 });
                             } else {
-                                // Regular message - use outer event ID as message ID (for reaction compatibility with iris-chat)
+                                // Chat message (kind 14 or default)
                                 let msg_id = event.id.to_hex();
                                 let stored = StoredMessage {
                                     id: msg_id.clone(),
