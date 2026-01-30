@@ -59,7 +59,7 @@ async fn start_ndr_listen(data_dir: &std::path::Path, chat_id: Option<&str>) -> 
 }
 
 /// Setup ndr data directory with config for test relay
-fn setup_ndr_dir(relay_url: &str, secret_key: &str) -> TempDir {
+fn setup_ndr_dir(relay_url: &str, _secret_key: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
 
     // Write config with relay

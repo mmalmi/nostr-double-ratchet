@@ -106,6 +106,10 @@ enum Commands {
         /// The nostr event JSON
         event: String,
     },
+
+    /// Group management
+    #[command(subcommand)]
+    Group(GroupCommands),
 }
 
 #[derive(Subcommand)]
@@ -152,6 +156,81 @@ enum ContactCommands {
     Remove {
         /// Petname to remove
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupCommands {
+    /// Create a new group
+    Create {
+        /// Group name
+        #[arg(short, long)]
+        name: String,
+        /// Member pubkeys (hex), comma-separated
+        #[arg(short, long, value_delimiter = ',')]
+        members: Vec<String>,
+    },
+
+    /// List all groups
+    List,
+
+    /// Show group details
+    Show {
+        /// Group ID
+        id: String,
+    },
+
+    /// Delete a group
+    Delete {
+        /// Group ID
+        id: String,
+    },
+
+    /// Update group metadata
+    Update {
+        /// Group ID
+        id: String,
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
+        /// New description
+        #[arg(long)]
+        description: Option<String>,
+        /// New picture URL
+        #[arg(long)]
+        picture: Option<String>,
+    },
+
+    /// Add a member to a group
+    AddMember {
+        /// Group ID
+        id: String,
+        /// Member pubkey (hex)
+        pubkey: String,
+    },
+
+    /// Remove a member from a group
+    RemoveMember {
+        /// Group ID
+        id: String,
+        /// Member pubkey (hex)
+        pubkey: String,
+    },
+
+    /// Promote a member to admin
+    AddAdmin {
+        /// Group ID
+        id: String,
+        /// Member pubkey (hex)
+        pubkey: String,
+    },
+
+    /// Demote an admin
+    RemoveAdmin {
+        /// Group ID
+        id: String,
+        /// Admin pubkey (hex)
+        pubkey: String,
     },
 }
 
@@ -297,5 +376,42 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Receive { event } => {
             commands::message::receive(&event, &storage, output).await
         }
+        Commands::Group(cmd) => match cmd {
+            GroupCommands::Create { name, members } => {
+                commands::group::create(&name, &members, &config, &storage, output).await
+            }
+            GroupCommands::List => {
+                commands::group::list(&storage, output).await
+            }
+            GroupCommands::Show { id } => {
+                commands::group::show(&id, &storage, output).await
+            }
+            GroupCommands::Delete { id } => {
+                commands::group::delete(&id, &storage, output).await
+            }
+            GroupCommands::Update { id, name, description, picture } => {
+                commands::group::update(
+                    &id,
+                    name.as_deref(),
+                    description.as_deref(),
+                    picture.as_deref(),
+                    &config,
+                    &storage,
+                    output,
+                ).await
+            }
+            GroupCommands::AddMember { id, pubkey } => {
+                commands::group::add_member(&id, &pubkey, &config, &storage, output).await
+            }
+            GroupCommands::RemoveMember { id, pubkey } => {
+                commands::group::remove_member(&id, &pubkey, &config, &storage, output).await
+            }
+            GroupCommands::AddAdmin { id, pubkey } => {
+                commands::group::add_admin(&id, &pubkey, &config, &storage, output).await
+            }
+            GroupCommands::RemoveAdmin { id, pubkey } => {
+                commands::group::remove_admin(&id, &pubkey, &config, &storage, output).await
+            }
+        },
     }
 }

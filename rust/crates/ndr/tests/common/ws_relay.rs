@@ -173,11 +173,13 @@ impl WsRelay {
     }
 
     /// Get event count (for testing)
+    #[allow(dead_code)]
     pub async fn event_count(&self) -> usize {
         self.state.events.read().await.len()
     }
 
     /// Clear all events
+    #[allow(dead_code)]
     pub async fn clear(&self) {
         self.state.events.write().await.clear();
     }

@@ -236,19 +236,14 @@ fn test_reaction_roundtrip() {
     
     // Verify the inner event is a reaction (kind 7)
     assert_eq!(reaction_rumor["kind"].as_u64().unwrap(), 7);
-    
-    // Verify the content is the reaction payload
-    let content: serde_json::Value = serde_json::from_str(
-        reaction_rumor["content"].as_str().unwrap()
-    ).unwrap();
-    assert_eq!(content["type"].as_str().unwrap(), "reaction");
-    assert_eq!(content["messageId"].as_str().unwrap(), msg_id);
-    assert_eq!(content["emoji"].as_str().unwrap(), "❤️");
-    
-    // Verify the e tag
+
+    // Verify the content is the emoji directly (not a JSON object)
+    assert_eq!(reaction_rumor["content"].as_str().unwrap(), "❤️");
+
+    // Verify the e tag references the message
     let tags = reaction_rumor["tags"].as_array().unwrap();
     let e_tag = tags.iter().find(|t| t[0].as_str() == Some("e")).unwrap();
     assert_eq!(e_tag[1].as_str().unwrap(), msg_id);
-    
+
     println!("Reaction roundtrip test passed!");
 }

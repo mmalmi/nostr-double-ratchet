@@ -46,6 +46,13 @@ pub struct StoredReaction {
     pub is_outgoing: bool,
 }
 
+/// Stored group data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredGroup {
+    #[serde(flatten)]
+    pub data: nostr_double_ratchet::group::GroupData,
+}
+
 /// File-based storage (agent-friendly - can read JSON directly)
 pub struct Storage {
     #[allow(dead_code)]
@@ -54,6 +61,7 @@ pub struct Storage {
     chats_dir: PathBuf,
     messages_dir: PathBuf,
     reactions_dir: PathBuf,
+    groups_dir: PathBuf,
 }
 
 impl Storage {
@@ -64,11 +72,13 @@ impl Storage {
         let chats_dir = base_dir.join("chats");
         let messages_dir = base_dir.join("messages");
         let reactions_dir = base_dir.join("reactions");
+        let groups_dir = base_dir.join("groups");
 
         fs::create_dir_all(&invites_dir)?;
         fs::create_dir_all(&chats_dir)?;
         fs::create_dir_all(&messages_dir)?;
         fs::create_dir_all(&reactions_dir)?;
+        fs::create_dir_all(&groups_dir)?;
 
         Ok(Self {
             base_dir,
@@ -76,6 +86,7 @@ impl Storage {
             chats_dir,
             messages_dir,
             reactions_dir,
+            groups_dir,
         })
     }
 
@@ -305,6 +316,49 @@ impl Storage {
         Ok(reactions)
     }
 
+    // === Group operations ===
+
+    pub fn save_group(&self, group: &StoredGroup) -> Result<()> {
+        let path = self.groups_dir.join(format!("{}.json", group.data.id));
+        let temp_path = self.groups_dir.join(format!("{}.json.tmp", group.data.id));
+        let content = serde_json::to_string_pretty(group)?;
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
+        Ok(())
+    }
+
+    pub fn get_group(&self, id: &str) -> Result<Option<StoredGroup>> {
+        let path = self.groups_dir.join(format!("{}.json", id));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&content)?))
+    }
+
+    pub fn list_groups(&self) -> Result<Vec<StoredGroup>> {
+        let mut groups: Vec<StoredGroup> = Vec::new();
+        for entry in fs::read_dir(&self.groups_dir)? {
+            let entry = entry?;
+            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+                let content = fs::read_to_string(entry.path())?;
+                groups.push(serde_json::from_str(&content)?);
+            }
+        }
+        groups.sort_by(|a, b| b.data.created_at.cmp(&a.data.created_at));
+        Ok(groups)
+    }
+
+    pub fn delete_group(&self, id: &str) -> Result<bool> {
+        let path = self.groups_dir.join(format!("{}.json", id));
+        if path.exists() {
+            fs::remove_file(path)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Clear all data (for logout)
     pub fn clear_all(&self) -> Result<()> {
         if self.invites_dir.exists() {
@@ -319,12 +373,16 @@ impl Storage {
         if self.reactions_dir.exists() {
             fs::remove_dir_all(&self.reactions_dir)?;
         }
+        if self.groups_dir.exists() {
+            fs::remove_dir_all(&self.groups_dir)?;
+        }
 
         // Recreate dirs
         fs::create_dir_all(&self.invites_dir)?;
         fs::create_dir_all(&self.chats_dir)?;
         fs::create_dir_all(&self.messages_dir)?;
         fs::create_dir_all(&self.reactions_dir)?;
+        fs::create_dir_all(&self.groups_dir)?;
 
         Ok(())
     }

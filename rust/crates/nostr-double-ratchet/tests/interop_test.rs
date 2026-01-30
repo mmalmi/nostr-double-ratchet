@@ -59,13 +59,13 @@ fn test_decrypt_typescript_messages() -> Result<()> {
     println!("Loaded test vectors: {}", vectors.description);
     println!("Messages: {}", vectors.messages.len());
 
-    let alice_sk = hex_to_bytes32(&vectors.alice_ephemeral_sk);
+    let _alice_sk = hex_to_bytes32(&vectors.alice_ephemeral_sk);
     let bob_sk = hex_to_bytes32(&vectors.bob_ephemeral_sk);
     let shared_secret = hex_to_bytes32(&vectors.shared_secret);
 
     let alice_pk = nostr::PublicKey::from_slice(&hex::decode(&vectors.alice_ephemeral_pk).unwrap())
         .expect("Invalid alice pk");
-    let bob_pk = nostr::PublicKey::from_slice(&hex::decode(&vectors.bob_ephemeral_pk).unwrap())
+    let _bob_pk = nostr::PublicKey::from_slice(&hex::decode(&vectors.bob_ephemeral_pk).unwrap())
         .expect("Invalid bob pk");
 
     // Bob is responder, receives Alice's first message
