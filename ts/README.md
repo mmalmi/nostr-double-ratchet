@@ -11,17 +11,17 @@ pnpm add nostr-double-ratchet
 ## Quick Start
 
 ```typescript
-import { ApplicationManager, DelegateManager } from "nostr-double-ratchet"
+import { AppKeysManager, DelegateManager } from "nostr-double-ratchet"
 
 // 1. Create device identity
 const delegate = new DelegateManager({ nostrSubscribe, nostrPublish, storage })
 await delegate.init()
 
 // 2. Register device (only on devices with main nsec)
-const applicationManager = new ApplicationManager({ nostrPublish, storage })
-await applicationManager.init()
-applicationManager.addDevice(delegate.getRegistrationPayload())
-await applicationManager.publish()
+const appKeysManager = new AppKeysManager({ nostrPublish, storage })
+await appKeysManager.init()
+appKeysManager.addDevice(delegate.getRegistrationPayload())
+await appKeysManager.publish()
 
 // 3. Activate and create session manager
 await delegate.activate(ownerPublicKey)
@@ -35,7 +35,7 @@ await sessionManager.sendMessage(recipientPubkey, "Hello!")
 
 ## Multi-Device
 
-- **Main device** (has nsec): Uses both `DelegateManager` and `ApplicationManager`
+- **Main device** (has nsec): Uses both `DelegateManager` and `AppKeysManager`
 - **Delegate device** (no nsec): Uses only `DelegateManager`, waits for activation
 
 ```typescript

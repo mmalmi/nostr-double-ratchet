@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey } from "nostr-tools"
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
 import { AppKeys, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
 import { NostrSubscribe, NostrPublish, APP_KEYS_EVENT_KIND, Unsubscribe } from "./types"
@@ -202,9 +202,10 @@ export class DelegateManager {
     this.invite = savedInvite || Invite.createNew(this.devicePublicKey, this.devicePublicKey)
     await this.saveInvite(this.invite)
 
-    // Publish Invite event (signed by this device's identity key)
+    // Sign and publish Invite event with this device's identity key
     const inviteEvent = this.invite.getEvent()
-    await this.nostrPublish(inviteEvent).catch(() => {
+    const signedInvite = finalizeEvent(inviteEvent, this.devicePrivateKey)
+    await this.nostrPublish(signedInvite).catch(() => {
       // Failed to publish Invite
     })
   }
@@ -243,7 +244,8 @@ export class DelegateManager {
     await this.saveInvite(this.invite)
 
     const inviteEvent = this.invite.getEvent()
-    await this.nostrPublish(inviteEvent)
+    const signedInvite = finalizeEvent(inviteEvent, this.devicePrivateKey)
+    await this.nostrPublish(signedInvite)
   }
 
   /**
