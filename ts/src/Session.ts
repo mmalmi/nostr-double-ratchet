@@ -97,7 +97,6 @@ export class Session {
 
     const session = new Session(nostrSubscribe, state);
     if (name) session.name = name;
-    console.log(`[DR:Session] INIT ${session.name} isInitiator=${isInitiator} ourCurrent=${ourCurrentNostrKey?.publicKey?.slice(0,8) || 'none'} ourNext=${ourNextNostrKey.publicKey.slice(0,8)} theirNext=${theirEphemeralNostrPublicKey.slice(0,8)}`)
     return session;
   }
 
@@ -226,7 +225,6 @@ export class Session {
   }
 
   private ratchetStep() {
-    const oldOurNext = this.state.ourNextNostrKey.publicKey;
     this.state.previousSendingChainMessageCount = this.state.sendingChainMessageNumber;
     this.state.sendingChainMessageNumber = 0;
     this.state.receivingChainMessageNumber = 0;
@@ -247,7 +245,6 @@ export class Session {
     const [rootKey, sendingChainKey] = kdf(theirRootKey, conversationKey2, 2);
     this.state.rootKey = rootKey;
     this.state.sendingChainKey = sendingChainKey;
-    console.log(`[DR:Session] ${this.name} RATCHET ourCurrent=${oldOurNext.slice(0,8)} -> ourNext=${this.state.ourNextNostrKey.publicKey.slice(0,8)} theirNext=${this.state.theirNextNostrPublicKey?.slice(0,8)}`)
   }
 
   // 3. MESSAGE KEY FUNCTIONS
@@ -340,14 +337,12 @@ export class Session {
 
 
   private handleNostrEvent(e: { tags: string[][]; pubkey: string; content: string }) {
-    console.log(`[DR:Session] ${this.name} handleNostrEvent from=${e.pubkey.slice(0,8)}`)
     const snapshot = deepCopyState(this.state);
     let pendingSwitch = false;
 
     try {
       const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
       if (!isSkipped && this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
-        console.log(`[DR:Session] ${this.name} pendingSwitch: theirNext ${this.state.theirNextNostrPublicKey?.slice(0,8)} -> ${header.nextPublicKey?.slice(0,8)}`)
         this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
         this.state.theirNextNostrPublicKey = header.nextPublicKey;
         pendingSwitch = true;
@@ -360,7 +355,6 @@ export class Session {
         }
       } else {
         if (!this.state.skippedKeys[e.pubkey]?.messageKeys[header.number]) {
-          console.log(`[DR:Session] ${this.name} discarded: skipped key not found`, e.pubkey.slice(0,8))
           return;
         }
       }
@@ -369,18 +363,15 @@ export class Session {
       const innerEvent = JSON.parse(text);
 
       if (!validateEvent(innerEvent)) {
-        console.log(`[DR:Session] ${this.name} discarded: invalid event`, e.pubkey.slice(0,8))
         this.state = snapshot;
         return;
       }
       if (innerEvent.id !== getEventHash(innerEvent)) {
-        console.log(`[DR:Session] ${this.name} discarded: hash mismatch`, e.pubkey.slice(0,8))
         this.state = snapshot;
         return;
       }
 
       if (pendingSwitch) {
-        console.log(`[DR:Session] ${this.name} subscribing to new theirNext: ${this.state.theirNextNostrPublicKey?.slice(0,8)}`)
         this.nostrUnsubscribe?.();
         this.nostrUnsubscribe = this.nostrNextUnsubscribe;
         this.nostrNextUnsubscribe = this.nostrSubscribe(
@@ -389,20 +380,17 @@ export class Session {
         );
       }
 
-      console.log(`[DR:Session] ${this.name} delivered kind=${innerEvent.kind} from=${e.pubkey.slice(0,8)}`)
       this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));
     } catch (error) {
       this.state = snapshot;
       if (error instanceof Error) {
         if (error.message.includes("Failed to decrypt header")) {
-          console.log(`[DR:Session] ${this.name} discarded: header decrypt failed`, e.pubkey.slice(0,8))
           return;
         }
 
         if (error.message === "invalid MAC") {
           // Duplicate or stale ciphertexts can hit decrypt() again after a state restore.
           // nip44 throws "invalid MAC" in that case, but the message has already been handled.
-          console.log(`[DR:Session] ${this.name} discarded: invalid MAC`, e.pubkey.slice(0,8))
           return;
         }
       }
@@ -412,7 +400,6 @@ export class Session {
 
   private subscribeToNostrEvents() {
     if (this.nostrNextUnsubscribe) return;
-    console.log(`[DR:Session] ${this.name} SUBSCRIBE theirNext=${this.state.theirNextNostrPublicKey?.slice(0,8)} theirCurrent=${this.state.theirCurrentNostrPublicKey?.slice(0,8) || 'none'} skipped=${Object.keys(this.state.skippedKeys).length}`)
     this.nostrNextUnsubscribe = this.nostrSubscribe(
       {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
       (e) => this.handleNostrEvent(e)
