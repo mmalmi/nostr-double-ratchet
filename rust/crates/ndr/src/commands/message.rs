@@ -5,7 +5,45 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::output::Output;
-use crate::storage::{Storage, StoredMessage, StoredReaction};
+use crate::storage::{Storage, StoredChat, StoredMessage, StoredReaction};
+
+/// Resolve a target (chat_id, npub, hex pubkey, or petname) to a StoredChat.
+pub fn resolve_target(target: &str, storage: &Storage) -> Result<StoredChat> {
+    // 1. Try as chat_id directly (short hex, e.g. 8 chars)
+    if let Ok(Some(chat)) = storage.get_chat(target) {
+        return Ok(chat);
+    }
+
+    // 2. Try as npub -> decode to hex pubkey -> find chat
+    if target.starts_with("npub1") {
+        use nostr::FromBech32;
+        if let Ok(pk) = nostr::PublicKey::from_bech32(target) {
+            let hex = pk.to_hex();
+            if let Ok(Some(chat)) = storage.get_chat_by_pubkey(&hex) {
+                return Ok(chat);
+            }
+        }
+        anyhow::bail!("No chat found for {}", target);
+    }
+
+    // 3. Try as 64-char hex pubkey
+    if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(Some(chat)) = storage.get_chat_by_pubkey(target) {
+            return Ok(chat);
+        }
+        anyhow::bail!("No chat found for pubkey {}", target);
+    }
+
+    // 4. Try as petname from contacts file
+    if let Ok(Some(hex)) = storage.get_contact_pubkey(target) {
+        if let Ok(Some(chat)) = storage.get_chat_by_pubkey(&hex) {
+            return Ok(chat);
+        }
+        anyhow::bail!("Contact '{}' found but no chat exists with them", target);
+    }
+
+    anyhow::bail!("Chat not found: {}", target)
+}
 
 #[derive(Serialize)]
 struct MessageSent {
@@ -64,7 +102,7 @@ struct ReactionInfo {
 
 /// Send a message
 pub async fn send(
-    chat_id: &str,
+    target: &str,
     message: &str,
     config: &Config,
     storage: &Storage,
@@ -74,8 +112,8 @@ pub async fn send(
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
-    let chat = storage.get_chat(chat_id)?
-        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+    let chat = resolve_target(target, storage)?;
+    let chat_id = chat.id.clone();
 
     // Load session state
     let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
@@ -133,7 +171,7 @@ pub async fn send(
 
 /// React to a message
 pub async fn react(
-    chat_id: &str,
+    target: &str,
     message_id: &str,
     emoji: &str,
     config: &Config,
@@ -144,8 +182,8 @@ pub async fn react(
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
-    let chat = storage.get_chat(chat_id)?
-        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+    let chat = resolve_target(target, storage)?;
+    let chat_id = chat.id.clone();
 
     // Load session state
     let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
@@ -202,7 +240,7 @@ pub async fn react(
 
 /// Send a delivery/read receipt
 pub async fn receipt(
-    chat_id: &str,
+    target: &str,
     receipt_type: &str,
     message_ids: &[&str],
     config: &Config,
@@ -221,8 +259,8 @@ pub async fn receipt(
         anyhow::bail!("At least one message ID is required");
     }
 
-    let chat = storage.get_chat(chat_id)?
-        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+    let chat = resolve_target(target, storage)?;
+    let chat_id = chat.id.clone();
 
     let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
         .map_err(|e| anyhow::anyhow!("Invalid session state: {}. Chat may not be properly initialized.", e))?;
@@ -256,7 +294,7 @@ pub async fn receipt(
 
 /// Send a typing indicator
 pub async fn typing(
-    chat_id: &str,
+    target: &str,
     config: &Config,
     storage: &Storage,
     output: &Output,
@@ -265,8 +303,8 @@ pub async fn typing(
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
-    let chat = storage.get_chat(chat_id)?
-        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+    let chat = resolve_target(target, storage)?;
+    let chat_id = chat.id.clone();
 
     let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
         .map_err(|e| anyhow::anyhow!("Invalid session state: {}. Chat may not be properly initialized.", e))?;
@@ -291,6 +329,7 @@ pub async fn typing(
 
     output.success("typing", serde_json::json!({
         "chat_id": chat_id,
+        "event": nostr::JsonUtil::as_json(&encrypted_event),
     }));
 
     Ok(())
@@ -298,16 +337,16 @@ pub async fn typing(
 
 /// Read messages from a chat
 pub async fn read(
-    chat_id: &str,
+    target: &str,
     limit: usize,
     storage: &Storage,
     output: &Output,
 ) -> Result<()> {
-    let _ = storage.get_chat(chat_id)?
-        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+    let chat = resolve_target(target, storage)?;
+    let chat_id = chat.id.clone();
 
-    let messages = storage.get_messages(chat_id, limit)?;
-    let reactions = storage.get_reactions(chat_id, limit)?;
+    let messages = storage.get_messages(&chat_id, limit)?;
+    let reactions = storage.get_reactions(&chat_id, limit)?;
 
     let message_infos: Vec<MessageInfo> = messages
         .into_iter()
@@ -887,5 +926,109 @@ mod tests {
 
         let after = storage.get_chat("test-chat").unwrap().unwrap();
         assert!(after.last_message_at.is_some());
+    }
+
+    #[test]
+    fn test_resolve_target_by_chat_id() {
+        let (_temp, _config, storage, _) = setup();
+        let chat = resolve_target("test-chat", &storage).unwrap();
+        assert_eq!(chat.id, "test-chat");
+    }
+
+    #[test]
+    fn test_resolve_target_by_hex_pubkey() {
+        let (_temp, _config, storage, _) = setup();
+        let keys = nostr::Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+
+        // Create a chat with this pubkey
+        let session = create_test_session();
+        let session_state = serde_json::to_string(&session.state).unwrap();
+        storage.save_chat(&StoredChat {
+            id: "pk-chat".to_string(),
+            their_pubkey: pubkey_hex.clone(),
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state,
+        }).unwrap();
+
+        let chat = resolve_target(&pubkey_hex, &storage).unwrap();
+        assert_eq!(chat.id, "pk-chat");
+    }
+
+    #[test]
+    fn test_resolve_target_by_npub() {
+        let (_temp, _config, storage, _) = setup();
+        let keys = nostr::Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
+
+        let session = create_test_session();
+        let session_state = serde_json::to_string(&session.state).unwrap();
+        storage.save_chat(&StoredChat {
+            id: "npub-chat".to_string(),
+            their_pubkey: pubkey_hex,
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state,
+        }).unwrap();
+
+        let chat = resolve_target(&npub, &storage).unwrap();
+        assert_eq!(chat.id, "npub-chat");
+    }
+
+    #[test]
+    fn test_resolve_target_not_found() {
+        let (_temp, _config, storage, _) = setup();
+        assert!(resolve_target("nonexistent", &storage).is_err());
+    }
+
+    #[test]
+    fn test_resolve_target_prefers_recent() {
+        let (_temp, _config, storage, _) = setup();
+        let keys = nostr::Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+
+        let session1 = create_test_session();
+        let session2 = create_test_session();
+        storage.save_chat(&StoredChat {
+            id: "old-chat".to_string(),
+            their_pubkey: pubkey_hex.clone(),
+            created_at: 1000,
+            last_message_at: Some(2000),
+            session_state: serde_json::to_string(&session1.state).unwrap(),
+        }).unwrap();
+        storage.save_chat(&StoredChat {
+            id: "new-chat".to_string(),
+            their_pubkey: pubkey_hex.clone(),
+            created_at: 1000,
+            last_message_at: Some(5000),
+            session_state: serde_json::to_string(&session2.state).unwrap(),
+        }).unwrap();
+
+        let chat = resolve_target(&pubkey_hex, &storage).unwrap();
+        assert_eq!(chat.id, "new-chat");
+    }
+
+    #[test]
+    fn test_resolve_target_by_petname() {
+        let (_temp, _config, storage, _) = setup();
+        let keys = nostr::Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
+
+        let session = create_test_session();
+        let session_state = serde_json::to_string(&session.state).unwrap();
+        storage.save_chat(&StoredChat {
+            id: "pet-chat".to_string(),
+            their_pubkey: pubkey_hex,
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state,
+        }).unwrap();
+
+        storage.add_contact(&npub, "alice").unwrap();
+        let chat = resolve_target("alice", &storage).unwrap();
+        assert_eq!(chat.id, "pet-chat");
     }
 }

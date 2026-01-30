@@ -334,6 +334,148 @@ impl Storage {
         Ok(())
     }
 
+    /// Find a chat by the peer's pubkey (hex). If multiple, returns the most recently active.
+    pub fn get_chat_by_pubkey(&self, pubkey_hex: &str) -> Result<Option<StoredChat>> {
+        let chats = self.list_chats()?;
+        Ok(chats.into_iter()
+            .filter(|c| c.their_pubkey == pubkey_hex)
+            .max_by_key(|c| c.last_message_at.unwrap_or(c.created_at)))
+    }
+
+    // === Contact operations ===
+    // Contacts file: plain text, one per line: `npub1... petname`
+    // Lines starting with # are comments, blank lines are ignored.
+
+    fn contacts_path(&self) -> PathBuf {
+        self.base_dir.join("contacts")
+    }
+
+    pub fn get_contact_pubkey(&self, name: &str) -> Result<Option<String>> {
+        let path = self.contacts_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path)?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let npub = parts.next().unwrap_or("");
+            let petname = parts.next().unwrap_or("").trim();
+            if petname.eq_ignore_ascii_case(name) {
+                // Decode npub to hex
+                use nostr::FromBech32;
+                if let Ok(pk) = nostr::PublicKey::from_bech32(npub) {
+                    return Ok(Some(pk.to_hex()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn add_contact(&self, npub: &str, name: &str) -> Result<()> {
+        // Validate npub
+        use nostr::FromBech32;
+        nostr::PublicKey::from_bech32(npub)
+            .map_err(|_| anyhow::anyhow!("Invalid npub: {}", npub))?;
+
+        // Remove existing entry for this name or npub
+        self.remove_contact_by_name_or_npub(name, npub)?;
+
+        let path = self.contacts_path();
+        let mut content = if path.exists() {
+            fs::read_to_string(&path)?
+        } else {
+            String::new()
+        };
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&format!("{} {}\n", npub, name));
+        fs::write(&path, &content)?;
+        Ok(())
+    }
+
+    pub fn remove_contact(&self, name: &str) -> Result<bool> {
+        let path = self.contacts_path();
+        if !path.exists() {
+            return Ok(false);
+        }
+        let content = fs::read_to_string(&path)?;
+        let mut found = false;
+        let filtered: Vec<&str> = content.lines().filter(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return true;
+            }
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let _npub = parts.next().unwrap_or("");
+            let petname = parts.next().unwrap_or("").trim();
+            if petname.eq_ignore_ascii_case(name) {
+                found = true;
+                false
+            } else {
+                true
+            }
+        }).collect();
+        if found {
+            let mut out = filtered.join("\n");
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            fs::write(&path, &out)?;
+        }
+        Ok(found)
+    }
+
+    fn remove_contact_by_name_or_npub(&self, name: &str, npub: &str) -> Result<()> {
+        let path = self.contacts_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let content = fs::read_to_string(&path)?;
+        let filtered: Vec<&str> = content.lines().filter(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return true;
+            }
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let line_npub = parts.next().unwrap_or("");
+            let petname = parts.next().unwrap_or("").trim();
+            !(petname.eq_ignore_ascii_case(name) || line_npub == npub)
+        }).collect();
+        let mut out = filtered.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        fs::write(&path, &out)?;
+        Ok(())
+    }
+
+    pub fn list_contacts(&self) -> Result<Vec<(String, String)>> {
+        let path = self.contacts_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(&path)?;
+        let mut contacts = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let npub = parts.next().unwrap_or("").to_string();
+            let name = parts.next().unwrap_or("").trim().to_string();
+            if !npub.is_empty() && !name.is_empty() {
+                contacts.push((npub, name));
+            }
+        }
+        Ok(contacts)
+    }
+
     /// Get the base data directory (for agents to find)
     #[allow(dead_code)]
     pub fn data_dir(&self) -> &Path {
@@ -466,6 +608,99 @@ mod tests {
 
         storage.clear_all().unwrap();
         assert!(storage.list_invites().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_contacts_crud() {
+        let (_temp, storage) = test_storage();
+        let keys = nostr::Keys::generate();
+        let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
+        let hex = keys.public_key().to_hex();
+
+        // Add
+        storage.add_contact(&npub, "alice").unwrap();
+        let contacts = storage.list_contacts().unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].1, "alice");
+
+        // Lookup
+        let found = storage.get_contact_pubkey("alice").unwrap().unwrap();
+        assert_eq!(found, hex);
+
+        // Not found
+        assert!(storage.get_contact_pubkey("bob").unwrap().is_none());
+
+        // Remove
+        assert!(storage.remove_contact("alice").unwrap());
+        assert!(storage.list_contacts().unwrap().is_empty());
+        assert!(!storage.remove_contact("alice").unwrap());
+    }
+
+    #[test]
+    fn test_contact_file_format() {
+        let (temp, storage) = test_storage();
+        let keys1 = nostr::Keys::generate();
+        let keys2 = nostr::Keys::generate();
+        let npub1 = nostr::ToBech32::to_bech32(&keys1.public_key()).unwrap();
+        let npub2 = nostr::ToBech32::to_bech32(&keys2.public_key()).unwrap();
+
+        storage.add_contact(&npub1, "alice").unwrap();
+        storage.add_contact(&npub2, "bob").unwrap();
+
+        let content = fs::read_to_string(temp.path().join("contacts")).unwrap();
+        assert!(content.contains("alice"));
+        assert!(content.contains("bob"));
+        // Each line is: npub1... name
+        for line in content.lines() {
+            if !line.trim().is_empty() {
+                assert!(line.starts_with("npub1"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_contact_dedup_on_add() {
+        let (_temp, storage) = test_storage();
+        let keys = nostr::Keys::generate();
+        let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
+
+        storage.add_contact(&npub, "alice").unwrap();
+        storage.add_contact(&npub, "alice").unwrap();
+        assert_eq!(storage.list_contacts().unwrap().len(), 1);
+
+        // Re-add with different name replaces
+        storage.add_contact(&npub, "bob").unwrap();
+        let contacts = storage.list_contacts().unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].1, "bob");
+    }
+
+    #[test]
+    fn test_get_chat_by_pubkey() {
+        let (_temp, storage) = test_storage();
+
+        storage.save_chat(&StoredChat {
+            id: "c1".to_string(),
+            their_pubkey: "aabbcc".to_string(),
+            created_at: 1000,
+            last_message_at: Some(2000),
+            session_state: "{}".to_string(),
+        }).unwrap();
+
+        storage.save_chat(&StoredChat {
+            id: "c2".to_string(),
+            their_pubkey: "aabbcc".to_string(),
+            created_at: 1000,
+            last_message_at: Some(5000),
+            session_state: "{}".to_string(),
+        }).unwrap();
+
+        // Should return the most recent
+        let chat = storage.get_chat_by_pubkey("aabbcc").unwrap().unwrap();
+        assert_eq!(chat.id, "c2");
+
+        // Not found
+        assert!(storage.get_chat_by_pubkey("zzz").unwrap().is_none());
     }
 
     #[test]

@@ -10,6 +10,8 @@ import {
   Rumor,
   CHAT_MESSAGE_KIND,
   REACTION_KIND,
+  RECEIPT_KIND,
+  TYPING_KIND,
 } from "./types";
 import { kdf, deepCopyState, createReactionPayload } from "./utils";
 
@@ -126,6 +128,31 @@ export class Session {
       content: createReactionPayload(messageId, emoji),
       kind: REACTION_KIND,
       tags: [["e", messageId]]
+    });
+  }
+
+  /**
+   * Sends a typing indicator through the encrypted session.
+   * @returns A verified Nostr event containing the encrypted typing indicator. You need to publish this event to the Nostr network.
+   */
+  sendTyping(): {event: VerifiedEvent, innerEvent: Rumor} {
+    return this.sendEvent({
+      content: 'typing',
+      kind: TYPING_KIND,
+    });
+  }
+
+  /**
+   * Sends a delivery/read receipt through the encrypted session.
+   * @param receiptType Either "delivered" or "seen"
+   * @param messageIds The IDs of the messages being acknowledged
+   * @returns A verified Nostr event containing the encrypted receipt. You need to publish this event to the Nostr network.
+   */
+  sendReceipt(receiptType: 'delivered' | 'seen', messageIds: string[]): {event: VerifiedEvent, innerEvent: Rumor} {
+    return this.sendEvent({
+      content: receiptType,
+      kind: RECEIPT_KIND,
+      tags: messageIds.map(id => ["e", id]),
     });
   }
 

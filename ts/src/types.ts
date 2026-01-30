@@ -129,3 +129,13 @@ export interface ReactionPayload {
  * Kind constant for reaction inner events
  */
 export const REACTION_KIND = 7;
+
+/**
+ * Kind constant for read/delivery receipt inner events
+ */
+export const RECEIPT_KIND = 15;
+
+/**
+ * Kind constant for typing indicator inner events
+ */
+export const TYPING_KIND = 25;

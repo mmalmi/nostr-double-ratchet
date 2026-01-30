@@ -49,16 +49,16 @@ enum Commands {
 
     /// Send a message
     Send {
-        /// Chat ID
-        chat_id: String,
+        /// Chat ID, npub, hex pubkey, or contact name
+        target: String,
         /// Message content
         message: String,
     },
 
     /// React to a message
     React {
-        /// Chat ID
-        chat_id: String,
+        /// Chat ID, npub, hex pubkey, or contact name
+        target: String,
         /// Message ID to react to
         message_id: String,
         /// Emoji reaction (e.g., 👍, ❤️, +1)
@@ -67,14 +67,14 @@ enum Commands {
 
     /// Send a typing indicator
     Typing {
-        /// Chat ID
-        chat_id: String,
+        /// Chat ID, npub, hex pubkey, or contact name
+        target: String,
     },
 
     /// Send a delivery/read receipt
     Receipt {
-        /// Chat ID
-        chat_id: String,
+        /// Chat ID, npub, hex pubkey, or contact name
+        target: String,
         /// Receipt type: "delivered" or "seen"
         receipt_type: String,
         /// Message IDs to acknowledge
@@ -83,12 +83,16 @@ enum Commands {
 
     /// Read messages from a chat
     Read {
-        /// Chat ID
-        chat_id: String,
+        /// Chat ID, npub, hex pubkey, or contact name
+        target: String,
         /// Maximum number of messages to show
         #[arg(short, long, default_value = "50")]
         limit: usize,
     },
+
+    /// Manage contacts (petnames)
+    #[command(subcommand)]
+    Contact(ContactCommands),
 
     /// Listen for new messages
     Listen {
@@ -128,6 +132,26 @@ enum InviteCommands {
         invite_id: String,
         /// The acceptance event JSON
         event: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactCommands {
+    /// Add a contact (petname)
+    Add {
+        /// npub or hex pubkey
+        pubkey: String,
+        /// Petname
+        name: String,
+    },
+
+    /// List all contacts
+    List,
+
+    /// Remove a contact
+    Remove {
+        /// Petname to remove
+        name: String,
     },
 }
 
@@ -240,22 +264,33 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
                 commands::chat::delete(&id, &storage, output).await
             }
         },
-        Commands::Send { chat_id, message } => {
-            commands::message::send(&chat_id, &message, &config, &storage, output).await
+        Commands::Send { target, message } => {
+            commands::message::send(&target, &message, &config, &storage, output).await
         }
-        Commands::React { chat_id, message_id, emoji } => {
-            commands::message::react(&chat_id, &message_id, &emoji, &config, &storage, output).await
+        Commands::React { target, message_id, emoji } => {
+            commands::message::react(&target, &message_id, &emoji, &config, &storage, output).await
         }
-        Commands::Typing { chat_id } => {
-            commands::message::typing(&chat_id, &config, &storage, output).await
+        Commands::Typing { target } => {
+            commands::message::typing(&target, &config, &storage, output).await
         }
-        Commands::Receipt { chat_id, receipt_type, message_ids } => {
+        Commands::Receipt { target, receipt_type, message_ids } => {
             let ids: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
-            commands::message::receipt(&chat_id, &receipt_type, &ids, &config, &storage, output).await
+            commands::message::receipt(&target, &receipt_type, &ids, &config, &storage, output).await
         }
-        Commands::Read { chat_id, limit } => {
-            commands::message::read(&chat_id, limit, &storage, output).await
+        Commands::Read { target, limit } => {
+            commands::message::read(&target, limit, &storage, output).await
         }
+        Commands::Contact(cmd) => match cmd {
+            ContactCommands::Add { pubkey, name } => {
+                commands::contact::add(&pubkey, &name, &storage, output).await
+            }
+            ContactCommands::List => {
+                commands::contact::list(&storage, output).await
+            }
+            ContactCommands::Remove { name } => {
+                commands::contact::remove(&name, &storage, output).await
+            }
+        },
         Commands::Listen { chat } => {
             commands::message::listen(chat.as_deref(), &config, &storage, output).await
         }
