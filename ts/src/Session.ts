@@ -94,7 +94,7 @@ export class Session {
       previousSendingChainMessageCount: 0,
       skippedKeys: {},
     };
-    
+
     const session = new Session(nostrSubscribe, state);
     if (name) session.name = name;
     return session;
@@ -417,7 +417,7 @@ export class Session {
       this.skippedSubscription = this.nostrSubscribe(
         {authors: skippedAuthors, kinds: [MESSAGE_EVENT_KIND]},
         (e) => this.handleNostrEvent(e)
-      );  
+      );
     }
   }
 }

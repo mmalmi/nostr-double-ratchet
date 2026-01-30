@@ -30,36 +30,56 @@ export class MockRelay {
     event: UnsignedEvent,
     signerSecretKey?: Uint8Array
   ): Promise<VerifiedEvent> {
-    const ndkEvent = new NDKEvent()
-    ndkEvent.kind = event.kind
-    ndkEvent.content = event.content
-    ndkEvent.tags = event.tags || []
-    ndkEvent.created_at = event.created_at
-    ndkEvent.pubkey = event.pubkey
+    // Check if event is already signed (has id and sig)
+    const isAlreadySigned = 'id' in event && 'sig' in event && event.id && (event as VerifiedEvent).sig
 
-    if (signerSecretKey) {
-      const signer = new NDKPrivateKeySigner(signerSecretKey)
-      await ndkEvent.sign(signer)
+    let verifiedEvent: VerifiedEvent
+
+    if (isAlreadySigned) {
+      // Event is already signed, use it as-is
+      verifiedEvent = event as VerifiedEvent
+    } else {
+      // Event needs signing
+      const ndkEvent = new NDKEvent()
+      ndkEvent.kind = event.kind
+      ndkEvent.content = event.content
+      ndkEvent.tags = event.tags || []
+      ndkEvent.created_at = event.created_at
+      ndkEvent.pubkey = event.pubkey
+
+      if (signerSecretKey) {
+        const signer = new NDKPrivateKeySigner(signerSecretKey)
+        await ndkEvent.sign(signer)
+      }
+
+      verifiedEvent = {
+        ...event,
+        pubkey: ndkEvent.pubkey,
+        id: ndkEvent.id!,
+        sig: ndkEvent.sig!,
+        tags: ndkEvent.tags || [],
+      } as VerifiedEvent
     }
 
-    const verifiedEvent = {
-      ...event,
-      id: ndkEvent.id!,
-      sig: ndkEvent.sig!,
-      tags: ndkEvent.tags || [],
-    } as VerifiedEvent
-
-    // Handle replaceable events (kinds 10000-19999): keep only latest per pubkey + d-tag
-    if (event.kind >= 10000 && event.kind < 20000) {
+    // Handle replaceable events (kinds 10000-19999) and parameterized replaceable events (30000-39999)
+    // Keep only latest per pubkey + kind + d-tag
+    const isReplaceable = (event.kind >= 10000 && event.kind < 20000) ||
+                          (event.kind >= 30000 && event.kind < 40000)
+    if (isReplaceable) {
       const dTag = event.tags?.find((t) => t[0] === "d")?.[1]
       this.events = this.events.filter((e) => {
-        if (e.kind !== event.kind || e.pubkey !== event.pubkey) return true
+        if (e.kind !== event.kind || e.pubkey !== verifiedEvent.pubkey) return true
         const existingDTag = e.tags?.find((t) => t[0] === "d")?.[1]
         return existingDTag !== dTag
       })
     }
 
     this.events.push(verifiedEvent)
+
+    if (this.debug) {
+      const pTags = verifiedEvent.tags?.filter(t => t[0] === 'p').map(t => t[1]?.slice(0,8)).join(',') || 'none'
+      console.log(`[MockRelay] PUBLISH: event(pubkey=${verifiedEvent.pubkey?.slice(0,8)}, kind=${verifiedEvent.kind}, p-tags=${pTags}) to ${this.subscribers.size} subscribers`)
+    }
 
     for (const sub of this.subscribers.values()) {
       this.deliverToSubscriber(sub, verifiedEvent)
@@ -82,12 +102,9 @@ export class MockRelay {
     this.subscribers.set(subId, subscriber)
 
     if (this.debug) {
-      console.log("MockRelay: new subscription", subId, "with filter", filter)
-      console.log(
-        "MockRelay: delivering",
-        this.events.length,
-        "existing events to new subscriber"
-      )
+      const pTags = (filter as Record<string, unknown>)['#p'] as string[] | undefined
+      console.log(`[MockRelay] SUBSCRIBE: ${subId} filter(authors=${filter.authors?.map(a => a.slice(0,8)).join(',') || 'none'}, kinds=${filter.kinds?.join(',') || 'any'}, #p=${pTags?.map(p => p.slice(0,8)).join(',') || 'none'})`)
+      console.log(`[MockRelay] Replaying ${this.events.length} existing events to ${subId}`)
     }
 
     // Defer initial delivery to next tick to allow subscriber assignment to complete
@@ -104,20 +121,34 @@ export class MockRelay {
   }
 
   private deliverToSubscriber(subscriber: Subscriber, event: VerifiedEvent): void {
-    if (!subscriber.delivered.has(event.id) && matchFilter(subscriber.filter, event)) {
+    if (subscriber.delivered.has(event.id)) {
       if (this.debug) {
-        console.log("Delivering event", event.id, "to subscriber", subscriber.id)
+        console.log(`[MockRelay] ALREADY DELIVERED: event(id=${event.id?.slice(0,8)}) to ${subscriber.id}`)
       }
-      subscriber.delivered.add(event.id)
-      try {
-        subscriber.onEvent(event)
-      } catch (error) {
-        if (this.shouldIgnoreDecryptionError(error)) {
-          console.warn("MockRelay: ignored decrypt error", error)
-          return
-        }
-        throw error
+      return
+    }
+    const matches = matchFilter(subscriber.filter, event)
+    if (!matches) {
+      // Log filter mismatches for debugging (only for kind 1059 to reduce noise)
+      if (this.debug && event.kind === 1059) {
+        const pTags = (subscriber.filter as Record<string, unknown>)['#p'] as string[] | undefined
+        const eventPTags = event.tags?.filter(t => t[0] === 'p').map(t => t[1]?.slice(0,8)).join(',') || 'none'
+        console.log(`[MockRelay] NO MATCH 1059: event(pubkey=${event.pubkey?.slice(0,8)}, p-tags=${eventPTags}) vs ${subscriber.id}(#p=${pTags?.map(p => p.slice(0,8)).join(',') || 'none'})`)
       }
+      return
+    }
+    if (this.debug) {
+      console.log(`[MockRelay] MATCH: event(pubkey=${event.pubkey?.slice(0,8)}, kind=${event.kind}) delivered to ${subscriber.id}`)
+    }
+    subscriber.delivered.add(event.id)
+    try {
+      subscriber.onEvent(event)
+    } catch (error) {
+      if (this.shouldIgnoreDecryptionError(error)) {
+        console.warn("MockRelay: ignored decrypt error", error)
+        return
+      }
+      throw error
     }
   }
 

@@ -4,7 +4,7 @@ import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { generateSecretKey, getPublicKey } from "nostr-tools"
-import { DeviceManager } from "../../src/DeviceManager"
+import { AppKeysManager } from "../../src/AppKeysManager"
 
 export type ActorId = "alice" | "bob"
 
@@ -25,7 +25,7 @@ interface ActorState {
   secretKey: Uint8Array
   publicKey: string
   devices: Map<string, DeviceState>
-  mainDeviceManager?: DeviceManager
+  mainAppKeysManager?: AppKeysManager
 }
 
 interface DeviceState {
@@ -37,7 +37,6 @@ interface DeviceState {
   waiters: MessageWaiter[]
   unsub?: () => void
   isDelegate?: boolean
-  delegateDeviceManager?: DeviceManager
 }
 
 interface ActorDeviceRef {
@@ -295,15 +294,15 @@ async function addDevice(context: ScenarioContext, actorId: ActorId, deviceId: s
     throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, deviceManager } = await createMockSessionManager(
+  const { manager, mockStorage, appKeysManager } = await createMockSessionManager(
     deviceId,
     context.relay,
     actor.secretKey
   )
 
-  // Track the first device's DeviceManager as the main one for this actor
-  if (!actor.mainDeviceManager) {
-    actor.mainDeviceManager = deviceManager
+  // Track the first device's AppKeysManager as the main one for this actor
+  if (!actor.mainAppKeysManager) {
+    actor.mainAppKeysManager = appKeysManager
   }
 
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
@@ -327,19 +326,18 @@ async function addDelegateDevice(
     throw new Error(`Main device '${mainDeviceId}' not found for actor '${actorId}'`)
   }
 
-  if (!actor.mainDeviceManager) {
-    throw new Error(`No main DeviceManager found for actor '${actorId}'`)
+  if (!actor.mainAppKeysManager) {
+    throw new Error(`No main AppKeysManager found for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, delegateDeviceManager } = await createMockDelegateSessionManager(
+  const { manager, mockStorage } = await createMockDelegateSessionManager(
     deviceId,
     context.relay,
-    actor.mainDeviceManager
+    actor.mainAppKeysManager
   )
 
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
   deviceState.isDelegate = true
-  deviceState.delegateDeviceManager = delegateDeviceManager
   actor.devices.set(deviceId, deviceState)
   return deviceState
 }

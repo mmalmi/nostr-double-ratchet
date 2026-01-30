@@ -7,8 +7,8 @@ import {
 import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
-import { generateSecretKey, getPublicKey, Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
-import { OwnerDeviceManager, DelegateDeviceManager } from "../../src/DeviceManager"
+import { finalizeEvent, generateSecretKey, getPublicKey, Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
+import { AppKeysManager, DelegateManager } from "../../src/AppKeysManager"
 
 export type ActorId = "alice" | "bob"
 
@@ -33,7 +33,7 @@ interface ActorState {
   secretKey: Uint8Array
   publicKey: string
   devices: Map<string, DeviceState>
-  mainDeviceManager?: OwnerDeviceManager
+  mainAppKeysManager?: AppKeysManager
 }
 
 interface DeviceState {
@@ -46,7 +46,7 @@ interface DeviceState {
   unsub?: () => void
   subscriptionId?: string
   isDelegate?: boolean
-  delegateDeviceManager?: DelegateDeviceManager
+  delegateManager?: DelegateManager
 }
 
 interface ActorDeviceRef {
@@ -218,6 +218,7 @@ async function executeStep(
       break
     case "deliverEvent": {
       const eventId = getEventRef(context, step.ref)
+      console.log(`[executeStep] deliverEvent ref=${step.ref} eventId=${eventId?.slice(0,8)}`)
       context.relay.deliverEvent(eventId)
       break
     }
@@ -379,9 +380,14 @@ async function sendMessage(
   // Send the message (with auto-deliver mode in sessionManager, it delivers immediately)
   await senderDevice.manager.sendMessage(recipientActor.publicKey, message)
 
+  // Small delay to allow async publishing to complete
+  await new Promise(r => setTimeout(r, 0))
+
   // Find the event ID of what we just sent (most recent event)
   const allEvents = context.relay.getAllEvents()
   const sentEvent = allEvents[allEvents.length - 1]
+
+  console.log(`[sendMessage] sent "${message.slice(0,30)}" ref=${ref} eventCount=${allEvents.length} lastEvent=${sentEvent?.id?.slice(0,8)}`)
 
   if (sentEvent && ref) {
     context.eventRefs.set(ref, sentEvent.id)
@@ -390,11 +396,13 @@ async function sendMessage(
   // Handle wait behavior
   if (waitOn === "auto") {
     // Wait for all recipient devices to receive
+    // Use existingOk: true because message might be delivered before waiter is set up
+    // (when session establishment completes synchronously in mock relay)
     const waitTargets = resolveWaitTargets(context, "all-recipient-devices", recipientActor)
     await Promise.all(
       waitTargets.map((device) =>
         waitForMessage(device, deviceLabel(recipientActor, device), message, {
-          existingOk: false,
+          existingOk: true,
         })
       )
     )
@@ -404,7 +412,7 @@ async function sendMessage(
     await Promise.all(
       waitTargets.map((device) =>
         waitForMessage(device, deviceLabel(recipientActor, device), message, {
-          existingOk: false,
+          existingOk: true,
         })
       )
     )
@@ -453,12 +461,12 @@ async function restartDevice(context: ControlledScenarioContext, ref: ActorDevic
   device.unsub?.()
   device.manager.close()
 
-  if (device.isDelegate && device.delegateDeviceManager) {
+  if (device.isDelegate && device.delegateManager) {
     // Restart delegate device
     await restartDelegateDevice(context, ref, actor, device)
   } else {
     // Restart main device
-    const { manager: newManager } = await createControlledMockSessionManager(
+    const { manager: newManager, delegateManager: newDelegateManager } = await createControlledMockSessionManager(
       device.deviceId,
       context.relay,
       actor.secretKey,
@@ -466,6 +474,7 @@ async function restartDevice(context: ControlledScenarioContext, ref: ActorDevic
     )
 
     device.manager = newManager
+    device.delegateManager = newDelegateManager
     device.unsub = attachManagerListener(actor, device)
   }
 
@@ -483,18 +492,12 @@ async function restartDelegateDevice(
   actor: ActorState,
   device: DeviceState
 ) {
-  const oldDelegateManager = device.delegateDeviceManager!
+  const oldDelegateManager = device.delegateManager!
 
   // Get the delegate's keys before they're lost
   // Delegate devices always use raw keys, never extension login
-  const devicePrivateKey = oldDelegateManager.getIdentityKey() as Uint8Array
+  const devicePrivateKey = oldDelegateManager.getIdentityKey()
   const devicePublicKey = oldDelegateManager.getIdentityPublicKey()
-  const ephemeralKeypair = oldDelegateManager.getEphemeralKeypair()
-  const sharedSecret = oldDelegateManager.getSharedSecret()
-
-  if (!ephemeralKeypair || !sharedSecret) {
-    throw new Error(`Delegate device '${device.deviceId}' was not activated - cannot restart`)
-  }
 
   // Create new subscribe/publish functions
   const subscribe = vi
@@ -505,36 +508,39 @@ async function restartDelegateDevice(
     })
 
   const publish = vi.fn().mockImplementation(async (event: UnsignedEvent | VerifiedEvent) => {
+    // Already signed - publish directly
     if ('sig' in event && event.sig) {
       const verifiedEvent = event as VerifiedEvent
       await context.relay.publishAndDeliver(event as UnsignedEvent)
       return verifiedEvent
     }
-    throw new Error("Delegate publish received unsigned event")
+    // Unsigned event - sign with delegate's private key (for Invite events)
+    const signedEvent = finalizeEvent(event, devicePrivateKey)
+    await context.relay.publishAndDeliver(signedEvent as UnsignedEvent)
+    return signedEvent
   })
 
-  // Restore the delegate DeviceManager with saved keys
-  const newDelegateManager = DelegateDeviceManager.restore({
-    deviceId: device.deviceId,
-    deviceLabel: device.deviceId,
+  // Restore the delegate DelegateManager using same storage (auto-restores keys)
+  // The Invite is stored separately and will be loaded from storage during init()
+  const newDelegateManager = new DelegateManager({
     nostrSubscribe: subscribe,
     nostrPublish: publish,
     storage: device.storage,
-    devicePublicKey,
-    devicePrivateKey,
-    ephemeralPublicKey: ephemeralKeypair.publicKey,
-    ephemeralPrivateKey: ephemeralKeypair.privateKey,
-    sharedSecret,
   })
 
   await newDelegateManager.init()
+
+  // Verify keys were restored correctly
+  if (newDelegateManager.getIdentityPublicKey() !== devicePublicKey) {
+    throw new Error("Identity keys were not restored correctly from storage")
+  }
 
   // Create new SessionManager
   const newManager = newDelegateManager.createSessionManager()
   await newManager.init()
 
   device.manager = newManager
-  device.delegateDeviceManager = newDelegateManager
+  device.delegateManager = newDelegateManager
   device.unsub = attachManagerListener(actor, device)
 }
 
@@ -544,6 +550,7 @@ function attachManagerListener(_actor: ActorState, device: DeviceState): () => v
     const content = event.content ?? ""
     const currentCount = device.messageCounts.get(content) ?? 0
     const nextCount = currentCount + 1
+    console.log(`[TestListener] device=${device.deviceId} content="${content.slice(0,30)}" count=${nextCount}`)
     device.messageCounts.set(content, nextCount)
     resolveWaiters(device, content, nextCount)
   }
@@ -556,8 +563,12 @@ function attachManagerListener(_actor: ActorState, device: DeviceState): () => v
 
 function resolveWaiters(device: DeviceState, content: string, count: number) {
   const pending = device.waiters.slice()
+  if (pending.length > 0) {
+    console.log(`[resolveWaiters] device=${device.deviceId} content="${content.slice(0,30)}" count=${count} waiters=${pending.length} waitingFor=[${pending.map(w => `"${w.message.slice(0,20)}"@${w.targetCount}`).join(',')}]`)
+  }
   for (const waiter of pending) {
     if (waiter.message === content && count >= waiter.targetCount) {
+      console.log(`[resolveWaiters] RESOLVING waiter for "${content.slice(0,30)}"`)
       waiter.resolve()
     }
   }
@@ -571,7 +582,9 @@ function waitForMessage(
 ): Promise<void> {
   const { existingOk } = options
   const currentCount = device.messageCounts.get(message) ?? 0
+  console.log(`[waitForMessage] device=${device.deviceId} message="${message.slice(0,30)}" currentCount=${currentCount} existingOk=${existingOk}`)
   if (existingOk && currentCount > 0) {
+    console.log(`[waitForMessage] immediately resolved (already exists)`)
     return Promise.resolve()
   }
 
@@ -633,18 +646,42 @@ async function addDevice(
     throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, deviceManager } = await createControlledMockSessionManager(
+  // If there's already a mainAppKeysManager, add as delegate device
+  // This ensures all devices for an actor share the same AppKeys
+  if (actor.mainAppKeysManager) {
+    const { manager, mockStorage, delegateManager } =
+      await createControlledMockDelegateSessionManager(
+        deviceId,
+        context.relay,
+        actor.mainAppKeysManager
+      )
+
+    const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
+    deviceState.isDelegate = true
+
+    // Track subscription ID
+    const subs = context.relay.getSubscriptions()
+    const latestSub = subs[subs.length - 1]
+    if (latestSub) {
+      deviceState.subscriptionId = latestSub.id
+      context.subscriptionRefs.set(`${actorId}/${deviceId}`, latestSub.id)
+    }
+
+    actor.devices.set(deviceId, deviceState)
+    return deviceState
+  }
+
+  // First device - create new AppKeysManager and DelegateManager
+  const { manager, mockStorage, appKeysManager, delegateManager } = await createControlledMockSessionManager(
     deviceId,
     context.relay,
     actor.secretKey
   )
 
-  // Track the first device's DeviceManager as the main one for this actor
-  if (!actor.mainDeviceManager) {
-    actor.mainDeviceManager = deviceManager
-  }
+  // Track the first device's AppKeysManager as the main one for this actor
+  actor.mainAppKeysManager = appKeysManager
 
-  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
+  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
 
   // Track subscription ID for delivery control
   const subs = context.relay.getSubscriptions()
@@ -674,20 +711,19 @@ async function addDelegateDevice(
     throw new Error(`Main device '${mainDeviceId}' not found for actor '${actorId}'`)
   }
 
-  if (!actor.mainDeviceManager) {
-    throw new Error(`No main DeviceManager found for actor '${actorId}'`)
+  if (!actor.mainAppKeysManager) {
+    throw new Error(`No main AppKeysManager found for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, delegateDeviceManager } =
+  const { manager, mockStorage, delegateManager } =
     await createControlledMockDelegateSessionManager(
       deviceId,
       context.relay,
-      actor.mainDeviceManager
+      actor.mainAppKeysManager
     )
 
-  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
+  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
   deviceState.isDelegate = true
-  deviceState.delegateDeviceManager = delegateDeviceManager
 
   // Track subscription ID
   const subs = context.relay.getSubscriptions()
@@ -726,7 +762,8 @@ function createDeviceState(
   actor: ActorState,
   deviceId: string,
   manager: SessionManager,
-  storage: InMemoryStorageAdapter
+  storage: InMemoryStorageAdapter,
+  delegateManager?: DelegateManager
 ): DeviceState {
   const deviceState: DeviceState = {
     deviceId,
@@ -735,6 +772,7 @@ function createDeviceState(
     events: [],
     messageCounts: new Map(),
     waiters: [],
+    delegateManager,
   }
 
   deviceState.unsub = attachManagerListener(actor, deviceState)

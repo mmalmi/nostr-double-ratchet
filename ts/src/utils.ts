@@ -188,10 +188,6 @@ export function kdf(input1: Uint8Array, input2: Uint8Array = new Uint8Array(32),
   return outputs;
 }
 
-export function skippedMessageIndexKey(_nostrSender: string, _number: number): string {
-  return `${_nostrSender}:${_number}`;
-}
-
 export function getMillisecondTimestamp(event: Rumor) {
   const msTag = event.tags?.find((tag: string[]) => tag[0] === "ms");
   if (msTag) {

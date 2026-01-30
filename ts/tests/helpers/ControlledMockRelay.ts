@@ -119,6 +119,19 @@ export class ControlledMockRelay {
   ): Promise<string> {
     const verifiedEvent = await this.signEvent(event, signerSecretKey)
 
+    // Handle replaceable events (kinds 10000-19999) and parameterized replaceable events (30000-39999)
+    // Keep only latest per pubkey + kind + d-tag
+    const isReplaceable = (event.kind >= 10000 && event.kind < 20000) ||
+                          (event.kind >= 30000 && event.kind < 40000)
+    if (isReplaceable) {
+      const dTag = event.tags?.find((t) => t[0] === "d")?.[1]
+      this.deliveredEvents = this.deliveredEvents.filter((e) => {
+        if (e.kind !== event.kind || e.pubkey !== event.pubkey) return true
+        const existingDTag = e.tags?.find((t: string[]) => t[0] === "d")?.[1]
+        return existingDTag !== dTag
+      })
+    }
+
     this.deliveredEvents.push(verifiedEvent)
     const activeSubs = Array.from(this.subscriptions.values()).filter(s => !s.closed)
     const subFilters = activeSubs.map(s => s.filters.map(f => f.authors?.map(a => a.slice(0, 8)).join(',') || 'none').join(';')).join(' | ')
@@ -158,6 +171,7 @@ export class ControlledMockRelay {
 
     return {
       ...event,
+      pubkey: ndkEvent.pubkey, // Use signed pubkey (signer sets this)
       id: ndkEvent.id!,
       sig: ndkEvent.sig!,
       tags: ndkEvent.tags || [],
@@ -251,18 +265,33 @@ export class ControlledMockRelay {
 
   /**
    * Deliver a specific event by ID.
+   * Checks both pending queue and already-delivered events.
+   * For already-delivered events, re-delivers to any subscriptions that haven't received it.
    * @returns true if the event was found and delivered
    */
   deliverEvent(eventId: string): boolean {
+    // First check pending events
     const index = this.pendingEvents.findIndex((p) => p.event.id === eventId)
-    if (index === -1) {
-      this.log(`deliverEvent: event ${eventId} not found in pending queue`)
-      return false
+    if (index !== -1) {
+      const [pending] = this.pendingEvents.splice(index, 1)
+      this.deliverPendingEvent(pending)
+      return true
     }
 
-    const [pending] = this.pendingEvents.splice(index, 1)
-    this.deliverPendingEvent(pending)
-    return true
+    // Check already delivered events and re-deliver to any subscriptions that missed it
+    const delivered = this.deliveredEvents.find((e) => e.id === eventId)
+    if (delivered) {
+      this.log(`deliverEvent: event ${eventId} already delivered, re-delivering to any new subscriptions`)
+      for (const sub of this.subscriptions.values()) {
+        if (!sub.closed) {
+          this.deliverEventToSubscriber(sub, delivered)
+        }
+      }
+      return true
+    }
+
+    this.log(`deliverEvent: event ${eventId} not found`)
+    return false
   }
 
   /**

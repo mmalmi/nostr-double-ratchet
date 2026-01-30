@@ -4,11 +4,12 @@ import {
   NostrPublish,
   Rumor,
   Unsubscribe,
-  INVITE_LIST_EVENT_KIND,
+  APP_KEYS_EVENT_KIND,
   CHAT_MESSAGE_KIND,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
-import { InviteList } from "./InviteList"
+import { AppKeys, DeviceEntry } from "./AppKeys"
+import { Invite } from "./Invite"
 import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
@@ -24,36 +25,36 @@ export interface InviteCredentials {
   sharedSecret: string
 }
 
-interface DeviceRecord {
+export interface DeviceRecord {
   deviceId: string
   activeSession?: Session
   inactiveSessions: Session[]
   createdAt: number
-  staleAt?: number
-  // Set to true when we've processed an invite response from this device
-  // This survives restarts and prevents duplicate RESPONDER session creation
-  hasResponderSession?: boolean
 }
 
-interface UserRecord {
+export interface UserRecord {
   publicKey: string
   devices: Map<string, DeviceRecord>
+  /** Device identity pubkeys from AppKeys - used to rebuild delegateToOwner on load */
+  knownDeviceIdentities: string[]
 }
 
-type StoredSessionEntry = ReturnType<typeof serializeSessionState>
+interface StoredSessionEntry {
+  name: string
+  state: string
+}
 
 interface StoredDeviceRecord {
   deviceId: string
   activeSession: StoredSessionEntry | null
   inactiveSessions: StoredSessionEntry[]
   createdAt: number
-  staleAt?: number
-  hasResponderSession?: boolean
 }
 
 interface StoredUserRecord {
   publicKey: string
   devices: StoredDeviceRecord[]
+  knownDeviceIdentities?: string[]
 }
 
 export class SessionManager {
@@ -79,6 +80,8 @@ export class SessionManager {
   private messageHistory: Map<string, Rumor[]> = new Map()
   // Map delegate device pubkeys to their owner's pubkey
   private delegateToOwner: Map<string, string> = new Map()
+  // Track processed InviteResponse event IDs to prevent replay
+  private processedInviteResponses: Set<string> = new Set()
 
   // Subscriptions
   private ourInviteResponseSubscription: Unsubscribe | null = null
@@ -117,12 +120,12 @@ export class SessionManager {
     if (this.initialized) return
     this.initialized = true
 
-    await this.runMigrations().catch((error) => {
-      console.error("Failed to run migrations:", error)
+    await this.runMigrations().catch(() => {
+      // Failed to run migrations
     })
 
-    await this.loadAllUserRecords().catch((error) => {
-      console.error("Failed to load user records:", error)
+    await this.loadAllUserRecords().catch(() => {
+      // Failed to load user records
     })
 
     // Add our own device to user record to prevent accepting our own invite
@@ -153,6 +156,12 @@ export class SessionManager {
         "#p": [ephemeralPubkey],
       },
       async (event) => {
+        // Skip already processed InviteResponses (prevents replay issues on restart)
+        if (this.processedInviteResponses.has(event.id)) {
+          return
+        }
+        this.processedInviteResponses.add(event.id)
+
         try {
           const decrypted = await decryptInviteResponse({
             envelopeContent: event.content,
@@ -165,38 +174,40 @@ export class SessionManager {
 
           // Skip our own responses - this happens when we publish an invite response
           // and our own listener receives it back from relays
-          if (decrypted.deviceId === this.deviceId) {
+          // inviteeIdentity serves as the device ID
+          if (decrypted.inviteeIdentity === this.deviceId) {
             return
           }
 
-          // Resolve delegate pubkey to owner for correct UserRecord attribution
-          const ownerPubkey = this.resolveToOwner(decrypted.inviteeIdentity)
+          // Get owner pubkey from response (required for proper chat routing)
+          // If not present (old client), fall back to resolveToOwner
+          const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
+
+          // Verify the device is authorized by fetching owner's AppKeys
+          const appKeys = await this.fetchAppKeys(claimedOwner)
+
+          if (appKeys) {
+            const deviceInList = appKeys.getAllDevices().some(
+              d => d.identityPubkey === decrypted.inviteeIdentity
+            )
+            if (!deviceInList) {
+              return
+            }
+            this.updateDelegateMapping(claimedOwner, appKeys)
+          } else {
+            // No AppKeys - check cached identities or single-device case
+            const cachedIdentities = this.userRecords.get(claimedOwner)?.knownDeviceIdentities || []
+            const isCached = cachedIdentities.includes(decrypted.inviteeIdentity)
+            const isSingleDevice = decrypted.inviteeIdentity === claimedOwner
+            if (!isCached && !isSingleDevice) {
+              return
+            }
+          }
+
+          const ownerPubkey = claimedOwner
           const userRecord = this.getOrCreateUserRecord(ownerPubkey)
-          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.deviceId || "default")
-
-          // Check for duplicate/stale responses using the persisted flag
-          // This flag survives restarts and prevents creating duplicate RESPONDER sessions
-          if (deviceRecord.hasResponderSession) {
-            return
-          }
-
-          // Also check session state as a fallback (for existing sessions before the flag was added)
-          const responseSessionKey = decrypted.inviteeSessionPublicKey
-          const existingSession = deviceRecord.activeSession
-          const existingInactive = deviceRecord.inactiveSessions || []
-          const allSessions = existingSession ? [existingSession, ...existingInactive] : existingInactive
-
-          // Check if any existing session can already receive from this device:
-          // - Has receivingChainKey set (RESPONDER session has received messages)
-          // - Has the same theirNextNostrPublicKey (same session, duplicate response)
-          const canAlreadyReceive = allSessions.some(s =>
-            s.state?.receivingChainKey !== undefined ||
-            s.state?.theirNextNostrPublicKey === responseSessionKey ||
-            s.state?.theirCurrentNostrPublicKey === responseSessionKey
-          )
-          if (canAlreadyReceive) {
-            return
-          }
+          // inviteeIdentity serves as the device ID
+          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.inviteeIdentity)
 
           const session = createSessionFromAccept({
             nostrSubscribe: this.nostrSubscribe,
@@ -207,18 +218,58 @@ export class SessionManager {
             name: event.id,
           })
 
-          // Mark that we've processed a responder session for this device
-          // This flag is persisted and survives restarts
-          deviceRecord.hasResponderSession = true
-
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
-          // Persist the flag
-          this.storeUserRecord(ownerPubkey).catch(console.error)
+          this.storeUserRecord(ownerPubkey).catch(() => {})
         } catch {
-          // Invalid response, ignore
         }
       }
     )
+  }
+
+  /**
+   * Fetch a user's AppKeys from relays.
+   * Returns null if not found within timeout.
+   */
+  private fetchAppKeys(pubkey: string, timeoutMs = 2000): Promise<AppKeys | null> {
+    return new Promise((resolve) => {
+      let latestEvent: { created_at: number; appKeys: AppKeys } | null = null
+      let resolved = false
+
+      // Use a short initial delay before resolving to allow event delivery
+      const resolveResult = () => {
+        if (resolved) return
+        resolved = true
+        unsubscribe()
+        resolve(latestEvent?.appKeys ?? null)
+      }
+
+      // Start timeout
+      const timeout = setTimeout(resolveResult, timeoutMs)
+
+      const unsubscribe = this.nostrSubscribe(
+        {
+          kinds: [APP_KEYS_EVENT_KIND],
+          authors: [pubkey],
+          "#d": ["double-ratchet/app-keys"],
+        },
+        (event) => {
+          if (resolved) return
+          try {
+            const appKeys = AppKeys.fromEvent(event)
+            // Use >= to prefer later-delivered events when timestamps are equal
+            // This handles replaceable events created within the same second
+            if (!latestEvent || event.created_at >= latestEvent.created_at) {
+              latestEvent = { created_at: event.created_at, appKeys }
+            }
+            // Resolve quickly after receiving an event (allow for more events to arrive)
+            clearTimeout(timeout)
+            setTimeout(resolveResult, 100) // Short delay to collect any late events
+          } catch {
+            // Invalid event, ignore
+          }
+        }
+      )
+    })
   }
 
   // -------------------
@@ -227,7 +278,7 @@ export class SessionManager {
   private getOrCreateUserRecord(userPubkey: string): UserRecord {
     let rec = this.userRecords.get(userPubkey)
     if (!rec) {
-      rec = { publicKey: userPubkey, devices: new Map() }
+      rec = { publicKey: userPubkey, devices: new Map(), knownDeviceIdentities: [] }
       this.userRecords.set(userPubkey, rec)
     }
     return rec
@@ -279,39 +330,52 @@ export class SessionManager {
   }
 
   /**
-   * Update the delegate-to-owner mapping from an InviteList.
+   * Update the delegate-to-owner mapping from an AppKeys.
    * Extracts delegate device pubkeys and maps them to the owner.
+   * Persists the mapping in the user record for restart recovery.
    */
-  private updateDelegateMapping(ownerPubkey: string, inviteList: InviteList): void {
-    for (const device of inviteList.getAllDevices()) {
-      if (device.identityPubkey) {
-        this.delegateToOwner.set(device.identityPubkey, ownerPubkey)
-      }
+  private updateDelegateMapping(ownerPubkey: string, appKeys: AppKeys): void {
+    const userRecord = this.getOrCreateUserRecord(ownerPubkey)
+    const deviceIdentities = appKeys.getAllDevices()
+      .map(d => d.identityPubkey)
+      .filter(Boolean) as string[]
+
+    // Update user record with known device identities
+    userRecord.knownDeviceIdentities = deviceIdentities
+
+    // Update in-memory mapping
+    for (const identity of deviceIdentities) {
+      this.delegateToOwner.set(identity, ownerPubkey)
     }
+
+    // Persist
+    this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
-  private subscribeToUserInviteList(
+  private subscribeToUserAppKeys(
     pubkey: string,
-    onInviteList: (list: InviteList) => void
+    onAppKeys: (list: AppKeys) => void
   ): Unsubscribe {
     return this.nostrSubscribe(
       {
-        kinds: [INVITE_LIST_EVENT_KIND],
+        kinds: [APP_KEYS_EVENT_KIND],
         authors: [pubkey],
-        "#d": ["double-ratchet/invite-list"],
+        "#d": ["double-ratchet/app-keys"],
       },
       (event) => {
         try {
-          const list = InviteList.fromEvent(event)
-          // Update delegate mapping whenever we receive an InviteList
+          const list = AppKeys.fromEvent(event)
+          // Update delegate mapping whenever we receive an AppKeys
           this.updateDelegateMapping(pubkey, list)
-          onInviteList(list)
+          onAppKeys(list)
         } catch {
           // Invalid event, ignore
         }
       }
     )
   }
+
+  private static MAX_INACTIVE_SESSIONS = 10
 
   private attachSessionSubscription(
     userPubkey: string,
@@ -320,70 +384,87 @@ export class SessionManager {
     // Set to true if only handshake -> not yet sendable -> will be promoted on message
     inactive: boolean = false
   ): void {
-    if (deviceRecord.staleAt !== undefined) {
-      return
-    }
-
     const key = this.sessionKey(userPubkey, deviceRecord.deviceId, session.name)
     if (this.sessionSubscriptions.has(key)) {
       return
     }
 
     const dr = deviceRecord
-    const rotateSession = (nextSession: Session) => {
+
+    // Promote a session to active when it receives a message
+    // Current active goes to top of inactive queue
+    const promoteToActive = (nextSession: Session) => {
       const current = dr.activeSession
 
-      if (!current) {
-        dr.activeSession = nextSession
+      // Already active, nothing to do
+      if (current === nextSession || current?.name === nextSession.name) {
         return
       }
 
-      if (current === nextSession || current.name === nextSession.name) {
-        dr.activeSession = nextSession
-        return
-      }
-
+      // Remove nextSession from inactive if present
       dr.inactiveSessions = dr.inactiveSessions.filter(
-        (session) => session !== current && session.name !== current.name
+        (s) => s !== nextSession && s.name !== nextSession.name
       )
 
-      dr.inactiveSessions.push(current)
-      dr.inactiveSessions = dr.inactiveSessions.slice(-1)
+      // Move current active to top of inactive queue
+      if (current) {
+        dr.inactiveSessions.unshift(current)
+      }
+
+      // Set new active
       dr.activeSession = nextSession
+
+      // Trim inactive queue to max size (remove oldest from end)
+      if (dr.inactiveSessions.length > SessionManager.MAX_INACTIVE_SESSIONS) {
+        const removed = dr.inactiveSessions.splice(SessionManager.MAX_INACTIVE_SESSIONS)
+        // Unsubscribe from removed sessions
+        for (const s of removed) {
+          this.removeSessionSubscription(userPubkey, dr.deviceId, s.name)
+        }
+      }
     }
 
+    // Add new session: if inactive, add to top of inactive queue; otherwise set as active
     if (inactive) {
       const alreadyTracked = dr.inactiveSessions.some(
-        (tracked) => tracked === session || tracked.name === session.name
+        (s) => s === session || s.name === session.name
       )
       if (!alreadyTracked) {
-        dr.inactiveSessions.push(session)
-        dr.inactiveSessions = dr.inactiveSessions.slice(-1)
+        // Add to top of inactive queue
+        dr.inactiveSessions.unshift(session)
+        // Trim to max size
+        if (dr.inactiveSessions.length > SessionManager.MAX_INACTIVE_SESSIONS) {
+          const removed = dr.inactiveSessions.splice(SessionManager.MAX_INACTIVE_SESSIONS)
+          for (const s of removed) {
+            this.removeSessionSubscription(userPubkey, dr.deviceId, s.name)
+          }
+        }
       }
     } else {
-      rotateSession(session)
+      promoteToActive(session)
     }
 
+    // Subscribe to session events - when message received, promote to active
     const unsub = session.onEvent((event) => {
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
-      rotateSession(session)
-      this.storeUserRecord(userPubkey).catch(console.error)
+      promoteToActive(session)
+      this.storeUserRecord(userPubkey).catch(() => {})
     })
-    this.storeUserRecord(userPubkey).catch(console.error)
+    this.storeUserRecord(userPubkey).catch(() => {})
     this.sessionSubscriptions.set(key, unsub)
   }
 
-  private attachInviteListSubscription(
+  private attachAppKeysSubscription(
     userPubkey: string,
-    onInviteList?: (inviteList: InviteList) => void | Promise<void>
+    onAppKeys?: (appKeys: AppKeys) => void | Promise<void>
   ): void {
-    const key = `invitelist:${userPubkey}`
+    const key = `appkeys:${userPubkey}`
     if (this.inviteSubscriptions.has(key)) return
 
-    const unsubscribe = this.subscribeToUserInviteList(
+    const unsubscribe = this.subscribeToUserAppKeys(
       userPubkey,
-      async (inviteList) => {
-        if (onInviteList) await onInviteList(inviteList)
+      async (appKeys) => {
+        if (onAppKeys) await onAppKeys(appKeys)
       }
     )
 
@@ -393,41 +474,122 @@ export class SessionManager {
   setupUser(userPubkey: string) {
     const userRecord = this.getOrCreateUserRecord(userPubkey)
 
+    // Track which device identities we've subscribed to for invites
+    const subscribedDeviceIdentities = new Set<string>()
+    // Track devices currently being accepted (to prevent duplicate acceptance)
+    const pendingAcceptances = new Set<string>()
+
+    /**
+     * Accept an invite from a device.
+     * The invite is fetched separately from the device's own Invite event.
+     */
     const acceptInviteFromDevice = async (
-      inviteList: InviteList,
-      deviceId: string
+      device: DeviceEntry,
+      invite: Invite
     ) => {
+      // Double-check for active session (race condition guard)
+      // Another concurrent call may have already established a session
+      const existingRecord = userRecord.devices.get(device.identityPubkey)
+      if (existingRecord?.activeSession) {
+        return
+      }
+
       // Add device record IMMEDIATELY to prevent duplicate acceptance from race conditions
-      // (InviteList callback can fire multiple times before async accept completes)
-      const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
+      // Use identityPubkey as the device identifier
+      const deviceRecord = this.upsertDeviceRecord(userRecord, device.identityPubkey)
 
       const encryptor = this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
-      const { session, event } = await inviteList.accept(
-        deviceId,
+      // ourPublicKey serves as both identity and device ID
+      const { session, event } = await invite.accept(
         this.nostrSubscribe,
         this.ourPublicKey,
         encryptor,
-        this.deviceId
+        this.ownerPublicKey
       )
       return this.nostrPublish(event)
-        .then(() => this.attachSessionSubscription(userPubkey, deviceRecord, session))
-        .then(() => this.sendMessageHistory(userPubkey, deviceId))
-        .catch(console.error)
+        .then(() => {
+          this.attachSessionSubscription(userPubkey, deviceRecord, session)
+        })
+        .then(() => this.sendMessageHistory(userPubkey, device.identityPubkey))
+        .catch(() => {})
     }
 
-    this.attachInviteListSubscription(userPubkey, async (inviteList) => {
-      const devices = inviteList.getAllDevices()
+    /**
+     * Subscribe to a device's Invite event and accept it when received.
+     */
+    const subscribeToDeviceInvite = (device: DeviceEntry) => {
+      // identityPubkey is the device identifier
+      const deviceKey = device.identityPubkey
+      if (subscribedDeviceIdentities.has(deviceKey)) {
+        return
+      }
+      subscribedDeviceIdentities.add(deviceKey)
 
-      // Handle removed devices (source of truth for revocation)
-      for (const deviceId of inviteList.getRemovedDeviceIds()) {
-        await this.cleanupDevice(userPubkey, deviceId)
+      // Already have a record with active session for this device? Skip.
+      const existingRecord = userRecord.devices.get(device.identityPubkey)
+      if (existingRecord?.activeSession) {
+        return
       }
 
-      // Accept invites from new devices
-      for (const device of devices) {
-        if (!userRecord.devices.has(device.deviceId)) {
-          await acceptInviteFromDevice(inviteList, device.deviceId)
+      const inviteSubKey = `invite:${device.identityPubkey}`
+      if (this.inviteSubscriptions.has(inviteSubKey)) {
+        return
+      }
+
+      // Subscribe to this device's Invite event
+      const unsub = Invite.fromUser(device.identityPubkey, this.nostrSubscribe, async (invite) => {
+        // Verify the invite is for this device (identityPubkey is the device identifier)
+        if (invite.deviceId !== device.identityPubkey) {
+          return
         }
+
+        // Skip if we already have an active session (race condition guard)
+        const existingDeviceRecord = userRecord.devices.get(device.identityPubkey)
+        if (existingDeviceRecord?.activeSession) {
+          return
+        }
+
+        // Skip if acceptance is already in progress (race condition guard)
+        if (pendingAcceptances.has(device.identityPubkey)) {
+          return
+        }
+
+        pendingAcceptances.add(device.identityPubkey)
+        try {
+          await acceptInviteFromDevice(device, invite)
+        } finally {
+          pendingAcceptances.delete(device.identityPubkey)
+        }
+      })
+
+      this.inviteSubscriptions.set(inviteSubKey, unsub)
+    }
+
+    this.attachAppKeysSubscription(userPubkey, async (appKeys) => {
+      const devices = appKeys.getAllDevices()
+      const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
+
+      // Handle devices no longer in list (revoked or AppKeys recreated from scratch)
+      const userRecord = this.userRecords.get(userPubkey)
+      if (userRecord) {
+        for (const [deviceId] of userRecord.devices) {
+          if (!activeDeviceIds.has(deviceId)) {
+            // Remove from tracking so device can be re-subscribed if re-added
+            subscribedDeviceIdentities.delete(deviceId)
+            const inviteSubKey = `invite:${deviceId}`
+            const inviteUnsub = this.inviteSubscriptions.get(inviteSubKey)
+            if (inviteUnsub) {
+              inviteUnsub()
+              this.inviteSubscriptions.delete(inviteSubKey)
+            }
+            await this.cleanupDevice(userPubkey, deviceId)
+          }
+        }
+      }
+
+      // For each device in AppKeys, subscribe to their Invite event
+      for (const device of devices) {
+        subscribeToDeviceInvite(device)
       }
     })
   }
@@ -469,7 +631,7 @@ export class SessionManager {
         device.activeSession = undefined
       }
     }
-    this.storeUserRecord(publicKey).catch(console.error)
+    this.storeUserRecord(publicKey).catch(() => {})
   }
 
   async deleteUser(userPubkey: string): Promise<void> {
@@ -495,11 +657,11 @@ export class SessionManager {
       this.userRecords.delete(userPubkey)
     }
 
-    const inviteListKey = `invitelist:${userPubkey}`
-    const inviteListUnsub = this.inviteSubscriptions.get(inviteListKey)
-    if (inviteListUnsub) {
-      inviteListUnsub()
-      this.inviteSubscriptions.delete(inviteListKey)
+    const appKeysKey = `appkeys:${userPubkey}`
+    const appKeysUnsub = this.inviteSubscriptions.get(appKeysKey)
+    if (appKeysUnsub) {
+      appKeysUnsub()
+      this.inviteSubscriptions.delete(appKeysKey)
     }
 
     this.messageHistory.delete(userPubkey)
@@ -542,13 +704,12 @@ export class SessionManager {
     if (!device) {
       return
     }
-    if (device.staleAt !== undefined) {
-      return
-    }
     for (const event of history) {
       const { activeSession } = device
 
-      if (!activeSession) continue
+      if (!activeSession) {
+        continue
+      }
       const { event: verifiedEvent } = activeSession.sendEvent(event)
       await this.nostrPublish(verifiedEvent)
       await this.storeUserRecord(recipientPublicKey)
@@ -578,8 +739,8 @@ export class SessionManager {
     // Use ownerPublicKey to setup sessions with sibling devices
     this.setupUser(this.ownerPublicKey)
 
-    const recipientDevices = Array.from(userRecord.devices.values()).filter(d => d.staleAt === undefined)
-    const ownDevices = Array.from(ourUserRecord.devices.values()).filter(d => d.staleAt === undefined)
+    const recipientDevices = Array.from(userRecord.devices.values())
+    const ownDevices = Array.from(ourUserRecord.devices.values())
 
     // Merge and deduplicate by deviceId, excluding our own sending device
     // This fixes the self-message bug where sending to yourself would duplicate devices
@@ -591,28 +752,28 @@ export class SessionManager {
     }
     const devices = Array.from(deviceMap.values())
 
-    // Send to all devices in background (if sessions exist)
-    Promise.allSettled(
+    // Send to all devices and await completion before returning
+    // This ensures session state is ratcheted and persisted before function returns
+    await Promise.allSettled(
       devices.map(async (device) => {
         const { activeSession } = device
         if (!activeSession) {
           return
         }
         const { event: verifiedEvent } = activeSession.sendEvent(event)
-        await this.nostrPublish(verifiedEvent).catch(console.error)
+        await this.nostrPublish(verifiedEvent).catch(() => {})
       })
     )
-      .then(() => {
-        // Store recipient's user record
-        this.storeUserRecord(recipientIdentityKey)
-        // Also store owner's record if different (for sibling device sessions)
-        // This ensures session state is persisted after ratcheting
-        // TODO: check if really necessary, if yes, why?
-        if (this.ownerPublicKey !== recipientIdentityKey) {
-          this.storeUserRecord(this.ownerPublicKey)
-        }
-      })
-      .catch(console.error)
+
+    // Store recipient's user record after all messages sent
+    await this.storeUserRecord(recipientIdentityKey)
+    // Also store owner's record if different (for sibling device sessions)
+    // This ensures session state is persisted after ratcheting for both:
+    // - recipientDevices stored under recipientIdentityKey
+    // - Own sibling devices stored under ownerPublicKey
+    if (this.ownerPublicKey !== recipientIdentityKey) {
+      await this.storeUserRecord(this.ownerPublicKey)
+    }
 
     // Return the event with computed ID (same as library would compute)
     return completeEvent
@@ -645,7 +806,9 @@ export class SessionManager {
     rumor.id = getEventHash(rumor)
 
     // Use sendEvent for actual sending (includes queueing)
-    this.sendEvent(recipientPublicKey, rumor).catch(console.error)
+    // Note: sendEvent is not awaited to maintain backward compatibility
+    // The message is queued and will be sent when sessions are established
+    this.sendEvent(recipientPublicKey, rumor).catch(() => {})
 
     return rumor
   }
@@ -654,22 +817,19 @@ export class SessionManager {
     const userRecord = this.userRecords.get(publicKey)
     if (!userRecord) return
     const deviceRecord = userRecord.devices.get(deviceId)
-
     if (!deviceRecord) return
 
+    // Unsubscribe from sessions
     if (deviceRecord.activeSession) {
       this.removeSessionSubscription(publicKey, deviceId, deviceRecord.activeSession.name)
     }
-
     for (const session of deviceRecord.inactiveSessions) {
       this.removeSessionSubscription(publicKey, deviceId, session.name)
     }
 
-    deviceRecord.activeSession = undefined
-    deviceRecord.inactiveSessions = []
-    deviceRecord.staleAt = Date.now()
-
-    await this.storeUserRecord(publicKey).catch(console.error)
+    // Delete the device record entirely
+    userRecord.devices.delete(deviceId)
+    await this.storeUserRecord(publicKey).catch(() => {})
   }
 
   private buildMessageTags(
@@ -686,22 +846,26 @@ export class SessionManager {
   }
 
   private storeUserRecord(publicKey: string) {
+    const userRecord = this.userRecords.get(publicKey)
+    const devices = Array.from(userRecord?.devices.entries() || [])
+    const serializeSession = (session: Session): StoredSessionEntry => ({
+      name: session.name,
+      state: serializeSessionState(session.state)
+    })
+
     const data: StoredUserRecord = {
       publicKey: publicKey,
-      devices: Array.from(this.userRecords.get(publicKey)?.devices.entries() || []).map(
+      devices: devices.map(
         ([, device]) => ({
           deviceId: device.deviceId,
           activeSession: device.activeSession
-            ? serializeSessionState(device.activeSession.state)
+            ? serializeSession(device.activeSession)
             : null,
-          inactiveSessions: device.inactiveSessions.map((session) =>
-            serializeSessionState(session.state)
-          ),
+          inactiveSessions: device.inactiveSessions.map(serializeSession),
           createdAt: device.createdAt,
-          staleAt: device.staleAt,
-          hasResponderSession: device.hasResponderSession,
         })
       ),
+      knownDeviceIdentities: userRecord?.knownDeviceIdentities || [],
     }
     return this.storage.put(this.userRecordKey(publicKey), data)
   }
@@ -714,63 +878,66 @@ export class SessionManager {
 
         const devices = new Map<string, DeviceRecord>()
 
+        const deserializeSession = (entry: StoredSessionEntry): Session => {
+          const session = new Session(this.nostrSubscribe, deserializeSessionState(entry.state))
+          session.name = entry.name
+          this.processedInviteResponses.add(entry.name)
+          return session
+        }
+
         for (const deviceData of data.devices) {
           const {
             deviceId,
             activeSession: serializedActive,
             inactiveSessions: serializedInactive,
             createdAt,
-            staleAt,
-            hasResponderSession,
           } = deviceData
 
           try {
             const activeSession = serializedActive
-              ? new Session(
-                  this.nostrSubscribe,
-                  deserializeSessionState(serializedActive)
-                )
+              ? deserializeSession(serializedActive)
               : undefined
 
-            const inactiveSessions = serializedInactive.map(
-              (entry) => new Session(this.nostrSubscribe, deserializeSessionState(entry))
-            )
+            const inactiveSessions = serializedInactive.map(deserializeSession)
 
             devices.set(deviceId, {
               deviceId,
               activeSession,
               inactiveSessions,
               createdAt,
-              staleAt,
-              hasResponderSession,
             })
-          } catch (e) {
-            console.error(
-              `Failed to deserialize session for user ${publicKey}, device ${deviceId}:`,
-              e
-            )
+          } catch {
+            // Failed to deserialize session
           }
         }
+
+        const knownDeviceIdentities = data.knownDeviceIdentities || []
 
         this.userRecords.set(publicKey, {
           publicKey: data.publicKey,
           devices,
+          knownDeviceIdentities,
         })
 
+        // Rebuild delegateToOwner mapping from stored device identities
+        for (const identity of knownDeviceIdentities) {
+          this.delegateToOwner.set(identity, publicKey)
+        }
+
         for (const device of devices.values()) {
-          const { deviceId, activeSession, inactiveSessions, staleAt } = device
-          if (!deviceId || staleAt !== undefined) continue
+          const { deviceId, activeSession, inactiveSessions } = device
+          if (!deviceId) continue
 
           for (const session of inactiveSessions.reverse()) {
-            this.attachSessionSubscription(publicKey, device, session)
+            this.attachSessionSubscription(publicKey, device, session, true)  // Restore as inactive
           }
           if (activeSession) {
-            this.attachSessionSubscription(publicKey, device, activeSession)
+            this.attachSessionSubscription(publicKey, device, activeSession)  // Restore as active
           }
         }
       })
-      .catch((error) => {
-        console.error(`Failed to load user record for ${publicKey}:`, error)
+      .catch(() => {
+        // Failed to load user record
       })
   }
 
@@ -819,8 +986,8 @@ export class SessionManager {
               await this.storage.put(newKey, newUserRecordData)
               await this.storage.del(key)
             }
-          } catch (e) {
-            console.error("Migration error for user record:", e)
+          } catch {
+            // Migration error for user record
           }
         })
       )

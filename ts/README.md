@@ -1,29 +1,56 @@
-# nostr-double-ratchet (TypeScript)
+# nostr-double-ratchet
 
-TypeScript implementation of the Double Ratchet protocol for Nostr.
-
-Powers the encryption in [chat.iris.to](https://chat.iris.to).
+End-to-end encrypted messaging for Nostr using the Double Ratchet algorithm.
 
 ## Installation
 
 ```bash
-npm install nostr-double-ratchet
-# or
-yarn add nostr-double-ratchet
+pnpm add nostr-double-ratchet
 ```
 
-## Usage
+## Quick Start
 
-Check out [tests](./tests) for usage examples.
+```typescript
+import { AppKeysManager, DelegateManager } from "nostr-double-ratchet"
 
-## Documentation
+// 1. Create device identity
+const delegate = new DelegateManager({ nostrSubscribe, nostrPublish, storage })
+await delegate.init()
 
-[API Documentation](https://mmalmi.github.io/nostr-double-ratchet/)
+// 2. Register device (only on devices with main nsec)
+const appKeysManager = new AppKeysManager({ nostrPublish, storage })
+await appKeysManager.init()
+appKeysManager.addDevice(delegate.getRegistrationPayload())
+await appKeysManager.publish()
 
-## Development
+// 3. Activate and create session manager
+await delegate.activate(ownerPublicKey)
+const sessionManager = delegate.createSessionManager()
+await sessionManager.init()
 
-```bash
-yarn install
-yarn test
-yarn build
+// 4. Send and receive messages
+sessionManager.onEvent((event, from) => console.log(`${from}: ${event.content}`))
+await sessionManager.sendMessage(recipientPubkey, "Hello!")
 ```
+
+## Multi-Device
+
+- **Main device** (has nsec): Uses both `DelegateManager` and `AppKeysManager`
+- **Delegate device** (no nsec): Uses only `DelegateManager`, waits for activation
+
+```typescript
+// Delegate device flow
+const delegate = new DelegateManager({ nostrSubscribe, nostrPublish, storage })
+await delegate.init()
+// Transfer delegate.getRegistrationPayload().identityPubkey to main device
+const ownerPublicKey = await delegate.waitForActivation(60000)
+const sessionManager = delegate.createSessionManager()
+```
+
+## Event Types
+
+| Event | Kind | Purpose |
+|-------|------|---------|
+| AppKeys | 30078 | Lists authorized devices for a user |
+| Invite | 30078 | Per-device keys for session establishment |
+| Invite Response | 1059 | Encrypted session handshake |
