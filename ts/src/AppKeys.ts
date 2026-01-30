@@ -1,5 +1,5 @@
 import { VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
-import { APPLICATION_KEYS_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
+import { APP_KEYS_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
 
 const now = () => Math.round(Date.now() / 1000)
 
@@ -28,14 +28,14 @@ export interface DeviceEntry {
 }
 
 /**
- * Manages a consolidated list of device invites (kind 30078, d-tag "double-ratchet/application-keys").
+ * Manages a consolidated list of device invites (kind 30078, d-tag "double-ratchet/app-keys").
  * Single atomic event containing all device invites for a user.
  * Uses union merge strategy for conflict resolution.
  *
  * Note: ownerPublicKey is not stored - it's passed to getEvent() when publishing,
  * and NDK's signer sets the correct pubkey during signing anyway.
  */
-export class ApplicationKeys {
+export class AppKeys {
   private devices: Map<string, DeviceEntry> = new Map()
 
   constructor(devices: DeviceEntry[] = []) {
@@ -80,19 +80,19 @@ export class ApplicationKeys {
     ])
 
     return {
-      kind: APPLICATION_KEYS_EVENT_KIND,
+      kind: APP_KEYS_EVENT_KIND,
       pubkey: "", // Signer will set this
       content: "",
       created_at: now(),
       tags: [
-        ["d", "double-ratchet/application-keys"],
+        ["d", "double-ratchet/app-keys"],
         ["version", "1"],
         ...deviceTags,
       ],
     }
   }
 
-  static fromEvent(event: VerifiedEvent): ApplicationKeys {
+  static fromEvent(event: VerifiedEvent): AppKeys {
     if (!event.sig) {
       throw new Error("Event is not signed")
     }
@@ -109,7 +109,7 @@ export class ApplicationKeys {
         createdAt: parseInt(createdAt, 10) || event.created_at,
       }))
 
-    return new ApplicationKeys(devices)
+    return new AppKeys(devices)
   }
 
   serialize(): string {
@@ -118,14 +118,14 @@ export class ApplicationKeys {
     })
   }
 
-  static deserialize(json: string): ApplicationKeys {
+  static deserialize(json: string): AppKeys {
     const data = JSON.parse(json) as {
       devices: DeviceEntry[]
     }
-    return new ApplicationKeys(data.devices)
+    return new AppKeys(data.devices)
   }
 
-  merge(other: ApplicationKeys): ApplicationKeys {
+  merge(other: AppKeys): AppKeys {
     // Merge devices, preferring the one with earlier createdAt for same identityPubkey
     const mergedDevices = [...this.devices.values(), ...other.devices.values()]
       .reduce((map, device) => {
@@ -136,29 +136,29 @@ export class ApplicationKeys {
         return map
       }, new Map<string, DeviceEntry>())
 
-    return new ApplicationKeys(Array.from(mergedDevices.values()))
+    return new AppKeys(Array.from(mergedDevices.values()))
   }
 
   /**
-   * Subscribe to ApplicationKeys events from a user.
+   * Subscribe to AppKeys events from a user.
    * Similar to Invite.fromUser pattern.
    */
   static fromUser(
     user: string,
     subscribe: NostrSubscribe,
-    onApplicationKeysList: (applicationKeys: ApplicationKeys) => void
+    onAppKeysList: (appKeys: AppKeys) => void
   ): Unsubscribe {
     return subscribe(
       {
-        kinds: [APPLICATION_KEYS_EVENT_KIND],
+        kinds: [APP_KEYS_EVENT_KIND],
         authors: [user],
-        "#d": ["double-ratchet/application-keys"],
+        "#d": ["double-ratchet/app-keys"],
       },
       (event) => {
         if (event.pubkey !== user) return
         try {
-          const applicationKeys = ApplicationKeys.fromEvent(event)
-          onApplicationKeysList(applicationKeys)
+          const appKeys = AppKeys.fromEvent(event)
+          onAppKeysList(appKeys)
         } catch {
           // Invalid event
         }
@@ -167,8 +167,8 @@ export class ApplicationKeys {
   }
 
   /**
-   * Wait for ApplicationKeys from a user with timeout.
-   * Returns the most recent ApplicationKeys received within the timeout, or null.
+   * Wait for AppKeys from a user with timeout.
+   * Returns the most recent AppKeys received within the timeout, or null.
    * Note: Uses the most recent event by created_at, not merging, since
    * device revocation is determined by absence from the list.
    */
@@ -176,9 +176,9 @@ export class ApplicationKeys {
     user: string,
     subscribe: NostrSubscribe,
     timeoutMs = 500
-  ): Promise<ApplicationKeys | null> {
+  ): Promise<AppKeys | null> {
     return new Promise((resolve) => {
-      let latest: { list: ApplicationKeys; createdAt: number } | null = null
+      let latest: { list: AppKeys; createdAt: number } | null = null
 
       setTimeout(() => {
         unsubscribe()
@@ -187,14 +187,14 @@ export class ApplicationKeys {
 
       const unsubscribe = subscribe(
         {
-          kinds: [APPLICATION_KEYS_EVENT_KIND],
+          kinds: [APP_KEYS_EVENT_KIND],
           authors: [user],
-          "#d": ["double-ratchet/application-keys"],
+          "#d": ["double-ratchet/app-keys"],
         },
         (event) => {
           if (event.pubkey !== user) return
           try {
-            const list = ApplicationKeys.fromEvent(event)
+            const list = AppKeys.fromEvent(event)
             // Use >= to prefer later-delivered events when timestamps are equal
             // This handles replaceable events created within the same second
             if (!latest || event.created_at >= latest.createdAt) {

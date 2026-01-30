@@ -1,5 +1,5 @@
 import { vi } from "vitest"
-import { ApplicationManager, DelegateManager } from "../../src/ApplicationManager"
+import { AppKeysManager, DelegateManager } from "../../src/AppKeysManager"
 import {
   Filter,
   generateSecretKey,
@@ -10,10 +10,10 @@ import {
 import { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { MockRelay } from "./mockRelay"
 
-// Track ApplicationManagers per owner (by publicKey) and relay to share ApplicationKeys across devices
+// Track AppKeysManagers per owner (by publicKey) and relay to share AppKeys across devices
 // Key format: `${relayId}:${publicKey}` where relayId is a unique ID assigned to each relay
-const applicationManagers = new Map<string, ApplicationManager>()
-const applicationManagerStorages = new Map<string, InMemoryStorageAdapter>()
+const appKeysManagers = new Map<string, AppKeysManager>()
+const appKeysManagerStorages = new Map<string, InMemoryStorageAdapter>()
 const relayIds = new WeakMap<MockRelay, string>()
 let relayCounter = 0
 
@@ -45,33 +45,33 @@ export const createMockSessionManager = async (
   const delegateStorage = delegateStorages.get(storageKey) || new InMemoryStorageAdapter()
   delegateStorages.set(storageKey, delegateStorage)
 
-  // Get or create ApplicationManager for this owner+relay (shared across all devices of same owner on same relay)
+  // Get or create AppKeysManager for this owner+relay (shared across all devices of same owner on same relay)
   const relayId = getRelayId(mockRelay)
-  const applicationManagerKey = `${relayId}:${publicKey}`
-  let applicationManager = applicationManagers.get(applicationManagerKey)
-  let applicationManagerStorage = applicationManagerStorages.get(applicationManagerKey)
+  const appKeysManagerKey = `${relayId}:${publicKey}`
+  let appKeysManager = appKeysManagers.get(appKeysManagerKey)
+  let appKeysManagerStorage = appKeysManagerStorages.get(appKeysManagerKey)
 
-  if (!applicationManager || !applicationManagerStorage) {
-    applicationManagerStorage = existingStorage || new InMemoryStorageAdapter()
-    applicationManagerStorages.set(applicationManagerKey, applicationManagerStorage)
+  if (!appKeysManager || !appKeysManagerStorage) {
+    appKeysManagerStorage = existingStorage || new InMemoryStorageAdapter()
+    appKeysManagerStorages.set(appKeysManagerKey, appKeysManagerStorage)
 
-    // ApplicationManager publish signs with owner's secret key
+    // AppKeysManager publish signs with owner's secret key
     // Use mockRelay.publish() to properly handle replaceable events
-    const applicationManagerPublish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
+    const appKeysManagerPublish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
       return await mockRelay.publish(event, secretKey)
     })
 
-    // Create ApplicationManager for ApplicationKeys authority (only needs nostrPublish)
-    applicationManager = new ApplicationManager({
-      nostrPublish: applicationManagerPublish,
-      storage: applicationManagerStorage,
+    // Create AppKeysManager for AppKeys authority (only needs nostrPublish)
+    appKeysManager = new AppKeysManager({
+      nostrPublish: appKeysManagerPublish,
+      storage: appKeysManagerStorage,
     })
 
-    await applicationManager.init()
-    applicationManagers.set(applicationManagerKey, applicationManager)
+    await appKeysManager.init()
+    appKeysManagers.set(appKeysManagerKey, appKeysManager)
   }
 
-  const mockStorage = applicationManagerStorage!
+  const mockStorage = appKeysManagerStorage!
   const storageSpy = {
     get: vi.spyOn(mockStorage, "get"),
     del: vi.spyOn(mockStorage, "del"),
@@ -121,10 +121,10 @@ export const createMockSessionManager = async (
   if (storedOwner) {
     // Already activated, nothing more to do
   } else {
-    // New delegate - add to ApplicationKeys and wait for activation
+    // New delegate - add to AppKeys and wait for activation
     const payload = delegateManager.getRegistrationPayload()
-    applicationManager.addDevice(payload)
-    await applicationManager.publish() // Publish ApplicationKeys to relay
+    appKeysManager.addDevice(payload)
+    await appKeysManager.publish() // Publish AppKeys to relay
     await delegateManager.waitForActivation(5000)
   }
 
@@ -137,7 +137,7 @@ export const createMockSessionManager = async (
 
   return {
     manager,
-    applicationManager,
+    appKeysManager,
     delegateManager,
     subscribe,
     publish: delegatePublish,
@@ -153,7 +153,7 @@ export const createMockSessionManager = async (
 export const createMockDelegateSessionManager = async (
   _deviceId: string,
   sharedMockRelay: MockRelay,
-  mainApplicationManager: ApplicationManager
+  mainAppKeysManager: AppKeysManager
 ) => {
   const mockStorage = new InMemoryStorageAdapter()
   const storageSpy = {
@@ -195,9 +195,9 @@ export const createMockDelegateSessionManager = async (
   await delegateManager.init()
   const payload = delegateManager.getRegistrationPayload()
 
-  // Main device adds delegate to its ApplicationKeys and publishes
-  mainApplicationManager.addDevice(payload)
-  await mainApplicationManager.publish()
+  // Main device adds delegate to its AppKeys and publishes
+  mainAppKeysManager.addDevice(payload)
+  await mainAppKeysManager.publish()
 
   // Delegate waits for activation
   await delegateManager.waitForActivation(5000)
@@ -224,7 +224,7 @@ export const createMockDelegateSessionManager = async (
 
 // Reset all tracked state - call this in afterEach/beforeEach
 export const resetMockSessionManagerState = () => {
-  applicationManagers.clear()
-  applicationManagerStorages.clear()
+  appKeysManagers.clear()
+  appKeysManagerStorages.clear()
   delegateStorages.clear()
 }

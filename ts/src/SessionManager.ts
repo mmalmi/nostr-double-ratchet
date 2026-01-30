@@ -4,11 +4,11 @@ import {
   NostrPublish,
   Rumor,
   Unsubscribe,
-  APPLICATION_KEYS_EVENT_KIND,
+  APP_KEYS_EVENT_KIND,
   CHAT_MESSAGE_KIND,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
-import { ApplicationKeys, DeviceEntry } from "./ApplicationKeys"
+import { AppKeys, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
@@ -35,7 +35,7 @@ export interface DeviceRecord {
 export interface UserRecord {
   publicKey: string
   devices: Map<string, DeviceRecord>
-  /** Device identity pubkeys from ApplicationKeys - used to rebuild delegateToOwner on load */
+  /** Device identity pubkeys from AppKeys - used to rebuild delegateToOwner on load */
   knownDeviceIdentities: string[]
 }
 
@@ -183,25 +183,25 @@ export class SessionManager {
           // If not present (old client), fall back to resolveToOwner
           const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
 
-          // Verify the device is authorized by fetching owner's ApplicationKeys
-          const applicationKeys = await this.fetchApplicationKeys(claimedOwner)
+          // Verify the device is authorized by fetching owner's AppKeys
+          const appKeys = await this.fetchAppKeys(claimedOwner)
 
-          if (applicationKeys) {
-            const deviceInList = applicationKeys.getAllDevices().some(
+          if (appKeys) {
+            const deviceInList = appKeys.getAllDevices().some(
               d => d.identityPubkey === decrypted.inviteeIdentity
             )
             if (!deviceInList) {
-              console.log(`[DR:SessionManager] InviteResponse REJECTED: device ${decrypted.inviteeIdentity.slice(0,8)} not in owner's ApplicationKeys`)
+              console.log(`[DR:SessionManager] InviteResponse REJECTED: device ${decrypted.inviteeIdentity.slice(0,8)} not in owner's AppKeys`)
               return
             }
-            this.updateDelegateMapping(claimedOwner, applicationKeys)
+            this.updateDelegateMapping(claimedOwner, appKeys)
           } else {
-            // No ApplicationKeys - check cached identities or single-device case
+            // No AppKeys - check cached identities or single-device case
             const cachedIdentities = this.userRecords.get(claimedOwner)?.knownDeviceIdentities || []
             const isCached = cachedIdentities.includes(decrypted.inviteeIdentity)
             const isSingleDevice = decrypted.inviteeIdentity === claimedOwner
             if (!isCached && !isSingleDevice) {
-              console.log(`[DR:SessionManager] InviteResponse REJECTED: no ApplicationKeys for owner ${claimedOwner.slice(0,8)}, device ${decrypted.inviteeIdentity.slice(0,8)} not cached or owner`)
+              console.log(`[DR:SessionManager] InviteResponse REJECTED: no AppKeys for owner ${claimedOwner.slice(0,8)}, device ${decrypted.inviteeIdentity.slice(0,8)} not cached or owner`)
               return
             }
           }
@@ -231,12 +231,12 @@ export class SessionManager {
   }
 
   /**
-   * Fetch a user's ApplicationKeys from relays.
+   * Fetch a user's AppKeys from relays.
    * Returns null if not found within timeout.
    */
-  private fetchApplicationKeys(pubkey: string, timeoutMs = 2000): Promise<ApplicationKeys | null> {
+  private fetchAppKeys(pubkey: string, timeoutMs = 2000): Promise<AppKeys | null> {
     return new Promise((resolve) => {
-      let latestEvent: { created_at: number; applicationKeys: ApplicationKeys } | null = null
+      let latestEvent: { created_at: number; appKeys: AppKeys } | null = null
       let resolved = false
 
       // Use a short initial delay before resolving to allow event delivery
@@ -244,7 +244,7 @@ export class SessionManager {
         if (resolved) return
         resolved = true
         unsubscribe()
-        resolve(latestEvent?.applicationKeys ?? null)
+        resolve(latestEvent?.appKeys ?? null)
       }
 
       // Start timeout
@@ -252,18 +252,18 @@ export class SessionManager {
 
       const unsubscribe = this.nostrSubscribe(
         {
-          kinds: [APPLICATION_KEYS_EVENT_KIND],
+          kinds: [APP_KEYS_EVENT_KIND],
           authors: [pubkey],
-          "#d": ["double-ratchet/application-keys"],
+          "#d": ["double-ratchet/app-keys"],
         },
         (event) => {
           if (resolved) return
           try {
-            const applicationKeys = ApplicationKeys.fromEvent(event)
+            const appKeys = AppKeys.fromEvent(event)
             // Use >= to prefer later-delivered events when timestamps are equal
             // This handles replaceable events created within the same second
             if (!latestEvent || event.created_at >= latestEvent.created_at) {
-              latestEvent = { created_at: event.created_at, applicationKeys }
+              latestEvent = { created_at: event.created_at, appKeys }
             }
             // Resolve quickly after receiving an event (allow for more events to arrive)
             clearTimeout(timeout)
@@ -334,13 +334,13 @@ export class SessionManager {
   }
 
   /**
-   * Update the delegate-to-owner mapping from an ApplicationKeys.
+   * Update the delegate-to-owner mapping from an AppKeys.
    * Extracts delegate device pubkeys and maps them to the owner.
    * Persists the mapping in the user record for restart recovery.
    */
-  private updateDelegateMapping(ownerPubkey: string, applicationKeys: ApplicationKeys): void {
+  private updateDelegateMapping(ownerPubkey: string, appKeys: AppKeys): void {
     const userRecord = this.getOrCreateUserRecord(ownerPubkey)
-    const deviceIdentities = applicationKeys.getAllDevices()
+    const deviceIdentities = appKeys.getAllDevices()
       .map(d => d.identityPubkey)
       .filter(Boolean) as string[]
 
@@ -356,22 +356,22 @@ export class SessionManager {
     this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
-  private subscribeToUserApplicationKeys(
+  private subscribeToUserAppKeys(
     pubkey: string,
-    onApplicationKeys: (list: ApplicationKeys) => void
+    onAppKeys: (list: AppKeys) => void
   ): Unsubscribe {
     return this.nostrSubscribe(
       {
-        kinds: [APPLICATION_KEYS_EVENT_KIND],
+        kinds: [APP_KEYS_EVENT_KIND],
         authors: [pubkey],
-        "#d": ["double-ratchet/application-keys"],
+        "#d": ["double-ratchet/app-keys"],
       },
       (event) => {
         try {
-          const list = ApplicationKeys.fromEvent(event)
-          // Update delegate mapping whenever we receive an ApplicationKeys
+          const list = AppKeys.fromEvent(event)
+          // Update delegate mapping whenever we receive an AppKeys
           this.updateDelegateMapping(pubkey, list)
-          onApplicationKeys(list)
+          onAppKeys(list)
         } catch {
           // Invalid event, ignore
         }
@@ -465,17 +465,17 @@ export class SessionManager {
     this.sessionSubscriptions.set(key, unsub)
   }
 
-  private attachApplicationKeysSubscription(
+  private attachAppKeysSubscription(
     userPubkey: string,
-    onApplicationKeys?: (applicationKeys: ApplicationKeys) => void | Promise<void>
+    onAppKeys?: (appKeys: AppKeys) => void | Promise<void>
   ): void {
-    const key = `applicationkeys:${userPubkey}`
+    const key = `appkeys:${userPubkey}`
     if (this.inviteSubscriptions.has(key)) return
 
-    const unsubscribe = this.subscribeToUserApplicationKeys(
+    const unsubscribe = this.subscribeToUserAppKeys(
       userPubkey,
-      async (applicationKeys) => {
-        if (onApplicationKeys) await onApplicationKeys(applicationKeys)
+      async (appKeys) => {
+        if (onAppKeys) await onAppKeys(appKeys)
       }
     )
 
@@ -585,13 +585,13 @@ export class SessionManager {
       this.inviteSubscriptions.set(inviteSubKey, unsub)
     }
 
-    this.attachApplicationKeysSubscription(userPubkey, async (applicationKeys) => {
-      const devices = applicationKeys.getAllDevices()
+    this.attachAppKeysSubscription(userPubkey, async (appKeys) => {
+      const devices = appKeys.getAllDevices()
       const userRecordDevices = Array.from(this.userRecords.get(userPubkey)?.devices.keys() || [])
-      console.log(`[DR:SessionManager] ApplicationKeys for ${userPubkey.slice(0,8)}: devices=[${devices.map(d => d.identityPubkey.slice(0,8)).join(',')}] existing=[${userRecordDevices.map(d => d.slice(0,8)).join(',')}]`)
+      console.log(`[DR:SessionManager] AppKeys for ${userPubkey.slice(0,8)}: devices=[${devices.map(d => d.identityPubkey.slice(0,8)).join(',')}] existing=[${userRecordDevices.map(d => d.slice(0,8)).join(',')}]`)
       const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
 
-      // Handle devices no longer in list (revoked or ApplicationKeys recreated from scratch)
+      // Handle devices no longer in list (revoked or AppKeys recreated from scratch)
       const userRecord = this.userRecords.get(userPubkey)
       if (userRecord) {
         for (const [deviceId] of userRecord.devices) {
@@ -609,7 +609,7 @@ export class SessionManager {
         }
       }
 
-      // For each device in ApplicationKeys, subscribe to their Invite event
+      // For each device in AppKeys, subscribe to their Invite event
       for (const device of devices) {
         subscribeToDeviceInvite(device)
       }
@@ -679,11 +679,11 @@ export class SessionManager {
       this.userRecords.delete(userPubkey)
     }
 
-    const applicationKeysKey = `applicationkeys:${userPubkey}`
-    const applicationKeysUnsub = this.inviteSubscriptions.get(applicationKeysKey)
-    if (applicationKeysUnsub) {
-      applicationKeysUnsub()
-      this.inviteSubscriptions.delete(applicationKeysKey)
+    const appKeysKey = `appkeys:${userPubkey}`
+    const appKeysUnsub = this.inviteSubscriptions.get(appKeysKey)
+    if (appKeysUnsub) {
+      appKeysUnsub()
+      this.inviteSubscriptions.delete(appKeysKey)
     }
 
     this.messageHistory.delete(userPubkey)

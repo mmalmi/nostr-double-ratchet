@@ -1,5 +1,5 @@
 import { vi } from "vitest"
-import { ApplicationManager, DelegateManager } from "../../src/ApplicationManager"
+import { AppKeysManager, DelegateManager } from "../../src/AppKeysManager"
 import {
   Filter,
   finalizeEvent,
@@ -47,8 +47,8 @@ export const createControlledMockSessionManager = async (
       return handle.close
     })
 
-  // ApplicationManager publish signs with owner's secret key
-  const applicationManagerPublish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
+  // AppKeysManager publish signs with owner's secret key
+  const appKeysManagerPublish = vi.fn().mockImplementation(async (event: UnsignedEvent) => {
     if (autoDeliver) {
       const eventId = await mockRelay.publishAndDeliver(event, secretKey)
       const allEvents = mockRelay.getAllEvents()
@@ -60,13 +60,13 @@ export const createControlledMockSessionManager = async (
     }
   })
 
-  // Create ApplicationManager for ApplicationKeys authority (only needs nostrPublish)
-  const applicationManager = new ApplicationManager({
-    nostrPublish: applicationManagerPublish,
+  // Create AppKeysManager for AppKeys authority (only needs nostrPublish)
+  const appKeysManager = new AppKeysManager({
+    nostrPublish: appKeysManagerPublish,
     storage: mockStorage,
   })
 
-  await applicationManager.init()
+  await appKeysManager.init()
 
   // Create DelegateManager for device identity
   // Use a holder so the publish function can access the manager's key during init
@@ -108,9 +108,9 @@ export const createControlledMockSessionManager = async (
   await delegateManager.init()
   const payload = delegateManager.getRegistrationPayload()
 
-  // Add device to ApplicationKeys and publish
-  applicationManager.addDevice(payload)
-  await applicationManager.publish() // Publish ApplicationKeys to relay
+  // Add device to AppKeys and publish
+  appKeysManager.addDevice(payload)
+  await appKeysManager.publish() // Publish AppKeys to relay
 
   // Wait for activation
   await delegateManager.waitForActivation(5000)
@@ -124,10 +124,10 @@ export const createControlledMockSessionManager = async (
 
   return {
     manager,
-    applicationManager,
+    appKeysManager,
     delegateManager,
     subscribe,
-    publish: applicationManagerPublish,
+    publish: appKeysManagerPublish,
     onEvent,
     mockStorage,
     storageSpy,
@@ -140,7 +140,7 @@ export const createControlledMockSessionManager = async (
 export const createControlledMockDelegateSessionManager = async (
   _deviceId: string,
   sharedMockRelay: ControlledMockRelay,
-  mainApplicationManager: ApplicationManager
+  mainAppKeysManager: AppKeysManager
 ) => {
   const mockStorage = new InMemoryStorageAdapter()
   const storageSpy = {
@@ -188,9 +188,9 @@ export const createControlledMockDelegateSessionManager = async (
   await delegateManager.init()
   const payload = delegateManager.getRegistrationPayload()
 
-  // Main device adds delegate to its ApplicationKeys and publishes
-  mainApplicationManager.addDevice(payload)
-  await mainApplicationManager.publish()
+  // Main device adds delegate to its AppKeys and publishes
+  mainAppKeysManager.addDevice(payload)
+  await mainAppKeysManager.publish()
 
   // Delegate waits for activation
   await delegateManager.waitForActivation(5000)

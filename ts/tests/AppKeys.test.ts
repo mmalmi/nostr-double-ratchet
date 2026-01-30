@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
-import { ApplicationKeys, DeviceEntry } from '../src/ApplicationKeys'
-import { APPLICATION_KEYS_EVENT_KIND } from '../src/types'
+import { AppKeys, DeviceEntry } from '../src/AppKeys'
+import { APP_KEYS_EVENT_KIND } from '../src/types'
 
-describe('ApplicationKeys', () => {
+describe('AppKeys', () => {
   /**
    * Create a simple device entry.
    * identityPubkey serves as the device identifier.
@@ -16,16 +16,16 @@ describe('ApplicationKeys', () => {
   }
 
   describe('constructor and basic properties', () => {
-    it('should create an empty ApplicationKeys', () => {
-      const list = new ApplicationKeys()
+    it('should create an empty AppKeys', () => {
+      const list = new AppKeys()
 
       expect(list.getAllDevices()).toHaveLength(0)
     })
 
-    it('should create ApplicationKeys with initial devices', () => {
+    it('should create AppKeys with initial devices', () => {
       const device = createTestDevice()
 
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
 
       expect(list.getAllDevices()).toHaveLength(1)
       expect(list.getAllDevices()[0].identityPubkey).toBe(device.identityPubkey)
@@ -34,7 +34,7 @@ describe('ApplicationKeys', () => {
 
   describe('device management', () => {
     it('should add a device', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
       const device = createTestDevice()
 
       list.addDevice(device)
@@ -44,7 +44,7 @@ describe('ApplicationKeys', () => {
     })
 
     it('should add multiple devices', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const device1 = createTestDevice()
       const device2 = createTestDevice()
@@ -58,7 +58,7 @@ describe('ApplicationKeys', () => {
     })
 
     it('should not add duplicate device (same identityPubkey)', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
       const device = createTestDevice()
 
       list.addDevice(device)
@@ -69,7 +69,7 @@ describe('ApplicationKeys', () => {
 
     it('should remove a device', () => {
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
 
       expect(list.getAllDevices()).toHaveLength(1)
 
@@ -81,7 +81,7 @@ describe('ApplicationKeys', () => {
 
     it('should allow re-adding a device after removal', () => {
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
 
       list.removeDevice(device.identityPubkey)
       expect(list.getAllDevices()).toHaveLength(0)
@@ -95,7 +95,7 @@ describe('ApplicationKeys', () => {
     it('should get device by identityPubkey', () => {
       const device1 = createTestDevice()
       const device2 = createTestDevice()
-      const list = new ApplicationKeys([device1, device2])
+      const list = new AppKeys([device1, device2])
 
       const found = list.getDevice(device2.identityPubkey)
 
@@ -103,7 +103,7 @@ describe('ApplicationKeys', () => {
     })
 
     it('should return undefined for non-existent device', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       expect(list.getDevice('non-existent-pubkey')).toBeUndefined()
     })
@@ -112,13 +112,13 @@ describe('ApplicationKeys', () => {
   describe('event serialization', () => {
     it('should create a valid unsigned event', () => {
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
 
       const event = list.getEvent()
 
-      expect(event.kind).toBe(APPLICATION_KEYS_EVENT_KIND)
+      expect(event.kind).toBe(APP_KEYS_EVENT_KIND)
       expect(event.pubkey).toBe('') // Signer will set this
-      expect(event.tags).toContainEqual(['d', 'double-ratchet/application-keys'])
+      expect(event.tags).toContainEqual(['d', 'double-ratchet/app-keys'])
       expect(event.tags).toContainEqual(['version', '1'])
 
       // Simplified tag format: ["device", identityPubkey, createdAt]
@@ -131,7 +131,7 @@ describe('ApplicationKeys', () => {
 
     it('should not include removed tags in event (devices are simply deleted)', () => {
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
 
       list.removeDevice(device.identityPubkey)
       const event = list.getEvent()
@@ -142,16 +142,16 @@ describe('ApplicationKeys', () => {
       expect(event.tags.filter(t => t[0] === 'device')).toHaveLength(0)
     })
 
-    it('should parse ApplicationKeys from event', () => {
+    it('should parse AppKeys from event', () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
 
       const event = list.getEvent()
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
 
-      const parsed = ApplicationKeys.fromEvent(signedEvent)
+      const parsed = AppKeys.fromEvent(signedEvent)
 
       expect(parsed.getAllDevices()).toHaveLength(1)
       expect(parsed.getAllDevices()[0].identityPubkey).toBe(device.identityPubkey)
@@ -162,35 +162,35 @@ describe('ApplicationKeys', () => {
     it('should parse event after device removal (device is simply gone)', () => {
       const ownerPrivateKey = generateSecretKey()
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
       list.removeDevice(device.identityPubkey)
 
       const event = list.getEvent()
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
 
-      const parsed = ApplicationKeys.fromEvent(signedEvent)
+      const parsed = AppKeys.fromEvent(signedEvent)
 
       expect(parsed.getAllDevices()).toHaveLength(0)
     })
 
     it('should throw on unsigned event', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const event = list.getEvent()
       // Event without signature
       const unsignedEvent = { ...event, id: 'fake-id', sig: '' } as any
 
-      expect(() => ApplicationKeys.fromEvent(unsignedEvent)).toThrow('Event is not signed')
+      expect(() => AppKeys.fromEvent(unsignedEvent)).toThrow('Event is not signed')
     })
   })
 
   describe('serialization for persistence', () => {
     it('should serialize and deserialize', () => {
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
 
       const json = list.serialize()
-      const restored = ApplicationKeys.deserialize(json)
+      const restored = AppKeys.deserialize(json)
 
       expect(restored.getAllDevices()).toHaveLength(1)
       expect(restored.getAllDevices()[0].identityPubkey).toBe(device.identityPubkey)
@@ -198,11 +198,11 @@ describe('ApplicationKeys', () => {
 
     it('should serialize empty list after device removal', () => {
       const device = createTestDevice()
-      const list = new ApplicationKeys([device])
+      const list = new AppKeys([device])
       list.removeDevice(device.identityPubkey)
 
       const json = list.serialize()
-      const restored = ApplicationKeys.deserialize(json)
+      const restored = AppKeys.deserialize(json)
 
       expect(restored.getAllDevices()).toHaveLength(0)
     })
@@ -213,8 +213,8 @@ describe('ApplicationKeys', () => {
       const device1 = createTestDevice()
       const device2 = createTestDevice()
 
-      const list1 = new ApplicationKeys([device1])
-      const list2 = new ApplicationKeys([device2])
+      const list1 = new AppKeys([device1])
+      const list2 = new AppKeys([device2])
 
       const merged = list1.merge(list2)
 
@@ -227,10 +227,10 @@ describe('ApplicationKeys', () => {
       const device1 = createTestDevice()
       const device2 = createTestDevice()
 
-      const list1 = new ApplicationKeys([device1])
+      const list1 = new AppKeys([device1])
       list1.removeDevice(device1.identityPubkey)
 
-      const list2 = new ApplicationKeys([device2])
+      const list2 = new AppKeys([device2])
       list2.removeDevice(device2.identityPubkey)
 
       const merged = list1.merge(list2)
@@ -243,10 +243,10 @@ describe('ApplicationKeys', () => {
       const device = createTestDevice()
 
       // List1 has the device
-      const list1 = new ApplicationKeys([device])
+      const list1 = new AppKeys([device])
 
       // List2 has removed the device (so it's empty)
-      const list2 = new ApplicationKeys([device])
+      const list2 = new AppKeys([device])
       list2.removeDevice(device.identityPubkey)
 
       const merged = list1.merge(list2)
@@ -267,8 +267,8 @@ describe('ApplicationKeys', () => {
         createdAt: 2000,
       }
 
-      const list1 = new ApplicationKeys([laterDevice])
-      const list2 = new ApplicationKeys([earlierDevice])
+      const list1 = new AppKeys([laterDevice])
+      const list2 = new AppKeys([earlierDevice])
 
       const merged = list1.merge(list2)
 
@@ -279,7 +279,7 @@ describe('ApplicationKeys', () => {
   describe('createDeviceEntry helper', () => {
     it('should create a device entry with identity info', () => {
       const identityPubkey = getPublicKey(generateSecretKey())
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const now = Math.floor(Date.now() / 1000)
       const device = list.createDeviceEntry(identityPubkey)
@@ -293,7 +293,7 @@ describe('ApplicationKeys', () => {
 
   describe('DeviceEntry with identityPubkey', () => {
     it('should add device with identityPubkey', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -307,7 +307,7 @@ describe('ApplicationKeys', () => {
     })
 
     it('should include identityPubkey in event tags', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -324,7 +324,7 @@ describe('ApplicationKeys', () => {
 
     it('should parse identityPubkey from event', () => {
       const ownerPrivateKey = generateSecretKey()
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -334,7 +334,7 @@ describe('ApplicationKeys', () => {
       const event = list.getEvent()
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
 
-      const parsed = ApplicationKeys.fromEvent(signedEvent)
+      const parsed = AppKeys.fromEvent(signedEvent)
       const parsedDevice = parsed.getDevice(device.identityPubkey)
 
       expect(parsedDevice).toBeDefined()
@@ -342,7 +342,7 @@ describe('ApplicationKeys', () => {
     })
 
     it('should preserve identityPubkey in serialization', () => {
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -350,7 +350,7 @@ describe('ApplicationKeys', () => {
 
       list.addDevice(device)
       const json = list.serialize()
-      const restored = ApplicationKeys.deserialize(json)
+      const restored = AppKeys.deserialize(json)
 
       const restoredDevice = restored.getDevice(device.identityPubkey)
       expect(restoredDevice).toBeDefined()
@@ -362,8 +362,8 @@ describe('ApplicationKeys', () => {
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
       const device = createTestDevice(delegatePublicKey)
 
-      const list1 = new ApplicationKeys([device])
-      const list2 = new ApplicationKeys()
+      const list1 = new AppKeys([device])
+      const list2 = new AppKeys()
 
       const merged = list1.merge(list2)
 
@@ -375,7 +375,7 @@ describe('ApplicationKeys', () => {
     it('should handle mixed devices (with different identityPubkeys)', () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
-      const list = new ApplicationKeys()
+      const list = new AppKeys()
 
       const delegatePrivateKey = generateSecretKey()
       const delegatePublicKey = getPublicKey(delegatePrivateKey)
@@ -388,7 +388,7 @@ describe('ApplicationKeys', () => {
 
       const event = list.getEvent()
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
-      const parsed = ApplicationKeys.fromEvent(signedEvent)
+      const parsed = AppKeys.fromEvent(signedEvent)
 
       // Both devices should have identityPubkey set correctly
       expect(parsed.getDevice(mainDevice.identityPubkey)?.identityPubkey).toBe(ownerPublicKey)

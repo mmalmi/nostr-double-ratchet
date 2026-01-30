@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { generateSecretKey, getPublicKey, finalizeEvent, UnsignedEvent, VerifiedEvent } from 'nostr-tools'
-import { ApplicationManager, DelegateManager } from '../src/ApplicationManager'
+import { AppKeysManager, DelegateManager } from '../src/AppKeysManager'
 import { InMemoryStorageAdapter } from '../src/StorageAdapter'
 import { ControlledMockRelay } from './helpers/ControlledMockRelay'
 
@@ -31,12 +31,12 @@ describe('Delegate Device Architecture', () => {
   })
 
   it('main device goes through same pairing flow as delegate device', async () => {
-    // 1. Create ApplicationManager (authority) - new API only needs nostrPublish
-    const applicationManager = new ApplicationManager({
+    // 1. Create AppKeysManager (authority) - new API only needs nostrPublish
+    const appKeysManager = new AppKeysManager({
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
     })
-    await applicationManager.init()
+    await appKeysManager.init()
 
     // 2. Create DelegateManager for main device (same flow as any device!)
     // Use a holder object to capture the manager reference for the publish closure
@@ -64,11 +64,11 @@ describe('Delegate Device Architecture', () => {
     await mainDelegateManager.init()
     const mainPayload = mainDelegateManager.getRegistrationPayload()
 
-    // 3. Add main device to ApplicationKeys (local) and publish
-    applicationManager.addDevice(mainPayload)
-    await applicationManager.publish()
+    // 3. Add main device to AppKeys (local) and publish
+    appKeysManager.addDevice(mainPayload)
+    await appKeysManager.publish()
 
-    const devices = applicationManager.getOwnDevices()
+    const devices = appKeysManager.getOwnDevices()
     expect(devices.length).toBe(1)
     expect(devices[0].identityPubkey).toBe(mainPayload.identityPubkey)
 
@@ -85,12 +85,12 @@ describe('Delegate Device Architecture', () => {
   })
 
   it('delegate device can be added and activated', async () => {
-    // Setup: Create owner's ApplicationManager - new API only needs nostrPublish
-    const applicationManager = new ApplicationManager({
+    // Setup: Create owner's AppKeysManager - new API only needs nostrPublish
+    const appKeysManager = new AppKeysManager({
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
     })
-    await applicationManager.init()
+    await appKeysManager.init()
 
     // Create delegate DelegateManager
     const managerHolder: { manager: DelegateManager | null } = { manager: null }
@@ -116,12 +116,12 @@ describe('Delegate Device Architecture', () => {
     await delegateManager.init()
     const payload = delegateManager.getRegistrationPayload()
 
-    // Start waiting for activation BEFORE adding to ApplicationKeys
+    // Start waiting for activation BEFORE adding to AppKeys
     const activationPromise = delegateManager.waitForActivation(5000)
 
     // Owner adds delegate device (local) and publishes
-    applicationManager.addDevice(payload)
-    await applicationManager.publish()
+    appKeysManager.addDevice(payload)
+    await appKeysManager.publish()
 
     // Delegate receives activation
     const activatedOwnerPubkey = await activationPromise
@@ -135,11 +135,11 @@ describe('Delegate Device Architecture', () => {
 
   it('revoked device is detected', async () => {
     // Setup - new API only needs nostrPublish
-    const applicationManager = new ApplicationManager({
+    const appKeysManager = new AppKeysManager({
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
     })
-    await applicationManager.init()
+    await appKeysManager.init()
 
     const managerHolder: { manager: DelegateManager | null } = { manager: null }
     const delegatePublish = vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
@@ -166,8 +166,8 @@ describe('Delegate Device Architecture', () => {
 
     // Add and activate device
     const activationPromise = delegateManager.waitForActivation(5000)
-    applicationManager.addDevice(payload)
-    await applicationManager.publish()
+    appKeysManager.addDevice(payload)
+    await appKeysManager.publish()
     await activationPromise
 
     // Device is not revoked initially
@@ -175,8 +175,8 @@ describe('Delegate Device Architecture', () => {
     expect(initialRevoked).toBe(false)
 
     // Revoke device and publish
-    applicationManager.revokeDevice(payload.identityPubkey)
-    await applicationManager.publish()
+    appKeysManager.revokeDevice(payload.identityPubkey)
+    await appKeysManager.publish()
 
     // Device detects revocation
     const revoked = await delegateManager.isRevoked()

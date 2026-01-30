@@ -51,6 +51,6 @@ const sessionManager = delegate.createSessionManager()
 
 | Event | Kind | Purpose |
 |-------|------|---------|
-| ApplicationKeys | 30078 | Lists authorized devices for a user |
+| AppKeys | 30078 | Lists authorized devices for a user |
 | Invite | 30078 | Per-device keys for session establishment |
 | Invite Response | 1059 | Encrypted session handshake |

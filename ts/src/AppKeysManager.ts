@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools"
-import { ApplicationKeys, DeviceEntry } from "./ApplicationKeys"
+import { AppKeys, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
-import { NostrSubscribe, NostrPublish, APPLICATION_KEYS_EVENT_KIND, Unsubscribe } from "./types"
+import { NostrSubscribe, NostrPublish, APP_KEYS_EVENT_KIND, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
@@ -10,9 +10,9 @@ export interface DelegatePayload {
 }
 
 /**
- * Options for ApplicationManager (authority for ApplicationKeys)
+ * Options for AppKeysManager (authority for AppKeys)
  */
-export interface ApplicationManagerOptions {
+export interface AppKeysManagerOptions {
   nostrPublish: NostrPublish
   storage?: StorageAdapter
 }
@@ -28,15 +28,15 @@ export interface DelegateManagerOptions {
 
 
 /**
- * ApplicationManager - Authority for ApplicationKeys.
- * Manages local ApplicationKeys and publishes to relays.
+ * AppKeysManager - Authority for AppKeys.
+ * Manages local AppKeys and publishes to relays.
  * Does NOT have device identity (no Invite, no SessionManager creation).
  */
-export class ApplicationManager {
+export class AppKeysManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
 
-  private applicationKeys: ApplicationKeys | null = null
+  private appKeys: AppKeys | null = null
   private initialized = false
 
   private readonly storageVersion = "3"
@@ -44,7 +44,7 @@ export class ApplicationManager {
     return `v${this.storageVersion}`
   }
 
-  constructor(options: ApplicationManagerOptions) {
+  constructor(options: AppKeysManagerOptions) {
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
   }
@@ -54,69 +54,69 @@ export class ApplicationManager {
     this.initialized = true
 
     // Load local only - no auto-subscribe, no auto-publish, no auto-merge
-    this.applicationKeys = await this.loadApplicationKeys()
-    if (!this.applicationKeys) {
-      this.applicationKeys = new ApplicationKeys()
+    this.appKeys = await this.loadAppKeys()
+    if (!this.appKeys) {
+      this.appKeys = new AppKeys()
     }
   }
 
-  getApplicationKeys(): ApplicationKeys | null {
-    return this.applicationKeys
+  getAppKeys(): AppKeys | null {
+    return this.appKeys
   }
 
   getOwnDevices(): DeviceEntry[] {
-    return this.applicationKeys?.getAllDevices() || []
+    return this.appKeys?.getAllDevices() || []
   }
 
   /**
-   * Add a device to the ApplicationKeys.
+   * Add a device to the AppKeys.
    * Only adds identity info - the device publishes its own Invite separately.
    * This is a local-only operation - call publish() to publish to relays.
    */
   addDevice(payload: DelegatePayload): void {
-    if (!this.applicationKeys) {
-      this.applicationKeys = new ApplicationKeys()
+    if (!this.appKeys) {
+      this.appKeys = new AppKeys()
     }
 
     const device: DeviceEntry = {
       identityPubkey: payload.identityPubkey,
       createdAt: Math.floor(Date.now() / 1000),
     }
-    this.applicationKeys.addDevice(device)
-    this.saveApplicationKeys(this.applicationKeys).catch(() => {})
+    this.appKeys.addDevice(device)
+    this.saveAppKeys(this.appKeys).catch(() => {})
   }
 
   /**
-   * Revoke a device from the ApplicationKeys.
+   * Revoke a device from the AppKeys.
    * This is a local-only operation - call publish() to publish to relays.
    */
   revokeDevice(identityPubkey: string): void {
-    if (!this.applicationKeys) return
+    if (!this.appKeys) return
 
-    this.applicationKeys.removeDevice(identityPubkey)
-    this.saveApplicationKeys(this.applicationKeys).catch(() => {})
+    this.appKeys.removeDevice(identityPubkey)
+    this.saveAppKeys(this.appKeys).catch(() => {})
   }
 
   /**
-   * Publish the current ApplicationKeys to relays.
+   * Publish the current AppKeys to relays.
    * This is the only way to publish - addDevice/revokeDevice are local-only.
    */
   async publish(): Promise<void> {
-    if (!this.applicationKeys) {
-      this.applicationKeys = new ApplicationKeys()
+    if (!this.appKeys) {
+      this.appKeys = new AppKeys()
     }
 
-    const event = this.applicationKeys.getEvent()
+    const event = this.appKeys.getEvent()
     await this.nostrPublish(event)
   }
 
   /**
-   * Replace the local ApplicationKeys with the given list and save to storage.
+   * Replace the local AppKeys with the given list and save to storage.
    * Used for authority transfer - receive list from another device, then call publish().
    */
-  async setApplicationKeys(list: ApplicationKeys): Promise<void> {
-    this.applicationKeys = list
-    await this.saveApplicationKeys(list)
+  async setAppKeys(list: AppKeys): Promise<void> {
+    this.appKeys = list
+    await this.saveAppKeys(list)
   }
 
   /**
@@ -126,22 +126,22 @@ export class ApplicationManager {
     // No-op - no subscriptions to clean up
   }
 
-  private applicationKeysKey(): string {
-    return `${this.versionPrefix}/application-manager/application-keys`
+  private appKeysKey(): string {
+    return `${this.versionPrefix}/app-keys-manager/app-keys`
   }
 
-  private async loadApplicationKeys(): Promise<ApplicationKeys | null> {
-    const data = await this.storage.get<string>(this.applicationKeysKey())
+  private async loadAppKeys(): Promise<AppKeys | null> {
+    const data = await this.storage.get<string>(this.appKeysKey())
     if (!data) return null
     try {
-      return ApplicationKeys.deserialize(data)
+      return AppKeys.deserialize(data)
     } catch {
       return null
     }
   }
 
-  private async saveApplicationKeys(list: ApplicationKeys): Promise<void> {
-    await this.storage.put(this.applicationKeysKey(), list.serialize())
+  private async saveAppKeys(list: AppKeys): Promise<void> {
+    await this.storage.put(this.appKeysKey(), list.serialize())
   }
 }
 
@@ -210,7 +210,7 @@ export class DelegateManager {
   }
 
   /**
-   * Get the registration payload for adding this device to an ApplicationManager.
+   * Get the registration payload for adding this device to an AppKeysManager.
    * Must be called after init().
    */
   getRegistrationPayload(): DelegatePayload {
@@ -257,7 +257,7 @@ export class DelegateManager {
   }
 
   /**
-   * Wait for this device to be activated (added to an ApplicationKeys).
+   * Wait for this device to be activated (added to an AppKeys).
    * Returns the owner's public key once activated.
    * For delegate devices that don't know the owner ahead of time.
    */
@@ -272,16 +272,16 @@ export class DelegateManager {
         reject(new Error("Activation timeout"))
       }, timeoutMs)
 
-      // Subscribe to all ApplicationKeys events and look for our identityPubkey
+      // Subscribe to all AppKeys events and look for our identityPubkey
       const unsubscribe = this.nostrSubscribe(
         {
-          kinds: [APPLICATION_KEYS_EVENT_KIND],
-          "#d": ["double-ratchet/application-keys"],
+          kinds: [APP_KEYS_EVENT_KIND],
+          "#d": ["double-ratchet/app-keys"],
         },
         async (event) => {
           try {
-            const applicationKeys = ApplicationKeys.fromEvent(event)
-            const device = applicationKeys.getDevice(this.devicePublicKey)
+            const appKeys = AppKeys.fromEvent(event)
+            const device = appKeys.getDevice(this.devicePublicKey)
 
             // Check that our identity pubkey is in the list
             if (device) {
@@ -292,7 +292,7 @@ export class DelegateManager {
               resolve(event.pubkey)
             }
           } catch {
-            // Invalid ApplicationKeys
+            // Invalid AppKeys
           }
         }
       )
@@ -302,7 +302,7 @@ export class DelegateManager {
   }
 
   /**
-   * Check if this device has been revoked from the owner's ApplicationKeys.
+   * Check if this device has been revoked from the owner's AppKeys.
    * @param options.timeoutMs - Timeout for each attempt (default 2000ms)
    * @param options.retries - Number of retry attempts (default 2)
    */
@@ -313,15 +313,15 @@ export class DelegateManager {
 
     // Retry loop to handle slow relays
     for (let attempt = 0; attempt <= retries; attempt++) {
-      const applicationKeys = await ApplicationKeys.waitFor(ownerPubkey, this.nostrSubscribe, timeoutMs)
-      if (applicationKeys) {
-        const device = applicationKeys.getDevice(this.devicePublicKey)
+      const appKeys = await AppKeys.waitFor(ownerPubkey, this.nostrSubscribe, timeoutMs)
+      if (appKeys) {
+        const device = appKeys.getDevice(this.devicePublicKey)
         // Device is revoked if not in list
         return !device
       }
     }
 
-    // No ApplicationKeys found after all retries - assume revoked
+    // No AppKeys found after all retries - assume revoked
     return true
   }
 
@@ -398,3 +398,6 @@ export class DelegateManager {
   }
 }
 
+// Backwards compatibility aliases
+export { AppKeysManager as ApplicationManager }
+export type { AppKeysManagerOptions as ApplicationManagerOptions }

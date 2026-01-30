@@ -4,7 +4,7 @@ import { SessionManager } from "../../src/SessionManager"
 import { Rumor } from "../../src/types"
 import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
 import { generateSecretKey, getPublicKey } from "nostr-tools"
-import { ApplicationManager } from "../../src/ApplicationManager"
+import { AppKeysManager } from "../../src/AppKeysManager"
 
 export type ActorId = "alice" | "bob"
 
@@ -25,7 +25,7 @@ interface ActorState {
   secretKey: Uint8Array
   publicKey: string
   devices: Map<string, DeviceState>
-  mainApplicationManager?: ApplicationManager
+  mainAppKeysManager?: AppKeysManager
 }
 
 interface DeviceState {
@@ -294,15 +294,15 @@ async function addDevice(context: ScenarioContext, actorId: ActorId, deviceId: s
     throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
   }
 
-  const { manager, mockStorage, applicationManager } = await createMockSessionManager(
+  const { manager, mockStorage, appKeysManager } = await createMockSessionManager(
     deviceId,
     context.relay,
     actor.secretKey
   )
 
-  // Track the first device's ApplicationManager as the main one for this actor
-  if (!actor.mainApplicationManager) {
-    actor.mainApplicationManager = applicationManager
+  // Track the first device's AppKeysManager as the main one for this actor
+  if (!actor.mainAppKeysManager) {
+    actor.mainAppKeysManager = appKeysManager
   }
 
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
@@ -326,14 +326,14 @@ async function addDelegateDevice(
     throw new Error(`Main device '${mainDeviceId}' not found for actor '${actorId}'`)
   }
 
-  if (!actor.mainApplicationManager) {
-    throw new Error(`No main ApplicationManager found for actor '${actorId}'`)
+  if (!actor.mainAppKeysManager) {
+    throw new Error(`No main AppKeysManager found for actor '${actorId}'`)
   }
 
   const { manager, mockStorage } = await createMockDelegateSessionManager(
     deviceId,
     context.relay,
-    actor.mainApplicationManager
+    actor.mainAppKeysManager
   )
 
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
