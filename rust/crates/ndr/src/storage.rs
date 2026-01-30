@@ -305,11 +305,6 @@ impl Storage {
         Ok(reactions)
     }
 
-    pub fn get_reactions_for_message(&self, chat_id: &str, message_id: &str) -> Result<Vec<StoredReaction>> {
-        let reactions = self.get_reactions(chat_id, usize::MAX)?;
-        Ok(reactions.into_iter().filter(|r| r.message_id == message_id).collect())
-    }
-
     /// Clear all data (for logout)
     pub fn clear_all(&self) -> Result<()> {
         if self.invites_dir.exists() {

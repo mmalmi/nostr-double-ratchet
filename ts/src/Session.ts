@@ -13,7 +13,7 @@ import {
   RECEIPT_KIND,
   TYPING_KIND,
 } from "./types";
-import { kdf, deepCopyState, createReactionPayload } from "./utils";
+import { kdf, deepCopyState } from "./utils";
 
 const MAX_SKIP = 1000;
 
@@ -125,7 +125,7 @@ export class Session {
    */
   sendReaction(messageId: string, emoji: string): {event: VerifiedEvent, innerEvent: Rumor} {
     return this.sendEvent({
-      content: createReactionPayload(messageId, emoji),
+      content: emoji,
       kind: REACTION_KIND,
       tags: [["e", messageId]]
     });

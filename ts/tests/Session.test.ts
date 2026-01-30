@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { Session } from '../src/Session'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
 import { MESSAGE_EVENT_KIND, REACTION_KIND } from '../src/types';
-import { createEventStream, parseReaction, isReaction, createReactionPayload } from '../src/utils';
+import { createEventStream, parseReaction, isReaction } from '../src/utils';
 import { serializeSessionState, deserializeSessionState } from '../src/utils';
 
 describe('Session', () => {
@@ -420,42 +420,40 @@ describe('Session', () => {
     expect(reactionInner.kind).toBe(REACTION_KIND);
     expect(reactionInner.tags).toContainEqual(['e', messageId]);
     
-    // Verify reaction payload
-    const payload = parseReaction(reactionInner.content);
+    // Verify reaction content is raw emoji (NIP-25 compatible)
+    expect(reactionInner.content).toBe('👍');
+    expect(isReaction(reactionInner)).toBe(true);
+    const payload = parseReaction(reactionInner);
     expect(payload).not.toBeNull();
-    expect(payload?.type).toBe('reaction');
-    expect(payload?.messageId).toBe(messageId);
     expect(payload?.emoji).toBe('👍');
-    expect(isReaction(reactionInner.content)).toBe(true);
+    expect(payload?.messageId).toBe(messageId);
 
     // Alice receives the reaction
     messageQueue.push(reactionEvent);
     const aliceReaction = await aliceMessages.next();
-    expect(isReaction(aliceReaction.value?.content)).toBe(true);
-    const receivedPayload = parseReaction(aliceReaction.value?.content);
+    expect(isReaction(aliceReaction.value!)).toBe(true);
+    const receivedPayload = parseReaction(aliceReaction.value!);
     expect(receivedPayload?.emoji).toBe('👍');
     expect(receivedPayload?.messageId).toBe(messageId);
   });
 
   it('should correctly identify reaction vs regular messages', () => {
-    // Test reaction payload
-    const reactionContent = createReactionPayload('abc123', '❤️');
-    expect(isReaction(reactionContent)).toBe(true);
-    const parsed = parseReaction(reactionContent);
+    // Test reaction rumor
+    const reactionRumor = { kind: REACTION_KIND, content: '❤️', tags: [["e", "abc123"]] };
+    expect(isReaction(reactionRumor)).toBe(true);
+    const parsed = parseReaction(reactionRumor);
     expect(parsed?.type).toBe('reaction');
     expect(parsed?.messageId).toBe('abc123');
     expect(parsed?.emoji).toBe('❤️');
 
-    // Test regular message content
-    expect(isReaction('Hello world')).toBe(false);
-    expect(parseReaction('Hello world')).toBeNull();
+    // Test regular message rumor
+    const messageRumor = { kind: 14, content: 'Hello world', tags: [] };
+    expect(isReaction(messageRumor)).toBe(false);
+    expect(parseReaction(messageRumor)).toBeNull();
 
-    // Test invalid JSON
-    expect(isReaction('{invalid json')).toBe(false);
-    expect(parseReaction('{invalid json')).toBeNull();
-
-    // Test valid JSON but not a reaction
-    expect(isReaction('{"foo": "bar"}')).toBe(false);
-    expect(parseReaction('{"foo": "bar"}')).toBeNull();
+    // Test rumor with wrong kind
+    const wrongKind = { kind: 1, content: '👍', tags: [["e", "abc123"]] };
+    expect(isReaction(wrongKind)).toBe(false);
+    expect(parseReaction(wrongKind)).toBeNull();
   });
 })

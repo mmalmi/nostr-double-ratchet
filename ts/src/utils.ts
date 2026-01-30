@@ -1,5 +1,5 @@
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
-import { Rumor, SessionState, ReactionPayload } from "./types";
+import { Rumor, SessionState, ReactionPayload, REACTION_KIND } from "./types";
 import { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -197,42 +197,22 @@ export function getMillisecondTimestamp(event: Rumor) {
 }
 
 /**
- * Check if a message content is a reaction payload.
- * @param content The message content to check
+ * Parse a reaction from a rumor event.
+ * Reactions are identified by kind 7 with emoji in content and messageId in ["e", ...] tag.
+ * @param rumor An event-like object with kind, content, and tags
  * @returns The parsed ReactionPayload if valid, null otherwise
  */
-export function parseReaction(content: string): ReactionPayload | null {
-  try {
-    const parsed = JSON.parse(content);
-    if (parsed.type === 'reaction' && typeof parsed.messageId === 'string' && typeof parsed.emoji === 'string') {
-      return parsed as ReactionPayload;
-    }
-  } catch {
-    // Not JSON or invalid structure
-  }
-  return null;
+export function parseReaction(rumor: { kind: number; content: string; tags?: string[][] }): ReactionPayload | null {
+  if (rumor.kind !== REACTION_KIND) return null;
+  const messageId = rumor.tags?.find(t => t[0] === "e")?.[1] || "";
+  return { type: 'reaction', messageId, emoji: rumor.content };
 }
 
 /**
- * Check if a message content is a reaction.
- * @param content The message content to check
- * @returns true if the content is a reaction payload
+ * Check if a rumor event is a reaction.
+ * @param rumor An event-like object with at least a kind field
+ * @returns true if the event is a reaction
  */
-export function isReaction(content: string): boolean {
-  return parseReaction(content) !== null;
-}
-
-/**
- * Create a reaction payload JSON string.
- * @param messageId The ID of the message being reacted to
- * @param emoji The emoji or reaction content
- * @returns JSON string of the reaction payload
- */
-export function createReactionPayload(messageId: string, emoji: string): string {
-  const payload: ReactionPayload = {
-    type: 'reaction',
-    messageId,
-    emoji
-  };
-  return JSON.stringify(payload);
+export function isReaction(rumor: { kind: number }): boolean {
+  return rumor.kind === REACTION_KIND;
 }

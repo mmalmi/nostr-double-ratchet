@@ -110,20 +110,16 @@ async function main() {
     session.onEvent((rumor, outerEvent) => {
       // Use outer event ID as message ID (like iris-chat does)
       const msgId = outerEvent?.id || rumor.id;
-      
-      // Check if it's a reaction
-      try {
-        const parsed = JSON.parse(rumor.content);
-        if (parsed.type === 'reaction' && parsed.messageId && parsed.emoji) {
-          log(`E2E_REACTION_RECEIVED:messageId=${parsed.messageId},emoji=${parsed.emoji}`);
-          receivedReactions.push({ messageId: parsed.messageId, emoji: parsed.emoji });
-          return;
-        }
-      } catch (e) {}
-      
-      // Regular message
-      log(`E2E_MESSAGE_RECEIVED:id=${msgId},content=${rumor.content}`);
-      receivedMessages.push({ id: msgId, content: rumor.content });
+
+      if (rumor.kind === REACTION_KIND) {
+        const messageId = rumor.tags?.find((t: string[]) => t[0] === "e")?.[1] || "";
+        const emoji = rumor.content;
+        log(`E2E_REACTION_RECEIVED:messageId=${messageId},emoji=${emoji}`);
+        receivedReactions.push({ messageId, emoji });
+      } else {
+        log(`E2E_MESSAGE_RECEIVED:id=${msgId},content=${rumor.content}`);
+        receivedMessages.push({ id: msgId, content: rumor.content });
+      }
     });
   });
 
