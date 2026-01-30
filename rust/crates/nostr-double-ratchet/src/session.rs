@@ -1,7 +1,7 @@
 use crate::{
     utils::{kdf, pubkey_from_hex},
     Error, EventCallback, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry,
-    Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND,
+    Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
     pubsub::build_filter,
 };
 use nostr::PublicKey;
@@ -249,6 +249,22 @@ impl Session {
         }
 
         self.send_event(builder.build(dummy_keys.public_key()))
+    }
+
+    /// Send a typing indicator through the encrypted session.
+    ///
+    /// # Returns
+    /// A signed Nostr event containing the encrypted typing indicator.
+    pub fn send_typing(&mut self) -> Result<nostr::Event> {
+        let dummy_keys = Keys::generate();
+
+        let event = EventBuilder::new(
+            nostr::Kind::from(TYPING_KIND as u16),
+            "typing",
+        )
+        .build(dummy_keys.public_key());
+
+        self.send_event(event)
     }
 
     pub fn send_event(&mut self, mut event: UnsignedEvent) -> Result<nostr::Event> {

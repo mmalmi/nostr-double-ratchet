@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nostr_double_ratchet::{Session, REACTION_KIND, RECEIPT_KIND, CHAT_MESSAGE_KIND};
+use nostr_double_ratchet::{Session, REACTION_KIND, RECEIPT_KIND, TYPING_KIND, CHAT_MESSAGE_KIND};
 use nostr_sdk::Client;
 use serde::Serialize;
 
@@ -249,6 +249,48 @@ pub async fn receipt(
         "chat_id": chat_id,
         "type": receipt_type,
         "message_ids": message_ids,
+    }));
+
+    Ok(())
+}
+
+/// Send a typing indicator
+pub async fn typing(
+    chat_id: &str,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    let chat = storage.get_chat(chat_id)?
+        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", chat_id))?;
+
+    let session_state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
+        .map_err(|e| anyhow::anyhow!("Invalid session state: {}. Chat may not be properly initialized.", e))?;
+
+    let mut session = Session::new(session_state, chat_id.to_string());
+
+    let encrypted_event = session.send_typing()
+        .map_err(|e| anyhow::anyhow!("Failed to send typing indicator: {}", e))?;
+
+    // Update chat with new session state (ratchet advances)
+    let mut updated_chat = chat;
+    updated_chat.session_state = serde_json::to_string(&session.state)?;
+    storage.save_chat(&updated_chat)?;
+
+    // Publish to relays
+    let client = Client::default();
+    for relay in &config.relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+    client.send_event(encrypted_event.clone()).await?;
+
+    output.success("typing", serde_json::json!({
+        "chat_id": chat_id,
     }));
 
     Ok(())
@@ -692,6 +734,17 @@ pub async fn listen(
                                     emoji: content,
                                     timestamp,
                                 });
+                            } else if rumor_kind == TYPING_KIND {
+                                // Typing indicator - ephemeral, don't store
+                                let mut updated_chat = chat.clone();
+                                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                                storage.save_chat(&updated_chat)?;
+
+                                output.event("typing", serde_json::json!({
+                                    "chat_id": updated_chat.id,
+                                    "from_pubkey": from_pubkey_hex,
+                                    "timestamp": timestamp,
+                                }));
                             } else {
                                 // Chat message (kind 14 or default)
                                 let msg_id = event.id.to_hex();

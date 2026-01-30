@@ -65,6 +65,12 @@ enum Commands {
         emoji: String,
     },
 
+    /// Send a typing indicator
+    Typing {
+        /// Chat ID
+        chat_id: String,
+    },
+
     /// Send a delivery/read receipt
     Receipt {
         /// Chat ID
@@ -182,6 +188,7 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             | Commands::Chat(ChatCommands::Join { .. })
             | Commands::Send { .. }
             | Commands::React { .. }
+            | Commands::Typing { .. }
             | Commands::Receipt { .. }
             | Commands::Listen { .. }
     );
@@ -238,6 +245,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         }
         Commands::React { chat_id, message_id, emoji } => {
             commands::message::react(&chat_id, &message_id, &emoji, &config, &storage, output).await
+        }
+        Commands::Typing { chat_id } => {
+            commands::message::typing(&chat_id, &config, &storage, output).await
         }
         Commands::Receipt { chat_id, receipt_type, message_ids } => {
             let ids: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
