@@ -117,13 +117,204 @@ impl Config {
         let keys = nostr::Keys::new(sk);
         Ok(keys.public_key().to_hex())
     }
+
+    /// Resolve relays with environment overrides and optional local relay detection.
+    pub fn resolved_relays(&self) -> Vec<String> {
+        resolve_relays(&self.relays)
+    }
+}
+
+fn resolve_relays(config_relays: &[String]) -> Vec<String> {
+    let mut base = match parse_env_list("NOSTR_RELAYS") {
+        Some(list) => list,
+        None => config_relays.to_vec(),
+    };
+
+    base = base
+        .into_iter()
+        .filter_map(|r| normalize_relay_url(&r))
+        .collect();
+
+    if !prefer_local_relay() {
+        return dedupe_relays(base);
+    }
+
+    let mut combined = detect_local_relay_urls();
+    combined.extend(base);
+    dedupe_relays(combined)
+}
+
+fn detect_local_relay_urls() -> Vec<String> {
+    let mut relays = Vec::new();
+
+    if let Some(list) = parse_env_list("NOSTR_LOCAL_RELAY")
+        .or_else(|| parse_env_list("HTREE_LOCAL_RELAY"))
+    {
+        for raw in list {
+            if let Some(url) = normalize_relay_url(&raw) {
+                relays.push(url);
+            }
+        }
+    }
+
+    if let Some(port) = local_daemon_port() {
+        if local_port_open(port) {
+            relays.push(format!("ws://127.0.0.1:{port}/ws"));
+        }
+    }
+
+    let mut ports = parse_env_ports("NOSTR_LOCAL_RELAY_PORTS");
+    if ports.is_empty() {
+        ports.push(4869);
+    }
+
+    for port in ports {
+        if port == 0 {
+            continue;
+        }
+        if local_port_open(port) {
+            relays.push(format!("ws://127.0.0.1:{port}"));
+        }
+    }
+
+    dedupe_relays(relays)
+}
+
+fn local_daemon_port() -> Option<u16> {
+    if let Ok(addr) = std::env::var("HTREE_DAEMON_ADDR") {
+        if let Some(port) = parse_port(&addr) {
+            return Some(port);
+        }
+    }
+    if let Ok(url) = std::env::var("HTREE_DAEMON_URL") {
+        if let Some(port) = parse_port(&url) {
+            return Some(port);
+        }
+    }
+    Some(8080)
+}
+
+fn parse_port(addr: &str) -> Option<u16> {
+    if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
+        return Some(sock.port());
+    }
+    if let Some((_, port_str)) = addr.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return Some(port);
+        }
+    }
+    None
+}
+
+fn prefer_local_relay() -> bool {
+    for key in ["NOSTR_PREFER_LOCAL", "HTREE_PREFER_LOCAL_RELAY"] {
+        if let Ok(val) = std::env::var(key) {
+            let val = val.trim().to_lowercase();
+            return !matches!(val.as_str(), "0" | "false" | "no" | "off");
+        }
+    }
+    true
+}
+
+fn parse_env_list(var: &str) -> Option<Vec<String>> {
+    let value = std::env::var(var).ok()?;
+    let mut items = Vec::new();
+    for part in value.split(|c| c == ',' || c == ';' || c == '\n' || c == '\t' || c == ' ') {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            items.push(trimmed.to_string());
+        }
+    }
+    if items.is_empty() { None } else { Some(items) }
+}
+
+fn parse_env_ports(var: &str) -> Vec<u16> {
+    let Some(list) = parse_env_list(var) else {
+        return Vec::new();
+    };
+    list.into_iter()
+        .filter_map(|item| item.parse::<u16>().ok())
+        .collect()
+}
+
+fn normalize_relay_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let trimmed = trimmed.trim_end_matches('/');
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("ws://") || lower.starts_with("wss://") {
+        return Some(trimmed.to_string());
+    }
+    if lower.starts_with("http://") {
+        return Some(format!("ws://{}", &trimmed[7..]));
+    }
+    if lower.starts_with("https://") {
+        return Some(format!("wss://{}", &trimmed[8..]));
+    }
+    Some(format!("ws://{}", trimmed))
+}
+
+fn local_port_open(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = Duration::from_millis(100);
+    TcpStream::connect_timeout(&addr, timeout).is_ok()
+}
+
+fn dedupe_relays(relays: Vec<String>) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for relay in relays {
+        let key = relay.trim_end_matches('/').to_lowercase();
+        if seen.insert(key) {
+            out.push(relay);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.prev {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
     #[test]
     fn test_config_default() {
         let config = Config::default();
@@ -178,5 +369,44 @@ mod tests {
 
         let pubkey = config.public_key().unwrap();
         assert_eq!(pubkey.len(), 64); // Hex public key is 64 chars
+    }
+
+    #[test]
+    fn test_resolved_relays_prefers_local() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let _prefer = EnvGuard::set("NOSTR_PREFER_LOCAL", "1");
+        let _ports = EnvGuard::set("NOSTR_LOCAL_RELAY_PORTS", &port.to_string());
+        let _relays = EnvGuard::clear("NOSTR_RELAYS");
+
+        let config = Config {
+            relays: vec!["wss://relay.example".to_string()],
+            ..Config::default()
+        };
+
+        let resolved = config.resolved_relays();
+        assert!(!resolved.is_empty());
+        assert_eq!(resolved[0], format!("ws://127.0.0.1:{port}"));
+        assert!(resolved.contains(&"wss://relay.example".to_string()));
+    }
+
+    #[test]
+    fn test_resolved_relays_env_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _prefer = EnvGuard::set("NOSTR_PREFER_LOCAL", "0");
+        let _relays = EnvGuard::set("NOSTR_RELAYS", "wss://relay.one,wss://relay.two");
+
+        let config = Config {
+            relays: vec!["wss://relay.example".to_string()],
+            ..Config::default()
+        };
+
+        let resolved = config.resolved_relays();
+        assert_eq!(
+            resolved,
+            vec!["wss://relay.one".to_string(), "wss://relay.two".to_string()]
+        );
     }
 }

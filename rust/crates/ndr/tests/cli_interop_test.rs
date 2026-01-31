@@ -11,6 +11,7 @@ use tempfile::TempDir;
 
 fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
     let output = Command::new("cargo")
+        .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")

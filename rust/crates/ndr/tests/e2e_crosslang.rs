@@ -13,6 +13,7 @@ use tokio::process::{Child, Command};
 /// Run ndr CLI command and return JSON output (async version)
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
     let output = Command::new("cargo")
+        .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
@@ -37,6 +38,7 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
 /// Start ndr listen in background and return the child process with stdout reader
 async fn start_ndr_listen(data_dir: &std::path::Path, chat_id: &str) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let mut child = Command::new("cargo")
+        .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")

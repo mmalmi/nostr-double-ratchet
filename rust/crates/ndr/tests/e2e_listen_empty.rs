@@ -20,6 +20,7 @@ async fn start_ndr_listen_with_stderr(
     BufReader<tokio::process::ChildStderr>,
 ) {
     let mut child = Command::new("cargo")
+        .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
@@ -38,6 +39,7 @@ async fn start_ndr_listen_with_stderr(
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
     let output = Command::new("cargo")
+        .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")

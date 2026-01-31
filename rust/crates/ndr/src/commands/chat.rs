@@ -86,7 +86,8 @@ pub async fn join(
 
     // Publish response event to relays
     let client = Client::default();
-    for relay in &config.relays {
+    let relays = config.resolved_relays();
+    for relay in &relays {
         client.add_relay(relay).await?;
     }
     client.connect().await;

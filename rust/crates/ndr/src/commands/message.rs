@@ -1,11 +1,11 @@
 use anyhow::Result;
-use nostr_double_ratchet::{Session, REACTION_KIND, RECEIPT_KIND, TYPING_KIND, CHAT_MESSAGE_KIND};
+use nostr_double_ratchet::{Session, REACTION_KIND, RECEIPT_KIND, TYPING_KIND, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND};
 use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
 use crate::output::Output;
-use crate::storage::{Storage, StoredChat, StoredMessage, StoredReaction};
+use crate::storage::{Storage, StoredChat, StoredMessage, StoredReaction, StoredGroupMessage, StoredGroup};
 
 /// Resolve a target (chat_id, npub, hex pubkey, or petname) to a StoredChat.
 pub fn resolve_target(target: &str, storage: &Storage) -> Result<StoredChat> {
@@ -152,11 +152,12 @@ pub async fn send(
 
     // Publish to relays
     let client = Client::default();
-    for relay in &config.relays {
+    let relays = config.resolved_relays();
+    for relay in &relays {
         client.add_relay(relay).await?;
     }
     client.connect().await;
-    client.send_event(encrypted_event.clone()).await?;
+    send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success("send", MessageSent {
         id: msg_id,
@@ -220,11 +221,12 @@ pub async fn react(
 
     // Publish to relays
     let client = Client::default();
-    for relay in &config.relays {
+    let relays = config.resolved_relays();
+    for relay in &relays {
         client.add_relay(relay).await?;
     }
     client.connect().await;
-    client.send_event(encrypted_event.clone()).await?;
+    send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success("react", serde_json::json!({
         "id": reaction_id,
@@ -277,11 +279,12 @@ pub async fn receipt(
 
     // Publish to relays
     let client = Client::default();
-    for relay in &config.relays {
+    let relays = config.resolved_relays();
+    for relay in &relays {
         client.add_relay(relay).await?;
     }
     client.connect().await;
-    client.send_event(encrypted_event.clone()).await?;
+    send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success("receipt", serde_json::json!({
         "chat_id": chat_id,
@@ -321,11 +324,12 @@ pub async fn typing(
 
     // Publish to relays
     let client = Client::default();
-    for relay in &config.relays {
+    let relays = config.resolved_relays();
+    for relay in &relays {
         client.add_relay(relay).await?;
     }
     client.connect().await;
-    client.send_event(encrypted_event.clone()).await?;
+    send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success("typing", serde_json::json!({
         "chat_id": chat_id,
@@ -390,10 +394,6 @@ pub async fn receive(
     let event: nostr::Event = nostr::JsonUtil::from_json(event_json)
         .map_err(|e| anyhow::anyhow!("Invalid event JSON: {}", e))?;
 
-    // Find the chat by looking at the event's pubkey tags or trying all chats
-    // The sender's current key is in the event author field
-    let sender_pubkey = event.pubkey;
-
     // Try to find a matching chat and decrypt
     let chats = storage.list_chats()?;
 
@@ -408,7 +408,6 @@ pub async fn receive(
         // Try to decrypt with this session
         match session.receive(&event) {
             Ok(Some(decrypted_event_json)) => {
-                // The decrypted result is a nostr event JSON ("rumor"), extract its content
                 let decrypted_event: serde_json::Value = serde_json::from_str(&decrypted_event_json)
                     .map_err(|e| anyhow::anyhow!("Failed to parse decrypted event: {}", e))?;
 
@@ -417,34 +416,75 @@ pub async fn receive(
                     .unwrap_or(&decrypted_event_json)
                     .to_string();
 
+                let rumor_kind = decrypted_event["kind"]
+                    .as_u64()
+                    .unwrap_or(CHAT_MESSAGE_KIND as u64) as u32;
+
                 let timestamp = event.created_at.as_u64();
+                let from_pubkey_hex = chat.their_pubkey.clone();
 
-                // Use outer event ID as message ID (for reaction compatibility with iris-chat)
-                let msg_id = event.id.to_hex();
-                let stored = StoredMessage {
-                    id: msg_id.clone(),
-                    chat_id: chat.id.clone(),
-                    from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                    content: content.clone(),
-                    timestamp,
-                    is_outgoing: false,
-                };
-
-                storage.save_message(&stored)?;
+                // Check for group routing tag
+                let group_id = decrypted_event["tags"]
+                    .as_array()
+                    .and_then(|tags| tags.iter().find_map(|t| {
+                        let arr = t.as_array()?;
+                        if arr.first()?.as_str()? == "l" {
+                            arr.get(1)?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    }));
 
                 // Update session state
                 let mut updated_chat = chat;
-                updated_chat.last_message_at = Some(timestamp);
                 updated_chat.session_state = serde_json::to_string(&session.state)?;
-                storage.save_chat(&updated_chat)?;
 
-                output.success("receive", IncomingMessage {
-                    chat_id: updated_chat.id,
-                    message_id: msg_id,
-                    from_pubkey: hex::encode(sender_pubkey.to_bytes()),
-                    content,
-                    timestamp,
-                });
+                if let Some(gid) = group_id {
+                    // Group message
+                    if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
+                        let msg_id = event.id.to_hex();
+                        let stored = StoredGroupMessage {
+                            id: msg_id.clone(),
+                            group_id: gid.clone(),
+                            sender_pubkey: from_pubkey_hex.clone(),
+                            content: content.clone(),
+                            timestamp,
+                            is_outgoing: false,
+                        };
+                        storage.save_group_message(&stored)?;
+                    }
+                    storage.save_chat(&updated_chat)?;
+
+                    output.success("receive", serde_json::json!({
+                        "group_id": gid,
+                        "message_id": event.id.to_hex(),
+                        "sender_pubkey": from_pubkey_hex,
+                        "content": content,
+                        "timestamp": timestamp,
+                    }));
+                } else {
+                    // 1:1 message
+                    let msg_id = event.id.to_hex();
+                    let stored = StoredMessage {
+                        id: msg_id.clone(),
+                        chat_id: updated_chat.id.clone(),
+                        from_pubkey: from_pubkey_hex.clone(),
+                        content: content.clone(),
+                        timestamp,
+                        is_outgoing: false,
+                    };
+                    storage.save_message(&stored)?;
+                    updated_chat.last_message_at = Some(timestamp);
+                    storage.save_chat(&updated_chat)?;
+
+                    output.success("receive", IncomingMessage {
+                        chat_id: updated_chat.id,
+                        message_id: msg_id,
+                        from_pubkey: from_pubkey_hex,
+                        content,
+                        timestamp,
+                    });
+                }
 
                 return Ok(());
             }
@@ -454,6 +494,38 @@ pub async fn receive(
     }
 
     anyhow::bail!("Could not decrypt message - no matching session found");
+}
+
+/// Extract first "e" tag value from a decrypted event JSON
+fn extract_e_tag(event: &serde_json::Value) -> String {
+    event["tags"]
+        .as_array()
+        .and_then(|tags| tags.iter().find_map(|t| {
+            let arr = t.as_array()?;
+            if arr.first()?.as_str()? == "e" {
+                arr.get(1)?.as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        }))
+        .unwrap_or_default()
+}
+
+/// Extract all "e" tag values from a decrypted event JSON
+fn extract_e_tags(event: &serde_json::Value) -> Vec<String> {
+    event["tags"]
+        .as_array()
+        .map(|tags| tags.iter()
+            .filter_map(|t| {
+                let arr = t.as_array()?;
+                if arr.first()?.as_str()? == "e" {
+                    arr.get(1)?.as_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect())
+        .unwrap_or_default()
 }
 
 /// Helper to collect ephemeral pubkeys from chats for subscription
@@ -479,6 +551,24 @@ fn collect_chat_pubkeys(storage: &Storage, chat_id: Option<&str>) -> Result<Vec<
     Ok(pubkeys)
 }
 
+async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
+    match client.send_event(event).await {
+        Ok(_) => Ok(()),
+        Err(err) if should_ignore_publish_errors() => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn should_ignore_publish_errors() -> bool {
+    for key in ["NDR_IGNORE_PUBLISH_ERRORS", "NOSTR_IGNORE_PUBLISH_ERRORS"] {
+        if let Ok(val) = std::env::var(key) {
+            let val = val.trim().to_lowercase();
+            return matches!(val.as_str(), "1" | "true" | "yes" | "on");
+        }
+    }
+    false
+}
+
 /// Listen for new messages and invite responses
 pub async fn listen(
     chat_id: Option<&str>,
@@ -487,8 +577,8 @@ pub async fn listen(
     output: &Output,
 ) -> Result<()> {
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
-    use nostr_double_ratchet::{MESSAGE_EVENT_KIND, INVITE_RESPONSE_KIND};
-    use std::collections::HashSet;
+    use nostr_double_ratchet::{MESSAGE_EVENT_KIND, INVITE_RESPONSE_KIND, SHARED_CHANNEL_KIND, GROUP_INVITE_RUMOR_KIND};
+    use std::collections::{HashSet, HashMap};
     use notify::{Watcher, RecursiveMode, Event as NotifyEvent, EventKind};
     use std::sync::mpsc;
 
@@ -501,7 +591,8 @@ pub async fn listen(
 
     // Prepare client (don't connect until we have something to subscribe to)
     let client = Client::default();
-    for relay in &config.relays {
+    let relays = config.resolved_relays();
+    for relay in &relays {
         client.add_relay(relay).await?;
     }
     let mut connected = false;
@@ -509,8 +600,31 @@ pub async fn listen(
     let scope = chat_id.map(|id| format!("chat {}", id))
         .unwrap_or_else(|| "all chats".to_string());
 
+    // Helper to build SharedChannel map from groups
+    let build_channel_map = |storage: &Storage| -> Result<HashMap<String, (nostr_double_ratchet::SharedChannel, String)>> {
+        let mut channels = HashMap::new();
+        for group in storage.list_groups()? {
+            if group.data.accepted != Some(true) {
+                continue;
+            }
+            if let Some(ref secret_hex) = group.data.secret {
+                if let Ok(secret_bytes) = hex::decode(secret_hex) {
+                    if secret_bytes.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&secret_bytes);
+                        if let Ok(channel) = nostr_double_ratchet::SharedChannel::new(&arr) {
+                            let pk_hex = channel.public_key().to_hex();
+                            channels.insert(pk_hex, (channel, group.data.id.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(channels)
+    };
+
     // Helper to build filters from current state
-    let build_filters = |storage: &Storage, chat_id: Option<&str>| -> Result<(Vec<Filter>, HashSet<String>)> {
+    let build_filters = |storage: &Storage, chat_id: Option<&str>, channel_map: &HashMap<String, (nostr_double_ratchet::SharedChannel, String)>| -> Result<(Vec<Filter>, HashSet<String>)> {
         let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
         let subscribed_pubkeys: HashSet<String> = pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
 
@@ -541,11 +655,25 @@ pub async fn listen(
             );
         }
 
+        // Add SharedChannel filters for accepted groups
+        let channel_pubkeys: Vec<nostr::PublicKey> = channel_map.values()
+            .filter_map(|(ch, _)| Some(ch.public_key()))
+            .collect();
+        if !channel_pubkeys.is_empty() {
+            filters.push(
+                Filter::new()
+                    .kind(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16))
+                    .authors(channel_pubkeys)
+            );
+        }
+
         Ok((filters, subscribed_pubkeys))
     };
 
     // Build initial filters
-    let (mut filters, mut subscribed_pubkeys) = build_filters(storage, chat_id)?;
+    let my_pubkey = config.public_key()?;
+    let mut channel_map = build_channel_map(storage)?;
+    let (mut filters, mut subscribed_pubkeys) = build_filters(storage, chat_id, &channel_map)?;
 
     output.success_message("listen", &format!("Listening for messages and invite responses on {}... (Ctrl+C to stop)", scope));
 
@@ -562,11 +690,15 @@ pub async fn listen(
     // Watch storage directories
     let invites_dir = storage.data_dir().join("invites");
     let chats_dir = storage.data_dir().join("chats");
+    let groups_dir = storage.data_dir().join("groups");
     if invites_dir.exists() {
         _watcher.watch(&invites_dir, RecursiveMode::NonRecursive)?;
     }
     if chats_dir.exists() {
         _watcher.watch(&chats_dir, RecursiveMode::NonRecursive)?;
+    }
+    if groups_dir.exists() {
+        _watcher.watch(&groups_dir, RecursiveMode::NonRecursive)?;
     }
 
     // Subscribe only if we have filters
@@ -585,7 +717,8 @@ pub async fn listen(
 
         // Check for filesystem changes
         while let Ok(()) = fs_rx.try_recv() {
-            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref())?;
+            channel_map = build_channel_map(storage)?;
+            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref(), &channel_map)?;
             if !new_filters.is_empty() {
                 filters = new_filters;
                 subscribed_pubkeys = new_pubkeys;
@@ -605,7 +738,8 @@ pub async fn listen(
     loop {
         // Check for filesystem changes (new invites/chats created by other processes)
         while let Ok(()) = fs_rx.try_recv() {
-            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref())?;
+            channel_map = build_channel_map(storage)?;
+            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref(), &channel_map)?;
             if !new_filters.is_empty() && (new_filters.len() != filters.len() || new_pubkeys != subscribed_pubkeys) {
                 filters = new_filters;
                 subscribed_pubkeys = new_pubkeys;
@@ -680,6 +814,91 @@ pub async fn listen(
                 continue;
             }
 
+            // Handle SharedChannel events (kind 10444)
+            if event_kind == SHARED_CHANNEL_KIND {
+                let sender_hex = event.pubkey.to_hex();
+                if let Some((channel, group_id)) = channel_map.get(&sender_hex) {
+                    if let Ok(rumor_json) = channel.decrypt_event(&event) {
+                        if let Ok(rumor) = serde_json::from_str::<serde_json::Value>(&rumor_json) {
+                            let rumor_kind = rumor["kind"].as_u64().unwrap_or(0) as u32;
+                            let rumor_pubkey = rumor["pubkey"].as_str().unwrap_or("").to_string();
+
+                            // Skip if it's our own event
+                            if rumor_pubkey == my_pubkey {
+                                continue;
+                            }
+
+                            if rumor_kind == GROUP_INVITE_RUMOR_KIND {
+                                // Group member published an invite on the channel
+                                let content_str = rumor["content"].as_str().unwrap_or("{}");
+                                if let Ok(invite_data) = serde_json::from_str::<serde_json::Value>(content_str) {
+                                    let invite_url = invite_data["inviteUrl"].as_str().unwrap_or("");
+                                    let _invite_group_id = invite_data["groupId"].as_str().unwrap_or("");
+
+                                    // Check if this is from a group member
+                                    if let Some(group) = storage.get_group(group_id)? {
+                                        if !group.data.members.contains(&rumor_pubkey) {
+                                            continue;
+                                        }
+
+                                        // Skip if we already have a session with this member
+                                        if storage.get_chat_by_pubkey(&rumor_pubkey)?.is_some() {
+                                            continue;
+                                        }
+
+                                        // Auto-accept: parse invite URL, create session
+                                        if !invite_url.is_empty() {
+                                            if let Ok(invite) = nostr_double_ratchet::Invite::from_url(invite_url) {
+                                                let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+                                                match invite.accept(my_pk, our_private_key.clone(), None) {
+                                                    Ok((accept_session, response_event)) => {
+                                                        // Save the new chat
+                                                        let new_chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                                                        let session_state_str = serde_json::to_string(&accept_session.state)?;
+
+                                                        let chat = crate::storage::StoredChat {
+                                                            id: new_chat_id.clone(),
+                                                            their_pubkey: rumor_pubkey.clone(),
+                                                            created_at: std::time::SystemTime::now()
+                                                                .duration_since(std::time::UNIX_EPOCH)?
+                                                                .as_secs(),
+                                                            last_message_at: None,
+                                                            session_state: session_state_str,
+                                                        };
+                                                        storage.save_chat(&chat)?;
+
+                                                        // Publish the response event
+                                                        client.send_event(response_event).await?;
+
+                                                        output.event("group_invite_accepted", serde_json::json!({
+                                                            "group_id": group_id,
+                                                            "member_pubkey": rumor_pubkey,
+                                                            "chat_id": new_chat_id,
+                                                        }));
+
+                                                        // Update subscription for new chat's keys
+                                                        let new_pubkeys = collect_chat_pubkeys(storage, chat_id_owned.as_deref())?;
+                                                        if !new_pubkeys.is_empty() {
+                                                            let new_filter = Filter::new()
+                                                                .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+                                                                .authors(new_pubkeys.clone());
+                                                            client.subscribe(vec![new_filter], None).await?;
+                                                            subscribed_pubkeys = new_pubkeys.iter().map(|pk| pk.to_hex()).collect();
+                                                        }
+                                                    }
+                                                    Err(_) => {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
             // Handle messages
             if event_kind == MESSAGE_EVENT_KIND {
                 for chat in storage.list_chats()? {
@@ -702,115 +921,203 @@ pub async fn listen(
                                 .to_string();
 
                             let timestamp = event.created_at.as_u64();
-                            let sender_pubkey = event.pubkey;
-                            let from_pubkey_hex = hex::encode(sender_pubkey.to_bytes());
+                            let from_pubkey_hex = chat.their_pubkey.clone();
 
-                            // Dispatch on inner event kind
-                            if rumor_kind == RECEIPT_KIND {
-                                // Receipt - just update session state, don't store
-                                let receipt_type = content.clone();
-                                let message_ids: Vec<String> = decrypted_event["tags"]
-                                    .as_array()
-                                    .map(|tags| tags.iter()
-                                        .filter_map(|t| {
-                                            let arr = t.as_array()?;
-                                            if arr.first()?.as_str()? == "e" {
-                                                arr.get(1)?.as_str().map(|s| s.to_string())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect())
-                                    .unwrap_or_default();
-
-                                let mut updated_chat = chat.clone();
-                                updated_chat.session_state = serde_json::to_string(&session.state)?;
-                                storage.save_chat(&updated_chat)?;
-
-                                output.event("receipt", serde_json::json!({
-                                    "chat_id": updated_chat.id,
-                                    "from_pubkey": from_pubkey_hex,
-                                    "type": receipt_type,
-                                    "message_ids": message_ids,
-                                    "timestamp": timestamp,
+                            // Check for group routing tag ["l", group_id]
+                            let group_id = decrypted_event["tags"]
+                                .as_array()
+                                .and_then(|tags| tags.iter().find_map(|t| {
+                                    let arr = t.as_array()?;
+                                    if arr.first()?.as_str()? == "l" {
+                                        arr.get(1)?.as_str().map(String::from)
+                                    } else {
+                                        None
+                                    }
                                 }));
-                            } else if rumor_kind == REACTION_KIND {
-                                // Extract message_id from e tag
-                                let message_id = decrypted_event["tags"]
-                                    .as_array()
-                                    .and_then(|tags| tags.iter()
-                                        .find_map(|t| {
-                                            let arr = t.as_array()?;
-                                            if arr.first()?.as_str()? == "e" {
-                                                arr.get(1)?.as_str().map(|s| s.to_string())
-                                            } else {
-                                                None
+
+                            // Always update session state first
+                            let mut updated_chat = chat.clone();
+                            updated_chat.session_state = serde_json::to_string(&session.state)?;
+
+                            if let Some(ref gid) = group_id {
+                                // === Group-routed event ===
+                                if rumor_kind == GROUP_METADATA_KIND {
+                                    // Group metadata update
+                                    if let Some(metadata) = nostr_double_ratchet::group::parse_group_metadata(&content) {
+                                        let my_pubkey = config.public_key()?;
+                                        let existing = storage.get_group(gid)?;
+
+                                        match existing {
+                                            Some(existing_group) => {
+                                                let validation = nostr_double_ratchet::group::validate_metadata_update(
+                                                    &existing_group.data,
+                                                    &metadata,
+                                                    &from_pubkey_hex,
+                                                    &my_pubkey,
+                                                );
+                                                match validation {
+                                                    nostr_double_ratchet::group::MetadataValidation::Accept => {
+                                                        let updated = nostr_double_ratchet::group::apply_metadata_update(
+                                                            &existing_group.data,
+                                                            &metadata,
+                                                        );
+                                                        storage.save_group(&StoredGroup { data: updated })?;
+                                                        storage.save_chat(&updated_chat)?;
+                                                        output.event("group_metadata", serde_json::json!({
+                                                            "group_id": gid,
+                                                            "action": "updated",
+                                                            "sender_pubkey": from_pubkey_hex,
+                                                        }));
+                                                    }
+                                                    nostr_double_ratchet::group::MetadataValidation::Removed => {
+                                                        storage.delete_group(gid)?;
+                                                        storage.save_chat(&updated_chat)?;
+                                                        output.event("group_metadata", serde_json::json!({
+                                                            "group_id": gid,
+                                                            "action": "removed",
+                                                            "sender_pubkey": from_pubkey_hex,
+                                                        }));
+                                                    }
+                                                    nostr_double_ratchet::group::MetadataValidation::Reject => {}
+                                                }
                                             }
-                                        }))
-                                    .unwrap_or_default();
+                                            None => {
+                                                // New group creation
+                                                if nostr_double_ratchet::group::validate_metadata_creation(
+                                                    &metadata,
+                                                    &from_pubkey_hex,
+                                                    &my_pubkey,
+                                                ) {
+                                                    let group_data = nostr_double_ratchet::group::GroupData {
+                                                        id: metadata.id.clone(),
+                                                        name: metadata.name,
+                                                        description: metadata.description,
+                                                        picture: metadata.picture,
+                                                        members: metadata.members,
+                                                        admins: metadata.admins,
+                                                        created_at: timestamp * 1000,
+                                                        secret: metadata.secret,
+                                                        accepted: None,
+                                                    };
+                                                    storage.save_group(&StoredGroup { data: group_data })?;
+                                                    storage.save_chat(&updated_chat)?;
+                                                    output.event("group_metadata", serde_json::json!({
+                                                        "group_id": gid,
+                                                        "action": "created",
+                                                        "sender_pubkey": from_pubkey_hex,
+                                                    }));
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
+                                    // Group chat message
+                                    let msg_id = event.id.to_hex();
+                                    let stored = StoredGroupMessage {
+                                        id: msg_id.clone(),
+                                        group_id: gid.clone(),
+                                        sender_pubkey: from_pubkey_hex.clone(),
+                                        content: content.clone(),
+                                        timestamp,
+                                        is_outgoing: false,
+                                    };
+                                    storage.save_group_message(&stored)?;
+                                    storage.save_chat(&updated_chat)?;
 
-                                let reaction_id = event.id.to_hex();
-                                let stored = StoredReaction {
-                                    id: reaction_id,
-                                    chat_id: chat.id.clone(),
-                                    message_id: message_id.clone(),
-                                    from_pubkey: from_pubkey_hex.clone(),
-                                    emoji: content.clone(),
-                                    timestamp,
-                                    is_outgoing: false,
-                                };
-
-                                storage.save_reaction(&stored)?;
-
-                                let mut updated_chat = chat.clone();
-                                updated_chat.session_state = serde_json::to_string(&session.state)?;
-                                storage.save_chat(&updated_chat)?;
-
-                                output.event("reaction", IncomingReaction {
-                                    chat_id: updated_chat.id,
-                                    from_pubkey: from_pubkey_hex,
-                                    message_id,
-                                    emoji: content,
-                                    timestamp,
-                                });
-                            } else if rumor_kind == TYPING_KIND {
-                                // Typing indicator - ephemeral, don't store
-                                let mut updated_chat = chat.clone();
-                                updated_chat.session_state = serde_json::to_string(&session.state)?;
-                                storage.save_chat(&updated_chat)?;
-
-                                output.event("typing", serde_json::json!({
-                                    "chat_id": updated_chat.id,
-                                    "from_pubkey": from_pubkey_hex,
-                                    "timestamp": timestamp,
-                                }));
+                                    output.event("group_message", serde_json::json!({
+                                        "group_id": gid,
+                                        "message_id": msg_id,
+                                        "sender_pubkey": from_pubkey_hex,
+                                        "content": content,
+                                        "timestamp": timestamp,
+                                    }));
+                                } else if rumor_kind == REACTION_KIND {
+                                    let message_id = extract_e_tag(&decrypted_event);
+                                    storage.save_chat(&updated_chat)?;
+                                    output.event("group_reaction", serde_json::json!({
+                                        "group_id": gid,
+                                        "sender_pubkey": from_pubkey_hex,
+                                        "message_id": message_id,
+                                        "emoji": content,
+                                        "timestamp": timestamp,
+                                    }));
+                                } else if rumor_kind == TYPING_KIND {
+                                    storage.save_chat(&updated_chat)?;
+                                    output.event("group_typing", serde_json::json!({
+                                        "group_id": gid,
+                                        "sender_pubkey": from_pubkey_hex,
+                                        "timestamp": timestamp,
+                                    }));
+                                }
                             } else {
-                                // Chat message (kind 14 or default)
-                                let msg_id = event.id.to_hex();
-                                let stored = StoredMessage {
-                                    id: msg_id.clone(),
-                                    chat_id: chat.id.clone(),
-                                    from_pubkey: from_pubkey_hex.clone(),
-                                    content: content.clone(),
-                                    timestamp,
-                                    is_outgoing: false,
-                                };
+                                // === 1:1 event (no group tag) ===
+                                if rumor_kind == RECEIPT_KIND {
+                                    let receipt_type = content.clone();
+                                    let message_ids: Vec<String> = extract_e_tags(&decrypted_event);
 
-                                storage.save_message(&stored)?;
+                                    storage.save_chat(&updated_chat)?;
+                                    output.event("receipt", serde_json::json!({
+                                        "chat_id": updated_chat.id,
+                                        "from_pubkey": from_pubkey_hex,
+                                        "type": receipt_type,
+                                        "message_ids": message_ids,
+                                        "timestamp": timestamp,
+                                    }));
+                                } else if rumor_kind == REACTION_KIND {
+                                    let message_id = extract_e_tag(&decrypted_event);
+                                    let reaction_id = event.id.to_hex();
+                                    let stored = StoredReaction {
+                                        id: reaction_id,
+                                        chat_id: chat.id.clone(),
+                                        message_id: message_id.clone(),
+                                        from_pubkey: from_pubkey_hex.clone(),
+                                        emoji: content.clone(),
+                                        timestamp,
+                                        is_outgoing: false,
+                                    };
+                                    storage.save_reaction(&stored)?;
+                                    storage.save_chat(&updated_chat)?;
 
-                                let mut updated_chat = chat.clone();
-                                updated_chat.last_message_at = Some(timestamp);
-                                updated_chat.session_state = serde_json::to_string(&session.state)?;
-                                storage.save_chat(&updated_chat)?;
+                                    output.event("reaction", IncomingReaction {
+                                        chat_id: updated_chat.id.clone(),
+                                        from_pubkey: from_pubkey_hex,
+                                        message_id,
+                                        emoji: content,
+                                        timestamp,
+                                    });
+                                } else if rumor_kind == TYPING_KIND {
+                                    storage.save_chat(&updated_chat)?;
+                                    output.event("typing", serde_json::json!({
+                                        "chat_id": updated_chat.id,
+                                        "from_pubkey": from_pubkey_hex,
+                                        "timestamp": timestamp,
+                                    }));
+                                } else {
+                                    // Chat message (kind 14 or default)
+                                    let msg_id = event.id.to_hex();
+                                    let stored = StoredMessage {
+                                        id: msg_id.clone(),
+                                        chat_id: chat.id.clone(),
+                                        from_pubkey: from_pubkey_hex.clone(),
+                                        content: content.clone(),
+                                        timestamp,
+                                        is_outgoing: false,
+                                    };
+                                    storage.save_message(&stored)?;
+                                    updated_chat.last_message_at = Some(timestamp);
 
-                                output.event("message", IncomingMessage {
-                                    chat_id: updated_chat.id,
-                                    message_id: msg_id,
-                                    from_pubkey: from_pubkey_hex,
-                                    content,
-                                    timestamp,
-                                });
+                                    storage.save_chat(&updated_chat)?;
+                                    output.event("message", IncomingMessage {
+                                        chat_id: updated_chat.id.clone(),
+                                        message_id: msg_id,
+                                        from_pubkey: from_pubkey_hex,
+                                        content,
+                                        timestamp,
+                                    });
+                                }
                             }
+
+                            storage.save_chat(&updated_chat)?;
 
                             // KEY FIX: Update subscription after receiving a message
                             // because the ratchet may have rotated ephemeral keys
@@ -843,6 +1150,7 @@ mod tests {
     use super::*;
     use crate::storage::StoredChat;
     use tempfile::TempDir;
+    use std::sync::Once;
 
     fn create_test_session() -> nostr_double_ratchet::Session {
         // Create an invite
@@ -865,7 +1173,16 @@ mod tests {
         bob_session
     }
 
+    fn init_test_env() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("NDR_IGNORE_PUBLISH_ERRORS", "1");
+            std::env::set_var("NOSTR_PREFER_LOCAL", "0");
+        });
+    }
+
     fn setup() -> (TempDir, Config, Storage, String) {
+        init_test_env();
         let temp = TempDir::new().unwrap();
         let mut config = Config::load(temp.path()).unwrap();
         config.set_private_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
