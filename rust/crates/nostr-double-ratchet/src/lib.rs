@@ -9,6 +9,7 @@ pub mod user_record;
 pub mod session_manager;
 pub mod pubsub;
 pub mod group;
+pub mod shared_channel;
 
 pub use error::{Error, Result};
 pub use session::Session;
@@ -20,3 +21,4 @@ pub use user_record::{UserRecord, DeviceRecord, StoredUserRecord, StoredDeviceRe
 pub use session_manager::{SessionManager, SessionManagerEvent};
 pub use pubsub::{SessionEvent, NostrPubSub, ChannelPubSub};
 pub use group::*;
+pub use shared_channel::SharedChannel;

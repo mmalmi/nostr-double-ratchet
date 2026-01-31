@@ -53,6 +53,17 @@ pub struct StoredGroup {
     pub data: nostr_double_ratchet::group::GroupData,
 }
 
+/// Stored group message data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredGroupMessage {
+    pub id: String,
+    pub group_id: String,
+    pub sender_pubkey: String,
+    pub content: String,
+    pub timestamp: u64,
+    pub is_outgoing: bool,
+}
+
 /// File-based storage (agent-friendly - can read JSON directly)
 pub struct Storage {
     #[allow(dead_code)]
@@ -62,6 +73,7 @@ pub struct Storage {
     messages_dir: PathBuf,
     reactions_dir: PathBuf,
     groups_dir: PathBuf,
+    group_messages_dir: PathBuf,
 }
 
 impl Storage {
@@ -73,12 +85,14 @@ impl Storage {
         let messages_dir = base_dir.join("messages");
         let reactions_dir = base_dir.join("reactions");
         let groups_dir = base_dir.join("groups");
+        let group_messages_dir = base_dir.join("group_messages");
 
         fs::create_dir_all(&invites_dir)?;
         fs::create_dir_all(&chats_dir)?;
         fs::create_dir_all(&messages_dir)?;
         fs::create_dir_all(&reactions_dir)?;
         fs::create_dir_all(&groups_dir)?;
+        fs::create_dir_all(&group_messages_dir)?;
 
         Ok(Self {
             base_dir,
@@ -87,6 +101,7 @@ impl Storage {
             messages_dir,
             reactions_dir,
             groups_dir,
+            group_messages_dir,
         })
     }
 
@@ -316,6 +331,66 @@ impl Storage {
         Ok(reactions)
     }
 
+    // === Group message operations ===
+    // Group messages stored at group_messages/<group_id>/<date>.json
+
+    fn group_messages_path(&self, group_id: &str) -> PathBuf {
+        self.group_messages_dir.join(group_id)
+    }
+
+    pub fn save_group_message(&self, msg: &StoredGroupMessage) -> Result<()> {
+        let dir = self.group_messages_path(&msg.group_id);
+        fs::create_dir_all(&dir)?;
+
+        let date = Self::date_from_timestamp(msg.timestamp);
+        let path = dir.join(format!("{}.json", date));
+
+        let mut day_messages: Vec<StoredGroupMessage> = if path.exists() {
+            let content = fs::read_to_string(&path)?;
+            serde_json::from_str(&content)?
+        } else {
+            Vec::new()
+        };
+
+        day_messages.retain(|m| m.id != msg.id);
+        day_messages.push(msg.clone());
+        day_messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        let content = serde_json::to_string_pretty(&day_messages)?;
+        let temp_path = dir.join(format!("{}.json.tmp", date));
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
+        Ok(())
+    }
+
+    pub fn get_group_messages(&self, group_id: &str, limit: usize) -> Result<Vec<StoredGroupMessage>> {
+        let dir = self.group_messages_path(group_id);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut day_files: Vec<_> = fs::read_dir(&dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+            .collect();
+        day_files.sort_by(|a, b| b.path().cmp(&a.path()));
+
+        let mut messages: Vec<StoredGroupMessage> = Vec::new();
+        for entry in day_files {
+            let content = fs::read_to_string(entry.path())?;
+            let day_messages: Vec<StoredGroupMessage> = serde_json::from_str(&content)?;
+            messages.extend(day_messages);
+            if messages.len() >= limit {
+                break;
+            }
+        }
+
+        messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        messages.truncate(limit);
+        messages.reverse();
+        Ok(messages)
+    }
+
     // === Group operations ===
 
     pub fn save_group(&self, group: &StoredGroup) -> Result<()> {
@@ -351,12 +426,17 @@ impl Storage {
 
     pub fn delete_group(&self, id: &str) -> Result<bool> {
         let path = self.groups_dir.join(format!("{}.json", id));
+        let messages_path = self.group_messages_dir.join(id);
+        let existed = path.exists();
+
         if path.exists() {
             fs::remove_file(path)?;
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        if messages_path.exists() {
+            fs::remove_dir_all(messages_path)?;
+        }
+
+        Ok(existed)
     }
 
     /// Clear all data (for logout)
@@ -376,6 +456,9 @@ impl Storage {
         if self.groups_dir.exists() {
             fs::remove_dir_all(&self.groups_dir)?;
         }
+        if self.group_messages_dir.exists() {
+            fs::remove_dir_all(&self.group_messages_dir)?;
+        }
 
         // Recreate dirs
         fs::create_dir_all(&self.invites_dir)?;
@@ -383,6 +466,7 @@ impl Storage {
         fs::create_dir_all(&self.messages_dir)?;
         fs::create_dir_all(&self.reactions_dir)?;
         fs::create_dir_all(&self.groups_dir)?;
+        fs::create_dir_all(&self.group_messages_dir)?;
 
         Ok(())
     }
@@ -774,6 +858,94 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"id\": \"readable\""));
         assert!(content.contains("\"label\": \"Test\""));
+    }
+
+    #[test]
+    fn test_group_message_crud() {
+        let (_temp, storage) = test_storage();
+
+        let base_ts = 1704067200u64;
+        for i in 0..5 {
+            let msg = StoredGroupMessage {
+                id: format!("gmsg-{}", i),
+                group_id: "group-1".to_string(),
+                sender_pubkey: "sender".to_string(),
+                content: format!("Group message {}", i),
+                timestamp: base_ts + i as u64 * 60,
+                is_outgoing: i % 2 == 0,
+            };
+            storage.save_group_message(&msg).unwrap();
+        }
+
+        let messages = storage.get_group_messages("group-1", 3).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].content, "Group message 2");
+        assert_eq!(messages[2].content, "Group message 4");
+    }
+
+    #[test]
+    fn test_group_message_empty() {
+        let (_temp, storage) = test_storage();
+        let messages = storage.get_group_messages("nonexistent", 10).unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_delete_group_cascades_messages() {
+        let (_temp, storage) = test_storage();
+
+        let group = StoredGroup {
+            data: nostr_double_ratchet::group::GroupData {
+                id: "g1".to_string(),
+                name: "Test".to_string(),
+                description: None,
+                picture: None,
+                members: vec!["a".to_string()],
+                admins: vec!["a".to_string()],
+                created_at: 1000,
+                secret: None,
+                accepted: Some(true),
+            },
+        };
+        storage.save_group(&group).unwrap();
+
+        let msg = StoredGroupMessage {
+            id: "gm1".to_string(),
+            group_id: "g1".to_string(),
+            sender_pubkey: "a".to_string(),
+            content: "Hello".to_string(),
+            timestamp: 1704067200,
+            is_outgoing: true,
+        };
+        storage.save_group_message(&msg).unwrap();
+
+        storage.delete_group("g1").unwrap();
+        assert!(storage.get_group_messages("g1", 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_group_message_dedup() {
+        let (_temp, storage) = test_storage();
+
+        let msg = StoredGroupMessage {
+            id: "gm1".to_string(),
+            group_id: "g1".to_string(),
+            sender_pubkey: "a".to_string(),
+            content: "v1".to_string(),
+            timestamp: 1704067200,
+            is_outgoing: true,
+        };
+        storage.save_group_message(&msg).unwrap();
+
+        let msg2 = StoredGroupMessage {
+            content: "v2".to_string(),
+            ..msg.clone()
+        };
+        storage.save_group_message(&msg2).unwrap();
+
+        let messages = storage.get_group_messages("g1", 100).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "v2");
     }
 
     #[test]

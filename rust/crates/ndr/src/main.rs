@@ -232,6 +232,39 @@ enum GroupCommands {
         /// Admin pubkey (hex)
         pubkey: String,
     },
+
+    /// Send a message to all group members
+    Send {
+        /// Group ID
+        id: String,
+        /// Message content
+        message: String,
+    },
+
+    /// React to a group message
+    React {
+        /// Group ID
+        id: String,
+        /// Message ID to react to
+        message_id: String,
+        /// Emoji reaction
+        emoji: String,
+    },
+
+    /// Accept a group invitation (enable shared channel)
+    Accept {
+        /// Group ID
+        id: String,
+    },
+
+    /// Read group messages
+    Messages {
+        /// Group ID
+        id: String,
+        /// Maximum number of messages to show
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -294,6 +327,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             | Commands::Typing { .. }
             | Commands::Receipt { .. }
             | Commands::Listen { .. }
+            | Commands::Group(GroupCommands::Send { .. })
+            | Commands::Group(GroupCommands::React { .. })
+            | Commands::Group(GroupCommands::Accept { .. })
     );
 
     if needs_identity {
@@ -411,6 +447,18 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             }
             GroupCommands::RemoveAdmin { id, pubkey } => {
                 commands::group::remove_admin(&id, &pubkey, &config, &storage, output).await
+            }
+            GroupCommands::Send { id, message } => {
+                commands::group::send_message(&id, &message, &config, &storage, output).await
+            }
+            GroupCommands::React { id, message_id, emoji } => {
+                commands::group::react(&id, &message_id, &emoji, &config, &storage, output).await
+            }
+            GroupCommands::Accept { id } => {
+                commands::group::accept(&id, &config, &storage, output).await
+            }
+            GroupCommands::Messages { id, limit } => {
+                commands::group::messages(&id, limit, &storage, output).await
             }
         },
     }
