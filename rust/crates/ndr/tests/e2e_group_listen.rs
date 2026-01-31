@@ -264,3 +264,194 @@ async fn test_listen_group_metadata_and_message() {
         panic!("{:?}", err);
     }
 }
+
+#[tokio::test]
+async fn test_listen_group_add_member_and_fanout() {
+    let mut relay = common::WsRelay::new();
+    let addr = relay.start().await.expect("Failed to start relay");
+    let relay_url = format!("ws://{}", addr);
+    println!("Relay started at: {}", relay_url);
+
+    let alice_dir = setup_ndr_dir(&relay_url);
+    let bob_dir = setup_ndr_dir(&relay_url);
+    let carol_dir = setup_ndr_dir(&relay_url);
+
+    let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let bob_sk = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let carol_sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let alice_login = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
+    let alice_pubkey = alice_login["data"]["pubkey"]
+        .as_str()
+        .expect("alice pubkey")
+        .to_string();
+
+    let bob_login = run_ndr(bob_dir.path(), &["login", bob_sk]).await;
+    let bob_pubkey = bob_login["data"]["pubkey"]
+        .as_str()
+        .expect("bob pubkey")
+        .to_string();
+
+    let carol_login = run_ndr(carol_dir.path(), &["login", carol_sk]).await;
+    let carol_pubkey = carol_login["data"]["pubkey"]
+        .as_str()
+        .expect("carol pubkey")
+        .to_string();
+
+    let mut alice_child: Option<Child> = None;
+    let mut bob_child: Option<Child> = None;
+    let mut carol_child: Option<Child> = None;
+
+    let result = async {
+        // Alice creates invite for Bob, Bob joins.
+        let invite_bob = run_ndr(alice_dir.path(), &["invite", "create", "-l", "group-bob"]).await;
+        let invite_bob_id = invite_bob["data"]["id"].as_str().expect("invite id").to_string();
+        let invite_bob_url = invite_bob["data"]["url"].as_str().expect("invite url").to_string();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let bob_join = run_ndr(bob_dir.path(), &["chat", "join", &invite_bob_url]).await;
+        let bob_response_event = bob_join["data"]["response_event"]
+            .as_str()
+            .expect("bob response event")
+            .to_string();
+        let _ = run_ndr(
+            alice_dir.path(),
+            &["invite", "accept", &invite_bob_id, &bob_response_event],
+        )
+        .await;
+
+        // Alice creates invite for Carol, Carol joins.
+        let invite_carol = run_ndr(alice_dir.path(), &["invite", "create", "-l", "group-carol"]).await;
+        let invite_carol_id = invite_carol["data"]["id"].as_str().expect("invite id").to_string();
+        let invite_carol_url = invite_carol["data"]["url"].as_str().expect("invite url").to_string();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let carol_join = run_ndr(carol_dir.path(), &["chat", "join", &invite_carol_url]).await;
+        let carol_response_event = carol_join["data"]["response_event"]
+            .as_str()
+            .expect("carol response event")
+            .to_string();
+        let _ = run_ndr(
+            alice_dir.path(),
+            &["invite", "accept", &invite_carol_id, &carol_response_event],
+        )
+        .await;
+
+        // Start Alice listen after chats are created.
+        let (child, mut alice_stdout) = start_ndr_listen(alice_dir.path()).await;
+        alice_child = Some(child);
+        assert!(
+            read_until_command(&mut alice_stdout, "listen", Duration::from_secs(5)).await,
+            "Alice should print listen message"
+        );
+
+        // Bob sends a kickoff message so Alice can send to Bob.
+        let bob_kickoff = "kickoff-bob";
+        let _ = run_ndr(bob_dir.path(), &["send", &alice_pubkey, bob_kickoff]).await;
+        let kickoff_event = read_until_event(&mut alice_stdout, "message", Duration::from_secs(10))
+            .await
+            .expect("Alice should receive Bob kickoff message");
+        assert_eq!(kickoff_event["content"].as_str(), Some(bob_kickoff));
+
+        // Carol sends a kickoff message so Alice can send to Carol.
+        let carol_kickoff = "kickoff-carol";
+        let _ = run_ndr(carol_dir.path(), &["send", &alice_pubkey, carol_kickoff]).await;
+        let kickoff_event = read_until_event(&mut alice_stdout, "message", Duration::from_secs(10))
+            .await
+            .expect("Alice should receive Carol kickoff message");
+        assert_eq!(kickoff_event["content"].as_str(), Some(carol_kickoff));
+
+        // Start Bob listen.
+        let (child, mut bob_stdout) = start_ndr_listen(bob_dir.path()).await;
+        bob_child = Some(child);
+        assert!(
+            read_until_command(&mut bob_stdout, "listen", Duration::from_secs(5)).await,
+            "Bob should print listen message"
+        );
+
+        // Start Carol listen.
+        let (child, mut carol_stdout) = start_ndr_listen(carol_dir.path()).await;
+        carol_child = Some(child);
+        assert!(
+            read_until_command(&mut carol_stdout, "listen", Duration::from_secs(5)).await,
+            "Carol should print listen message"
+        );
+
+        // Alice creates a group with Bob only.
+        let group_create = run_ndr(
+            alice_dir.path(),
+            &["group", "create", "--name", "Big Group", "--members", &bob_pubkey],
+        )
+        .await;
+        let group_id = group_create["data"]["id"]
+            .as_str()
+            .expect("group id")
+            .to_string();
+
+        // Bob should receive group metadata creation.
+        let bob_created = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+            .await
+            .expect("Bob should receive group_metadata created");
+        assert_eq!(bob_created["group_id"].as_str(), Some(group_id.as_str()));
+        assert_eq!(bob_created["action"].as_str(), Some("created"));
+
+        // Alice adds Carol to the group.
+        let _ = run_ndr(
+            alice_dir.path(),
+            &["group", "add-member", &group_id, &carol_pubkey],
+        )
+        .await;
+
+        // Bob should receive group metadata update.
+        let bob_updated = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+            .await
+            .expect("Bob should receive group_metadata updated");
+        assert_eq!(bob_updated["group_id"].as_str(), Some(group_id.as_str()));
+        assert_eq!(bob_updated["action"].as_str(), Some("updated"));
+
+        // Carol should receive group metadata creation.
+        let carol_created = read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
+            .await
+            .expect("Carol should receive group_metadata created");
+        assert_eq!(carol_created["group_id"].as_str(), Some(group_id.as_str()));
+        assert_eq!(carol_created["action"].as_str(), Some("created"));
+
+        // Alice sends a group message to all.
+        let msg_text = "hello everyone";
+        let _ = run_ndr(
+            alice_dir.path(),
+            &["group", "send", &group_id, msg_text],
+        )
+        .await;
+
+        // Bob should receive group message.
+        let bob_msg = read_until_event(&mut bob_stdout, "group_message", Duration::from_secs(10))
+            .await
+            .expect("Bob should receive group_message");
+        assert_eq!(bob_msg["group_id"].as_str(), Some(group_id.as_str()));
+        assert_eq!(bob_msg["content"].as_str(), Some(msg_text));
+
+        // Carol should receive group message.
+        let carol_msg = read_until_event(&mut carol_stdout, "group_message", Duration::from_secs(10))
+            .await
+            .expect("Carol should receive group_message");
+        assert_eq!(carol_msg["group_id"].as_str(), Some(group_id.as_str()));
+        assert_eq!(carol_msg["content"].as_str(), Some(msg_text));
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Some(child) = alice_child {
+        stop_child(child).await;
+    }
+    if let Some(child) = bob_child {
+        stop_child(child).await;
+    }
+    if let Some(child) = carol_child {
+        stop_child(child).await;
+    }
+    relay.stop().await;
+
+    if let Err(err) = result {
+        panic!("{:?}", err);
+    }
+}
