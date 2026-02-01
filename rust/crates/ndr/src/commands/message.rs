@@ -235,9 +235,24 @@ async fn create_chat_from_public_invite(
         .limit(10);
 
     let events = client.fetch_events(vec![filter], Some(Duration::from_secs(10))).await?;
-    let invite = events
-        .iter()
-        .find_map(|event| nostr_double_ratchet::Invite::from_event(event).ok())
+    let has_tag = |event: &nostr::Event, name: &str, value: &str| {
+        event.tags.iter().any(|t| {
+            let parts = t.as_slice();
+            parts.get(0).map(|s| s.as_str()) == Some(name)
+                && parts.get(1).map(|s| s.as_str()) == Some(value)
+        })
+    };
+
+    let public_invite = events.iter().find_map(|event| {
+        if has_tag(event, "d", "double-ratchet/invites/public") {
+            nostr_double_ratchet::Invite::from_event(event).ok()
+        } else {
+            None
+        }
+    });
+
+    let invite = public_invite
+        .or_else(|| events.iter().find_map(|event| nostr_double_ratchet::Invite::from_event(event).ok()))
         .ok_or_else(|| anyhow::anyhow!("No public invite found for {}", target_pubkey_hex))?;
 
     let their_pubkey_hex = invite.inviter.to_hex();

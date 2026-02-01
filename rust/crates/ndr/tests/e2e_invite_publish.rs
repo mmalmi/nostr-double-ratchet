@@ -78,3 +78,42 @@ async fn test_invite_publish_creates_event() {
 
     relay.stop().await;
 }
+
+#[tokio::test]
+async fn test_invite_publish_defaults_public_device_id() {
+    let mut relay = common::WsRelay::new();
+    let addr = relay.start().await.expect("Failed to start relay");
+    let relay_url = format!("ws://{}", addr);
+
+    let temp = TempDir::new().unwrap();
+    let data_dir = temp.path();
+
+    let config_content = serde_json::json!({
+        "relays": [&relay_url]
+    });
+    std::fs::write(
+        data_dir.join("config.json"),
+        serde_json::to_string(&config_content).unwrap()
+    ).unwrap();
+
+    let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let login = run_ndr(data_dir, &["login", alice_sk]).await;
+    assert_eq!(login["status"], "ok");
+
+    let publish = run_ndr(data_dir, &["invite", "publish", "-l", "test"]).await;
+    assert_eq!(publish["status"], "ok");
+
+    sleep(Duration::from_millis(200)).await;
+
+    let events = relay.events().await;
+    let invite_event = events.iter().find(|e| e.kind == nostr_double_ratchet::INVITE_EVENT_KIND)
+        .expect("Expected invite event to be published");
+
+    let has_tag = |name: &str, value: &str| {
+        invite_event.tags.iter().any(|t| t.len() >= 2 && t[0] == name && t[1] == value)
+    };
+
+    assert!(has_tag("d", "double-ratchet/invites/public"));
+
+    relay.stop().await;
+}

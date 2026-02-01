@@ -126,7 +126,7 @@ enum InviteCommands {
         /// Label for the invite
         #[arg(short, long)]
         label: Option<String>,
-        /// Device identifier for invite event (default: label or "default")
+        /// Device identifier for invite event (default: "public")
         #[arg(long)]
         device_id: Option<String>,
     },
