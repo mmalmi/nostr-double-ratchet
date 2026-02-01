@@ -28,6 +28,9 @@ ndr whoami
 # Create an invite
 ndr invite create
 
+# Publish a public invite (default device id = "public")
+ndr invite publish
+
 # Join someone's invite
 ndr chat join <invite_url>
 
@@ -65,11 +68,16 @@ ndr whoami          # Show current identity
 
 ```bash
 ndr invite create           # Create new invite URL
-ndr invite publish          # Create + publish invite event on Nostr
+ndr invite publish          # Create + publish invite event on Nostr (default device id: "public")
 ndr invite list             # List pending invites
 ndr invite delete <id>      # Delete an invite
 ndr invite listen           # Listen for invite acceptances
 ```
+
+Notes:
+- `ndr invite publish` defaults to device id `public`, which makes the event replaceable on relays.
+- Re-run `ndr invite publish` to refresh the public invite.
+- Override the device id with `--device-id <name>` if you need multiple parallel invites.
 
 ### Chats
 
@@ -84,6 +92,7 @@ ndr chat delete <id>        # Delete a chat
 
 ```bash
 ndr send <chat_id> <msg>    # Send encrypted message
+ndr send <npub> <msg>       # Auto-accept their public invite if no chat exists
 ndr react <chat_id> <msg_id> <emoji>  # React to a message
 ndr read <chat_id>          # Read message history
 ndr listen                  # Listen for incoming messages
@@ -122,6 +131,16 @@ ndr chat join "https://..."
 
 # Alice sees session created, can now send messages
 ndr send <chat_id> "Hello Bob!"
+```
+
+### Send to npub using a public invite
+
+```bash
+# Bob publishes a public invite
+ndr invite publish
+
+# Alice can send directly to Bob's npub
+ndr send npub1... "Hello Bob!"
 ```
 
 ### AI Agent Integration
