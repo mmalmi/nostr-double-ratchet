@@ -579,6 +579,7 @@ pub async fn listen(
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
     use nostr_double_ratchet::{MESSAGE_EVENT_KIND, INVITE_RESPONSE_KIND, SHARED_CHANNEL_KIND, GROUP_INVITE_RUMOR_KIND};
     use std::collections::{HashSet, HashMap};
+    use std::time::{Duration, Instant};
     use notify::{Watcher, RecursiveMode, Event as NotifyEvent, EventKind};
     use std::sync::mpsc;
 
@@ -624,7 +625,7 @@ pub async fn listen(
     };
 
     // Helper to build filters from current state
-    let build_filters = |storage: &Storage, chat_id: Option<&str>, channel_map: &HashMap<String, (nostr_double_ratchet::SharedChannel, String)>| -> Result<(Vec<Filter>, HashSet<String>)> {
+    let build_filters = |storage: &Storage, chat_id: Option<&str>, channel_map: &HashMap<String, (nostr_double_ratchet::SharedChannel, String)>| -> Result<(Vec<Filter>, HashSet<String>, HashSet<String>, HashSet<String>)> {
         let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
         let subscribed_pubkeys: HashSet<String> = pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
 
@@ -646,6 +647,10 @@ pub async fn listen(
                     .map(|invite| invite.inviter_ephemeral_public_key)
             })
             .collect();
+        let invite_pubkeys: HashSet<String> = ephemeral_pubkeys
+            .iter()
+            .map(|pk| pk.to_hex())
+            .collect();
 
         if !ephemeral_pubkeys.is_empty() {
             filters.push(
@@ -659,6 +664,10 @@ pub async fn listen(
         let channel_pubkeys: Vec<nostr::PublicKey> = channel_map.values()
             .filter_map(|(ch, _)| Some(ch.public_key()))
             .collect();
+        let channel_pubkeys_hex: HashSet<String> = channel_pubkeys
+            .iter()
+            .map(|pk| pk.to_hex())
+            .collect();
         if !channel_pubkeys.is_empty() {
             filters.push(
                 Filter::new()
@@ -667,13 +676,15 @@ pub async fn listen(
             );
         }
 
-        Ok((filters, subscribed_pubkeys))
+        Ok((filters, subscribed_pubkeys, invite_pubkeys, channel_pubkeys_hex))
     };
 
     // Build initial filters
     let my_pubkey = config.public_key()?;
     let mut channel_map = build_channel_map(storage)?;
-    let (mut filters, mut subscribed_pubkeys) = build_filters(storage, chat_id, &channel_map)?;
+    let (mut filters, mut subscribed_pubkeys, mut subscribed_invite_pubkeys, mut subscribed_channel_pubkeys) =
+        build_filters(storage, chat_id, &channel_map)?;
+    let mut last_refresh = Instant::now();
 
     output.success_message("listen", &format!("Listening for messages and invite responses on {}... (Ctrl+C to stop)", scope));
 
@@ -681,7 +692,7 @@ pub async fn listen(
     let (fs_tx, fs_rx) = mpsc::channel();
     let mut _watcher = notify::recommended_watcher(move |res: Result<NotifyEvent, notify::Error>| {
         if let Ok(event) = res {
-            if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+            if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
                 let _ = fs_tx.send(());
             }
         }
@@ -718,10 +729,13 @@ pub async fn listen(
         // Check for filesystem changes
         while let Ok(()) = fs_rx.try_recv() {
             channel_map = build_channel_map(storage)?;
-            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref(), &channel_map)?;
+            let (new_filters, new_pubkeys, new_invite_pubkeys, new_channel_pubkeys) =
+                build_filters(storage, chat_id_owned.as_deref(), &channel_map)?;
             if !new_filters.is_empty() {
                 filters = new_filters;
                 subscribed_pubkeys = new_pubkeys;
+                subscribed_invite_pubkeys = new_invite_pubkeys;
+                subscribed_channel_pubkeys = new_channel_pubkeys;
                 if !connected {
                     client.connect().await;
                     connected = true;
@@ -737,14 +751,27 @@ pub async fn listen(
     let mut notifications = client.notifications();
     loop {
         // Check for filesystem changes (new invites/chats created by other processes)
+        let mut should_refresh = false;
         while let Ok(()) = fs_rx.try_recv() {
+            should_refresh = true;
+        }
+        if should_refresh || last_refresh.elapsed() >= Duration::from_secs(1) {
             channel_map = build_channel_map(storage)?;
-            let (new_filters, new_pubkeys) = build_filters(storage, chat_id_owned.as_deref(), &channel_map)?;
-            if !new_filters.is_empty() && (new_filters.len() != filters.len() || new_pubkeys != subscribed_pubkeys) {
+            let (new_filters, new_pubkeys, new_invite_pubkeys, new_channel_pubkeys) =
+                build_filters(storage, chat_id_owned.as_deref(), &channel_map)?;
+            if !new_filters.is_empty()
+                && (new_filters.len() != filters.len()
+                    || new_pubkeys != subscribed_pubkeys
+                    || new_invite_pubkeys != subscribed_invite_pubkeys
+                    || new_channel_pubkeys != subscribed_channel_pubkeys)
+            {
                 filters = new_filters;
                 subscribed_pubkeys = new_pubkeys;
+                subscribed_invite_pubkeys = new_invite_pubkeys;
+                subscribed_channel_pubkeys = new_channel_pubkeys;
                 client.subscribe(filters.clone(), None).await?;
             }
+            last_refresh = Instant::now();
         }
 
         // Wait for relay notification with timeout to allow fs check
