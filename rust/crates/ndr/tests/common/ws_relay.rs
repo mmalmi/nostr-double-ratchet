@@ -178,6 +178,12 @@ impl WsRelay {
         self.state.events.read().await.len()
     }
 
+    /// Get all events (for testing)
+    #[allow(dead_code)]
+    pub async fn events(&self) -> Vec<NostrEvent> {
+        self.state.events.read().await.clone()
+    }
+
     /// Clear all events
     #[allow(dead_code)]
     pub async fn clear(&self) {

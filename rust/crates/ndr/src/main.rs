@@ -121,6 +121,16 @@ enum InviteCommands {
         label: Option<String>,
     },
 
+    /// Create and publish an invite event to relays
+    Publish {
+        /// Label for the invite
+        #[arg(short, long)]
+        label: Option<String>,
+        /// Device identifier for invite event (default: label or "default")
+        #[arg(long)]
+        device_id: Option<String>,
+    },
+
     /// List all invites
     List,
 
@@ -354,6 +364,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Invite(cmd) => match cmd {
             InviteCommands::Create { label } => {
                 commands::invite::create(label, &config, &storage, output).await
+            }
+            InviteCommands::Publish { label, device_id } => {
+                commands::invite::publish(label, device_id, &config, &storage, output).await
             }
             InviteCommands::List => {
                 commands::invite::list(&storage, output).await

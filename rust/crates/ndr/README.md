@@ -65,6 +65,7 @@ ndr whoami          # Show current identity
 
 ```bash
 ndr invite create           # Create new invite URL
+ndr invite publish          # Create + publish invite event on Nostr
 ndr invite list             # List pending invites
 ndr invite delete <id>      # Delete an invite
 ndr invite listen           # Listen for invite acceptances

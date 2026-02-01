@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
+use nostr_sdk::Client;
 
 use crate::config::Config;
 use crate::output::Output;
@@ -10,6 +11,15 @@ struct InviteCreated {
     id: String,
     url: String,
     label: Option<String>,
+}
+
+#[derive(Serialize)]
+struct InvitePublished {
+    id: String,
+    url: String,
+    label: Option<String>,
+    device_id: String,
+    event: String,
 }
 
 #[derive(Serialize)]
@@ -67,6 +77,79 @@ pub async fn create(
     Ok(())
 }
 
+fn normalize_device_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "default".to_string();
+    }
+    trimmed.replace(' ', "-")
+}
+
+/// Create and publish a new invite event
+pub async fn publish(
+    label: Option<String>,
+    device_id: Option<String>,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    let pubkey_hex = config.public_key()?;
+    let pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&pubkey_hex)?;
+
+    let device_id = device_id
+        .or_else(|| label.clone())
+        .unwrap_or_else(|| "default".to_string());
+    let device_id = normalize_device_id(&device_id);
+
+    let invite = nostr_double_ratchet::Invite::create_new(pubkey, Some(device_id.clone()), None)?;
+    let url = invite.get_url("https://iris.to")?;
+    let serialized = invite.serialize()?;
+
+    let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+
+    let stored = StoredInvite {
+        id: id.clone(),
+        label: label.clone(),
+        url: url.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        serialized,
+    };
+    storage.save_invite(&stored)?;
+
+    // Build and sign invite event
+    let unsigned = invite.get_event()?;
+    let sk_bytes = config.private_key_bytes()?;
+    let sk = nostr::SecretKey::from_slice(&sk_bytes)?;
+    let keys = nostr::Keys::new(sk);
+    let event = unsigned.sign_with_keys(&keys)
+        .map_err(|e| anyhow::anyhow!("Failed to sign invite event: {}", e))?;
+
+    // Publish to relays
+    let client = Client::default();
+    let relays = config.resolved_relays();
+    for relay in &relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+    send_event_or_ignore(&client, event.clone()).await?;
+
+    output.success("invite.publish", InvitePublished {
+        id,
+        url,
+        label,
+        device_id,
+        event: nostr::JsonUtil::as_json(&event),
+    });
+
+    Ok(())
+}
+
 /// List all invites
 pub async fn list(storage: &Storage, output: &Output) -> Result<()> {
     let invites = storage.list_invites()?;
@@ -93,6 +176,24 @@ pub async fn delete(id: &str, storage: &Storage, output: &Output) -> Result<()> 
         anyhow::bail!("Invite not found: {}", id);
     }
     Ok(())
+}
+
+async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
+    match client.send_event(event).await {
+        Ok(_) => Ok(()),
+        Err(err) if should_ignore_publish_errors() => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn should_ignore_publish_errors() -> bool {
+    for key in ["NDR_IGNORE_PUBLISH_ERRORS", "NOSTR_IGNORE_PUBLISH_ERRORS"] {
+        if let Ok(val) = std::env::var(key) {
+            let val = val.trim().to_lowercase();
+            return matches!(val.as_str(), "1" | "true" | "yes" | "on");
+        }
+    }
+    false
 }
 
 #[derive(Serialize)]
