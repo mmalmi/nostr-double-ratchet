@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nostr_double_ratchet::{Session, REACTION_KIND, RECEIPT_KIND, TYPING_KIND, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND};
+use nostr_double_ratchet::{Session, REACTION_KIND, RECEIPT_KIND, TYPING_KIND, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, INVITE_EVENT_KIND};
 use nostr_sdk::Client;
 use serde::Serialize;
 
@@ -43,6 +43,26 @@ pub fn resolve_target(target: &str, storage: &Storage) -> Result<StoredChat> {
     }
 
     anyhow::bail!("Chat not found: {}", target)
+}
+
+/// Resolve a target to a hex pubkey (npub, hex pubkey, or petname).
+fn resolve_target_pubkey(target: &str, storage: &Storage) -> Result<String> {
+    if target.starts_with("npub1") {
+        use nostr::FromBech32;
+        let pk = nostr::PublicKey::from_bech32(target)
+            .map_err(|_| anyhow::anyhow!("Invalid npub: {}", target))?;
+        return Ok(pk.to_hex());
+    }
+
+    if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(target.to_string());
+    }
+
+    if let Ok(Some(hex)) = storage.get_contact_pubkey(target) {
+        return Ok(hex);
+    }
+
+    anyhow::bail!("Target is not a pubkey or contact: {}", target)
 }
 
 #[derive(Serialize)]
@@ -112,7 +132,26 @@ pub async fn send(
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
-    let chat = resolve_target(target, storage)?;
+    let chat = match resolve_target(target, storage) {
+        Ok(chat) => chat,
+        Err(resolve_err) => {
+            let target_pubkey = match resolve_target_pubkey(target, storage) {
+                Ok(pubkey) => pubkey,
+                Err(_) => return Err(resolve_err),
+            };
+
+            match create_chat_from_public_invite(&target_pubkey, config, storage).await {
+                Ok(chat) => chat,
+                Err(err) => {
+                    return Err(anyhow::anyhow!(
+                        "Chat not found and no public invite available for {}: {}",
+                        target,
+                        err
+                    ));
+                }
+            }
+        }
+    };
     let chat_id = chat.id.clone();
 
     // Load session state
@@ -168,6 +207,58 @@ pub async fn send(
     });
 
     Ok(())
+}
+
+async fn create_chat_from_public_invite(
+    target_pubkey_hex: &str,
+    config: &Config,
+    storage: &Storage,
+) -> Result<StoredChat> {
+    use nostr_sdk::Filter;
+    use std::time::Duration;
+
+    let target_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(target_pubkey_hex)?;
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey_hex = config.public_key()?;
+    let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
+
+    let client = Client::default();
+    let relays = config.resolved_relays();
+    for relay in &relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(nostr::Kind::Custom(INVITE_EVENT_KIND as u16))
+        .author(target_pubkey)
+        .limit(10);
+
+    let events = client.fetch_events(vec![filter], Some(Duration::from_secs(10))).await?;
+    let invite = events
+        .iter()
+        .find_map(|event| nostr_double_ratchet::Invite::from_event(event).ok())
+        .ok_or_else(|| anyhow::anyhow!("No public invite found for {}", target_pubkey_hex))?;
+
+    let their_pubkey_hex = invite.inviter.to_hex();
+    let (session, response_event) = invite.accept(our_pubkey, our_private_key, None)?;
+
+    let session_state = serde_json::to_string(&session.state)?;
+    let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    let chat = StoredChat {
+        id: chat_id.clone(),
+        their_pubkey: their_pubkey_hex,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        last_message_at: None,
+        session_state,
+    };
+
+    storage.save_chat(&chat)?;
+    send_event_or_ignore(&client, response_event).await?;
+
+    Ok(chat)
 }
 
 /// React to a message
