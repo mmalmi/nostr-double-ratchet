@@ -1,11 +1,11 @@
-//! E2E test: Alice publishes invite to relay, Bob fetches and parses it
+//! E2E test: Alice publishes invite, Bob fetches from relay, both exchange messages
 
 mod common;
 
 use tempfile::TempDir;
 use tokio::time::{sleep, Duration};
 
-use nostr_double_ratchet::INVITE_EVENT_KIND;
+use nostr_double_ratchet::{Invite, INVITE_EVENT_KIND};
 
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
@@ -33,12 +33,12 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
 }
 
 #[tokio::test]
-async fn test_publish_then_fetch_invite() {
+async fn test_publish_fetch_and_message_both_ways() {
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
 
-    // Alice setup
+    // Alice setup — publishes invite via ndr CLI
     let alice_dir = TempDir::new().unwrap();
     let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     std::fs::write(
@@ -48,16 +48,15 @@ async fn test_publish_then_fetch_invite() {
     let login = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
     assert_eq!(login["status"], "ok");
 
-    // Alice publishes invite
     let publish = run_ndr(alice_dir.path(), &["invite", "publish", "-l", "test"]).await;
     assert_eq!(publish["status"], "ok");
     let published_url = publish["data"]["url"].as_str().expect("Expected invite URL");
 
     sleep(Duration::from_millis(300)).await;
 
-    // Bob fetches the invite event from relay using nostr-sdk
+    // Bob fetches invite from relay
     let alice_sk_key = nostr::SecretKey::from_hex(alice_sk).unwrap();
-    let alice_keys = nostr::Keys::new(alice_sk_key);
+    let alice_keys = nostr::Keys::new(alice_sk_key.clone());
     let alice_pubkey = alice_keys.public_key();
 
     let bob_client = nostr_sdk::Client::default();
@@ -76,42 +75,73 @@ async fn test_publish_then_fetch_invite() {
 
     assert!(!events.is_empty(), "Expected at least one invite event from relay");
 
-    // Parse invite from the fetched event
     let invite_event = events
         .iter()
         .find(|e| e.kind.as_u16() == INVITE_EVENT_KIND as u16)
         .expect("Expected invite event");
 
-    let invite = nostr_double_ratchet::Invite::from_event(invite_event)
+    let invite = Invite::from_event(invite_event)
         .expect("Failed to parse invite from fetched event");
 
-    // Verify invite matches what was published
     assert_eq!(invite.inviter.to_hex(), alice_pubkey.to_hex());
-    let fetched_url = invite.get_url("https://iris.to").expect("Failed to get URL from fetched invite");
-    assert_eq!(fetched_url, published_url, "Fetched invite URL should match published URL");
+    let fetched_url = invite.get_url("https://iris.to").unwrap();
+    assert_eq!(fetched_url, published_url);
 
-    // Bob accepts the invite and establishes a session
+    // Bob accepts invite
     let bob_sk = "1111111111111111111111111111111111111111111111111111111111111111";
     let bob_sk_key = nostr::SecretKey::from_hex(bob_sk).unwrap();
     let bob_keys = nostr::Keys::new(bob_sk_key.clone());
     let bob_pubkey = bob_keys.public_key();
 
-    let (session, response_event) = invite
+    let (mut bob_session, response_event) = invite
         .accept(bob_pubkey, bob_sk_key.secret_bytes(), None)
         .expect("Failed to accept invite");
 
-    // Verify session was created (root_key is populated after key agreement)
-    assert!(!session.state.root_key.is_empty(), "Session root key should not be empty");
+    // Publish response to relay
+    bob_client.send_event(response_event.clone()).await.expect("Failed to publish response");
+    sleep(Duration::from_millis(300)).await;
 
-    // Response event is already signed by accept()
-    bob_client.send_event(response_event).await.expect("Failed to publish response");
+    // Alice loads her stored invite and processes Bob's response to get her session
+    let alice_storage = ndr::storage::Storage::open(alice_dir.path()).unwrap();
+    let stored_invites = alice_storage.list_invites().unwrap();
+    assert!(!stored_invites.is_empty(), "Alice should have a stored invite");
 
-    sleep(Duration::from_millis(200)).await;
+    let stored = &stored_invites[0];
+    let alice_invite = Invite::deserialize(&stored.serialized)
+        .expect("Failed to deserialize Alice's stored invite");
 
-    // Verify response event hit the relay
-    let relay_events = relay.events().await;
-    let has_response = relay_events.iter().any(|e| e.kind == nostr_double_ratchet::INVITE_RESPONSE_KIND);
-    assert!(has_response, "Expected invite response event on relay");
+    let (mut alice_session, _bob_identity, _device_id) = alice_invite
+        .process_invite_response(&response_event, alice_sk_key.secret_bytes())
+        .expect("Failed to process invite response")
+        .expect("Expected session from invite response");
+
+    // Helper to extract content from decrypted inner event JSON
+    fn extract_content(decrypted: Option<String>) -> String {
+        let json_str = decrypted.expect("Expected decrypted message");
+        let v: serde_json::Value = serde_json::from_str(&json_str).expect("Expected valid JSON");
+        v["content"].as_str().expect("Expected content field").to_string()
+    }
+
+    // Bob sends a message to Alice
+    let bob_msg_event = bob_session.send("hello from bob".to_string())
+        .expect("Bob failed to send message");
+    let decrypted = alice_session.receive(&bob_msg_event)
+        .expect("Alice failed to decrypt Bob's message");
+    assert_eq!(extract_content(decrypted), "hello from bob");
+
+    // Alice sends a message back to Bob
+    let alice_msg_event = alice_session.send("hello from alice".to_string())
+        .expect("Alice failed to send message");
+    let decrypted = bob_session.receive(&alice_msg_event)
+        .expect("Bob failed to decrypt Alice's message");
+    assert_eq!(extract_content(decrypted), "hello from alice");
+
+    // Another round to verify ratchet continues working
+    let bob_msg2 = bob_session.send("second message from bob".to_string())
+        .expect("Bob failed to send second message");
+    let decrypted = alice_session.receive(&bob_msg2)
+        .expect("Alice failed to decrypt Bob's second message");
+    assert_eq!(extract_content(decrypted), "second message from bob");
 
     relay.stop().await;
 }
