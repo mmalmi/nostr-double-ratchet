@@ -577,7 +577,7 @@ pub async fn accept(id: &str, config: &Config, storage: &Storage, output: &Outpu
                     // Create an invite for group members to establish 1:1 sessions
                     let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
                     let invite = nostr_double_ratchet::Invite::create_new(my_pk, None, None)?;
-                    let invite_url = invite.get_url("https://iris.to")?;
+                    let invite_url = invite.get_url("https://chat.iris.to")?;
 
                     let rumor_json = serde_json::json!({
                         "id": uuid::Uuid::new_v4().to_string(),

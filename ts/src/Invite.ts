@@ -165,7 +165,7 @@ export class Invite {
     /**
      * Invite parameters are in the URL's hash so they are not sent to the server.
      */
-    getUrl(root = "https://iris.to") {
+    getUrl(root = "https://chat.iris.to") {
         const data = {
             inviter: this.inviter,
             ephemeralKey: this.inviterEphemeralPublicKey,

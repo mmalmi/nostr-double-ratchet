@@ -51,7 +51,7 @@ pub async fn create(
 
     // Create invite using nostr-double-ratchet
     let invite = nostr_double_ratchet::Invite::create_new(pubkey, None, None)?;
-    let url = invite.get_url("https://iris.to")?;
+    let url = invite.get_url("https://chat.iris.to")?;
     let serialized = invite.serialize()?;
 
     let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
