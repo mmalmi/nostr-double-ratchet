@@ -56,9 +56,8 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
         panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 /// Setup ndr data directory with config for test relay
@@ -115,7 +114,8 @@ async fn test_listen_empty_data_dir() {
     );
 
     // Start ndr listen - this used to fail with "not subscribed" error
-    let (mut child, mut stdout_reader, _stderr_reader) = start_ndr_listen_with_stderr(dir.path()).await;
+    let (mut child, mut stdout_reader, _stderr_reader) =
+        start_ndr_listen_with_stderr(dir.path()).await;
 
     // Wait a bit for it to start and output the listening message
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -133,7 +133,12 @@ async fn test_listen_empty_data_dir() {
     let mut stdout_lines = Vec::new();
     loop {
         let mut line = String::new();
-        match tokio::time::timeout(Duration::from_millis(200), stdout_reader.read_line(&mut line)).await {
+        match tokio::time::timeout(
+            Duration::from_millis(200),
+            stdout_reader.read_line(&mut line),
+        )
+        .await
+        {
             Ok(Ok(0)) => break, // EOF
             Ok(Ok(_)) => {
                 let trimmed = line.trim();
@@ -188,7 +193,8 @@ async fn test_listen_detects_new_invite() {
     assert_eq!(result["status"], "ok", "Login failed");
 
     // Start ndr listen with empty data dir
-    let (mut child, mut stdout_reader, _stderr_reader) = start_ndr_listen_with_stderr(dir.path()).await;
+    let (mut child, mut stdout_reader, _stderr_reader) =
+        start_ndr_listen_with_stderr(dir.path()).await;
 
     // Wait for listener to start
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -204,7 +210,12 @@ async fn test_listen_detects_new_invite() {
     let timeout_start = std::time::Instant::now();
     while timeout_start.elapsed() < Duration::from_secs(5) {
         let mut line = String::new();
-        match tokio::time::timeout(Duration::from_millis(100), stdout_reader.read_line(&mut line)).await {
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            stdout_reader.read_line(&mut line),
+        )
+        .await
+        {
             Ok(Ok(n)) if n > 0 => {
                 let trimmed = line.trim();
                 println!("[listener] {}", trimmed);
@@ -269,17 +280,26 @@ async fn test_listen_receives_invite_response_after_dynamic_subscribe() {
 
     // Alice starts listening with EMPTY data dir
     println!("\n--- Alice starts listening with empty data dir ---");
-    let (mut alice_child, mut alice_stdout, _alice_stderr) = start_ndr_listen_with_stderr(alice_dir.path()).await;
+    let (mut alice_child, mut alice_stdout, _alice_stderr) =
+        start_ndr_listen_with_stderr(alice_dir.path()).await;
 
     // Wait for Alice to be ready
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(alice_child.try_wait().unwrap().is_none(), "Alice listener should be running");
+    assert!(
+        alice_child.try_wait().unwrap().is_none(),
+        "Alice listener should be running"
+    );
 
     // Wait for listening message
     let timeout_start = std::time::Instant::now();
     while timeout_start.elapsed() < Duration::from_secs(5) {
         let mut line = String::new();
-        match tokio::time::timeout(Duration::from_millis(100), alice_stdout.read_line(&mut line)).await {
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            alice_stdout.read_line(&mut line),
+        )
+        .await
+        {
             Ok(Ok(n)) if n > 0 => {
                 let trimmed = line.trim();
                 println!("[Alice] {}", trimmed);
@@ -293,7 +313,11 @@ async fn test_listen_receives_invite_response_after_dynamic_subscribe() {
 
     // Alice creates invite WHILE listener is running
     println!("\n--- Alice creates invite while listener is running ---");
-    let result = run_ndr(alice_dir.path(), &["invite", "create", "-l", "alice-invite"]).await;
+    let result = run_ndr(
+        alice_dir.path(),
+        &["invite", "create", "-l", "alice-invite"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Alice invite create failed");
     let invite_url = result["data"]["url"].as_str().unwrap().to_string();
     println!("Alice created invite: {}", invite_url);
@@ -314,7 +338,12 @@ async fn test_listen_receives_invite_response_after_dynamic_subscribe() {
     let timeout_start = std::time::Instant::now();
     while timeout_start.elapsed() < Duration::from_secs(10) {
         let mut line = String::new();
-        match tokio::time::timeout(Duration::from_millis(100), alice_stdout.read_line(&mut line)).await {
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            alice_stdout.read_line(&mut line),
+        )
+        .await
+        {
             Ok(Ok(n)) if n > 0 => {
                 let trimmed = line.trim();
                 println!("[Alice] {}", trimmed);

@@ -1,5 +1,5 @@
-use nostr::{Filter, PublicKey, Kind};
 use crate::Result;
+use nostr::{Filter, Kind, PublicKey};
 
 /// Bidirectional interface for Nostr pub/sub operations.
 /// Allows components (Invite, Session) to manage their own subscriptions.
@@ -23,7 +23,7 @@ pub trait NostrPubSub: Send + Sync {
 /// - Publishing events to relays (Publish, PublishSigned)
 /// - Subscribing to relay filters (Subscribe, Unsubscribe)
 /// - Handling decrypted messages (DecryptedMessage, ReceivedEvent)
-
+///
 /// Handler for SessionManager events from a receiver channel.
 /// Converts SessionManagerEvent variants into structured data for processing.
 pub enum SessionEvent {
@@ -149,21 +149,39 @@ pub mod test_utils {
     }
 
     impl SessionEventReceiver {
-        pub fn new(rx: crossbeam_channel::Receiver<crate::session_manager::SessionManagerEvent>) -> Self {
+        pub fn new(
+            rx: crossbeam_channel::Receiver<crate::session_manager::SessionManagerEvent>,
+        ) -> Self {
             Self { rx }
         }
 
         /// Try to receive the next session event (non-blocking)
         pub fn try_recv(&self) -> Option<SessionEvent> {
             self.rx.try_recv().ok().map(|event| match event {
-                crate::session_manager::SessionManagerEvent::Publish(unsigned) => SessionEvent::Publish(unsigned),
-                crate::session_manager::SessionManagerEvent::PublishSigned(signed) => SessionEvent::PublishSigned(signed),
-                crate::session_manager::SessionManagerEvent::Subscribe(filter) => SessionEvent::Subscribe(filter),
-                crate::session_manager::SessionManagerEvent::Unsubscribe(subid) => SessionEvent::Unsubscribe(subid),
-                crate::session_manager::SessionManagerEvent::DecryptedMessage { sender, content, event_id } => {
-                    SessionEvent::DecryptedMessage { sender, content, event_id }
+                crate::session_manager::SessionManagerEvent::Publish(unsigned) => {
+                    SessionEvent::Publish(unsigned)
                 }
-                crate::session_manager::SessionManagerEvent::ReceivedEvent(event) => SessionEvent::ReceivedEvent(event),
+                crate::session_manager::SessionManagerEvent::PublishSigned(signed) => {
+                    SessionEvent::PublishSigned(signed)
+                }
+                crate::session_manager::SessionManagerEvent::Subscribe(filter) => {
+                    SessionEvent::Subscribe(filter)
+                }
+                crate::session_manager::SessionManagerEvent::Unsubscribe(subid) => {
+                    SessionEvent::Unsubscribe(subid)
+                }
+                crate::session_manager::SessionManagerEvent::DecryptedMessage {
+                    sender,
+                    content,
+                    event_id,
+                } => SessionEvent::DecryptedMessage {
+                    sender,
+                    content,
+                    event_id,
+                },
+                crate::session_manager::SessionManagerEvent::ReceivedEvent(event) => {
+                    SessionEvent::ReceivedEvent(event)
+                }
             })
         }
     }

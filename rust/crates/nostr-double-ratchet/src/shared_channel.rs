@@ -1,6 +1,6 @@
+use base64::Engine;
 use nostr::nips::nip44;
 use nostr::{EventBuilder, Keys, PublicKey, Tag};
-use base64::Engine;
 
 use crate::{Error, Result, SHARED_CHANNEL_KIND};
 
@@ -21,10 +21,7 @@ impl SharedChannel {
         let public_key = keys.public_key();
 
         // Self-encryption: derive conversation key from secret_key + own public_key
-        let conversation_key = nip44::v2::ConversationKey::derive(
-            &keys.secret_key(),
-            &public_key,
-        );
+        let conversation_key = nip44::v2::ConversationKey::derive(keys.secret_key(), &public_key);
 
         Ok(Self {
             public_key,
@@ -47,14 +44,12 @@ impl SharedChannel {
         let secret_key = nostr::SecretKey::from_slice(&self.secret_key)?;
         let keys = Keys::new(secret_key);
 
-        let unsigned = EventBuilder::new(
-            nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16),
-            &encoded,
-        )
-        .tag(Tag::identifier(&rumor_pubkey))
-        .build(keys.public_key());
+        let unsigned = EventBuilder::new(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16), &encoded)
+            .tag(Tag::identifier(&rumor_pubkey))
+            .build(keys.public_key());
 
-        let event = unsigned.sign_with_keys(&keys)
+        let event = unsigned
+            .sign_with_keys(&keys)
             .map_err(|e| Error::InvalidEvent(e.to_string()))?;
 
         Ok(event)
@@ -66,7 +61,8 @@ impl SharedChannel {
             .decode(event.content.as_bytes())
             .map_err(|e| Error::Decryption(format!("Base64 decode error: {}", e)))?;
 
-        let plaintext_bytes = nip44::v2::decrypt_to_bytes(&self.conversation_key, &ciphertext_bytes)?;
+        let plaintext_bytes =
+            nip44::v2::decrypt_to_bytes(&self.conversation_key, &ciphertext_bytes)?;
 
         String::from_utf8(plaintext_bytes)
             .map_err(|e| Error::Decryption(format!("UTF-8 decode error: {}", e)))
@@ -103,12 +99,12 @@ mod tests {
             "kind": 10445,
             "tags": [],
             "content": content
-        }).to_string()
+        })
+        .to_string()
     }
 
     fn make_test_event(keys: &Keys, kind: nostr::Kind, content: &str) -> nostr::Event {
-        let unsigned = EventBuilder::new(kind, content)
-            .build(keys.public_key());
+        let unsigned = EventBuilder::new(kind, content).build(keys.public_key());
         unsigned.sign_with_keys(keys).unwrap()
     }
 
@@ -145,9 +141,10 @@ mod tests {
         let rumor = make_rumor_json("deadbeef", "hello");
         let event = channel.create_event(&rumor).unwrap();
 
-        let d_tag = event.tags.iter().find(|t| {
-            t.as_slice().first().map(|s| s.as_str()) == Some("d")
-        });
+        let d_tag = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"));
         assert!(d_tag.is_some());
         let d_value = d_tag.unwrap().as_slice().get(1).map(|s| s.as_str());
         assert_eq!(d_value, Some("deadbeef"));

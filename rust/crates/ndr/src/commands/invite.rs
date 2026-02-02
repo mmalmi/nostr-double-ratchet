@@ -1,6 +1,6 @@
 use anyhow::Result;
-use serde::Serialize;
 use nostr_sdk::Client;
+use serde::Serialize;
 
 use crate::config::Config;
 use crate::output::Output;
@@ -68,11 +68,7 @@ pub async fn create(
 
     storage.save_invite(&stored)?;
 
-    output.success("invite.create", InviteCreated {
-        id,
-        url,
-        label,
-    });
+    output.success("invite.create", InviteCreated { id, url, label });
 
     Ok(())
 }
@@ -100,8 +96,7 @@ pub async fn publish(
     let pubkey_hex = config.public_key()?;
     let pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&pubkey_hex)?;
 
-    let device_id = device_id
-        .unwrap_or_else(|| "public".to_string());
+    let device_id = device_id.unwrap_or_else(|| "public".to_string());
     let device_id = normalize_device_id(&device_id);
 
     let invite = nostr_double_ratchet::Invite::create_new(pubkey, Some(device_id.clone()), None)?;
@@ -126,7 +121,8 @@ pub async fn publish(
     let sk_bytes = config.private_key_bytes()?;
     let sk = nostr::SecretKey::from_slice(&sk_bytes)?;
     let keys = nostr::Keys::new(sk);
-    let event = unsigned.sign_with_keys(&keys)
+    let event = unsigned
+        .sign_with_keys(&keys)
         .map_err(|e| anyhow::anyhow!("Failed to sign invite event: {}", e))?;
 
     // Publish to relays
@@ -138,13 +134,16 @@ pub async fn publish(
     client.connect().await;
     send_event_or_ignore(&client, event.clone()).await?;
 
-    output.success("invite.publish", InvitePublished {
-        id,
-        url,
-        label,
-        device_id,
-        event: nostr::JsonUtil::as_json(&event),
-    });
+    output.success(
+        "invite.publish",
+        InvitePublished {
+            id,
+            url,
+            label,
+            device_id,
+            event: nostr::JsonUtil::as_json(&event),
+        },
+    );
 
     Ok(())
 }
@@ -163,7 +162,12 @@ pub async fn list(storage: &Storage, output: &Output) -> Result<()> {
         })
         .collect();
 
-    output.success("invite.list", InviteList { invites: invite_infos });
+    output.success(
+        "invite.list",
+        InviteList {
+            invites: invite_infos,
+        },
+    );
     Ok(())
 }
 
@@ -218,7 +222,8 @@ pub async fn accept(
     let our_private_key = config.private_key_bytes()?;
 
     // Load the invite
-    let stored_invite = storage.get_invite(invite_id)?
+    let stored_invite = storage
+        .get_invite(invite_id)?
         .ok_or_else(|| anyhow::anyhow!("Invite not found: {}", invite_id))?;
 
     // Deserialize the invite
@@ -231,8 +236,8 @@ pub async fn accept(
     // Process the acceptance - creates session
     let result = invite.process_invite_response(&event, our_private_key)?;
 
-    let (session, their_pubkey, _device_id) = result
-        .ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+    let (session, their_pubkey, _device_id) =
+        result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
 
     // Serialize session state
     let session_state = serde_json::to_string(&session.state)?;
@@ -255,11 +260,14 @@ pub async fn accept(
     // Optionally delete the used invite
     storage.delete_invite(invite_id)?;
 
-    output.success("invite.accept", InviteAccepted {
-        invite_id: invite_id.to_string(),
-        chat_id,
-        their_pubkey: their_pubkey_hex,
-    });
+    output.success(
+        "invite.accept",
+        InviteAccepted {
+            invite_id: invite_id.to_string(),
+            chat_id,
+            their_pubkey: their_pubkey_hex,
+        },
+    );
 
     Ok(())
 }
@@ -273,7 +281,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = Config::load(temp.path()).unwrap();
         // Login with test key
-        config.set_private_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        config
+            .set_private_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap();
         let config = Config::load(temp.path()).unwrap();
         let storage = Storage::open(temp.path()).unwrap();
         (temp, config, storage)
@@ -298,8 +308,12 @@ mod tests {
         let (_temp, config, storage) = setup();
         let output = Output::new(true);
 
-        create(Some("One".to_string()), &config, &storage, &output).await.unwrap();
-        create(Some("Two".to_string()), &config, &storage, &output).await.unwrap();
+        create(Some("One".to_string()), &config, &storage, &output)
+            .await
+            .unwrap();
+        create(Some("Two".to_string()), &config, &storage, &output)
+            .await
+            .unwrap();
 
         list(&storage, &output).await.unwrap();
     }

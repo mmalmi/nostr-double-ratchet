@@ -21,18 +21,12 @@ struct WhoamiResult {
 }
 
 /// Login with a private key (nsec or hex)
-pub async fn login(
-    key: &str,
-    config: &Config,
-    _storage: &Storage,
-    output: &Output,
-) -> Result<()> {
+pub async fn login(key: &str, config: &Config, _storage: &Storage, output: &Output) -> Result<()> {
     // Parse the key - accept nsec or hex
     let hex_key = if key.starts_with("nsec1") {
         // Decode bech32 nsec
         use nostr::nips::nip19::FromBech32;
-        let sk = nostr::SecretKey::from_bech32(key)
-            .context("Invalid nsec key")?;
+        let sk = nostr::SecretKey::from_bech32(key).context("Invalid nsec key")?;
         hex::encode(sk.to_secret_bytes())
     } else {
         // Assume hex
@@ -45,8 +39,7 @@ pub async fn login(
     };
 
     // Verify the key is valid
-    let sk = nostr::SecretKey::from_slice(&hex::decode(&hex_key)?)
-        .context("Invalid secret key")?;
+    let sk = nostr::SecretKey::from_slice(&hex::decode(&hex_key)?).context("Invalid secret key")?;
     let keys = nostr::Keys::new(sk);
     let pubkey = keys.public_key();
 
@@ -151,13 +144,15 @@ mod tests {
         config.set_private_key(key).unwrap();
 
         // Add some data
-        storage.save_invite(&crate::storage::StoredInvite {
-            id: "test".to_string(),
-            label: None,
-            url: "".to_string(),
-            created_at: 0,
-            serialized: "".to_string(),
-        }).unwrap();
+        storage
+            .save_invite(&crate::storage::StoredInvite {
+                id: "test".to_string(),
+                label: None,
+                url: "".to_string(),
+                created_at: 0,
+                serialized: "".to_string(),
+            })
+            .unwrap();
 
         logout(temp.path(), &output).await.unwrap();
 

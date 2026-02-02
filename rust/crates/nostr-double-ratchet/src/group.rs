@@ -221,14 +221,28 @@ pub fn remove_group_member(group: &GroupData, pubkey: &str, actor: &str) -> Opti
         return None;
     }
     Some(GroupData {
-        members: group.members.iter().filter(|m| *m != pubkey).cloned().collect(),
-        admins: group.admins.iter().filter(|a| *a != pubkey).cloned().collect(),
+        members: group
+            .members
+            .iter()
+            .filter(|m| *m != pubkey)
+            .cloned()
+            .collect(),
+        admins: group
+            .admins
+            .iter()
+            .filter(|a| *a != pubkey)
+            .cloned()
+            .collect(),
         secret: Some(generate_group_secret()),
         ..group.clone()
     })
 }
 
-pub fn update_group_data(group: &GroupData, updates: &GroupUpdate, actor: &str) -> Option<GroupData> {
+pub fn update_group_data(
+    group: &GroupData,
+    updates: &GroupUpdate,
+    actor: &str,
+) -> Option<GroupData> {
     if !is_group_admin(group, actor) {
         return None;
     }
@@ -274,7 +288,12 @@ pub fn remove_group_admin(group: &GroupData, pubkey: &str, actor: &str) -> Optio
         return None;
     }
     Some(GroupData {
-        admins: group.admins.iter().filter(|a| *a != pubkey).cloned().collect(),
+        admins: group
+            .admins
+            .iter()
+            .filter(|a| *a != pubkey)
+            .cloned()
+            .collect(),
         ..group.clone()
     })
 }

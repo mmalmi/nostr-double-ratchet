@@ -28,15 +28,12 @@ async fn run_ndr(data_dir: &Path, args: &[&str]) -> serde_json::Value {
         panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 /// Start ndr listen in background and return (child, stdout_reader)
-async fn start_ndr_listen(
-    data_dir: &Path,
-) -> (Child, BufReader<tokio::process::ChildStdout>) {
+async fn start_ndr_listen(data_dir: &Path) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let mut child = Command::new("cargo")
         .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
@@ -131,8 +128,14 @@ async fn wait_for_chat_with_pubkey(
     let start = Instant::now();
     while start.elapsed() < timeout {
         let list = run_ndr(data_dir, &["chat", "list"]).await;
-        if let Some(chats) = list.get("data").and_then(|d| d.get("chats")).and_then(|c| c.as_array()) {
-            if chats.iter().any(|chat| chat.get("their_pubkey").and_then(|v| v.as_str()) == Some(target_pubkey)) {
+        if let Some(chats) = list
+            .get("data")
+            .and_then(|d| d.get("chats"))
+            .and_then(|c| c.as_array())
+        {
+            if chats.iter().any(|chat| {
+                chat.get("their_pubkey").and_then(|v| v.as_str()) == Some(target_pubkey)
+            }) {
                 return true;
             }
         }
@@ -201,13 +204,20 @@ async fn test_listen_group_metadata_and_message() {
 
         // Alice creates invite, Bob joins.
         let invite = run_ndr(alice_dir.path(), &["invite", "create", "-l", "group-test"]).await;
-        let invite_url = invite["data"]["url"].as_str().expect("invite url").to_string();
+        let invite_url = invite["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
         let _bob_join = run_ndr(bob_dir.path(), &["chat", "join", &invite_url]).await;
 
         // Alice should receive session_created.
-        let session_event = read_until_event(&mut alice_stdout, "session_created", Duration::from_secs(10))
-            .await
-            .expect("Alice should receive session_created event");
+        let session_event = read_until_event(
+            &mut alice_stdout,
+            "session_created",
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("Alice should receive session_created event");
         assert_eq!(
             session_event["their_pubkey"].as_str(),
             Some(bob_pubkey.as_str()),
@@ -233,7 +243,14 @@ async fn test_listen_group_metadata_and_message() {
         // Alice creates a group with Bob.
         let group_create = run_ndr(
             alice_dir.path(),
-            &["group", "create", "--name", "Test Group", "--members", &bob_pubkey],
+            &[
+                "group",
+                "create",
+                "--name",
+                "Test Group",
+                "--members",
+                &bob_pubkey,
+            ],
         )
         .await;
         let group_id = group_create["data"]["id"]
@@ -242,22 +259,16 @@ async fn test_listen_group_metadata_and_message() {
             .to_string();
 
         // Bob should receive group metadata creation.
-        let metadata_event = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Bob should receive group_metadata event");
-        assert_eq!(
-            metadata_event["group_id"].as_str(),
-            Some(group_id.as_str())
-        );
+        let metadata_event =
+            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Bob should receive group_metadata event");
+        assert_eq!(metadata_event["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(metadata_event["action"].as_str(), Some("created"));
 
         // Alice sends a group message.
         let msg_text = "hello group";
-        let _ = run_ndr(
-            alice_dir.path(),
-            &["group", "send", &group_id, msg_text],
-        )
-        .await;
+        let _ = run_ndr(alice_dir.path(), &["group", "send", &group_id, msg_text]).await;
 
         // Bob should receive group message.
         let msg_event = read_until_event(&mut bob_stdout, "group_message", Duration::from_secs(10))
@@ -323,8 +334,14 @@ async fn test_listen_group_add_member_and_fanout() {
     let result = async {
         // Alice creates invite for Bob, Bob joins.
         let invite_bob = run_ndr(alice_dir.path(), &["invite", "create", "-l", "group-bob"]).await;
-        let invite_bob_id = invite_bob["data"]["id"].as_str().expect("invite id").to_string();
-        let invite_bob_url = invite_bob["data"]["url"].as_str().expect("invite url").to_string();
+        let invite_bob_id = invite_bob["data"]["id"]
+            .as_str()
+            .expect("invite id")
+            .to_string();
+        let invite_bob_url = invite_bob["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let bob_join = run_ndr(bob_dir.path(), &["chat", "join", &invite_bob_url]).await;
         let bob_response_event = bob_join["data"]["response_event"]
@@ -338,9 +355,16 @@ async fn test_listen_group_add_member_and_fanout() {
         .await;
 
         // Alice creates invite for Carol, Carol joins.
-        let invite_carol = run_ndr(alice_dir.path(), &["invite", "create", "-l", "group-carol"]).await;
-        let invite_carol_id = invite_carol["data"]["id"].as_str().expect("invite id").to_string();
-        let invite_carol_url = invite_carol["data"]["url"].as_str().expect("invite url").to_string();
+        let invite_carol =
+            run_ndr(alice_dir.path(), &["invite", "create", "-l", "group-carol"]).await;
+        let invite_carol_id = invite_carol["data"]["id"]
+            .as_str()
+            .expect("invite id")
+            .to_string();
+        let invite_carol_url = invite_carol["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let carol_join = run_ndr(carol_dir.path(), &["chat", "join", &invite_carol_url]).await;
         let carol_response_event = carol_join["data"]["response_event"]
@@ -396,7 +420,14 @@ async fn test_listen_group_add_member_and_fanout() {
         // Alice creates a group with Bob only.
         let group_create = run_ndr(
             alice_dir.path(),
-            &["group", "create", "--name", "Big Group", "--members", &bob_pubkey],
+            &[
+                "group",
+                "create",
+                "--name",
+                "Big Group",
+                "--members",
+                &bob_pubkey,
+            ],
         )
         .await;
         let group_id = group_create["data"]["id"]
@@ -405,9 +436,10 @@ async fn test_listen_group_add_member_and_fanout() {
             .to_string();
 
         // Bob should receive group metadata creation.
-        let bob_created = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Bob should receive group_metadata created");
+        let bob_created =
+            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Bob should receive group_metadata created");
         assert_eq!(bob_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(bob_created["action"].as_str(), Some("created"));
 
@@ -419,26 +451,24 @@ async fn test_listen_group_add_member_and_fanout() {
         .await;
 
         // Bob should receive group metadata update.
-        let bob_updated = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Bob should receive group_metadata updated");
+        let bob_updated =
+            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Bob should receive group_metadata updated");
         assert_eq!(bob_updated["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(bob_updated["action"].as_str(), Some("updated"));
 
         // Carol should receive group metadata creation.
-        let carol_created = read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Carol should receive group_metadata created");
+        let carol_created =
+            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Carol should receive group_metadata created");
         assert_eq!(carol_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(carol_created["action"].as_str(), Some("created"));
 
         // Alice sends a group message to all.
         let msg_text = "hello everyone";
-        let _ = run_ndr(
-            alice_dir.path(),
-            &["group", "send", &group_id, msg_text],
-        )
-        .await;
+        let _ = run_ndr(alice_dir.path(), &["group", "send", &group_id, msg_text]).await;
 
         // Bob should receive group message.
         let bob_msg = read_until_event(&mut bob_stdout, "group_message", Duration::from_secs(10))
@@ -448,9 +478,10 @@ async fn test_listen_group_add_member_and_fanout() {
         assert_eq!(bob_msg["content"].as_str(), Some(msg_text));
 
         // Carol should receive group message.
-        let carol_msg = read_until_event(&mut carol_stdout, "group_message", Duration::from_secs(10))
-            .await
-            .expect("Carol should receive group_message");
+        let carol_msg =
+            read_until_event(&mut carol_stdout, "group_message", Duration::from_secs(10))
+                .await
+                .expect("Carol should receive group_message");
         assert_eq!(carol_msg["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(carol_msg["content"].as_str(), Some(msg_text));
 
@@ -514,8 +545,14 @@ async fn test_listen_group_remove_member() {
     let result = async {
         // Alice creates invite for Bob, Bob joins, Alice accepts.
         let invite_bob = run_ndr(alice_dir.path(), &["invite", "create", "-l", "remove-bob"]).await;
-        let invite_bob_id = invite_bob["data"]["id"].as_str().expect("invite id").to_string();
-        let invite_bob_url = invite_bob["data"]["url"].as_str().expect("invite url").to_string();
+        let invite_bob_id = invite_bob["data"]["id"]
+            .as_str()
+            .expect("invite id")
+            .to_string();
+        let invite_bob_url = invite_bob["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let bob_join = run_ndr(bob_dir.path(), &["chat", "join", &invite_bob_url]).await;
         let bob_response_event = bob_join["data"]["response_event"]
@@ -529,9 +566,19 @@ async fn test_listen_group_remove_member() {
         .await;
 
         // Alice creates invite for Carol, Carol joins, Alice accepts.
-        let invite_carol = run_ndr(alice_dir.path(), &["invite", "create", "-l", "remove-carol"]).await;
-        let invite_carol_id = invite_carol["data"]["id"].as_str().expect("invite id").to_string();
-        let invite_carol_url = invite_carol["data"]["url"].as_str().expect("invite url").to_string();
+        let invite_carol = run_ndr(
+            alice_dir.path(),
+            &["invite", "create", "-l", "remove-carol"],
+        )
+        .await;
+        let invite_carol_id = invite_carol["data"]["id"]
+            .as_str()
+            .expect("invite id")
+            .to_string();
+        let invite_carol_url = invite_carol["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let carol_join = run_ndr(carol_dir.path(), &["chat", "join", &invite_carol_url]).await;
         let carol_response_event = carol_join["data"]["response_event"]
@@ -587,7 +634,14 @@ async fn test_listen_group_remove_member() {
         let members_arg = format!("{},{}", bob_pubkey, carol_pubkey);
         let group_create = run_ndr(
             alice_dir.path(),
-            &["group", "create", "--name", "Removal Group", "--members", &members_arg],
+            &[
+                "group",
+                "create",
+                "--name",
+                "Removal Group",
+                "--members",
+                &members_arg,
+            ],
         )
         .await;
         let group_id = group_create["data"]["id"]
@@ -596,15 +650,17 @@ async fn test_listen_group_remove_member() {
             .to_string();
 
         // Bob and Carol should both receive group metadata creation.
-        let bob_created = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Bob should receive group_metadata created");
+        let bob_created =
+            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Bob should receive group_metadata created");
         assert_eq!(bob_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(bob_created["action"].as_str(), Some("created"));
 
-        let carol_created = read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Carol should receive group_metadata created");
+        let carol_created =
+            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Carol should receive group_metadata created");
         assert_eq!(carol_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(carol_created["action"].as_str(), Some("created"));
 
@@ -616,35 +672,38 @@ async fn test_listen_group_remove_member() {
         .await;
 
         // Bob should receive "removed".
-        let bob_removed = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Bob should receive group_metadata removed");
+        let bob_removed =
+            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Bob should receive group_metadata removed");
         assert_eq!(bob_removed["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(bob_removed["action"].as_str(), Some("removed"));
 
         // Carol should receive "updated".
-        let carol_updated = read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Carol should receive group_metadata updated");
+        let carol_updated =
+            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Carol should receive group_metadata updated");
         assert_eq!(carol_updated["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(carol_updated["action"].as_str(), Some("updated"));
 
         // Alice sends a group message; Carol should receive it, Bob should not.
         let msg_text = "after-removal";
-        let _ = run_ndr(
-            alice_dir.path(),
-            &["group", "send", &group_id, msg_text],
-        )
-        .await;
+        let _ = run_ndr(alice_dir.path(), &["group", "send", &group_id, msg_text]).await;
 
-        let carol_msg = read_until_event(&mut carol_stdout, "group_message", Duration::from_secs(10))
-            .await
-            .expect("Carol should receive group_message after removal");
+        let carol_msg =
+            read_until_event(&mut carol_stdout, "group_message", Duration::from_secs(10))
+                .await
+                .expect("Carol should receive group_message after removal");
         assert_eq!(carol_msg["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(carol_msg["content"].as_str(), Some(msg_text));
 
-        let bob_msg = read_until_event(&mut bob_stdout, "group_message", Duration::from_secs(2)).await;
-        assert!(bob_msg.is_none(), "Bob should not receive group_message after removal");
+        let bob_msg =
+            read_until_event(&mut bob_stdout, "group_message", Duration::from_secs(2)).await;
+        assert!(
+            bob_msg.is_none(),
+            "Bob should not receive group_message after removal"
+        );
 
         Ok::<(), anyhow::Error>(())
     }
@@ -706,8 +765,14 @@ async fn test_group_accept_shared_channel_invite_opens_session() {
     let result = async {
         // Create 1:1 sessions with Alice so she can fan-out group metadata.
         let invite_bob = run_ndr(alice_dir.path(), &["invite", "create", "-l", "shared-bob"]).await;
-        let invite_bob_id = invite_bob["data"]["id"].as_str().expect("invite id").to_string();
-        let invite_bob_url = invite_bob["data"]["url"].as_str().expect("invite url").to_string();
+        let invite_bob_id = invite_bob["data"]["id"]
+            .as_str()
+            .expect("invite id")
+            .to_string();
+        let invite_bob_url = invite_bob["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let bob_join = run_ndr(bob_dir.path(), &["chat", "join", &invite_bob_url]).await;
         let bob_response_event = bob_join["data"]["response_event"]
@@ -720,9 +785,19 @@ async fn test_group_accept_shared_channel_invite_opens_session() {
         )
         .await;
 
-        let invite_carol = run_ndr(alice_dir.path(), &["invite", "create", "-l", "shared-carol"]).await;
-        let invite_carol_id = invite_carol["data"]["id"].as_str().expect("invite id").to_string();
-        let invite_carol_url = invite_carol["data"]["url"].as_str().expect("invite url").to_string();
+        let invite_carol = run_ndr(
+            alice_dir.path(),
+            &["invite", "create", "-l", "shared-carol"],
+        )
+        .await;
+        let invite_carol_id = invite_carol["data"]["id"]
+            .as_str()
+            .expect("invite id")
+            .to_string();
+        let invite_carol_url = invite_carol["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let carol_join = run_ndr(carol_dir.path(), &["chat", "join", &invite_carol_url]).await;
         let carol_response_event = carol_join["data"]["response_event"]
@@ -776,7 +851,14 @@ async fn test_group_accept_shared_channel_invite_opens_session() {
         let members_arg = format!("{},{}", bob_pubkey, carol_pubkey);
         let group_create = run_ndr(
             alice_dir.path(),
-            &["group", "create", "--name", "Shared Channel Group", "--members", &members_arg],
+            &[
+                "group",
+                "create",
+                "--name",
+                "Shared Channel Group",
+                "--members",
+                &members_arg,
+            ],
         )
         .await;
         let group_id = group_create["data"]["id"]
@@ -784,15 +866,17 @@ async fn test_group_accept_shared_channel_invite_opens_session() {
             .expect("group id")
             .to_string();
 
-        let bob_created = read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Bob should receive group_metadata created");
+        let bob_created =
+            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Bob should receive group_metadata created");
         assert_eq!(bob_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(bob_created["action"].as_str(), Some("created"));
 
-        let carol_created = read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
-            .await
-            .expect("Carol should receive group_metadata created");
+        let carol_created =
+            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Carol should receive group_metadata created");
         assert_eq!(carol_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(carol_created["action"].as_str(), Some("created"));
 

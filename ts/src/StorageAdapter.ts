@@ -67,8 +67,8 @@ export class LocalStorageAdapter implements StorageAdapter {
     try {
       localStorage.setItem(this.getFullKey(key), JSON.stringify(value))
     } catch (e) {
-      console.error(`Failed to put key ${key} to localStorage:`, e)
-      throw e
+      const err = e instanceof Error ? e : new Error(String(e))
+      throw err
     }
   }
 

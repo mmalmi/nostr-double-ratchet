@@ -141,9 +141,7 @@ impl WsRelay {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx);
 
-        let app = Router::new()
-            .route("/", get(ws_handler))
-            .with_state(state);
+        let app = Router::new().route("/", get(ws_handler)).with_state(state);
 
         tokio::spawn(async move {
             axum::serve(listener, app)
@@ -255,7 +253,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
                 match msg_type {
                     "EVENT" => {
                         if parsed.len() >= 2 {
-                            if let Ok(event) = serde_json::from_value::<NostrEvent>(parsed[1].clone())
+                            if let Ok(event) =
+                                serde_json::from_value::<NostrEvent>(parsed[1].clone())
                             {
                                 let event_id = event.id.clone();
 

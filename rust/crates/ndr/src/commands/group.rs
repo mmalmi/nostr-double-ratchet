@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nostr_double_ratchet::{Session, CHAT_MESSAGE_KIND, REACTION_KIND, GROUP_METADATA_KIND};
+use nostr_double_ratchet::{Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND};
 use nostr_sdk::Client;
 use serde::Serialize;
 
@@ -76,18 +76,16 @@ async fn fan_out(
     tags.push(vec!["l".to_string(), group.id.clone()]);
     tags.push(vec!["ms".to_string(), now_ms.to_string()]);
 
-    let nostr_tags: Vec<nostr::Tag> = tags.iter()
+    let nostr_tags: Vec<nostr::Tag> = tags
+        .iter()
         .filter_map(|t| nostr::Tag::parse(t).ok())
         .collect();
 
     // Build the unsigned rumor event
     let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
-    let unsigned_event = nostr::EventBuilder::new(
-        nostr::Kind::Custom(rumor_kind as u16),
-        content,
-    )
-    .tags(nostr_tags)
-    .build(my_pk);
+    let unsigned_event = nostr::EventBuilder::new(nostr::Kind::Custom(rumor_kind as u16), content)
+        .tags(nostr_tags)
+        .build(my_pk);
 
     let client = Client::default();
     let relays = config.resolved_relays();
@@ -109,10 +107,11 @@ async fn fan_out(
             None => continue, // No session with this member yet
         };
 
-        let session_state: nostr_double_ratchet::SessionState = match serde_json::from_str(&chat.session_state) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+        let session_state: nostr_double_ratchet::SessionState =
+            match serde_json::from_str(&chat.session_state) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
         let mut session = Session::new(session_state, chat.id.clone());
 
@@ -169,22 +168,26 @@ async fn fan_out_metadata(
             None => continue,
         };
 
-        let session_state: nostr_double_ratchet::SessionState = match serde_json::from_str(&chat.session_state) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+        let session_state: nostr_double_ratchet::SessionState =
+            match serde_json::from_str(&chat.session_state) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
         let mut session = Session::new(session_state, chat.id.clone());
 
         // Exclude secret for removed members
         let exclude_secret = excluded_member.map(|e| e == member).unwrap_or(false);
-        let metadata_content = nostr_double_ratchet::group::build_group_metadata_content(group, exclude_secret);
+        let metadata_content =
+            nostr_double_ratchet::group::build_group_metadata_content(group, exclude_secret);
 
-        let mut tags: Vec<Vec<String>> = Vec::new();
-        tags.push(vec!["l".to_string(), group.id.clone()]);
-        tags.push(vec!["ms".to_string(), now_ms.to_string()]);
+        let tags: Vec<Vec<String>> = vec![
+            vec!["l".to_string(), group.id.clone()],
+            vec!["ms".to_string(), now_ms.to_string()],
+        ];
 
-        let nostr_tags: Vec<nostr::Tag> = tags.iter()
+        let nostr_tags: Vec<nostr::Tag> = tags
+            .iter()
             .filter_map(|t| nostr::Tag::parse(t).ok())
             .collect();
 
@@ -215,15 +218,20 @@ async fn fan_out_metadata(
     // Also fan-out without secret to the removed member
     if let Some(removed) = excluded_member {
         if let Some(chat) = storage.get_chat_by_pubkey(removed)? {
-            if let Ok(state) = serde_json::from_str::<nostr_double_ratchet::SessionState>(&chat.session_state) {
+            if let Ok(state) =
+                serde_json::from_str::<nostr_double_ratchet::SessionState>(&chat.session_state)
+            {
                 let mut session = Session::new(state, chat.id.clone());
-                let metadata_content = nostr_double_ratchet::group::build_group_metadata_content(group, true);
+                let metadata_content =
+                    nostr_double_ratchet::group::build_group_metadata_content(group, true);
 
-                let mut tags: Vec<Vec<String>> = Vec::new();
-                tags.push(vec!["l".to_string(), group.id.clone()]);
-                tags.push(vec!["ms".to_string(), now_ms.to_string()]);
+                let tags: Vec<Vec<String>> = vec![
+                    vec!["l".to_string(), group.id.clone()],
+                    vec!["ms".to_string(), now_ms.to_string()],
+                ];
 
-                let nostr_tags: Vec<nostr::Tag> = tags.iter()
+                let nostr_tags: Vec<nostr::Tag> = tags
+                    .iter()
                     .filter_map(|t| nostr::Tag::parse(t).ok())
                     .collect();
 
@@ -263,9 +271,7 @@ pub async fn create(
     let member_refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
     let group_data = nostr_double_ratchet::group::create_group_data(name, &my_pubkey, &member_refs);
 
-    let stored = StoredGroup {
-        data: group_data,
-    };
+    let stored = StoredGroup { data: group_data };
     storage.save_group(&stored)?;
 
     // Fan-out metadata to members
@@ -370,7 +376,11 @@ pub async fn remove_member(
 
     let my_pubkey = config.public_key()?;
     let updated = nostr_double_ratchet::group::remove_group_member(&group.data, pubkey, &my_pubkey)
-        .ok_or_else(|| anyhow::anyhow!("Cannot remove member: not admin, not a member, or trying to remove self"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot remove member: not admin, not a member, or trying to remove self"
+            )
+        })?;
 
     let stored = StoredGroup { data: updated };
     storage.save_group(&stored)?;
@@ -395,7 +405,9 @@ pub async fn add_admin(
 
     let my_pubkey = config.public_key()?;
     let updated = nostr_double_ratchet::group::add_group_admin(&group.data, pubkey, &my_pubkey)
-        .ok_or_else(|| anyhow::anyhow!("Cannot add admin: not admin, not a member, or already an admin"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Cannot add admin: not admin, not a member, or already an admin")
+        })?;
 
     let stored = StoredGroup { data: updated };
     storage.save_group(&stored)?;
@@ -420,7 +432,11 @@ pub async fn remove_admin(
 
     let my_pubkey = config.public_key()?;
     let updated = nostr_double_ratchet::group::remove_group_admin(&group.data, pubkey, &my_pubkey)
-        .ok_or_else(|| anyhow::anyhow!("Cannot remove admin: not admin, target not admin, or would remove last admin"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot remove admin: not admin, target not admin, or would remove last admin"
+            )
+        })?;
 
     let stored = StoredGroup { data: updated };
     storage.save_group(&stored)?;
@@ -455,7 +471,15 @@ pub async fn send_message(
 
     let msg_id = uuid::Uuid::new_v4().to_string();
 
-    let sent_count = fan_out(&group.data, CHAT_MESSAGE_KIND, message, vec![], config, storage).await?;
+    let sent_count = fan_out(
+        &group.data,
+        CHAT_MESSAGE_KIND,
+        message,
+        vec![],
+        config,
+        storage,
+    )
+    .await?;
 
     // Store outgoing message
     let stored_msg = StoredGroupMessage {
@@ -468,13 +492,16 @@ pub async fn send_message(
     };
     storage.save_group_message(&stored_msg)?;
 
-    output.success("group.send", serde_json::json!({
-        "id": msg_id,
-        "group_id": id,
-        "content": message,
-        "timestamp": timestamp,
-        "sent_to": sent_count,
-    }));
+    output.success(
+        "group.send",
+        serde_json::json!({
+            "id": msg_id,
+            "group_id": id,
+            "content": message,
+            "timestamp": timestamp,
+            "sent_to": sent_count,
+        }),
+    );
 
     Ok(())
 }
@@ -498,25 +525,31 @@ pub async fn react(
 
     let extra_tags = vec![vec!["e".to_string(), message_id.to_string()]];
 
-    let sent_count = fan_out(&group.data, REACTION_KIND, emoji, extra_tags, config, storage).await?;
+    let sent_count = fan_out(
+        &group.data,
+        REACTION_KIND,
+        emoji,
+        extra_tags,
+        config,
+        storage,
+    )
+    .await?;
 
-    output.success("group.react", serde_json::json!({
-        "group_id": id,
-        "message_id": message_id,
-        "emoji": emoji,
-        "sent_to": sent_count,
-    }));
+    output.success(
+        "group.react",
+        serde_json::json!({
+            "group_id": id,
+            "message_id": message_id,
+            "emoji": emoji,
+            "sent_to": sent_count,
+        }),
+    );
 
     Ok(())
 }
 
 /// Accept a group invitation
-pub async fn accept(
-    id: &str,
-    config: &Config,
-    storage: &Storage,
-    output: &Output,
-) -> Result<()> {
+pub async fn accept(id: &str, config: &Config, storage: &Storage, output: &Output) -> Result<()> {
     let group = storage
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
@@ -559,7 +592,8 @@ pub async fn accept(
                             "inviteUrl": invite_url,
                             "groupId": id,
                         }).to_string()
-                    }).to_string();
+                    })
+                    .to_string();
 
                     if let Ok(event) = channel.create_event(&rumor_json) {
                         let client = Client::default();
@@ -592,12 +626,7 @@ pub async fn accept(
 }
 
 /// Read group messages
-pub async fn messages(
-    id: &str,
-    limit: usize,
-    storage: &Storage,
-    output: &Output,
-) -> Result<()> {
+pub async fn messages(id: &str, limit: usize, storage: &Storage, output: &Output) -> Result<()> {
     // Verify group exists
     storage
         .get_group(id)?
@@ -617,10 +646,13 @@ pub async fn messages(
         })
         .collect();
 
-    output.success("group.messages", GroupMessageList {
-        group_id: id.to_string(),
-        messages: message_infos,
-    });
+    output.success(
+        "group.messages",
+        GroupMessageList {
+            group_id: id.to_string(),
+            messages: message_infos,
+        },
+    );
 
     Ok(())
 }

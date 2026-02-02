@@ -1,5 +1,5 @@
-use nostr_double_ratchet::{Result, Session};
 use nostr::Keys;
+use nostr_double_ratchet::{Result, Session};
 
 #[test]
 fn test_out_of_order_message_delivery() -> Result<()> {
@@ -14,8 +14,20 @@ fn test_out_of_order_message_delivery() -> Result<()> {
 
     let shared_secret = [0u8; 32];
 
-    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
-    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+    let mut alice = Session::init(
+        bob_pk,
+        alice_sk,
+        true,
+        shared_secret,
+        Some("alice".to_string()),
+    )?;
+    let mut bob = Session::init(
+        alice_pk,
+        bob_sk,
+        false,
+        shared_secret,
+        Some("bob".to_string()),
+    )?;
 
     let msg1 = alice.send("Message 1".to_string())?;
     let msg2 = alice.send("Message 2".to_string())?;
@@ -52,8 +64,20 @@ fn test_consecutive_messages_from_same_sender() -> Result<()> {
 
     let shared_secret = [0u8; 32];
 
-    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
-    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+    let mut alice = Session::init(
+        bob_pk,
+        alice_sk,
+        true,
+        shared_secret,
+        Some("alice".to_string()),
+    )?;
+    let mut bob = Session::init(
+        alice_pk,
+        bob_sk,
+        false,
+        shared_secret,
+        Some("bob".to_string()),
+    )?;
 
     let alice_msg1 = alice.send("Alice 1".to_string())?;
     bob.receive(&alice_msg1)?;

@@ -1,4 +1,4 @@
-use nostr_double_ratchet::{SharedChannel, SHARED_CHANNEL_KIND, GROUP_INVITE_RUMOR_KIND};
+use nostr_double_ratchet::{SharedChannel, GROUP_INVITE_RUMOR_KIND, SHARED_CHANNEL_KIND};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -49,7 +49,8 @@ fn test_shared_channel_roundtrip() {
         "kind": GROUP_INVITE_RUMOR_KIND,
         "tags": [],
         "content": "{\"inviteUrl\":\"https://iris.to#test\",\"groupId\":\"test-group\"}"
-    }).to_string();
+    })
+    .to_string();
 
     let event = channel.create_event(&rumor).unwrap();
 
@@ -58,9 +59,10 @@ fn test_shared_channel_roundtrip() {
     assert_eq!(event.pubkey, channel.public_key());
 
     // Verify d tag
-    let d_tag = event.tags.iter().find(|t| {
-        t.as_slice().first().map(|s| s.as_str()) == Some("d")
-    });
+    let d_tag = event
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"));
     assert!(d_tag.is_some());
 
     // Decrypt
@@ -124,7 +126,8 @@ fn test_generate_rust_shared_channel_vectors() {
     fs::write(
         &output_path,
         serde_json::to_string_pretty(&vectors).unwrap(),
-    ).expect("Failed to write vectors");
+    )
+    .expect("Failed to write vectors");
 
     println!("Generated Rust SharedChannel vectors at {:?}", output_path);
 }
@@ -143,12 +146,16 @@ fn test_parse_typescript_shared_channel_vectors() {
     }
 
     let content = fs::read_to_string(&vectors_path).expect("Failed to read vectors");
-    let vectors: SharedChannelVectors = serde_json::from_str(&content).expect("Failed to parse vectors");
+    let vectors: SharedChannelVectors =
+        serde_json::from_str(&content).expect("Failed to parse vectors");
 
     println!("Loaded SharedChannel vectors: {}", vectors.description);
 
     // Verify we derive the same pubkey from the same secret
-    let secret_bytes: [u8; 32] = hex::decode(&vectors.secret_hex).unwrap().try_into().unwrap();
+    let secret_bytes: [u8; 32] = hex::decode(&vectors.secret_hex)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let channel = SharedChannel::new(&secret_bytes).unwrap();
     assert_eq!(
         channel.public_key().to_hex(),
@@ -158,37 +165,40 @@ fn test_parse_typescript_shared_channel_vectors() {
 
     // If TS provided an encrypted event, verify we can decrypt it
     if let Some(ref encrypted) = vectors.encrypted_event {
-        let event: nostr::Event = serde_json::from_value(encrypted.clone())
-            .expect("Failed to parse TS encrypted event");
+        let event: nostr::Event =
+            serde_json::from_value(encrypted.clone()).expect("Failed to parse TS encrypted event");
 
         // Verify it's a channel event
-        assert!(channel.is_channel_event(&event), "Should recognize as channel event");
+        assert!(
+            channel.is_channel_event(&event),
+            "Should recognize as channel event"
+        );
 
         // Decrypt and verify content matches
-        let decrypted = channel.decrypt_event(&event).expect("Failed to decrypt TS event");
+        let decrypted = channel
+            .decrypt_event(&event)
+            .expect("Failed to decrypt TS event");
         let decrypted_val: serde_json::Value = serde_json::from_str(&decrypted).unwrap();
         assert_eq!(
-            decrypted_val["pubkey"],
-            vectors.plaintext_rumor["pubkey"],
+            decrypted_val["pubkey"], vectors.plaintext_rumor["pubkey"],
             "Decrypted pubkey should match"
         );
         assert_eq!(
-            decrypted_val["kind"],
-            vectors.plaintext_rumor["kind"],
+            decrypted_val["kind"], vectors.plaintext_rumor["kind"],
             "Decrypted kind should match"
         );
     }
 
     // Verify group tagged event format
     let tags = vectors.group_tagged_event["tags"].as_array().unwrap();
-    let l_tag = tags.iter().find(|t| {
-        t.as_array().unwrap().first().unwrap().as_str().unwrap() == "l"
-    });
+    let l_tag = tags
+        .iter()
+        .find(|t| t.as_array().unwrap().first().unwrap().as_str().unwrap() == "l");
     assert!(l_tag.is_some(), "Group tagged event should have 'l' tag");
 
-    let ms_tag = tags.iter().find(|t| {
-        t.as_array().unwrap().first().unwrap().as_str().unwrap() == "ms"
-    });
+    let ms_tag = tags
+        .iter()
+        .find(|t| t.as_array().unwrap().first().unwrap().as_str().unwrap() == "ms");
     assert!(ms_tag.is_some(), "Group tagged event should have 'ms' tag");
 
     println!("Successfully verified TypeScript SharedChannel vectors!");
@@ -214,7 +224,8 @@ fn test_shared_channel_from_group_secret() {
         "kind": GROUP_INVITE_RUMOR_KIND,
         "tags": [],
         "content": "test"
-    }).to_string();
+    })
+    .to_string();
 
     let event = channel1.create_event(&rumor).unwrap();
     let decrypted = channel2.decrypt_event(&event).unwrap();

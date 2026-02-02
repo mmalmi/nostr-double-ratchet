@@ -11,7 +11,9 @@ use output::Output;
 #[command(name = "ndr")]
 #[command(version)]
 #[command(about = "CLI for encrypted Nostr messaging using double ratchet")]
-#[command(long_about = "A command-line tool for end-to-end encrypted messaging over Nostr.\n\nDesigned for humans, AI agents, and automation.")]
+#[command(
+    long_about = "A command-line tool for end-to-end encrypted messaging over Nostr.\n\nDesigned for humans, AI agents, and automation."
+)]
 struct Cli {
     /// Output in JSON format (for agents/scripts)
     #[arg(short, long, global = true)]
@@ -352,15 +354,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Commands::Login { key } => {
-            commands::identity::login(&key, &config, &storage, output).await
-        }
-        Commands::Logout => {
-            commands::identity::logout(&data_dir, output).await
-        }
-        Commands::Whoami => {
-            commands::identity::whoami(&config, output).await
-        }
+        Commands::Login { key } => commands::identity::login(&key, &config, &storage, output).await,
+        Commands::Logout => commands::identity::logout(&data_dir, output).await,
+        Commands::Whoami => commands::identity::whoami(&config, output).await,
         Commands::Invite(cmd) => match cmd {
             InviteCommands::Create { label } => {
                 commands::invite::create(label, &config, &storage, output).await
@@ -368,42 +364,41 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             InviteCommands::Publish { label, device_id } => {
                 commands::invite::publish(label, device_id, &config, &storage, output).await
             }
-            InviteCommands::List => {
-                commands::invite::list(&storage, output).await
-            }
-            InviteCommands::Delete { id } => {
-                commands::invite::delete(&id, &storage, output).await
-            }
+            InviteCommands::List => commands::invite::list(&storage, output).await,
+            InviteCommands::Delete { id } => commands::invite::delete(&id, &storage, output).await,
             InviteCommands::Accept { invite_id, event } => {
                 commands::invite::accept(&invite_id, &event, &config, &storage, output).await
             }
         },
         Commands::Chat(cmd) => match cmd {
-            ChatCommands::List => {
-                commands::chat::list(&storage, output).await
-            }
+            ChatCommands::List => commands::chat::list(&storage, output).await,
             ChatCommands::Join { url } => {
                 commands::chat::join(&url, &config, &storage, output).await
             }
-            ChatCommands::Show { id } => {
-                commands::chat::show(&id, &storage, output).await
-            }
-            ChatCommands::Delete { id } => {
-                commands::chat::delete(&id, &storage, output).await
-            }
+            ChatCommands::Show { id } => commands::chat::show(&id, &storage, output).await,
+            ChatCommands::Delete { id } => commands::chat::delete(&id, &storage, output).await,
         },
         Commands::Send { target, message } => {
             commands::message::send(&target, &message, &config, &storage, output).await
         }
-        Commands::React { target, message_id, emoji } => {
+        Commands::React {
+            target,
+            message_id,
+            emoji,
+        } => {
             commands::message::react(&target, &message_id, &emoji, &config, &storage, output).await
         }
         Commands::Typing { target } => {
             commands::message::typing(&target, &config, &storage, output).await
         }
-        Commands::Receipt { target, receipt_type, message_ids } => {
+        Commands::Receipt {
+            target,
+            receipt_type,
+            message_ids,
+        } => {
             let ids: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
-            commands::message::receipt(&target, &receipt_type, &ids, &config, &storage, output).await
+            commands::message::receipt(&target, &receipt_type, &ids, &config, &storage, output)
+                .await
         }
         Commands::Read { target, limit } => {
             commands::message::read(&target, limit, &storage, output).await
@@ -412,9 +407,7 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             ContactCommands::Add { pubkey, name } => {
                 commands::contact::add(&pubkey, &name, &storage, output).await
             }
-            ContactCommands::List => {
-                commands::contact::list(&storage, output).await
-            }
+            ContactCommands::List => commands::contact::list(&storage, output).await,
             ContactCommands::Remove { name } => {
                 commands::contact::remove(&name, &storage, output).await
             }
@@ -422,23 +415,20 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Listen { chat } => {
             commands::message::listen(chat.as_deref(), &config, &storage, output).await
         }
-        Commands::Receive { event } => {
-            commands::message::receive(&event, &storage, output).await
-        }
+        Commands::Receive { event } => commands::message::receive(&event, &storage, output).await,
         Commands::Group(cmd) => match cmd {
             GroupCommands::Create { name, members } => {
                 commands::group::create(&name, &members, &config, &storage, output).await
             }
-            GroupCommands::List => {
-                commands::group::list(&storage, output).await
-            }
-            GroupCommands::Show { id } => {
-                commands::group::show(&id, &storage, output).await
-            }
-            GroupCommands::Delete { id } => {
-                commands::group::delete(&id, &storage, output).await
-            }
-            GroupCommands::Update { id, name, description, picture } => {
+            GroupCommands::List => commands::group::list(&storage, output).await,
+            GroupCommands::Show { id } => commands::group::show(&id, &storage, output).await,
+            GroupCommands::Delete { id } => commands::group::delete(&id, &storage, output).await,
+            GroupCommands::Update {
+                id,
+                name,
+                description,
+                picture,
+            } => {
                 commands::group::update(
                     &id,
                     name.as_deref(),
@@ -447,7 +437,8 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
                     &config,
                     &storage,
                     output,
-                ).await
+                )
+                .await
             }
             GroupCommands::AddMember { id, pubkey } => {
                 commands::group::add_member(&id, &pubkey, &config, &storage, output).await
@@ -464,9 +455,11 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             GroupCommands::Send { id, message } => {
                 commands::group::send_message(&id, &message, &config, &storage, output).await
             }
-            GroupCommands::React { id, message_id, emoji } => {
-                commands::group::react(&id, &message_id, &emoji, &config, &storage, output).await
-            }
+            GroupCommands::React {
+                id,
+                message_id,
+                emoji,
+            } => commands::group::react(&id, &message_id, &emoji, &config, &storage, output).await,
             GroupCommands::Accept { id } => {
                 commands::group::accept(&id, &config, &storage, output).await
             }

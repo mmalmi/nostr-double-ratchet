@@ -1,12 +1,12 @@
 use crate::{
+    pubsub::build_filter,
     utils::{kdf, pubkey_from_hex},
     Error, EventCallback, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry,
     Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
-    pubsub::build_filter,
 };
-use nostr::PublicKey;
-use nostr::nips::nip44::{self, Version};
 use base64::Engine;
+use nostr::nips::nip44::{self, Version};
+use nostr::PublicKey;
 use nostr::{EventBuilder, Keys, Tag, Timestamp, UnsignedEvent};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -40,7 +40,10 @@ impl Session {
         }
     }
 
-    pub fn set_event_tx(&mut self, event_tx: crossbeam_channel::Sender<crate::SessionManagerEvent>) {
+    pub fn set_event_tx(
+        &mut self,
+        event_tx: crossbeam_channel::Sender<crate::SessionManagerEvent>,
+    ) {
         self.event_tx = Some(event_tx);
     }
 
@@ -57,16 +60,20 @@ impl Session {
         shared_secret: [u8; 32],
         name: Option<String>,
     ) -> Result<Self> {
-        let our_keys = Keys::new(nostr::SecretKey::from_slice(&our_ephemeral_nostr_private_key)?);
+        let our_keys = Keys::new(nostr::SecretKey::from_slice(
+            &our_ephemeral_nostr_private_key,
+        )?);
         let our_next_private_key = nostr::Keys::generate().secret_key().to_secret_bytes();
         let our_next_keys = Keys::new(nostr::SecretKey::from_slice(&our_next_private_key)?);
-
 
         let (root_key, sending_chain_key, our_current_nostr_key, our_next_nostr_key);
 
         if is_initiator {
             let our_current_pubkey = our_keys.public_key();
-            let conversation_key = nip44::v2::ConversationKey::derive(&our_next_keys.secret_key(), &their_ephemeral_nostr_public_key);
+            let conversation_key = nip44::v2::ConversationKey::derive(
+                our_next_keys.secret_key(),
+                &their_ephemeral_nostr_public_key,
+            );
             let kdf_outputs = kdf(&shared_secret, conversation_key.as_bytes(), 2);
             root_key = kdf_outputs[0];
             sending_chain_key = Some(kdf_outputs[1]);
@@ -155,7 +162,8 @@ impl Session {
                 let filter_json = serde_json::to_string(&filter)?;
                 let subid = format!("session-current-{}", uuid::Uuid::new_v4());
 
-                event_tx.send(crate::SessionManagerEvent::Subscribe(filter_json))
+                event_tx
+                    .send(crate::SessionManagerEvent::Subscribe(filter_json))
                     .map_err(|_| crate::Error::Storage("Failed to send subscribe".to_string()))?;
 
                 *self.current_key_subid.lock().unwrap() = Some(subid);
@@ -170,7 +178,8 @@ impl Session {
                 let filter_json = serde_json::to_string(&filter)?;
                 let subid = format!("session-next-{}", uuid::Uuid::new_v4());
 
-                event_tx.send(crate::SessionManagerEvent::Subscribe(filter_json))
+                event_tx
+                    .send(crate::SessionManagerEvent::Subscribe(filter_json))
                     .map_err(|_| crate::Error::Storage("Failed to send subscribe".to_string()))?;
 
                 *self.next_key_subid.lock().unwrap() = Some(subid);
@@ -217,13 +226,12 @@ impl Session {
     pub fn send_reaction(&mut self, message_id: &str, emoji: &str) -> Result<nostr::Event> {
         let dummy_keys = Keys::generate();
 
-        let event = EventBuilder::new(
-            nostr::Kind::from(REACTION_KIND as u16),
-            emoji,
-        )
-        .tag(Tag::parse(&["e".to_string(), message_id.to_string()])
-            .map_err(|e| Error::InvalidEvent(e.to_string()))?)
-        .build(dummy_keys.public_key());
+        let event = EventBuilder::new(nostr::Kind::from(REACTION_KIND as u16), emoji)
+            .tag(
+                Tag::parse(&["e".to_string(), message_id.to_string()])
+                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+            )
+            .build(dummy_keys.public_key());
 
         self.send_event(event)
     }
@@ -236,16 +244,19 @@ impl Session {
     ///
     /// # Returns
     /// A signed Nostr event containing the encrypted receipt.
-    pub fn send_receipt(&mut self, receipt_type: &str, message_ids: &[&str]) -> Result<nostr::Event> {
+    pub fn send_receipt(
+        &mut self,
+        receipt_type: &str,
+        message_ids: &[&str],
+    ) -> Result<nostr::Event> {
         let dummy_keys = Keys::generate();
 
-        let mut builder = EventBuilder::new(
-            nostr::Kind::from(RECEIPT_KIND as u16),
-            receipt_type,
-        );
+        let mut builder = EventBuilder::new(nostr::Kind::from(RECEIPT_KIND as u16), receipt_type);
         for id in message_ids {
-            builder = builder.tag(Tag::parse(&["e".to_string(), id.to_string()])
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?);
+            builder = builder.tag(
+                Tag::parse(&["e".to_string(), id.to_string()])
+                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+            );
         }
 
         self.send_event(builder.build(dummy_keys.public_key()))
@@ -258,11 +269,8 @@ impl Session {
     pub fn send_typing(&mut self) -> Result<nostr::Event> {
         let dummy_keys = Keys::generate();
 
-        let event = EventBuilder::new(
-            nostr::Kind::from(TYPING_KIND as u16),
-            "typing",
-        )
-        .build(dummy_keys.public_key());
+        let event = EventBuilder::new(nostr::Kind::from(TYPING_KIND as u16), "typing")
+            .build(dummy_keys.public_key());
 
         self.send_event(event)
     }
@@ -293,7 +301,9 @@ impl Session {
                 builder = builder.tag(tag.clone());
             }
             builder = builder.tag(ms_tag);
-            event = builder.custom_created_at(event.created_at).build(event.pubkey);
+            event = builder
+                .custom_created_at(event.created_at)
+                .build(event.pubkey);
         }
 
         // Event fields were mutated; ensure id matches the final content.
@@ -321,35 +331,29 @@ impl Session {
 
         let author_pubkey = our_current.public_key;
 
-
         // Build the event
-        let unsigned_event = nostr::EventBuilder::new(
-            nostr::Kind::from(MESSAGE_EVENT_KIND as u16),
-            encrypted_data,
-        )
-        .tags(tags)
-        .custom_created_at(Timestamp::from(now))
-        .build(author_pubkey);
+        let unsigned_event =
+            nostr::EventBuilder::new(nostr::Kind::from(MESSAGE_EVENT_KIND as u16), encrypted_data)
+                .tags(tags)
+                .custom_created_at(Timestamp::from(now))
+                .build(author_pubkey);
 
         // Sign with the ephemeral private key before returning
         let author_secret_key = nostr::SecretKey::from_slice(&our_current.private_key)?;
         let author_keys = nostr::Keys::new(author_secret_key);
-        let signed_event = unsigned_event.sign_with_keys(&author_keys)
+        let signed_event = unsigned_event
+            .sign_with_keys(&author_keys)
             .map_err(|e| Error::InvalidEvent(e.to_string()))?;
 
         Ok(signed_event)
     }
 
     fn ratchet_encrypt(&mut self, plaintext: &str) -> Result<(Header, String)> {
-        let sending_chain_key = self
-            .state
-            .sending_chain_key
-            .ok_or(Error::SessionNotReady)?;
+        let sending_chain_key = self.state.sending_chain_key.ok_or(Error::SessionNotReady)?;
 
         let kdf_outputs = kdf(&sending_chain_key, &[1u8], 2);
         self.state.sending_chain_key = Some(kdf_outputs[0]);
         let message_key = kdf_outputs[1];
-
 
         let header = Header {
             number: self.state.sending_chain_message_number,
@@ -387,7 +391,6 @@ impl Session {
         self.state.receiving_chain_key = Some(kdf_outputs[0]);
         let message_key = kdf_outputs[1];
 
-
         self.state.receiving_chain_message_number += 1;
 
         let conversation_key = nip44::v2::ConversationKey::new(message_key);
@@ -405,7 +408,8 @@ impl Session {
         self.state.receiving_chain_message_number = 0;
 
         let our_next_sk = nostr::SecretKey::from_slice(&self.state.our_next_nostr_key.private_key)?;
-        let their_next_pk = self.state
+        let their_next_pk = self
+            .state
             .their_next_nostr_public_key
             .ok_or(Error::SessionNotReady)?;
 
@@ -482,7 +486,8 @@ impl Session {
                     .decode(ciphertext)
                     .map_err(|e| Error::Decryption(e.to_string()))?;
 
-                let plaintext_bytes = nip44::v2::decrypt_to_bytes(&conversation_key, &ciphertext_bytes)?;
+                let plaintext_bytes =
+                    nip44::v2::decrypt_to_bytes(&conversation_key, &ciphertext_bytes)?;
                 let plaintext = String::from_utf8(plaintext_bytes)
                     .map_err(|e| Error::Decryption(e.to_string()))?;
 
@@ -497,9 +502,11 @@ impl Session {
     }
 
     pub fn receive(&mut self, event: &nostr::Event) -> Result<Option<String>> {
-        let header_tag = event.tags.iter().cloned().find(|t| {
-            t.clone().to_vec().first().map(|s| s.as_str()) == Some("header")
-        });
+        let header_tag = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("header"))
+            .cloned();
 
         let encrypted_header = match header_tag {
             Some(tag) => {
@@ -513,11 +520,15 @@ impl Session {
         let (header, should_ratchet) = self.decrypt_header(&encrypted_header, &sender_pubkey)?;
 
         let sender_bytes = sender_pubkey.to_bytes();
-        let their_next_matches = self.state.their_next_nostr_public_key
+        let their_next_matches = self
+            .state
+            .their_next_nostr_public_key
             .as_ref()
             .map(|pk| pk.to_bytes() == sender_bytes)
             .unwrap_or(false);
-        let their_current_matches = self.state.their_current_nostr_public_key
+        let their_current_matches = self
+            .state
+            .their_current_nostr_public_key
             .as_ref()
             .map(|pk| pk.to_bytes() == sender_bytes)
             .unwrap_or(false);
@@ -526,13 +537,16 @@ impl Session {
             return Err(Error::InvalidEvent("Unexpected sender".to_string()));
         }
 
-        let their_next_pk_hex = self.state.their_next_nostr_public_key
+        let their_next_pk_hex = self
+            .state
+            .their_next_nostr_public_key
             .map(|pk| hex::encode(pk.to_bytes()))
             .unwrap_or_default();
 
         if header.next_public_key != their_next_pk_hex {
             self.state.their_current_nostr_public_key = self.state.their_next_nostr_public_key;
-            self.state.their_next_nostr_public_key = Some(pubkey_from_hex(&header.next_public_key)?);
+            self.state.their_next_nostr_public_key =
+                Some(pubkey_from_hex(&header.next_public_key)?);
         }
 
         if should_ratchet {
@@ -553,7 +567,9 @@ impl Session {
         if let Some(current) = &self.state.our_current_nostr_key {
             let current_sk = nostr::SecretKey::from_slice(&current.private_key)?;
 
-            if let Ok(decrypted) = nostr::nips::nip44::decrypt(&current_sk, sender, encrypted_header) {
+            if let Ok(decrypted) =
+                nostr::nips::nip44::decrypt(&current_sk, sender, encrypted_header)
+            {
                 let header: Header = serde_json::from_str(&decrypted)
                     .map_err(|e| Error::Serialization(e.to_string()))?;
                 return Ok((header, false));
@@ -563,8 +579,8 @@ impl Session {
         let next_sk = nostr::SecretKey::from_slice(&self.state.our_next_nostr_key.private_key)?;
 
         let decrypted = nostr::nips::nip44::decrypt(&next_sk, sender, encrypted_header)?;
-        let header: Header = serde_json::from_str(&decrypted)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let header: Header =
+            serde_json::from_str(&decrypted).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok((header, true))
     }
 

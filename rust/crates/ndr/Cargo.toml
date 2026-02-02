@@ -20,7 +20,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 hex.workspace = true
 uuid.workspace = true
-notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]
 tempfile = "3"

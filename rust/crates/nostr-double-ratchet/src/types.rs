@@ -117,7 +117,9 @@ mod serde_option_pubkey {
         match opt {
             Some(s) => {
                 let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-                Ok(Some(PublicKey::from_slice(&bytes).map_err(serde::de::Error::custom)?))
+                Ok(Some(
+                    PublicKey::from_slice(&bytes).map_err(serde::de::Error::custom)?,
+                ))
             }
             None => Ok(None),
         }
@@ -129,7 +131,10 @@ mod serde_pubkey_hashmap {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::HashMap;
 
-    pub fn serialize<S>(map: &HashMap<PublicKey, super::SkippedKeysEntry>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        map: &HashMap<PublicKey, super::SkippedKeysEntry>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -140,11 +145,14 @@ mod serde_pubkey_hashmap {
         string_map.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<PublicKey, super::SkippedKeysEntry>, D::Error>
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<PublicKey, super::SkippedKeysEntry>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let string_map: HashMap<String, super::SkippedKeysEntry> = HashMap::deserialize(deserializer)?;
+        let string_map: HashMap<String, super::SkippedKeysEntry> =
+            HashMap::deserialize(deserializer)?;
         string_map
             .into_iter()
             .map(|(k, v)| {

@@ -45,12 +45,7 @@ pub async fn list(storage: &Storage, output: &Output) -> Result<()> {
 }
 
 /// Join a chat via invite URL
-pub async fn join(
-    url: &str,
-    config: &Config,
-    storage: &Storage,
-    output: &Output,
-) -> Result<()> {
+pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output) -> Result<()> {
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
@@ -93,18 +88,22 @@ pub async fn join(
     client.connect().await;
     client.send_event(response_event.clone()).await?;
 
-    output.success("chat.join", ChatJoinedWithEvent {
-        id,
-        their_pubkey,
-        response_event: nostr::JsonUtil::as_json(&response_event),
-    });
+    output.success(
+        "chat.join",
+        ChatJoinedWithEvent {
+            id,
+            their_pubkey,
+            response_event: nostr::JsonUtil::as_json(&response_event),
+        },
+    );
 
     Ok(())
 }
 
 /// Show chat details
 pub async fn show(id: &str, storage: &Storage, output: &Output) -> Result<()> {
-    let chat = storage.get_chat(id)?
+    let chat = storage
+        .get_chat(id)?
         .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?;
 
     let info = ChatInfo {
@@ -136,7 +135,9 @@ mod tests {
     fn setup() -> (TempDir, Config, Storage) {
         let temp = TempDir::new().unwrap();
         let mut config = Config::load(temp.path()).unwrap();
-        config.set_private_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        config
+            .set_private_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap();
         let config = Config::load(temp.path()).unwrap();
         let storage = Storage::open(temp.path()).unwrap();
         (temp, config, storage)
@@ -156,13 +157,15 @@ mod tests {
         let output = Output::new(true);
 
         // Add a chat manually
-        storage.save_chat(&StoredChat {
-            id: "test-chat".to_string(),
-            their_pubkey: "abc123".to_string(),
-            created_at: 1234567890,
-            last_message_at: None,
-            session_state: "{}".to_string(),
-        }).unwrap();
+        storage
+            .save_chat(&StoredChat {
+                id: "test-chat".to_string(),
+                their_pubkey: "abc123".to_string(),
+                created_at: 1234567890,
+                last_message_at: None,
+                session_state: "{}".to_string(),
+            })
+            .unwrap();
 
         // List
         list(&storage, &output).await.unwrap();

@@ -1,8 +1,10 @@
-use crate::{Result, Session, Error, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, pubsub::build_filter};
+use crate::{
+    pubsub::build_filter, Error, Result, Session, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+};
+use base64::Engine;
+use nostr::nips::nip44::{self, Version};
 use nostr::PublicKey;
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
-use nostr::nips::nip44::{self, Version};
-use base64::Engine;
 
 #[derive(Clone)]
 pub struct Invite {
@@ -17,7 +19,11 @@ pub struct Invite {
 }
 
 impl Invite {
-    pub fn create_new(inviter: PublicKey, device_id: Option<String>, max_uses: Option<usize>) -> Result<Self> {
+    pub fn create_new(
+        inviter: PublicKey,
+        device_id: Option<String>,
+        max_uses: Option<usize>,
+    ) -> Result<Self> {
         let inviter_ephemeral_keys = Keys::generate();
         let inviter_ephemeral_public_key = inviter_ephemeral_keys.public_key();
         let inviter_ephemeral_private_key = inviter_ephemeral_keys.secret_key().to_secret_bytes();
@@ -53,17 +59,26 @@ impl Invite {
     }
 
     pub fn from_url(url: &str) -> Result<Self> {
-        let hash = url.split('#').nth(1).ok_or(Error::Invite("No hash in URL".to_string()))?;
+        let hash = url
+            .split('#')
+            .nth(1)
+            .ok_or(Error::Invite("No hash in URL".to_string()))?;
         let decoded = urlencoding::decode(hash).map_err(|e| Error::Invite(e.to_string()))?;
         let data: serde_json::Value = serde_json::from_str(&decoded)?;
 
         let inviter = crate::utils::pubkey_from_hex(
-            data["inviter"].as_str().ok_or(Error::Invite("Missing inviter".to_string()))?
+            data["inviter"]
+                .as_str()
+                .ok_or(Error::Invite("Missing inviter".to_string()))?,
         )?;
         let ephemeral_key = crate::utils::pubkey_from_hex(
-            data["ephemeralKey"].as_str().ok_or(Error::Invite("Missing ephemeralKey".to_string()))?
+            data["ephemeralKey"]
+                .as_str()
+                .ok_or(Error::Invite("Missing ephemeralKey".to_string()))?,
         )?;
-        let shared_secret_hex = data["sharedSecret"].as_str().ok_or(Error::Invite("Missing sharedSecret".to_string()))?;
+        let shared_secret_hex = data["sharedSecret"]
+            .as_str()
+            .ok_or(Error::Invite("Missing sharedSecret".to_string()))?;
         let shared_secret_bytes = hex::decode(shared_secret_hex)?;
         let mut shared_secret = [0u8; 32];
         shared_secret.copy_from_slice(&shared_secret_bytes);
@@ -84,12 +99,18 @@ impl Invite {
         let device_id = self.device_id.as_ref().ok_or(Error::DeviceIdRequired)?;
 
         let tags = vec![
-            Tag::parse(&["ephemeralKey".to_string(), hex::encode(self.inviter_ephemeral_public_key.to_bytes())])
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+            Tag::parse(&[
+                "ephemeralKey".to_string(),
+                hex::encode(self.inviter_ephemeral_public_key.to_bytes()),
+            ])
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?,
             Tag::parse(&["sharedSecret".to_string(), hex::encode(self.shared_secret)])
                 .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-            Tag::parse(&["d".to_string(), format!("double-ratchet/invites/{}", device_id)])
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+            Tag::parse(&[
+                "d".to_string(),
+                format!("double-ratchet/invites/{}", device_id),
+            ])
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?,
             Tag::parse(&["l".to_string(), "double-ratchet/invites".to_string()])
                 .map_err(|e| Error::InvalidEvent(e.to_string()))?,
         ];
@@ -105,19 +126,25 @@ impl Invite {
     pub fn from_event(event: &nostr::Event) -> Result<Self> {
         let inviter = event.pubkey;
 
-        let ephemeral_key = event.tags.iter().cloned()
-            .find(|t| t.clone().to_vec().first().map(|s| s.as_str()) == Some("ephemeralKey"))
-            .and_then(|t| t.to_vec().get(1).cloned())
+        let ephemeral_key = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("ephemeralKey"))
+            .and_then(|t| t.as_slice().get(1).map(|s| s.to_string()))
             .ok_or(Error::Invite("Missing ephemeralKey tag".to_string()))?;
 
-        let shared_secret_hex = event.tags.iter().cloned()
-            .find(|t| t.clone().to_vec().first().map(|s| s.as_str()) == Some("sharedSecret"))
-            .and_then(|t| t.to_vec().get(1).cloned())
+        let shared_secret_hex = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("sharedSecret"))
+            .and_then(|t| t.as_slice().get(1).map(|s| s.to_string()))
             .ok_or(Error::Invite("Missing sharedSecret tag".to_string()))?;
 
-        let device_tag = event.tags.iter().cloned()
-            .find(|t| t.clone().to_vec().first().map(|s| s.as_str()) == Some("d"))
-            .and_then(|t| t.to_vec().get(1).cloned());
+        let device_tag = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"))
+            .and_then(|t| t.as_slice().get(1).map(|s| s.to_string()));
 
         let device_id = device_tag.and_then(|d| d.split('/').nth(2).map(String::from));
 
@@ -162,7 +189,8 @@ impl Invite {
         });
 
         let invitee_sk = nostr::SecretKey::from_slice(&invitee_private_key)?;
-        let dh_encrypted = nip44::encrypt(&invitee_sk, &self.inviter, &payload.to_string(), Version::V2)?;
+        let dh_encrypted =
+            nip44::encrypt(&invitee_sk, &self.inviter, payload.to_string(), Version::V2)?;
 
         let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
         let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, &dh_encrypted)?;
@@ -183,7 +211,7 @@ impl Invite {
         let envelope_content = nip44::encrypt(
             random_sender_sk,
             &self.inviter_ephemeral_public_key,
-            &inner_event.to_string(),
+            inner_event.to_string(),
             Version::V2,
         )?;
 
@@ -196,14 +224,21 @@ impl Invite {
         let random_now = now - (rand::random::<u64>() % two_days);
 
         // Build and sign the event with ephemeral keys
-        let unsigned_envelope = EventBuilder::new(Kind::from(INVITE_RESPONSE_KIND as u16), envelope_content)
-            .tag(Tag::parse(&["p".to_string(), hex::encode(self.inviter_ephemeral_public_key.to_bytes())])
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?)
-            .custom_created_at(Timestamp::from(random_now))
-            .build(random_sender_keys.public_key());
+        let unsigned_envelope =
+            EventBuilder::new(Kind::from(INVITE_RESPONSE_KIND as u16), envelope_content)
+                .tag(
+                    Tag::parse(&[
+                        "p".to_string(),
+                        hex::encode(self.inviter_ephemeral_public_key.to_bytes()),
+                    ])
+                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+                )
+                .custom_created_at(Timestamp::from(random_now))
+                .build(random_sender_keys.public_key());
 
         // Sign with the ephemeral keys before returning
-        let signed_envelope = unsigned_envelope.sign_with_keys(&random_sender_keys)
+        let signed_envelope = unsigned_envelope
+            .sign_with_keys(&random_sender_keys)
             .map_err(|e| Error::InvalidEvent(e.to_string()))?;
 
         Ok((session, signed_envelope))
@@ -214,7 +249,7 @@ impl Invite {
             "inviterEphemeralPublicKey": hex::encode(self.inviter_ephemeral_public_key.to_bytes()),
             "sharedSecret": hex::encode(self.shared_secret),
             "inviter": hex::encode(self.inviter.to_bytes()),
-            "inviterEphemeralPrivateKey": self.inviter_ephemeral_private_key.map(|k| hex::encode(k)),
+            "inviterEphemeralPrivateKey": self.inviter_ephemeral_private_key.map(hex::encode),
             "deviceId": self.device_id,
             "maxUses": self.max_uses,
             "usedBy": self.used_by.iter().map(|pk| hex::encode(pk.to_bytes())).collect::<Vec<_>>(),
@@ -227,26 +262,33 @@ impl Invite {
         let data: serde_json::Value = serde_json::from_str(json)?;
 
         let inviter_ephemeral_public_key = crate::utils::pubkey_from_hex(
-            data["inviterEphemeralPublicKey"].as_str().ok_or(Error::Invite("Missing field".to_string()))?
+            data["inviterEphemeralPublicKey"]
+                .as_str()
+                .ok_or(Error::Invite("Missing field".to_string()))?,
         )?;
 
-        let shared_secret_hex = data["sharedSecret"].as_str().ok_or(Error::Invite("Missing sharedSecret".to_string()))?;
+        let shared_secret_hex = data["sharedSecret"]
+            .as_str()
+            .ok_or(Error::Invite("Missing sharedSecret".to_string()))?;
         let shared_secret_bytes = hex::decode(shared_secret_hex)?;
         let mut shared_secret = [0u8; 32];
         shared_secret.copy_from_slice(&shared_secret_bytes);
 
         let inviter = crate::utils::pubkey_from_hex(
-            data["inviter"].as_str().ok_or(Error::Invite("Missing inviter".to_string()))?
+            data["inviter"]
+                .as_str()
+                .ok_or(Error::Invite("Missing inviter".to_string()))?,
         )?;
 
-        let inviter_ephemeral_private_key = if let Some(hex_str) = data["inviterEphemeralPrivateKey"].as_str() {
-            let bytes = hex::decode(hex_str)?;
-            let mut array = [0u8; 32];
-            array.copy_from_slice(&bytes);
-            Some(array)
-        } else {
-            None
-        };
+        let inviter_ephemeral_private_key =
+            if let Some(hex_str) = data["inviterEphemeralPrivateKey"].as_str() {
+                let bytes = hex::decode(hex_str)?;
+                let mut array = [0u8; 32];
+                array.copy_from_slice(&bytes);
+                Some(array)
+            } else {
+                None
+            };
 
         let used_by = if let Some(arr) = data["usedBy"].as_array() {
             arr.iter()
@@ -269,10 +311,7 @@ impl Invite {
         })
     }
 
-    pub fn listen(
-        &self,
-        pubsub: &dyn crate::NostrPubSub,
-    ) -> Result<()> {
+    pub fn listen(&self, pubsub: &dyn crate::NostrPubSub) -> Result<()> {
         let filter = build_filter()
             .kinds(vec![INVITE_RESPONSE_KIND as u64])
             .pubkeys(vec![self.inviter_ephemeral_public_key])
@@ -282,10 +321,7 @@ impl Invite {
         Ok(())
     }
 
-    pub fn from_user(
-        user_pubkey: PublicKey,
-        pubsub: &dyn crate::NostrPubSub,
-    ) -> Result<()> {
+    pub fn from_user(user_pubkey: PublicKey, pubsub: &dyn crate::NostrPubSub) -> Result<()> {
         let filter = build_filter()
             .kinds(vec![INVITE_EVENT_KIND as u64])
             .authors(vec![user_pubkey])
@@ -295,8 +331,13 @@ impl Invite {
         Ok(())
     }
 
-    pub fn process_invite_response(&self, event: &nostr::Event, _inviter_private_key: [u8; 32]) -> Result<Option<(Session, PublicKey, Option<String>)>> {
-        let inviter_ephemeral_private_key = self.inviter_ephemeral_private_key
+    pub fn process_invite_response(
+        &self,
+        event: &nostr::Event,
+        _inviter_private_key: [u8; 32],
+    ) -> Result<Option<(Session, PublicKey, Option<String>)>> {
+        let inviter_ephemeral_private_key = self
+            .inviter_ephemeral_private_key
             .ok_or(Error::Invite("Ephemeral key not available".to_string()))?;
 
         let inviter_ephemeral_sk = nostr::SecretKey::from_slice(&inviter_ephemeral_private_key)?;
@@ -304,22 +345,29 @@ impl Invite {
         let decrypted = nip44::decrypt(&inviter_ephemeral_sk, &sender_pk, &event.content)?;
         let inner_event: serde_json::Value = serde_json::from_str(&decrypted)?;
 
-        let invitee_identity_hex = inner_event["pubkey"].as_str()
+        let invitee_identity_hex = inner_event["pubkey"]
+            .as_str()
             .ok_or(Error::Invite("Missing pubkey".to_string()))?;
         let invitee_identity = crate::utils::pubkey_from_hex(invitee_identity_hex)?;
 
-        let inner_content = inner_event["content"].as_str()
+        let inner_content = inner_event["content"]
+            .as_str()
             .ok_or(Error::Invite("Missing content".to_string()))?;
 
         let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
-        let ciphertext_bytes = base64::engine::general_purpose::STANDARD.decode(inner_content)
+        let ciphertext_bytes = base64::engine::general_purpose::STANDARD
+            .decode(inner_content)
             .map_err(|e| Error::Serialization(e.to_string()))?;
-        let dh_encrypted_ciphertext = String::from_utf8(nip44::v2::decrypt_to_bytes(&conversation_key, &ciphertext_bytes)?)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let dh_encrypted_ciphertext = String::from_utf8(nip44::v2::decrypt_to_bytes(
+            &conversation_key,
+            &ciphertext_bytes,
+        )?)
+        .map_err(|e| Error::Serialization(e.to_string()))?;
 
         // Decrypt the DH-encrypted layer using inviter's key
         let inviter_sk = nostr::SecretKey::from_slice(&_inviter_private_key)?;
-        let dh_decrypted = nip44::decrypt(&inviter_sk, &invitee_identity, &dh_encrypted_ciphertext)?;
+        let dh_decrypted =
+            nip44::decrypt(&inviter_sk, &invitee_identity, &dh_encrypted_ciphertext)?;
 
         let payload: serde_json::Value = match serde_json::from_str(&dh_decrypted) {
             Ok(p) => p,
@@ -337,7 +385,8 @@ impl Invite {
             }
         };
 
-        let invitee_session_key_hex = payload["sessionKey"].as_str()
+        let invitee_session_key_hex = payload["sessionKey"]
+            .as_str()
             .ok_or(Error::Invite("Missing sessionKey".to_string()))?;
         let invitee_session_pubkey = crate::utils::pubkey_from_hex(invitee_session_key_hex)?;
         let device_id = payload["deviceId"].as_str().map(String::from);

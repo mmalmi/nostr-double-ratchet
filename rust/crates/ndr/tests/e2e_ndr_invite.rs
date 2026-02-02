@@ -31,13 +31,14 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
         panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 /// Start ndr listen in background
-async fn start_ndr_listen(data_dir: &std::path::Path) -> (Child, BufReader<tokio::process::ChildStdout>) {
+async fn start_ndr_listen(
+    data_dir: &std::path::Path,
+) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let mut child = Command::new("cargo")
         .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
@@ -55,11 +56,17 @@ async fn start_ndr_listen(data_dir: &std::path::Path) -> (Child, BufReader<tokio
 }
 
 /// Start the TypeScript e2e script that accepts an ndr invite
-async fn start_ts_accept_script(relay_url: &str, invite_url: &str) -> (Child, BufReader<tokio::process::ChildStdout>) {
+async fn start_ts_accept_script(
+    relay_url: &str,
+    invite_url: &str,
+) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
-        .parent().unwrap()
-        .parent().unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .to_path_buf();
 
     let ts_dir = repo_root.join("ts");
@@ -80,7 +87,10 @@ async fn start_ts_accept_script(relay_url: &str, invite_url: &str) -> (Child, Bu
 }
 
 /// Read lines from stdout until we find a specific marker
-async fn read_until_marker(reader: &mut BufReader<tokio::process::ChildStdout>, prefix: &str) -> Option<String> {
+async fn read_until_marker(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    prefix: &str,
+) -> Option<String> {
     let timeout = Duration::from_secs(30);
 
     tokio::time::timeout(timeout, async {
@@ -99,7 +109,10 @@ async fn read_until_marker(reader: &mut BufReader<tokio::process::ChildStdout>, 
                 Err(_) => return None,
             }
         }
-    }).await.ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tokio::test]
@@ -120,8 +133,9 @@ async fn test_ndr_creates_invite_ts_accepts() {
     });
     std::fs::write(
         alice_dir.path().join("config.json"),
-        serde_json::to_string(&config_content).unwrap()
-    ).unwrap();
+        serde_json::to_string(&config_content).unwrap(),
+    )
+    .unwrap();
 
     // Alice logs in
     let result = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
@@ -135,7 +149,8 @@ async fn test_ndr_creates_invite_ts_accepts() {
     println!("Alice created invite: {} (id: {})", invite_url, invite_id);
 
     // Start ndr listen for Alice - this should pick up the invite response
-    let (mut alice_listen_child, mut alice_listen_reader) = start_ndr_listen(alice_dir.path()).await;
+    let (mut alice_listen_child, mut alice_listen_reader) =
+        start_ndr_listen(alice_dir.path()).await;
 
     // Give ndr listen time to connect
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -144,15 +159,18 @@ async fn test_ndr_creates_invite_ts_accepts() {
     let (mut ts_child, mut ts_reader) = start_ts_accept_script(&relay_url, &invite_url).await;
 
     // Wait for TypeScript to connect and accept
-    let _ = read_until_marker(&mut ts_reader, "E2E_RELAY_CONNECTED:").await
+    let _ = read_until_marker(&mut ts_reader, "E2E_RELAY_CONNECTED:")
+        .await
         .expect("TypeScript failed to connect to relay");
     println!("TypeScript connected to relay");
 
-    let _ = read_until_marker(&mut ts_reader, "E2E_INVITE_ACCEPTED").await
+    let _ = read_until_marker(&mut ts_reader, "E2E_INVITE_ACCEPTED")
+        .await
         .expect("TypeScript failed to accept invite");
     println!("TypeScript accepted the invite");
 
-    let _ = read_until_marker(&mut ts_reader, "E2E_RESPONSE_PUBLISHED").await
+    let _ = read_until_marker(&mut ts_reader, "E2E_RESPONSE_PUBLISHED")
+        .await
         .expect("TypeScript failed to publish response");
     println!("TypeScript published invite response");
 
@@ -164,8 +182,9 @@ async fn test_ndr_creates_invite_ts_accepts() {
         let mut line = String::new();
         let read_result = tokio::time::timeout(
             Duration::from_millis(100),
-            alice_listen_reader.read_line(&mut line)
-        ).await;
+            alice_listen_reader.read_line(&mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {

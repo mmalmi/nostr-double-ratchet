@@ -42,24 +42,31 @@ impl UserRecord {
     pub fn upsert_session(&mut self, device_id: Option<&str>, session: Session) {
         let device_id = device_id.unwrap_or("unknown").to_string();
 
-        let device = self.device_records.entry(device_id.clone()).or_insert_with(|| {
-            DeviceRecord {
+        let device = self
+            .device_records
+            .entry(device_id.clone())
+            .or_insert_with(|| DeviceRecord {
                 device_id: device_id.clone(),
                 public_key: String::new(),
                 active_session: None,
                 inactive_sessions: Vec::new(),
                 is_stale: false,
                 stale_timestamp: None,
-                last_activity: Some(std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()),
-            }
-        });
+                last_activity: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                ),
+            });
 
         // Prefer sendable sessions as active
         let new_can_send = session.can_send();
-        let old_can_send = device.active_session.as_ref().map(|s| s.can_send()).unwrap_or(false);
+        let old_can_send = device
+            .active_session
+            .as_ref()
+            .map(|s| s.can_send())
+            .unwrap_or(false);
 
         if let Some(old_session) = device.active_session.take() {
             // If new session can send but old can't, replace
@@ -75,10 +82,12 @@ impl UserRecord {
             device.active_session = Some(session);
         }
 
-        device.last_activity = Some(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
+        device.last_activity = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
     }
 
     pub fn get_all_sessions_mut(&mut self) -> Vec<&mut Session> {

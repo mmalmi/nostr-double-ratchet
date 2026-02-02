@@ -1,5 +1,5 @@
-use nostr_double_ratchet::{Invite, Result, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND};
 use nostr::Keys;
+use nostr_double_ratchet::{Invite, Result, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND};
 
 #[test]
 fn test_create_new_invite() -> Result<()> {
@@ -8,7 +8,10 @@ fn test_create_new_invite() -> Result<()> {
 
     let invite = Invite::create_new(alice_pk, Some("Test Device".to_string()), Some(5))?;
 
-    assert_eq!(hex::encode(invite.inviter_ephemeral_public_key.to_bytes()).len(), 64);
+    assert_eq!(
+        hex::encode(invite.inviter_ephemeral_public_key.to_bytes()).len(),
+        64
+    );
     assert_eq!(hex::encode(invite.shared_secret).len(), 64);
     assert_eq!(invite.inviter.to_bytes(), alice_pk.to_bytes());
     assert_eq!(invite.device_id, Some("Test Device".to_string()));
@@ -30,7 +33,10 @@ fn test_url_generation_and_parsing() -> Result<()> {
 
     let parsed_invite = Invite::from_url(&url)?;
     assert_eq!(parsed_invite.inviter.to_bytes(), invite.inviter.to_bytes());
-    assert_eq!(parsed_invite.inviter_ephemeral_public_key.to_bytes(), invite.inviter_ephemeral_public_key.to_bytes());
+    assert_eq!(
+        parsed_invite.inviter_ephemeral_public_key.to_bytes(),
+        invite.inviter_ephemeral_public_key.to_bytes()
+    );
     assert_eq!(parsed_invite.shared_secret, invite.shared_secret);
 
     Ok(())
@@ -45,7 +51,10 @@ fn test_invite_get_event_requires_device_id() -> Result<()> {
 
     let result = invite.get_event();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Device ID required"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Device ID required"));
 
     Ok(())
 }
@@ -89,11 +98,15 @@ fn test_invite_event_conversion() -> Result<()> {
     assert!(has_l_tag);
 
     // Sign the event before parsing
-    let signed_event = unsigned_event.sign_with_keys(&alice_keys)
+    let signed_event = unsigned_event
+        .sign_with_keys(&alice_keys)
         .map_err(|_e| nostr_double_ratchet::Error::Invite("Failed to sign event".to_string()))?;
     let parsed_invite = Invite::from_event(&signed_event)?;
 
-    assert_eq!(parsed_invite.inviter_ephemeral_public_key.to_bytes(), invite.inviter_ephemeral_public_key.to_bytes());
+    assert_eq!(
+        parsed_invite.inviter_ephemeral_public_key.to_bytes(),
+        invite.inviter_ephemeral_public_key.to_bytes()
+    );
     assert_eq!(parsed_invite.shared_secret, invite.shared_secret);
     assert_eq!(parsed_invite.inviter.to_bytes(), alice_pk.to_bytes());
     assert_eq!(parsed_invite.device_id, Some("test-device".to_string()));
@@ -121,7 +134,8 @@ fn test_invite_accept_creates_session() -> Result<()> {
     let has_p_tag = event.tags.iter().any(|t| {
         let v = t.clone().to_vec();
         v.get(0).map(|s| s.as_str()) == Some("p")
-            && v.get(1).map(|s| s.as_str()) == Some(&hex::encode(invite.inviter_ephemeral_public_key.to_bytes()))
+            && v.get(1).map(|s| s.as_str())
+                == Some(&hex::encode(invite.inviter_ephemeral_public_key.to_bytes()))
     });
     assert!(has_p_tag);
 
@@ -138,7 +152,10 @@ fn test_invite_serialization() -> Result<()> {
     let serialized = invite.serialize()?;
     let deserialized = Invite::deserialize(&serialized)?;
 
-    assert_eq!(deserialized.inviter_ephemeral_public_key.to_bytes(), invite.inviter_ephemeral_public_key.to_bytes());
+    assert_eq!(
+        deserialized.inviter_ephemeral_public_key.to_bytes(),
+        invite.inviter_ephemeral_public_key.to_bytes()
+    );
     assert_eq!(deserialized.shared_secret, invite.shared_secret);
     assert_eq!(deserialized.inviter.to_bytes(), invite.inviter.to_bytes());
     assert_eq!(deserialized.device_id, invite.device_id);

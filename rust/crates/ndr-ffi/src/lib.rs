@@ -134,7 +134,8 @@ impl InviteHandle {
         let invitee_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&invitee_pubkey_hex)?;
         let invitee_privkey = parse_private_key(&invitee_privkey_hex)?;
 
-        let (session, response_event) = invite.accept(invitee_pubkey, invitee_privkey, device_id)?;
+        let (session, response_event) =
+            invite.accept(invitee_pubkey, invitee_privkey, device_id)?;
         let response_event_json = serde_json::to_string(&response_event)?;
 
         Ok(InviteAcceptResult {
@@ -276,8 +277,7 @@ fn parse_private_key(hex_str: &str) -> Result<[u8; 32], NdrError> {
 
 /// Parse a hex-encoded secret.
 fn parse_secret(hex_str: &str) -> Result<[u8; 32], NdrError> {
-    let bytes =
-        hex::decode(hex_str).map_err(|_| NdrError::Serialization("Invalid hex".into()))?;
+    let bytes = hex::decode(hex_str).map_err(|_| NdrError::Serialization("Invalid hex".into()))?;
     if bytes.len() != 32 {
         return Err(NdrError::Serialization("Secret must be 32 bytes".into()));
     }
@@ -377,8 +377,7 @@ mod tests {
         let bob_kp = generate_keypair();
 
         // Alice creates invite
-        let invite =
-            InviteHandle::create_new(alice_kp.public_key_hex.clone(), None, None).unwrap();
+        let invite = InviteHandle::create_new(alice_kp.public_key_hex.clone(), None, None).unwrap();
         let invite_json = invite.serialize().unwrap();
 
         // Bob accepts invite
@@ -407,8 +406,7 @@ mod tests {
         let alice_kp = generate_keypair();
         let bob_kp = generate_keypair();
 
-        let invite =
-            InviteHandle::create_new(alice_kp.public_key_hex.clone(), None, None).unwrap();
+        let invite = InviteHandle::create_new(alice_kp.public_key_hex.clone(), None, None).unwrap();
         let invite_json = invite.serialize().unwrap();
 
         let bob_invite = InviteHandle::deserialize(invite_json).unwrap();

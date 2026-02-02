@@ -27,9 +27,8 @@ fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
         panic!("ndr failed: {} {}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 #[test]
@@ -71,10 +70,7 @@ fn test_cli_encrypt_decrypt_roundtrip() {
     let alice_chat_id = result["data"]["chat_id"].as_str().unwrap();
 
     // Bob sends a message to Alice
-    let result = run_ndr(
-        bob_dir.path(),
-        &["send", bob_chat_id, "Hello from Bob!"],
-    );
+    let result = run_ndr(bob_dir.path(), &["send", bob_chat_id, "Hello from Bob!"]);
     assert_eq!(result["status"], "ok");
     let encrypted_event = result["data"]["event"].as_str().unwrap();
 
@@ -131,7 +127,10 @@ fn test_bidirectional_conversation() {
 
     // Alice replies (she's non-initiator, so she can reply after receiving)
     // Note: In double ratchet, Alice needs to receive first before she can send
-    let result = run_ndr(alice_dir.path(), &["send", alice_chat_id, "Reply from Alice"]);
+    let result = run_ndr(
+        alice_dir.path(),
+        &["send", alice_chat_id, "Reply from Alice"],
+    );
     let event2 = result["data"]["event"].as_str().unwrap();
 
     // Bob receives Alice's reply

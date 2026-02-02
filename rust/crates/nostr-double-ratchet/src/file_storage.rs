@@ -40,8 +40,9 @@ impl StorageAdapter for FileStorageAdapter {
         let path = self.key_to_path(key);
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| crate::Error::Storage(format!("Failed to create parent dir: {}", e)))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                crate::Error::Storage(format!("Failed to create parent dir: {}", e))
+            })?;
         }
 
         fs::write(&path, value)
@@ -56,7 +57,10 @@ impl StorageAdapter for FileStorageAdapter {
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(crate::Error::Storage(format!("Failed to delete file: {}", e))),
+            Err(e) => Err(crate::Error::Storage(format!(
+                "Failed to delete file: {}",
+                e
+            ))),
         }
     }
 
@@ -139,7 +143,10 @@ impl StorageAdapter for DebouncedFileStorage {
     }
 
     fn put(&self, key: &str, value: String) -> Result<()> {
-        self.pending_writes.lock().unwrap().insert(key.to_string(), value);
+        self.pending_writes
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value);
         self.maybe_flush()
     }
 
@@ -176,7 +183,10 @@ mod tests {
         assert!(adapter.get("test-key").unwrap().is_none());
 
         adapter.put("test-key", "test-value".to_string()).unwrap();
-        assert_eq!(adapter.get("test-key").unwrap(), Some("test-value".to_string()));
+        assert_eq!(
+            adapter.get("test-key").unwrap(),
+            Some("test-value".to_string())
+        );
 
         adapter.del("test-key").unwrap();
         assert!(adapter.get("test-key").unwrap().is_none());
@@ -222,10 +232,7 @@ mod tests {
     #[test]
     fn test_debounced_storage() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = DebouncedFileStorage::new(
-            temp_dir.path().to_path_buf(),
-            1000,
-        ).unwrap();
+        let storage = DebouncedFileStorage::new(temp_dir.path().to_path_buf(), 1000).unwrap();
 
         storage.put("key1", "value1".to_string()).unwrap();
 
@@ -236,6 +243,9 @@ mod tests {
         storage.flush().unwrap();
 
         assert!(storage.pending_writes.lock().unwrap().is_empty());
-        assert_eq!(storage.adapter.get("key1").unwrap(), Some("value1".to_string()));
+        assert_eq!(
+            storage.adapter.get("key1").unwrap(),
+            Some("value1".to_string())
+        );
     }
 }

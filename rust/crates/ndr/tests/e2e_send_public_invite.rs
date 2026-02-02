@@ -27,9 +27,8 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
         panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 #[tokio::test]
@@ -45,12 +44,8 @@ async fn test_send_prefers_public_invite() {
     let bob_pubkey_hex = bob_keys.public_key().to_hex();
     let bob_npub = nostr::ToBech32::to_bech32(&bob_keys.public_key()).unwrap();
 
-    let mut public_invite = Invite::create_new(
-        bob_keys.public_key(),
-        Some("public".to_string()),
-        None,
-    )
-    .unwrap();
+    let mut public_invite =
+        Invite::create_new(bob_keys.public_key(), Some("public".to_string()), None).unwrap();
     public_invite.created_at = 1;
     let public_event = public_invite
         .get_event()
@@ -58,12 +53,8 @@ async fn test_send_prefers_public_invite() {
         .sign_with_keys(&bob_keys)
         .unwrap();
 
-    let mut other_invite = Invite::create_new(
-        bob_keys.public_key(),
-        Some("other".to_string()),
-        None,
-    )
-    .unwrap();
+    let mut other_invite =
+        Invite::create_new(bob_keys.public_key(), Some("other".to_string()), None).unwrap();
     other_invite.created_at = 2;
     let other_event = other_invite
         .get_event()
@@ -87,7 +78,8 @@ async fn test_send_prefers_public_invite() {
     std::fs::write(
         alice_dir.path().join("config.json"),
         serde_json::to_string(&config_content).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
 
     let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let login = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
@@ -121,7 +113,10 @@ async fn test_send_prefers_public_invite() {
 
     let storage = ndr::storage::Storage::open(alice_dir.path()).unwrap();
     let chat = storage.get_chat_by_pubkey(&bob_pubkey_hex).unwrap();
-    assert!(chat.is_some(), "Expected chat to be created for public invite");
+    assert!(
+        chat.is_some(),
+        "Expected chat to be created for public invite"
+    );
 
     relay.stop().await;
 }

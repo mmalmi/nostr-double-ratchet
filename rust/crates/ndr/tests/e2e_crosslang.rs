@@ -30,13 +30,15 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
         panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 /// Start ndr listen in background and return the child process with stdout reader
-async fn start_ndr_listen(data_dir: &std::path::Path, chat_id: &str) -> (Child, BufReader<tokio::process::ChildStdout>) {
+async fn start_ndr_listen(
+    data_dir: &std::path::Path,
+    chat_id: &str,
+) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let mut child = Command::new("cargo")
         .env("NOSTR_PREFER_LOCAL", "0")
         .args(["run", "-q", "-p", "ndr", "--"])
@@ -58,9 +60,12 @@ async fn start_ndr_listen(data_dir: &std::path::Path, chat_id: &str) -> (Child, 
 /// Start the TypeScript e2e script and capture its output
 async fn start_ts_script(relay_url: &str) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
-        .parent().unwrap()
-        .parent().unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .to_path_buf();
 
     let ts_dir = repo_root.join("ts");
@@ -80,7 +85,10 @@ async fn start_ts_script(relay_url: &str) -> (Child, BufReader<tokio::process::C
 }
 
 /// Read lines from TypeScript script until we find a specific marker
-async fn read_until_marker(reader: &mut BufReader<tokio::process::ChildStdout>, prefix: &str) -> Option<String> {
+async fn read_until_marker(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    prefix: &str,
+) -> Option<String> {
     let timeout = Duration::from_secs(30);
 
     tokio::time::timeout(timeout, async {
@@ -99,7 +107,10 @@ async fn read_until_marker(reader: &mut BufReader<tokio::process::ChildStdout>, 
                 Err(_) => return None,
             }
         }
-    }).await.ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tokio::test]
@@ -114,19 +125,23 @@ async fn test_ts_rust_e2e() {
     let (mut ts_child, mut ts_reader) = start_ts_script(&relay_url).await;
 
     // Wait for TypeScript to output the invite URL
-    let _alice_pubkey = read_until_marker(&mut ts_reader, "E2E_ALICE_PUBKEY:").await
+    let _alice_pubkey = read_until_marker(&mut ts_reader, "E2E_ALICE_PUBKEY:")
+        .await
         .expect("Failed to get Alice pubkey");
     println!("Got Alice pubkey");
 
     // Wait for WS connection
     let _ws_open = read_until_marker(&mut ts_reader, "E2E_WS_OPEN").await;
-    let _relay_connected = read_until_marker(&mut ts_reader, "E2E_RELAY_CONNECTED:").await
+    let _relay_connected = read_until_marker(&mut ts_reader, "E2E_RELAY_CONNECTED:")
+        .await
         .expect("TypeScript failed to connect to relay");
     println!("TypeScript connected to relay");
 
-    let invite_url = read_until_marker(&mut ts_reader, "E2E_INVITE_URL:").await
+    let invite_url = read_until_marker(&mut ts_reader, "E2E_INVITE_URL:")
+        .await
         .expect("Failed to get invite URL");
-    let _listening = read_until_marker(&mut ts_reader, "E2E_LISTENING").await
+    let _listening = read_until_marker(&mut ts_reader, "E2E_LISTENING")
+        .await
         .expect("TypeScript not listening");
 
     println!("Got invite URL: {}", invite_url);
@@ -141,8 +156,9 @@ async fn test_ts_rust_e2e() {
     });
     std::fs::write(
         bob_dir.path().join("config.json"),
-        serde_json::to_string(&config_content).unwrap()
-    ).unwrap();
+        serde_json::to_string(&config_content).unwrap(),
+    )
+    .unwrap();
 
     // Bob logs in
     let result = run_ndr(bob_dir.path(), &["login", bob_sk]).await;
@@ -152,17 +168,24 @@ async fn test_ts_rust_e2e() {
     let result = run_ndr(bob_dir.path(), &["chat", "join", &invite_url]).await;
     assert_eq!(result["status"], "ok", "Bob join failed");
     let bob_chat_id = result["data"]["id"].as_str().unwrap().to_string();
-    let response_event = result["data"]["response_event"].as_str().unwrap().to_string();
+    let response_event = result["data"]["response_event"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     println!("Bob joined chat: {}", bob_chat_id);
 
     // Publish the response event to the relay (ndr outputs it but doesn't publish)
-    use tokio_tungstenite::{connect_async, tungstenite::Message};
     use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-    let (mut ws, _) = connect_async(&relay_url).await.expect("Failed to connect to relay");
+    let (mut ws, _) = connect_async(&relay_url)
+        .await
+        .expect("Failed to connect to relay");
     let event_msg = format!(r#"["EVENT",{}]"#, response_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send event");
+    ws.send(Message::Text(event_msg))
+        .await
+        .expect("Failed to send event");
 
     // Wait for OK response
     if let Some(Ok(Message::Text(response))) = ws.next().await {
@@ -187,17 +210,17 @@ async fn test_ts_rust_e2e() {
 
     // Publish the encrypted message to the relay
     let event_msg = format!(r#"["EVENT",{}]"#, encrypted_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send message event");
+    ws.send(Message::Text(event_msg))
+        .await
+        .expect("Failed to send message event");
 
     // Wait for TypeScript to receive the message and send reply
     let mut ndr_to_ts_success = false;
     let timeout_instant = std::time::Instant::now();
     while timeout_instant.elapsed() < Duration::from_secs(10) {
         let mut line = String::new();
-        let read_result = tokio::time::timeout(
-            Duration::from_millis(100),
-            ts_reader.read_line(&mut line)
-        ).await;
+        let read_result =
+            tokio::time::timeout(Duration::from_millis(100), ts_reader.read_line(&mut line)).await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
@@ -215,13 +238,17 @@ async fn test_ts_rust_e2e() {
         }
     }
 
-    assert!(ndr_to_ts_success, "TypeScript did not receive the message from ndr");
+    assert!(
+        ndr_to_ts_success,
+        "TypeScript did not receive the message from ndr"
+    );
     println!("ndr -> TypeScript: OK");
 
     // Now test TypeScript -> ndr direction via relay
     // Start ndr listen to receive messages through the relay
     println!("Starting ndr listen to receive reply via relay...");
-    let (mut ndr_listen_child, mut ndr_listen_reader) = start_ndr_listen(bob_dir.path(), &bob_chat_id).await;
+    let (mut ndr_listen_child, mut ndr_listen_reader) =
+        start_ndr_listen(bob_dir.path(), &bob_chat_id).await;
 
     // Give ndr listen time to connect and subscribe
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -236,8 +263,9 @@ async fn test_ts_rust_e2e() {
         let mut line = String::new();
         let read_result = tokio::time::timeout(
             Duration::from_millis(100),
-            ndr_listen_reader.read_line(&mut line)
-        ).await;
+            ndr_listen_reader.read_line(&mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
@@ -262,7 +290,10 @@ async fn test_ts_rust_e2e() {
     let _ = ts_child.kill().await;
     relay.stop().await;
 
-    assert!(ts_to_ndr_success, "ndr did not receive the message from TypeScript via relay");
+    assert!(
+        ts_to_ndr_success,
+        "ndr did not receive the message from TypeScript via relay"
+    );
     println!("TypeScript -> ndr (via relay): OK");
     println!("Bidirectional E2E test passed!");
 }

@@ -1,6 +1,4 @@
-use crate::{
-    InMemoryStorage, Invite, Result, StorageAdapter, UserRecord,
-};
+use crate::{InMemoryStorage, Invite, Result, StorageAdapter, UserRecord};
 use nostr::PublicKey;
 use nostr::UnsignedEvent;
 use std::collections::{HashMap, VecDeque};
@@ -80,11 +78,7 @@ impl SessionManager {
         let device_invite_key = self.device_invite_key(&self.device_id);
         let invite = match self.storage.get(&device_invite_key)? {
             Some(data) => Invite::deserialize(&data)?,
-            None => Invite::create_new(
-                self.our_public_key,
-                Some(self.device_id.clone()),
-                None,
-            )?,
+            None => Invite::create_new(self.our_public_key, Some(self.device_id.clone()), None)?,
         };
 
         self.storage.put(&device_invite_key, invite.serialize()?)?;
@@ -99,7 +93,8 @@ impl SessionManager {
         invite.listen(&pubsub)?;
 
         let event = invite.get_event()?;
-        self.event_tx.send(SessionManagerEvent::Publish(event))
+        self.event_tx
+            .send(SessionManagerEvent::Publish(event))
             .map_err(|_| crate::Error::Storage("Failed to send publish".to_string()))?;
 
         // Sessions manage their own kind 1060 subscriptions
@@ -122,7 +117,11 @@ impl SessionManager {
     }
 
     pub fn send_text(&self, recipient: PublicKey, text: String) -> Result<Vec<String>> {
-        eprintln!("🚀 send_text called: recipient={}, text_len={}", &hex::encode(recipient.to_bytes())[..16], text.len());
+        eprintln!(
+            "🚀 send_text called: recipient={}, text_len={}",
+            &hex::encode(recipient.to_bytes())[..16],
+            text.len()
+        );
 
         if text.trim().is_empty() {
             eprintln!("⚠️  Ignoring empty text send");
@@ -133,14 +132,26 @@ impl SessionManager {
         let mut user_records = self.user_records.lock().unwrap();
 
         // Check if recipient has any active sessions
-        let has_recipient_sessions = user_records.get(&recipient)
+        let has_recipient_sessions = user_records
+            .get(&recipient)
             .map(|record| {
-                let count = record.device_records.values().filter(|dr| dr.active_session.is_some()).count();
-                eprintln!("  Recipient {} has {} active sessions", &hex::encode(recipient.to_bytes())[..16], count);
+                let count = record
+                    .device_records
+                    .values()
+                    .filter(|dr| dr.active_session.is_some())
+                    .count();
+                eprintln!(
+                    "  Recipient {} has {} active sessions",
+                    &hex::encode(recipient.to_bytes())[..16],
+                    count
+                );
                 count > 0
             })
             .unwrap_or_else(|| {
-                eprintln!("  Recipient {} not in user_records yet", &hex::encode(recipient.to_bytes())[..16]);
+                eprintln!(
+                    "  Recipient {} not in user_records yet",
+                    &hex::encode(recipient.to_bytes())[..16]
+                );
                 false
             });
 
@@ -176,18 +187,23 @@ impl SessionManager {
                 .lock()
                 .unwrap()
                 .entry(recipient)
-                .or_insert_with(VecDeque::new)
+                .or_default()
                 .push_back(pending_msg);
 
-            eprintln!("📮 Queued message to {} (no active sessions)", &hex::encode(recipient.to_bytes())[..16]);
+            eprintln!(
+                "📮 Queued message to {} (no active sessions)",
+                &hex::encode(recipient.to_bytes())[..16]
+            );
 
             return Ok(event_ids);
         }
 
         // Build event with p-tag for recipient (iris-client compatibility)
         let event = nostr::EventBuilder::text_note(&text)
-            .tag(nostr::Tag::parse(&["p".to_string(), hex::encode(recipient.to_bytes())])
-                .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?)
+            .tag(
+                nostr::Tag::parse(&["p".to_string(), hex::encode(recipient.to_bytes())])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            )
             .build(self.our_public_key);
 
         // Send to recipient's devices
@@ -196,7 +212,9 @@ impl SessionManager {
                 match session.send_event(event.clone()) {
                     Ok(signed_event) => {
                         event_ids.push(signed_event.id.to_string());
-                        let _ = self.event_tx.send(SessionManagerEvent::PublishSigned(signed_event));
+                        let _ = self
+                            .event_tx
+                            .send(SessionManagerEvent::PublishSigned(signed_event));
                     }
                     Err(_) => continue,
                 }
@@ -210,7 +228,9 @@ impl SessionManager {
                     match session.send_event(event.clone()) {
                         Ok(signed_event) => {
                             event_ids.push(signed_event.id.to_string());
-                            let _ = self.event_tx.send(SessionManagerEvent::PublishSigned(signed_event));
+                            let _ = self
+                                .event_tx
+                                .send(SessionManagerEvent::PublishSigned(signed_event));
                         }
                         Err(_) => continue,
                     }
@@ -219,7 +239,11 @@ impl SessionManager {
         }
 
         if !event_ids.is_empty() {
-            eprintln!("📤 Sent message to {} ({} sessions)", &hex::encode(recipient.to_bytes())[..16], event_ids.len());
+            eprintln!(
+                "📤 Sent message to {} ({} sessions)",
+                &hex::encode(recipient.to_bytes())[..16],
+                event_ids.len()
+            );
         }
 
         drop(user_records);
@@ -241,12 +265,7 @@ impl SessionManager {
     }
 
     pub fn get_user_pubkeys(&self) -> Vec<PublicKey> {
-        self.user_records
-            .lock()
-            .unwrap()
-            .keys()
-            .copied()
-            .collect()
+        self.user_records.lock().unwrap().keys().copied().collect()
     }
 
     pub fn get_total_sessions(&self) -> usize {
@@ -254,7 +273,12 @@ impl SessionManager {
             .lock()
             .unwrap()
             .values()
-            .map(|ur| ur.device_records.values().filter(|dr| dr.active_session.is_some()).count())
+            .map(|ur| {
+                ur.device_records
+                    .values()
+                    .filter(|dr| dr.active_session.is_some())
+                    .count()
+            })
             .sum()
     }
 
@@ -265,20 +289,36 @@ impl SessionManager {
         for (user_pk, user_record) in records.iter() {
             for (device_id, device_record) in &user_record.device_records {
                 if let Some(ref session) = device_record.active_session {
-                    output.push_str(&format!("Session with {}[{}]:\n", &hex::encode(user_pk.to_bytes())[..16], device_id));
+                    output.push_str(&format!(
+                        "Session with {}[{}]:\n",
+                        &hex::encode(user_pk.to_bytes())[..16],
+                        device_id
+                    ));
                     if let Some(our_current) = &session.state.our_current_nostr_key {
-                        output.push_str(&format!("  our_current:    {}\n", &hex::encode(our_current.public_key.to_bytes())[..16]));
+                        output.push_str(&format!(
+                            "  our_current:    {}\n",
+                            &hex::encode(our_current.public_key.to_bytes())[..16]
+                        ));
                     } else {
                         output.push_str("  our_current:    None\n");
                     }
-                    output.push_str(&format!("  our_next:       {}\n", &hex::encode(session.state.our_next_nostr_key.public_key.to_bytes())[..16]));
+                    output.push_str(&format!(
+                        "  our_next:       {}\n",
+                        &hex::encode(session.state.our_next_nostr_key.public_key.to_bytes())[..16]
+                    ));
                     if let Some(their_current) = session.state.their_current_nostr_public_key {
-                        output.push_str(&format!("  their_current:  {}\n", &hex::encode(their_current.to_bytes())[..16]));
+                        output.push_str(&format!(
+                            "  their_current:  {}\n",
+                            &hex::encode(their_current.to_bytes())[..16]
+                        ));
                     } else {
                         output.push_str("  their_current:  None\n");
                     }
                     if let Some(their_next) = session.state.their_next_nostr_public_key {
-                        output.push_str(&format!("  their_next:     {}\n", &hex::encode(their_next.to_bytes())[..16]));
+                        output.push_str(&format!(
+                            "  their_next:     {}\n",
+                            &hex::encode(their_next.to_bytes())[..16]
+                        ));
                     } else {
                         output.push_str("  their_next:     None\n");
                     }
@@ -334,7 +374,11 @@ impl SessionManager {
                 match self.send_text(recipient, pending_msg.text.clone()) {
                     Ok(event_ids) if !event_ids.is_empty() => {
                         // Successfully sent to at least one session
-                        tracing::info!("Flushed pending message to {} (sent to {} sessions)", hex::encode(recipient.to_bytes()), event_ids.len());
+                        tracing::info!(
+                            "Flushed pending message to {} (sent to {} sessions)",
+                            hex::encode(recipient.to_bytes()),
+                            event_ids.len()
+                        );
 
                         // Mark first send time if not set
                         if pending_msg.first_sent_at.is_none() {
@@ -348,7 +392,7 @@ impl SessionManager {
                                     .lock()
                                     .unwrap()
                                     .entry(recipient)
-                                    .or_insert_with(VecDeque::new)
+                                    .or_default()
                                     .push_back(pending_msg);
                             } else {
                                 tracing::info!("Removing message from queue (sent 5+ seconds ago)");
@@ -361,7 +405,7 @@ impl SessionManager {
                             .lock()
                             .unwrap()
                             .entry(recipient)
-                            .or_insert_with(VecDeque::new)
+                            .or_default()
                             .push_back(pending_msg);
                     }
                 }
@@ -399,7 +443,10 @@ impl SessionManager {
             used_by: Vec::new(),
             created_at: 0,
         };
-        self.pending_invites.lock().unwrap().insert(user_pubkey, placeholder);
+        self.pending_invites
+            .lock()
+            .unwrap()
+            .insert(user_pubkey, placeholder);
 
         Ok(())
     }
@@ -407,13 +454,23 @@ impl SessionManager {
     pub fn process_received_event(&self, event: nostr::Event) {
         if event.kind.as_u16() == crate::INVITE_RESPONSE_KIND as u16 {
             if let Some(state) = self.invite_state.lock().unwrap().as_ref() {
-                match state.invite.process_invite_response(&event, state.our_identity_key) {
+                match state
+                    .invite
+                    .process_invite_response(&event, state.our_identity_key)
+                {
                     Ok(Some((mut sess, invitee_pubkey, device_id))) => {
-                        tracing::info!("✅ Accepted invite response from {}", &hex::encode(invitee_pubkey.to_bytes())[..16]);
+                        tracing::info!(
+                            "✅ Accepted invite response from {}",
+                            &hex::encode(invitee_pubkey.to_bytes())[..16]
+                        );
 
                         if let Some(ref dev_id) = device_id {
                             if dev_id != &self.device_id {
-                                let acceptance_key = format!("invite-accept/{}/{}", hex::encode(invitee_pubkey.to_bytes()), dev_id);
+                                let acceptance_key = format!(
+                                    "invite-accept/{}/{}",
+                                    hex::encode(invitee_pubkey.to_bytes()),
+                                    dev_id
+                                );
                                 if self.storage.get(&acceptance_key).ok().flatten().is_none() {
                                     let _ = self.storage.put(&acceptance_key, "1".to_string());
 
@@ -421,9 +478,10 @@ impl SessionManager {
                                     let _ = sess.subscribe_to_messages();
 
                                     let mut records = self.user_records.lock().unwrap();
-                                    let user_record = records
-                                        .entry(invitee_pubkey)
-                                        .or_insert_with(|| UserRecord::new(hex::encode(invitee_pubkey.to_bytes())));
+                                    let user_record =
+                                        records.entry(invitee_pubkey).or_insert_with(|| {
+                                            UserRecord::new(hex::encode(invitee_pubkey.to_bytes()))
+                                        });
                                     user_record.upsert_session(Some(dev_id), sess);
                                     drop(records);
 
@@ -441,7 +499,10 @@ impl SessionManager {
             }
         } else if event.kind.as_u16() == crate::INVITE_EVENT_KIND as u16 {
             if let Ok(invite) = Invite::from_event(&event) {
-                tracing::info!("📨 Received invite from {}", &hex::encode(invite.inviter.to_bytes())[..16]);
+                tracing::info!(
+                    "📨 Received invite from {}",
+                    &hex::encode(invite.inviter.to_bytes())[..16]
+                );
 
                 if let Some(ref dev_id) = invite.device_id {
                     let inviter = invite.inviter;
@@ -456,27 +517,33 @@ impl SessionManager {
                     if !user_record.device_records.contains_key(dev_id) {
                         drop(records);
 
-                        match invite.accept(self.our_public_key, self.our_identity_key, Some(self.device_id.clone())) {
-                            Ok((mut session, event)) => {
-                                tracing::info!("✅ Accepting invite from {}", &hex::encode(inviter.to_bytes())[..16]);
-                                let _ = self.event_tx.send(SessionManagerEvent::PublishSigned(event));
+                        if let Ok((mut session, event)) = invite.accept(
+                            self.our_public_key,
+                            self.our_identity_key,
+                            Some(self.device_id.clone()),
+                        ) {
+                            tracing::info!(
+                                "✅ Accepting invite from {}",
+                                &hex::encode(inviter.to_bytes())[..16]
+                            );
+                            let _ = self
+                                .event_tx
+                                .send(SessionManagerEvent::PublishSigned(event));
 
-                                session.set_event_tx(self.event_tx.clone());
-                                let _ = session.subscribe_to_messages();
+                            session.set_event_tx(self.event_tx.clone());
+                            let _ = session.subscribe_to_messages();
 
-                                let mut records = self.user_records.lock().unwrap();
-                                let user_record = records
-                                    .entry(inviter)
-                                    .or_insert_with(|| UserRecord::new(hex::encode(inviter.to_bytes())));
-                                user_record.upsert_session(Some(dev_id), session);
-                                drop(records);
+                            let mut records = self.user_records.lock().unwrap();
+                            let user_record = records.entry(inviter).or_insert_with(|| {
+                                UserRecord::new(hex::encode(inviter.to_bytes()))
+                            });
+                            user_record.upsert_session(Some(dev_id), session);
+                            drop(records);
 
-                                let _ = self.store_user_record(&inviter);
+                            let _ = self.store_user_record(&inviter);
 
-                                // Try to flush any pending messages for this user
-                                self.flush_pending_messages(inviter);
-                            }
-                            Err(_) => {}
+                            // Try to flush any pending messages for this user
+                            self.flush_pending_messages(inviter);
                         }
                     }
                 }
@@ -490,7 +557,11 @@ impl SessionManager {
 
                 for session in all_sessions.iter_mut() {
                     if let Ok(Some(plaintext)) = session.receive(&event) {
-                        tracing::info!("💬 Decrypted message from {}: {}", &hex::encode(user_pubkey.to_bytes())[..16], &plaintext[..plaintext.len().min(50)]);
+                        tracing::info!(
+                            "💬 Decrypted message from {}: {}",
+                            &hex::encode(user_pubkey.to_bytes())[..16],
+                            &plaintext[..plaintext.len().min(50)]
+                        );
                         let sender = *user_pubkey;
                         drop(user_records);
                         let _ = self.event_tx.send(SessionManagerEvent::DecryptedMessage {
@@ -523,13 +594,7 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
 
-        let manager = SessionManager::new(
-            pubkey,
-            identity_key,
-            device_id.clone(),
-            tx,
-            None,
-        );
+        let manager = SessionManager::new(pubkey, identity_key, device_id.clone(), tx, None);
 
         assert_eq!(manager.get_device_id(), device_id);
     }
@@ -543,13 +608,7 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
 
-        let manager = SessionManager::new(
-            pubkey,
-            identity_key,
-            device_id,
-            tx,
-            None,
-        );
+        let manager = SessionManager::new(pubkey, identity_key, device_id, tx, None);
 
         let recipient = Keys::generate().public_key();
         let result = manager.send_text(recipient, "test".to_string());

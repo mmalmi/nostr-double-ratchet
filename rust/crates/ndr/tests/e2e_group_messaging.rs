@@ -51,7 +51,11 @@ impl TestStorage {
         std::fs::create_dir_all(&groups_dir).unwrap();
         std::fs::create_dir_all(&group_messages_dir).unwrap();
         std::fs::create_dir_all(&chats_dir).unwrap();
-        TestStorage { groups_dir, group_messages_dir, chats_dir }
+        TestStorage {
+            groups_dir,
+            group_messages_dir,
+            chats_dir,
+        }
     }
 
     fn save_group(&self, group: &nostr_double_ratchet::group::GroupData) {
@@ -62,7 +66,9 @@ impl TestStorage {
 
     fn get_group(&self, id: &str) -> Option<nostr_double_ratchet::group::GroupData> {
         let path = self.groups_dir.join(format!("{}.json", id));
-        if !path.exists() { return None; }
+        if !path.exists() {
+            return None;
+        }
         let content = std::fs::read_to_string(path).unwrap();
         Some(serde_json::from_str(&content).unwrap())
     }
@@ -81,11 +87,18 @@ impl TestStorage {
 
     fn list_group_messages(&self, group_id: &str) -> Vec<serde_json::Value> {
         let dir = self.group_messages_dir.join(group_id);
-        if !dir.exists() { return Vec::new(); }
+        if !dir.exists() {
+            return Vec::new();
+        }
         let mut all = Vec::new();
         for entry in std::fs::read_dir(&dir).unwrap() {
             let entry = entry.unwrap();
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 let content = std::fs::read_to_string(entry.path()).unwrap();
                 let msgs: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
                 all.extend(msgs);
@@ -135,7 +148,8 @@ fn test_group_message_fan_out_and_receive() {
     let mut bob_sk = [0u8; 32];
     bob_sk.copy_from_slice(&bob_sk_bytes);
 
-    let (mut alice_session, mut bob_session, _) = create_session_pair(&alice_pk, &alice_sk, &bob_pk, &bob_sk);
+    let (mut alice_session, mut bob_session, _) =
+        create_session_pair(&alice_pk, &alice_sk, &bob_pk, &bob_sk);
 
     // Bob (acceptor) must send first to complete the ratchet, then Alice can send.
     // In real usage, the 1:1 session is already established before group creation.
@@ -145,8 +159,16 @@ fn test_group_message_fan_out_and_receive() {
     // Save sessions
     let alice_chat_id = "alice-bob-chat";
     let bob_chat_id = "bob-alice-chat";
-    alice_storage.save_chat(alice_chat_id, &bob.pubkey, &serde_json::to_string(&alice_session.state).unwrap());
-    bob_storage.save_chat(bob_chat_id, &alice.pubkey, &serde_json::to_string(&bob_session.state).unwrap());
+    alice_storage.save_chat(
+        alice_chat_id,
+        &bob.pubkey,
+        &serde_json::to_string(&alice_session.state).unwrap(),
+    );
+    bob_storage.save_chat(
+        bob_chat_id,
+        &alice.pubkey,
+        &serde_json::to_string(&bob_session.state).unwrap(),
+    );
 
     // Alice creates group
     let group = create_group_data("Test Group", &alice.pubkey, &[&bob.pubkey]);
@@ -170,9 +192,9 @@ fn test_group_message_fan_out_and_receive() {
 
     // Verify group tag is present
     let tags = decrypted["tags"].as_array().unwrap();
-    let l_tag = tags.iter().find(|t| {
-        t.as_array().unwrap().first().unwrap().as_str().unwrap() == "l"
-    });
+    let l_tag = tags
+        .iter()
+        .find(|t| t.as_array().unwrap().first().unwrap().as_str().unwrap() == "l");
     assert!(l_tag.is_some());
     let group_id_from_tag = l_tag.unwrap().as_array().unwrap()[1].as_str().unwrap();
     assert_eq!(group_id_from_tag, group.id);
@@ -185,7 +207,11 @@ fn test_group_message_fan_out_and_receive() {
     assert_eq!(metadata.secret, group.secret);
 
     // Bob validates and creates group locally
-    assert!(validate_metadata_creation(&metadata, &alice.pubkey, &bob.pubkey));
+    assert!(validate_metadata_creation(
+        &metadata,
+        &alice.pubkey,
+        &bob.pubkey
+    ));
 
     // Alice sends a group message
     let msg_event = nostr::EventBuilder::new(
@@ -205,12 +231,14 @@ fn test_group_message_fan_out_and_receive() {
     // Verify it's a group message with the right content
     assert_eq!(decrypted_msg["content"].as_str().unwrap(), "Hello group!");
     let msg_tags = decrypted_msg["tags"].as_array().unwrap();
-    let msg_group_tag = msg_tags.iter().find(|t| {
-        t.as_array().unwrap().first().unwrap().as_str().unwrap() == "l"
-    });
+    let msg_group_tag = msg_tags
+        .iter()
+        .find(|t| t.as_array().unwrap().first().unwrap().as_str().unwrap() == "l");
     assert!(msg_group_tag.is_some());
     assert_eq!(
-        msg_group_tag.unwrap().as_array().unwrap()[1].as_str().unwrap(),
+        msg_group_tag.unwrap().as_array().unwrap()[1]
+            .as_str()
+            .unwrap(),
         group.id
     );
 }
@@ -234,7 +262,8 @@ fn test_group_metadata_update_flow() {
             picture: None,
         },
         &alice.pubkey,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Build metadata for fan-out
     let content = build_group_metadata_content(&updated, false);
@@ -259,12 +288,19 @@ fn test_member_removal_metadata_flow() {
     let carol = helpers::create_instance();
 
     // Alice creates group with Bob and Carol
-    let group = create_group_data("Three Members", &alice.pubkey, &[&bob.pubkey, &carol.pubkey]);
+    let group = create_group_data(
+        "Three Members",
+        &alice.pubkey,
+        &[&bob.pubkey, &carol.pubkey],
+    );
     let original_secret = group.secret.clone();
 
     // Alice removes Carol
     let updated = remove_group_member(&group, &carol.pubkey, &alice.pubkey).unwrap();
-    assert_ne!(updated.secret, original_secret, "Secret should rotate on member removal");
+    assert_ne!(
+        updated.secret, original_secret,
+        "Secret should rotate on member removal"
+    );
     assert!(!updated.members.contains(&carol.pubkey));
 
     // Build metadata for Bob (with secret) and Carol (without secret)
@@ -282,6 +318,7 @@ fn test_member_removal_metadata_flow() {
     assert!(carol_metadata.secret.is_none());
 
     // Carol sees she's been removed
-    let carol_validation = validate_metadata_update(&group, &carol_metadata, &alice.pubkey, &carol.pubkey);
+    let carol_validation =
+        validate_metadata_update(&group, &carol_metadata, &alice.pubkey, &carol.pubkey);
     assert_eq!(carol_validation, MetadataValidation::Removed);
 }

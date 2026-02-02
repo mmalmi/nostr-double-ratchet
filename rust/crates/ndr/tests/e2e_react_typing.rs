@@ -33,16 +33,18 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
         panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 async fn start_ts_script(relay_url: &str) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
-        .parent().unwrap()
-        .parent().unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .to_path_buf();
 
     let ts_dir = repo_root.join("ts");
@@ -61,7 +63,10 @@ async fn start_ts_script(relay_url: &str) -> (Child, BufReader<tokio::process::C
     (child, stdout)
 }
 
-async fn read_until_marker(reader: &mut BufReader<tokio::process::ChildStdout>, prefix: &str) -> Option<String> {
+async fn read_until_marker(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    prefix: &str,
+) -> Option<String> {
     let timeout = Duration::from_secs(30);
 
     tokio::time::timeout(timeout, async {
@@ -80,7 +85,10 @@ async fn read_until_marker(reader: &mut BufReader<tokio::process::ChildStdout>, 
                 Err(_) => return None,
             }
         }
-    }).await.ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tokio::test]
@@ -95,9 +103,11 @@ async fn test_react_and_typing_e2e() {
     let (mut ts_child, mut ts_reader) = start_ts_script(&relay_url).await;
 
     // Wait for TS to be ready
-    let invite_url = read_until_marker(&mut ts_reader, "E2E_INVITE_URL:").await
+    let invite_url = read_until_marker(&mut ts_reader, "E2E_INVITE_URL:")
+        .await
         .expect("Failed to get invite URL");
-    let _listening = read_until_marker(&mut ts_reader, "E2E_LISTENING").await
+    let _listening = read_until_marker(&mut ts_reader, "E2E_LISTENING")
+        .await
         .expect("TS not listening");
     println!("TS ready, invite URL: {}", invite_url);
 
@@ -108,8 +118,9 @@ async fn test_react_and_typing_e2e() {
     let config_content = serde_json::json!({ "relays": [&relay_url] });
     std::fs::write(
         bob_dir.path().join("config.json"),
-        serde_json::to_string(&config_content).unwrap()
-    ).unwrap();
+        serde_json::to_string(&config_content).unwrap(),
+    )
+    .unwrap();
 
     // Bob logs in and joins
     let result = run_ndr(bob_dir.path(), &["login", bob_sk]).await;
@@ -118,22 +129,30 @@ async fn test_react_and_typing_e2e() {
     let result = run_ndr(bob_dir.path(), &["chat", "join", &invite_url]).await;
     assert_eq!(result["status"], "ok", "Bob join failed");
     let bob_chat_id = result["data"]["id"].as_str().unwrap().to_string();
-    let response_event = result["data"]["response_event"].as_str().unwrap().to_string();
+    let response_event = result["data"]["response_event"]
+        .as_str()
+        .unwrap()
+        .to_string();
     println!("Bob joined chat: {}", bob_chat_id);
 
     // Publish response event to relay manually for reliability
-    use tokio_tungstenite::{connect_async, tungstenite::Message};
     use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-    let (mut ws, _) = connect_async(&relay_url).await.expect("Failed to connect to relay");
+    let (mut ws, _) = connect_async(&relay_url)
+        .await
+        .expect("Failed to connect to relay");
     let event_msg = format!(r#"["EVENT",{}]"#, response_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send event");
+    ws.send(Message::Text(event_msg))
+        .await
+        .expect("Failed to send event");
     if let Some(Ok(Message::Text(response))) = ws.next().await {
         println!("Relay response: {}", response);
     }
 
     // Wait for TS to create session
-    let _session_created = read_until_marker(&mut ts_reader, "E2E_SESSION_CREATED:").await
+    let _session_created = read_until_marker(&mut ts_reader, "E2E_SESSION_CREATED:")
+        .await
         .expect("TS failed to create session");
     println!("Session created");
 
@@ -144,15 +163,19 @@ async fn test_react_and_typing_e2e() {
 
     // Publish first message to relay
     let event_msg = format!(r#"["EVENT",{}]"#, first_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send first message");
+    ws.send(Message::Text(event_msg))
+        .await
+        .expect("Failed to send first message");
     println!("ndr sent first message");
 
     // Wait for TS to receive first message and send reply
-    let _got_first = read_until_marker(&mut ts_reader, "E2E_GOT_FIRST_MESSAGE:").await
+    let _got_first = read_until_marker(&mut ts_reader, "E2E_GOT_FIRST_MESSAGE:")
+        .await
         .expect("TS did not receive first message");
     println!("TS received first message");
 
-    let reply_id = read_until_marker(&mut ts_reader, "E2E_REPLY_SENT:id=").await
+    let reply_id = read_until_marker(&mut ts_reader, "E2E_REPLY_SENT:id=")
+        .await
         .expect("TS did not send reply");
     println!("TS sent reply with id: {}", reply_id);
 
@@ -179,8 +202,9 @@ async fn test_react_and_typing_e2e() {
         let mut line = String::new();
         let read_result = tokio::time::timeout(
             Duration::from_millis(200),
-            listen_reader.read_line(&mut line)
-        ).await;
+            listen_reader.read_line(&mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
@@ -197,17 +221,26 @@ async fn test_react_and_typing_e2e() {
         }
     }
     let _ = listen_child.kill().await;
-    assert!(!received_msg_id.is_empty(), "ndr did not receive the reply from TS");
+    assert!(
+        !received_msg_id.is_empty(),
+        "ndr did not receive the reply from TS"
+    );
 
     // ndr reacts to the reply
-    let result = run_ndr(bob_dir.path(), &["react", &bob_chat_id, &received_msg_id, "👍"]).await;
+    let result = run_ndr(
+        bob_dir.path(),
+        &["react", &bob_chat_id, &received_msg_id, "👍"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "ndr react failed");
     let react_event = result["data"]["event"].as_str().unwrap().to_string();
     println!("ndr sent reaction");
 
     // Publish reaction to relay
     let event_msg = format!(r#"["EVENT",{}]"#, react_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send reaction");
+    ws.send(Message::Text(event_msg))
+        .await
+        .expect("Failed to send reaction");
 
     // ndr sends typing indicator
     let result = run_ndr(bob_dir.path(), &["typing", &bob_chat_id]).await;
@@ -217,7 +250,9 @@ async fn test_react_and_typing_e2e() {
 
     // Publish typing event to relay
     let event_msg = format!(r#"["EVENT",{}]"#, typing_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send typing event");
+    ws.send(Message::Text(event_msg))
+        .await
+        .expect("Failed to send typing event");
 
     // ndr sends a follow-up message
     let result = run_ndr(bob_dir.path(), &["send", &bob_chat_id, "Follow-up!"]).await;
@@ -226,7 +261,9 @@ async fn test_react_and_typing_e2e() {
 
     // Publish follow-up to relay
     let event_msg = format!(r#"["EVENT",{}]"#, followup_event);
-    ws.send(Message::Text(event_msg)).await.expect("Failed to send follow-up");
+    ws.send(Message::Text(event_msg))
+        .await
+        .expect("Failed to send follow-up");
     println!("ndr sent follow-up message");
 
     // Wait for TS to confirm it received reaction, typing, and follow-up
@@ -239,7 +276,10 @@ async fn test_react_and_typing_e2e() {
     println!("TS received typing indicator");
 
     let followup_ok = read_until_marker(&mut ts_reader, "E2E_FOLLOWUP_OK:").await;
-    assert!(followup_ok.is_some(), "TS did not receive follow-up after reaction/typing");
+    assert!(
+        followup_ok.is_some(),
+        "TS did not receive follow-up after reaction/typing"
+    );
     println!("TS received follow-up: {:?}", followup_ok);
 
     let all_ok = read_until_marker(&mut ts_reader, "E2E_ALL_OK").await;

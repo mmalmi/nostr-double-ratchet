@@ -112,7 +112,12 @@ impl GroupStorage {
         let mut groups = Vec::new();
         for entry in std::fs::read_dir(&self.groups_dir).unwrap() {
             let entry = entry.unwrap();
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 let content = std::fs::read_to_string(entry.path()).unwrap();
                 groups.push(serde_json::from_str(&content).unwrap());
             }
@@ -149,7 +154,10 @@ fn e2e_group_lifecycle() {
     let groups = alice_storage.list();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].name, "Test Group");
-    assert_eq!(groups[0].members, vec![alice.pubkey.as_str(), bob.pubkey.as_str()]);
+    assert_eq!(
+        groups[0].members,
+        vec![alice.pubkey.as_str(), bob.pubkey.as_str()]
+    );
     assert_eq!(groups[0].admins, vec![alice.pubkey.as_str()]);
 
     // 3. Alice updates group name
@@ -230,7 +238,11 @@ fn e2e_group_metadata_serialization_roundtrip() {
     assert_eq!(metadata.secret, group.secret);
 
     // Validate as if Bob received this creation metadata
-    assert!(validate_metadata_creation(&metadata, &alice.pubkey, &bob.pubkey));
+    assert!(validate_metadata_creation(
+        &metadata,
+        &alice.pubkey,
+        &bob.pubkey
+    ));
 
     // Bob would apply it to create his local copy
     let bob_storage = GroupStorage::open(&bob.data_dir);

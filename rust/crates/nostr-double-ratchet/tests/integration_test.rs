@@ -1,5 +1,5 @@
-use nostr_double_ratchet::{Result, Session};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, UnsignedEvent};
+use nostr_double_ratchet::{Result, Session};
 
 #[test]
 fn test_alice_bob_conversation() -> Result<()> {
@@ -61,8 +61,20 @@ fn test_multiple_messages_back_and_forth() -> Result<()> {
 
     let shared_secret = [0u8; 32];
 
-    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
-    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+    let mut alice = Session::init(
+        bob_pk,
+        alice_sk,
+        true,
+        shared_secret,
+        Some("alice".to_string()),
+    )?;
+    let mut bob = Session::init(
+        alice_pk,
+        bob_sk,
+        false,
+        shared_secret,
+        Some("bob".to_string()),
+    )?;
 
     let messages = vec![
         ("alice", "Message 1"),
@@ -94,7 +106,7 @@ fn test_multiple_messages_back_and_forth() -> Result<()> {
 
 #[test]
 fn test_session_persistence() -> Result<()> {
-    use nostr_double_ratchet::utils::{serialize_session_state, deserialize_session_state};
+    use nostr_double_ratchet::utils::{deserialize_session_state, serialize_session_state};
 
     let alice_keys = Keys::generate();
     let bob_keys = Keys::generate();
@@ -107,8 +119,20 @@ fn test_session_persistence() -> Result<()> {
 
     let shared_secret = [0u8; 32];
 
-    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
-    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+    let mut alice = Session::init(
+        bob_pk,
+        alice_sk,
+        true,
+        shared_secret,
+        Some("alice".to_string()),
+    )?;
+    let mut bob = Session::init(
+        alice_pk,
+        bob_sk,
+        false,
+        shared_secret,
+        Some("bob".to_string()),
+    )?;
 
     let msg1 = alice.send("Before save 1".to_string())?;
     bob.receive(&msg1)?;
@@ -148,14 +172,24 @@ fn test_send_event_recomputes_id_with_ms_tag() -> Result<()> {
 
     let shared_secret = [7u8; 32];
 
-    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
-    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+    let mut alice = Session::init(
+        bob_pk,
+        alice_sk,
+        true,
+        shared_secret,
+        Some("alice".to_string()),
+    )?;
+    let mut bob = Session::init(
+        alice_pk,
+        bob_sk,
+        false,
+        shared_secret,
+        Some("bob".to_string()),
+    )?;
 
     let tags = vec![
-        Tag::parse(&["l".to_string(), "test-group-id".to_string()])
-            .expect("valid group tag"),
-        Tag::parse(&["ms".to_string(), "1700000000000".to_string()])
-            .expect("valid ms tag"),
+        Tag::parse(&["l".to_string(), "test-group-id".to_string()]).expect("valid group tag"),
+        Tag::parse(&["ms".to_string(), "1700000000000".to_string()]).expect("valid ms tag"),
     ];
 
     let inner = EventBuilder::new(Kind::Custom(14), "Hello group with ms tag")
@@ -164,10 +198,10 @@ fn test_send_event_recomputes_id_with_ms_tag() -> Result<()> {
 
     let outer = alice.send_event(inner)?;
     let plaintext = bob.receive(&outer)?.expect("expected decrypted rumor");
-    let rumor = UnsignedEvent::from_json(&plaintext)
-        .expect("valid rumor JSON");
+    let rumor = UnsignedEvent::from_json(&plaintext).expect("valid rumor JSON");
 
-    rumor.verify_id()
+    rumor
+        .verify_id()
         .expect("rumor id should match computed hash");
 
     Ok(())

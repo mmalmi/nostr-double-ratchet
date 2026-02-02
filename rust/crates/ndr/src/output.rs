@@ -66,7 +66,11 @@ impl Output {
             };
             println!("{}", serde_json::to_string(&event).unwrap());
         } else {
-            println!("[{}] {}", event_type, serde_json::to_string_pretty(&data).unwrap());
+            println!(
+                "[{}] {}",
+                event_type,
+                serde_json::to_string_pretty(&data).unwrap()
+            );
         }
     }
 }

@@ -1,5 +1,8 @@
-use nostr_double_ratchet::{utils::{serialize_session_state, deserialize_session_state}, Result, Session};
 use nostr::Keys;
+use nostr_double_ratchet::{
+    utils::{deserialize_session_state, serialize_session_state},
+    Result, Session,
+};
 
 #[test]
 fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
@@ -14,8 +17,20 @@ fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
 
     let shared_secret = [0u8; 32];
 
-    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
-    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+    let mut alice = Session::init(
+        bob_pk,
+        alice_sk,
+        true,
+        shared_secret,
+        Some("alice".to_string()),
+    )?;
+    let mut bob = Session::init(
+        alice_pk,
+        bob_sk,
+        false,
+        shared_secret,
+        Some("bob".to_string()),
+    )?;
 
     let mut sent_events = Vec::new();
     let messages = vec!["Message 1", "Message 2", "Message 3"];
@@ -32,14 +47,17 @@ fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
     let serialized_bob = serialize_session_state(&bob.state)?;
     let bob_restored = Session::new(
         deserialize_session_state(&serialized_bob)?,
-        "bob_restored".to_string()
+        "bob_restored".to_string(),
     );
 
     let initial_receiving_count = bob_restored.state.receiving_chain_message_number;
 
     for _event in &sent_events {
         let result = bob_restored.state.clone();
-        assert_eq!(result.receiving_chain_message_number, initial_receiving_count);
+        assert_eq!(
+            result.receiving_chain_message_number,
+            initial_receiving_count
+        );
     }
 
     let fresh_event = alice.send("Fresh message after duplicates".to_string())?;
@@ -48,7 +66,10 @@ fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
     assert!(received.is_some());
 
     let rumor: serde_json::Value = serde_json::from_str(&received.unwrap())?;
-    assert_eq!(rumor["content"].as_str(), Some("Fresh message after duplicates"));
+    assert_eq!(
+        rumor["content"].as_str(),
+        Some("Fresh message after duplicates")
+    );
 
     Ok(())
 }
@@ -66,8 +87,20 @@ fn test_session_reinitialization() -> Result<()> {
 
     let shared_secret = [0u8; 32];
 
-    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
-    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+    let mut alice = Session::init(
+        bob_pk,
+        alice_sk,
+        true,
+        shared_secret,
+        Some("alice".to_string()),
+    )?;
+    let mut bob = Session::init(
+        alice_pk,
+        bob_sk,
+        false,
+        shared_secret,
+        Some("bob".to_string()),
+    )?;
 
     let msg1 = alice.send("Message 1".to_string())?;
     let received1 = bob.receive(&msg1)?;
@@ -79,7 +112,7 @@ fn test_session_reinitialization() -> Result<()> {
 
     let mut bob_restored = Session::new(
         deserialize_session_state(&serialized_bob_state)?,
-        "bob_restored".to_string()
+        "bob_restored".to_string(),
     );
 
     let msg2 = alice.send("Message 2".to_string())?;

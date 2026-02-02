@@ -31,13 +31,15 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
         panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
     }
 
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout)
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
 }
 
 /// Start ndr listen in background
-async fn start_ndr_listen(data_dir: &std::path::Path, chat_id: Option<&str>) -> (Child, BufReader<tokio::process::ChildStdout>) {
+async fn start_ndr_listen(
+    data_dir: &std::path::Path,
+    chat_id: Option<&str>,
+) -> (Child, BufReader<tokio::process::ChildStdout>) {
     let mut cmd = Command::new("cargo");
     cmd.env("NOSTR_PREFER_LOCAL", "0");
     cmd.args(["run", "-q", "-p", "ndr", "--"])
@@ -70,8 +72,9 @@ fn setup_ndr_dir(relay_url: &str, _secret_key: &str) -> TempDir {
     });
     std::fs::write(
         dir.path().join("config.json"),
-        serde_json::to_string(&config_content).unwrap()
-    ).unwrap();
+        serde_json::to_string(&config_content).unwrap(),
+    )
+    .unwrap();
 
     // Login synchronously would be ideal but we'll do it in the test
     dir
@@ -101,14 +104,19 @@ async fn test_ndr_to_ndr_session() {
     assert_eq!(result["status"], "ok", "Bob login failed");
 
     // Alice creates an invite
-    let result = run_ndr(alice_dir.path(), &["invite", "create", "-l", "alice-invite"]).await;
+    let result = run_ndr(
+        alice_dir.path(),
+        &["invite", "create", "-l", "alice-invite"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Alice invite create failed");
     let invite_url = result["data"]["url"].as_str().unwrap().to_string();
     let invite_id = result["data"]["id"].as_str().unwrap().to_string();
     println!("Alice created invite: {} (id: {})", invite_url, invite_id);
 
     // Start Alice's ndr listen to receive the invite response
-    let (mut alice_listen_child, mut alice_listen_reader) = start_ndr_listen(alice_dir.path(), None).await;
+    let (mut alice_listen_child, mut alice_listen_reader) =
+        start_ndr_listen(alice_dir.path(), None).await;
 
     // Give Alice's listener time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -126,8 +134,9 @@ async fn test_ndr_to_ndr_session() {
         let mut line = String::new();
         let read_result = tokio::time::timeout(
             Duration::from_millis(100),
-            alice_listen_reader.read_line(&mut line)
-        ).await;
+            alice_listen_reader.read_line(&mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
@@ -136,7 +145,10 @@ async fn test_ndr_to_ndr_session() {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
                     if json["event"] == "session_created" {
                         alice_chat_id = json["chat_id"].as_str().map(|s| s.to_string());
-                        println!("Alice received invite response! Chat ID: {:?}", alice_chat_id);
+                        println!(
+                            "Alice received invite response! Chat ID: {:?}",
+                            alice_chat_id
+                        );
                         break;
                     }
                 }
@@ -147,14 +159,18 @@ async fn test_ndr_to_ndr_session() {
     // Kill Alice's first listener
     let _ = alice_listen_child.kill().await;
 
-    assert!(alice_chat_id.is_some(), "Alice did not receive Bob's invite response");
+    assert!(
+        alice_chat_id.is_some(),
+        "Alice did not receive Bob's invite response"
+    );
     let alice_chat_id = alice_chat_id.unwrap();
 
     // Now test bidirectional messaging
     println!("\n--- Testing Bob -> Alice message ---");
 
     // Start Alice's listener for messages
-    let (mut alice_listen_child, mut alice_listen_reader) = start_ndr_listen(alice_dir.path(), Some(&alice_chat_id)).await;
+    let (mut alice_listen_child, mut alice_listen_reader) =
+        start_ndr_listen(alice_dir.path(), Some(&alice_chat_id)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Bob sends a message (ndr send now publishes to relay automatically)
@@ -168,8 +184,9 @@ async fn test_ndr_to_ndr_session() {
         let mut line = String::new();
         let read_result = tokio::time::timeout(
             Duration::from_millis(100),
-            alice_listen_reader.read_line(&mut line)
-        ).await;
+            alice_listen_reader.read_line(&mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
@@ -192,11 +209,16 @@ async fn test_ndr_to_ndr_session() {
     println!("\n--- Testing Alice -> Bob message ---");
 
     // Start Bob's listener
-    let (mut bob_listen_child, mut bob_listen_reader) = start_ndr_listen(bob_dir.path(), Some(&bob_chat_id)).await;
+    let (mut bob_listen_child, mut bob_listen_reader) =
+        start_ndr_listen(bob_dir.path(), Some(&bob_chat_id)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Alice sends a message (ndr send now publishes to relay automatically)
-    let result = run_ndr(alice_dir.path(), &["send", &alice_chat_id, "Hello from Alice!"]).await;
+    let result = run_ndr(
+        alice_dir.path(),
+        &["send", &alice_chat_id, "Hello from Alice!"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Alice send failed");
 
     // Wait for Bob to receive the message
@@ -206,8 +228,9 @@ async fn test_ndr_to_ndr_session() {
         let mut line = String::new();
         let read_result = tokio::time::timeout(
             Duration::from_millis(100),
-            bob_listen_reader.read_line(&mut line)
-        ).await;
+            bob_listen_reader.read_line(&mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
@@ -242,10 +265,8 @@ async fn wait_for_message(
     let timeout_instant = std::time::Instant::now();
     while timeout_instant.elapsed() < Duration::from_secs(10) {
         let mut line = String::new();
-        let read_result = tokio::time::timeout(
-            Duration::from_millis(100),
-            reader.read_line(&mut line)
-        ).await;
+        let read_result =
+            tokio::time::timeout(Duration::from_millis(100), reader.read_line(&mut line)).await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
@@ -288,11 +309,16 @@ async fn test_ndr_long_conversation() {
     run_ndr(bob_dir.path(), &["login", bob_sk]).await;
 
     // Alice creates invite, Bob joins
-    let result = run_ndr(alice_dir.path(), &["invite", "create", "-l", "alice-invite"]).await;
+    let result = run_ndr(
+        alice_dir.path(),
+        &["invite", "create", "-l", "alice-invite"],
+    )
+    .await;
     let invite_url = result["data"]["url"].as_str().unwrap().to_string();
 
     // Start Alice's listener for invite response
-    let (mut alice_listen_child, mut alice_listen_reader) = start_ndr_listen(alice_dir.path(), None).await;
+    let (mut alice_listen_child, mut alice_listen_reader) =
+        start_ndr_listen(alice_dir.path(), None).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Bob joins
@@ -304,7 +330,12 @@ async fn test_ndr_long_conversation() {
     let timeout_instant = std::time::Instant::now();
     while timeout_instant.elapsed() < Duration::from_secs(10) {
         let mut line = String::new();
-        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), alice_listen_reader.read_line(&mut line)).await {
+        if let Ok(Ok(n)) = tokio::time::timeout(
+            Duration::from_millis(100),
+            alice_listen_reader.read_line(&mut line),
+        )
+        .await
+        {
             if n > 0 {
                 let trimmed = line.trim();
                 println!("[Alice listen] {}", trimmed);
@@ -323,51 +354,89 @@ async fn test_ndr_long_conversation() {
     println!("\n=== Starting long conversation test (listener stays running) ===\n");
 
     // Start PERSISTENT listeners for both Alice and Bob
-    let (mut alice_listen_child, mut alice_listen_reader) = start_ndr_listen(alice_dir.path(), Some(&alice_chat_id)).await;
-    let (mut bob_listen_child, mut bob_listen_reader) = start_ndr_listen(bob_dir.path(), Some(&bob_chat_id)).await;
+    let (mut alice_listen_child, mut alice_listen_reader) =
+        start_ndr_listen(alice_dir.path(), Some(&alice_chat_id)).await;
+    let (mut bob_listen_child, mut bob_listen_reader) =
+        start_ndr_listen(bob_dir.path(), Some(&bob_chat_id)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Round 1: Bob -> Alice
     println!("\n--- Round 1: Bob -> Alice ---");
-    let result = run_ndr(bob_dir.path(), &["send", &bob_chat_id, "Message 1 from Bob"]).await;
+    let result = run_ndr(
+        bob_dir.path(),
+        &["send", &bob_chat_id, "Message 1 from Bob"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Bob send 1 failed");
-    assert!(wait_for_message(&mut alice_listen_reader, "Message 1 from Bob", "Alice").await,
-        "Alice did not receive message 1 from Bob");
+    assert!(
+        wait_for_message(&mut alice_listen_reader, "Message 1 from Bob", "Alice").await,
+        "Alice did not receive message 1 from Bob"
+    );
 
     // Round 2: Alice -> Bob
     println!("\n--- Round 2: Alice -> Bob ---");
-    let result = run_ndr(alice_dir.path(), &["send", &alice_chat_id, "Message 2 from Alice"]).await;
+    let result = run_ndr(
+        alice_dir.path(),
+        &["send", &alice_chat_id, "Message 2 from Alice"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Alice send 2 failed");
-    assert!(wait_for_message(&mut bob_listen_reader, "Message 2 from Alice", "Bob").await,
-        "Bob did not receive message 2 from Alice");
+    assert!(
+        wait_for_message(&mut bob_listen_reader, "Message 2 from Alice", "Bob").await,
+        "Bob did not receive message 2 from Alice"
+    );
 
     // Round 3: Bob -> Alice (keys should have rotated by now)
     println!("\n--- Round 3: Bob -> Alice (after key rotation) ---");
-    let result = run_ndr(bob_dir.path(), &["send", &bob_chat_id, "Message 3 from Bob"]).await;
+    let result = run_ndr(
+        bob_dir.path(),
+        &["send", &bob_chat_id, "Message 3 from Bob"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Bob send 3 failed");
-    assert!(wait_for_message(&mut alice_listen_reader, "Message 3 from Bob", "Alice").await,
-        "Alice did not receive message 3 from Bob (KEY ROTATION BUG?)");
+    assert!(
+        wait_for_message(&mut alice_listen_reader, "Message 3 from Bob", "Alice").await,
+        "Alice did not receive message 3 from Bob (KEY ROTATION BUG?)"
+    );
 
     // Round 4: Alice -> Bob
     println!("\n--- Round 4: Alice -> Bob ---");
-    let result = run_ndr(alice_dir.path(), &["send", &alice_chat_id, "Message 4 from Alice"]).await;
+    let result = run_ndr(
+        alice_dir.path(),
+        &["send", &alice_chat_id, "Message 4 from Alice"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Alice send 4 failed");
-    assert!(wait_for_message(&mut bob_listen_reader, "Message 4 from Alice", "Bob").await,
-        "Bob did not receive message 4 from Alice (KEY ROTATION BUG?)");
+    assert!(
+        wait_for_message(&mut bob_listen_reader, "Message 4 from Alice", "Bob").await,
+        "Bob did not receive message 4 from Alice (KEY ROTATION BUG?)"
+    );
 
     // Round 5: Bob -> Alice
     println!("\n--- Round 5: Bob -> Alice ---");
-    let result = run_ndr(bob_dir.path(), &["send", &bob_chat_id, "Message 5 from Bob"]).await;
+    let result = run_ndr(
+        bob_dir.path(),
+        &["send", &bob_chat_id, "Message 5 from Bob"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Bob send 5 failed");
-    assert!(wait_for_message(&mut alice_listen_reader, "Message 5 from Bob", "Alice").await,
-        "Alice did not receive message 5 from Bob (KEY ROTATION BUG?)");
+    assert!(
+        wait_for_message(&mut alice_listen_reader, "Message 5 from Bob", "Alice").await,
+        "Alice did not receive message 5 from Bob (KEY ROTATION BUG?)"
+    );
 
     // Round 6: Alice -> Bob
     println!("\n--- Round 6: Alice -> Bob ---");
-    let result = run_ndr(alice_dir.path(), &["send", &alice_chat_id, "Message 6 from Alice"]).await;
+    let result = run_ndr(
+        alice_dir.path(),
+        &["send", &alice_chat_id, "Message 6 from Alice"],
+    )
+    .await;
     assert_eq!(result["status"], "ok", "Alice send 6 failed");
-    assert!(wait_for_message(&mut bob_listen_reader, "Message 6 from Alice", "Bob").await,
-        "Bob did not receive message 6 from Alice (KEY ROTATION BUG?)");
+    assert!(
+        wait_for_message(&mut bob_listen_reader, "Message 6 from Alice", "Bob").await,
+        "Bob did not receive message 6 from Alice (KEY ROTATION BUG?)"
+    );
 
     // Cleanup
     let _ = alice_listen_child.kill().await;

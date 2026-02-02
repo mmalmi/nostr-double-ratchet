@@ -66,7 +66,8 @@ fn test_parse_typescript_group_vectors() {
     println!("Loaded group vectors: {}", vectors.description);
 
     // Verify we can parse TS's metadata_with_secret
-    let parsed = parse_group_metadata(&vectors.metadata_with_secret).expect("Failed to parse TS metadata with secret");
+    let parsed = parse_group_metadata(&vectors.metadata_with_secret)
+        .expect("Failed to parse TS metadata with secret");
     assert_eq!(parsed.id, vectors.create_group.output.id);
     assert_eq!(parsed.name, vectors.create_group.output.name);
     assert_eq!(parsed.members, vectors.create_group.output.members);
@@ -75,7 +76,8 @@ fn test_parse_typescript_group_vectors() {
     assert_eq!(parsed.secret, vectors.create_group.output.secret);
 
     // Verify metadata_without_secret has no secret
-    let parsed_no_secret = parse_group_metadata(&vectors.metadata_without_secret).expect("Failed to parse TS metadata without secret");
+    let parsed_no_secret = parse_group_metadata(&vectors.metadata_without_secret)
+        .expect("Failed to parse TS metadata without secret");
     assert!(parsed_no_secret.secret.is_none());
     assert_eq!(parsed_no_secret.id, vectors.create_group.output.id);
 
@@ -92,13 +94,28 @@ fn test_parse_typescript_group_vectors() {
                 );
             }
             Some(expected) => {
-                let result = result.unwrap_or_else(|| {
-                    panic!("Expected Some for '{}', got None", pv.description)
-                });
-                assert_eq!(result.id, expected.id, "id mismatch for '{}'", pv.description);
-                assert_eq!(result.name, expected.name, "name mismatch for '{}'", pv.description);
-                assert_eq!(result.members, expected.members, "members mismatch for '{}'", pv.description);
-                assert_eq!(result.admins, expected.admins, "admins mismatch for '{}'", pv.description);
+                let result = result
+                    .unwrap_or_else(|| panic!("Expected Some for '{}', got None", pv.description));
+                assert_eq!(
+                    result.id, expected.id,
+                    "id mismatch for '{}'",
+                    pv.description
+                );
+                assert_eq!(
+                    result.name, expected.name,
+                    "name mismatch for '{}'",
+                    pv.description
+                );
+                assert_eq!(
+                    result.members, expected.members,
+                    "members mismatch for '{}'",
+                    pv.description
+                );
+                assert_eq!(
+                    result.admins, expected.admins,
+                    "admins mismatch for '{}'",
+                    pv.description
+                );
             }
         }
     }

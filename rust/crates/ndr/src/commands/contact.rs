@@ -15,21 +15,27 @@ pub async fn add(npub_or_hex: &str, name: &str, storage: &Storage, output: &Outp
     };
 
     storage.add_contact(&npub, name)?;
-    output.success("contact_add", serde_json::json!({
-        "npub": npub,
-        "name": name,
-    }));
+    output.success(
+        "contact_add",
+        serde_json::json!({
+            "npub": npub,
+            "name": name,
+        }),
+    );
     Ok(())
 }
 
 pub async fn list(storage: &Storage, output: &Output) -> Result<()> {
     let contacts = storage.list_contacts()?;
-    output.success("contact_list", serde_json::json!({
-        "contacts": contacts.iter().map(|(npub, name)| serde_json::json!({
-            "npub": npub,
-            "name": name,
-        })).collect::<Vec<_>>(),
-    }));
+    output.success(
+        "contact_list",
+        serde_json::json!({
+            "contacts": contacts.iter().map(|(npub, name)| serde_json::json!({
+                "npub": npub,
+                "name": name,
+            })).collect::<Vec<_>>(),
+        }),
+    );
     Ok(())
 }
 

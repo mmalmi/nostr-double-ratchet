@@ -44,10 +44,10 @@ impl Config {
         let config_path = data_dir.join("config.json");
 
         if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)
-                .context("Failed to read config file")?;
-            let mut config: Config = serde_json::from_str(&content)
-                .context("Failed to parse config file")?;
+            let content =
+                std::fs::read_to_string(&config_path).context("Failed to read config file")?;
+            let mut config: Config =
+                serde_json::from_str(&content).context("Failed to parse config file")?;
             config.path = config_path;
             Ok(config)
         } else {
@@ -60,10 +60,8 @@ impl Config {
 
     /// Save config to disk
     pub fn save(&self) -> Result<()> {
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config")?;
-        std::fs::write(&self.path, content)
-            .context("Failed to write config file")?;
+        let content = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
+        std::fs::write(&self.path, content).context("Failed to write config file")?;
         Ok(())
     }
 
@@ -102,11 +100,10 @@ impl Config {
 
     /// Get the private key bytes
     pub fn private_key_bytes(&self) -> Result<[u8; 32]> {
-        let key = self.private_key.as_ref()
-            .context("Not logged in")?;
-        let bytes = hex::decode(key)
-            .context("Invalid private key format")?;
-        bytes.try_into()
+        let key = self.private_key.as_ref().context("Not logged in")?;
+        let bytes = hex::decode(key).context("Invalid private key format")?;
+        bytes
+            .try_into()
             .map_err(|_| anyhow::anyhow!("Private key must be 32 bytes"))
     }
 
@@ -147,8 +144,8 @@ fn resolve_relays(config_relays: &[String]) -> Vec<String> {
 fn detect_local_relay_urls() -> Vec<String> {
     let mut relays = Vec::new();
 
-    if let Some(list) = parse_env_list("NOSTR_LOCAL_RELAY")
-        .or_else(|| parse_env_list("HTREE_LOCAL_RELAY"))
+    if let Some(list) =
+        parse_env_list("NOSTR_LOCAL_RELAY").or_else(|| parse_env_list("HTREE_LOCAL_RELAY"))
     {
         for raw in list {
             if let Some(url) = normalize_relay_url(&raw) {
@@ -219,13 +216,17 @@ fn prefer_local_relay() -> bool {
 fn parse_env_list(var: &str) -> Option<Vec<String>> {
     let value = std::env::var(var).ok()?;
     let mut items = Vec::new();
-    for part in value.split(|c| c == ',' || c == ';' || c == '\n' || c == '\t' || c == ' ') {
+    for part in value.split([',', ';', '\n', '\t', ' ']) {
         let trimmed = part.trim();
         if !trimmed.is_empty() {
             items.push(trimmed.to_string());
         }
     }
-    if items.is_empty() { None } else { Some(items) }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
 }
 
 fn parse_env_ports(var: &str) -> Vec<u16> {

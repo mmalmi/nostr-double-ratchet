@@ -1,6 +1,6 @@
 use crate::{Error, Result, SessionState};
-use nostr::PublicKey;
 use hkdf::Hkdf;
+use nostr::PublicKey;
 use sha2::Sha256;
 
 pub fn kdf(input1: &[u8], input2: &[u8], num_outputs: usize) -> Vec<[u8; 32]> {

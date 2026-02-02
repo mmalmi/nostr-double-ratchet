@@ -130,7 +130,12 @@ impl Storage {
         let mut invites: Vec<StoredInvite> = Vec::new();
         for entry in fs::read_dir(&self.invites_dir)? {
             let entry = entry?;
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 let content = fs::read_to_string(entry.path())?;
                 invites.push(serde_json::from_str(&content)?);
             }
@@ -173,7 +178,12 @@ impl Storage {
         let mut chats: Vec<StoredChat> = Vec::new();
         for entry in fs::read_dir(&self.chats_dir)? {
             let entry = entry?;
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 let content = fs::read_to_string(entry.path())?;
                 chats.push(serde_json::from_str(&content)?);
             }
@@ -264,9 +274,14 @@ impl Storage {
         // Collect all day files, sorted by date descending (newest first)
         let mut day_files: Vec<_> = fs::read_dir(&dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "json")
+                    .unwrap_or(false)
+            })
             .collect();
-        day_files.sort_by(|a, b| b.path().cmp(&a.path()));
+        day_files.sort_by_key(|entry| std::cmp::Reverse(entry.path()));
 
         let mut messages: Vec<StoredMessage> = Vec::new();
         for entry in day_files {
@@ -292,7 +307,9 @@ impl Storage {
     // Reactions are stored per chat: reactions/<chat_id>.json
 
     pub fn save_reaction(&self, reaction: &StoredReaction) -> Result<()> {
-        let path = self.reactions_dir.join(format!("{}.json", reaction.chat_id));
+        let path = self
+            .reactions_dir
+            .join(format!("{}.json", reaction.chat_id));
 
         // Load existing reactions for this chat, or start fresh
         let mut reactions: Vec<StoredReaction> = if path.exists() {
@@ -363,7 +380,11 @@ impl Storage {
         Ok(())
     }
 
-    pub fn get_group_messages(&self, group_id: &str, limit: usize) -> Result<Vec<StoredGroupMessage>> {
+    pub fn get_group_messages(
+        &self,
+        group_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredGroupMessage>> {
         let dir = self.group_messages_path(group_id);
         if !dir.exists() {
             return Ok(Vec::new());
@@ -371,9 +392,14 @@ impl Storage {
 
         let mut day_files: Vec<_> = fs::read_dir(&dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "json")
+                    .unwrap_or(false)
+            })
             .collect();
-        day_files.sort_by(|a, b| b.path().cmp(&a.path()));
+        day_files.sort_by_key(|entry| std::cmp::Reverse(entry.path()));
 
         let mut messages: Vec<StoredGroupMessage> = Vec::new();
         for entry in day_files {
@@ -415,7 +441,12 @@ impl Storage {
         let mut groups: Vec<StoredGroup> = Vec::new();
         for entry in fs::read_dir(&self.groups_dir)? {
             let entry = entry?;
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 let content = fs::read_to_string(entry.path())?;
                 groups.push(serde_json::from_str(&content)?);
             }
@@ -474,7 +505,8 @@ impl Storage {
     /// Find a chat by the peer's pubkey (hex). If multiple, returns the most recently active.
     pub fn get_chat_by_pubkey(&self, pubkey_hex: &str) -> Result<Option<StoredChat>> {
         let chats = self.list_chats()?;
-        Ok(chats.into_iter()
+        Ok(chats
+            .into_iter()
             .filter(|c| c.their_pubkey == pubkey_hex)
             .max_by_key(|c| c.last_message_at.unwrap_or(c.created_at)))
     }
@@ -542,21 +574,24 @@ impl Storage {
         }
         let content = fs::read_to_string(&path)?;
         let mut found = false;
-        let filtered: Vec<&str> = content.lines().filter(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                return true;
-            }
-            let mut parts = trimmed.splitn(2, char::is_whitespace);
-            let _npub = parts.next().unwrap_or("");
-            let petname = parts.next().unwrap_or("").trim();
-            if petname.eq_ignore_ascii_case(name) {
-                found = true;
-                false
-            } else {
-                true
-            }
-        }).collect();
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    return true;
+                }
+                let mut parts = trimmed.splitn(2, char::is_whitespace);
+                let _npub = parts.next().unwrap_or("");
+                let petname = parts.next().unwrap_or("").trim();
+                if petname.eq_ignore_ascii_case(name) {
+                    found = true;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
         if found {
             let mut out = filtered.join("\n");
             if !out.is_empty() {
@@ -573,16 +608,19 @@ impl Storage {
             return Ok(());
         }
         let content = fs::read_to_string(&path)?;
-        let filtered: Vec<&str> = content.lines().filter(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                return true;
-            }
-            let mut parts = trimmed.splitn(2, char::is_whitespace);
-            let line_npub = parts.next().unwrap_or("");
-            let petname = parts.next().unwrap_or("").trim();
-            !(petname.eq_ignore_ascii_case(name) || line_npub == npub)
-        }).collect();
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    return true;
+                }
+                let mut parts = trimmed.splitn(2, char::is_whitespace);
+                let line_npub = parts.next().unwrap_or("");
+                let petname = parts.next().unwrap_or("").trim();
+                !(petname.eq_ignore_ascii_case(name) || line_npub == npub)
+            })
+            .collect();
         let mut out = filtered.join("\n");
         if !out.is_empty() {
             out.push('\n');
@@ -735,13 +773,15 @@ mod tests {
     fn test_clear_all() {
         let (_temp, storage) = test_storage();
 
-        storage.save_invite(&StoredInvite {
-            id: "i".to_string(),
-            label: None,
-            url: "".to_string(),
-            created_at: 0,
-            serialized: "".to_string(),
-        }).unwrap();
+        storage
+            .save_invite(&StoredInvite {
+                id: "i".to_string(),
+                label: None,
+                url: "".to_string(),
+                created_at: 0,
+                serialized: "".to_string(),
+            })
+            .unwrap();
 
         storage.clear_all().unwrap();
         assert!(storage.list_invites().unwrap().is_empty());
@@ -816,21 +856,25 @@ mod tests {
     fn test_get_chat_by_pubkey() {
         let (_temp, storage) = test_storage();
 
-        storage.save_chat(&StoredChat {
-            id: "c1".to_string(),
-            their_pubkey: "aabbcc".to_string(),
-            created_at: 1000,
-            last_message_at: Some(2000),
-            session_state: "{}".to_string(),
-        }).unwrap();
+        storage
+            .save_chat(&StoredChat {
+                id: "c1".to_string(),
+                their_pubkey: "aabbcc".to_string(),
+                created_at: 1000,
+                last_message_at: Some(2000),
+                session_state: "{}".to_string(),
+            })
+            .unwrap();
 
-        storage.save_chat(&StoredChat {
-            id: "c2".to_string(),
-            their_pubkey: "aabbcc".to_string(),
-            created_at: 1000,
-            last_message_at: Some(5000),
-            session_state: "{}".to_string(),
-        }).unwrap();
+        storage
+            .save_chat(&StoredChat {
+                id: "c2".to_string(),
+                their_pubkey: "aabbcc".to_string(),
+                created_at: 1000,
+                last_message_at: Some(5000),
+                session_state: "{}".to_string(),
+            })
+            .unwrap();
 
         // Should return the most recent
         let chat = storage.get_chat_by_pubkey("aabbcc").unwrap().unwrap();

@@ -1,10 +1,10 @@
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
 
 type Subscriptions = Arc<Mutex<HashMap<String, Vec<Value>>>>;
 type Events = Arc<Mutex<Vec<Value>>>;
@@ -114,13 +114,23 @@ impl LocalRelay {
                                     let sub_id = arr[1].as_str().unwrap_or("").to_string();
                                     let filters = arr[2..].to_vec();
 
-                                    eprintln!("📥 Local relay REQ {} filters: {:?}", sub_id, filters.len());
+                                    eprintln!(
+                                        "📥 Local relay REQ {} filters: {:?}",
+                                        sub_id,
+                                        filters.len()
+                                    );
                                     for filter in &filters {
-                                        eprintln!("   Filter: {}", serde_json::to_string(filter).unwrap());
+                                        eprintln!(
+                                            "   Filter: {}",
+                                            serde_json::to_string(filter).unwrap()
+                                        );
                                     }
 
                                     client_subs.insert(sub_id.clone(), filters.clone());
-                                    subscriptions.lock().unwrap().insert(sub_id.clone(), filters.clone());
+                                    subscriptions
+                                        .lock()
+                                        .unwrap()
+                                        .insert(sub_id.clone(), filters.clone());
 
                                     // Send matching stored events
                                     let stored = events.lock().unwrap();
@@ -128,11 +138,16 @@ impl LocalRelay {
                                         if Self::event_matches_filters(event, &filters) {
                                             let kind = event["kind"].as_u64().unwrap_or(0);
                                             let id = event["id"].as_str().unwrap_or("unknown");
-                                            eprintln!("📨 Local relay: Sending stored kind {} id {}", kind, &id[..16]);
+                                            eprintln!(
+                                                "📨 Local relay: Sending stored kind {} id {}",
+                                                kind,
+                                                &id[..16]
+                                            );
 
                                             let event_msg = json!(["EVENT", sub_id, event]);
                                             if let Some(tx) = clients.lock().unwrap().get(&addr) {
-                                                let _ = tx.send(Message::Text(event_msg.to_string()));
+                                                let _ =
+                                                    tx.send(Message::Text(event_msg.to_string()));
                                             }
                                         }
                                     }
@@ -152,7 +167,11 @@ impl LocalRelay {
                                     let event_id = event["id"].as_str().unwrap_or("unknown");
                                     let kind = event["kind"].as_u64().unwrap_or(0);
 
-                                    eprintln!("📤 Local relay: Received EVENT kind {} id {}", kind, &event_id[..16]);
+                                    eprintln!(
+                                        "📤 Local relay: Received EVENT kind {} id {}",
+                                        kind,
+                                        &event_id[..16]
+                                    );
 
                                     // Show current subscriptions
                                     let all_subs = subscriptions.lock().unwrap();
@@ -160,7 +179,11 @@ impl LocalRelay {
                                     for (sub_id, filters) in all_subs.iter() {
                                         for filter in filters {
                                             if let Some(kinds) = filter["kinds"].as_array() {
-                                                eprintln!("     {} -> kinds: {:?}", &sub_id[..20], kinds);
+                                                eprintln!(
+                                                    "     {} -> kinds: {:?}",
+                                                    &sub_id[..20],
+                                                    kinds
+                                                );
                                             }
                                         }
                                     }
@@ -184,7 +207,8 @@ impl LocalRelay {
                                             if Self::event_matches_filters(event, filters) {
                                                 eprintln!("📨 Local relay: Broadcasting kind {} to {} sub {}", kind, client_addr, sub_id);
                                                 let event_msg = json!(["EVENT", sub_id, event]);
-                                                let _ = client_tx.send(Message::Text(event_msg.to_string()));
+                                                let _ = client_tx
+                                                    .send(Message::Text(event_msg.to_string()));
                                             }
                                         }
                                     }
@@ -236,7 +260,9 @@ impl LocalRelay {
             let event_pubkey = event["pubkey"].as_str().unwrap_or("");
             if !authors.iter().any(|a| {
                 let author = a.as_str().unwrap_or("");
-                event_pubkey.starts_with(author) || author.starts_with(event_pubkey) || event_pubkey == author
+                event_pubkey.starts_with(author)
+                    || author.starts_with(event_pubkey)
+                    || event_pubkey == author
             }) {
                 eprintln!("   ❌ Author {} not in filter", &event_pubkey[..16]);
                 return false;
@@ -260,7 +286,9 @@ impl LocalRelay {
                             let tag_value = tag_arr[1].as_str().unwrap_or("");
                             return p_values.iter().any(|p| {
                                 let filter_p = p.as_str().unwrap_or("");
-                                tag_value == filter_p || tag_value.starts_with(filter_p) || filter_p.starts_with(tag_value)
+                                tag_value == filter_p
+                                    || tag_value.starts_with(filter_p)
+                                    || filter_p.starts_with(tag_value)
                             });
                         }
                     }
