@@ -1,5 +1,5 @@
 use nostr_double_ratchet::{Result, Session};
-use nostr::Keys;
+use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, UnsignedEvent};
 
 #[test]
 fn test_alice_bob_conversation() -> Result<()> {
@@ -131,6 +131,44 @@ fn test_session_persistence() -> Result<()> {
 
     let rumor: serde_json::Value = serde_json::from_str(&received.unwrap())?;
     assert_eq!(rumor["content"].as_str(), Some("After restore"));
+
+    Ok(())
+}
+
+#[test]
+fn test_send_event_recomputes_id_with_ms_tag() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
+
+    let alice_sk = alice_keys.secret_key().to_secret_bytes();
+    let bob_sk = bob_keys.secret_key().to_secret_bytes();
+
+    let alice_pk = alice_keys.public_key();
+    let bob_pk = bob_keys.public_key();
+
+    let shared_secret = [7u8; 32];
+
+    let mut alice = Session::init(bob_pk, alice_sk, true, shared_secret, Some("alice".to_string()))?;
+    let mut bob = Session::init(alice_pk, bob_sk, false, shared_secret, Some("bob".to_string()))?;
+
+    let tags = vec![
+        Tag::parse(&["l".to_string(), "test-group-id".to_string()])
+            .expect("valid group tag"),
+        Tag::parse(&["ms".to_string(), "1700000000000".to_string()])
+            .expect("valid ms tag"),
+    ];
+
+    let inner = EventBuilder::new(Kind::Custom(14), "Hello group with ms tag")
+        .tags(tags)
+        .build(alice_pk);
+
+    let outer = alice.send_event(inner)?;
+    let plaintext = bob.receive(&outer)?.expect("expected decrypted rumor");
+    let rumor = UnsignedEvent::from_json(&plaintext)
+        .expect("valid rumor JSON");
+
+    rumor.verify_id()
+        .expect("rumor id should match computed hash");
 
     Ok(())
 }

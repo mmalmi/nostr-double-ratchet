@@ -296,6 +296,10 @@ impl Session {
             event = builder.custom_created_at(event.created_at).build(event.pubkey);
         }
 
+        // Event fields were mutated; ensure id matches the final content.
+        event.id = None;
+        event.ensure_id();
+
         let rumor_json = serde_json::to_string(&event)?;
         let (header, encrypted_data) = self.ratchet_encrypt(&rumor_json)?;
 
