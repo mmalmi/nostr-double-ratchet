@@ -58,6 +58,7 @@ type ScenarioStep =
   | { type: "expectAll"; actor: ActorId; deviceId: string; messages: string[] }
   | { type: "addDevice"; actor: ActorId; deviceId: string }
   | { type: "addDelegateDevice"; actor: ActorId; deviceId: string; mainDeviceId: string }
+  | { type: "removeDevice"; actor: ActorId; deviceId: string }
   | { type: "close"; actor: ActorId; deviceId: string }
   | { type: "restart"; actor: ActorId; deviceId: string }
   | { type: "clearEvents" }
@@ -94,6 +95,9 @@ export async function runScenario(def: ScenarioDefinition): Promise<ScenarioCont
         break
       case "addDelegateDevice":
         await addDelegateDevice(context, step.actor, step.deviceId, step.mainDeviceId)
+        break
+      case "removeDevice":
+        await removeDevice(context, step.actor, step.deviceId)
         break
       case "close":
         closeDevice(context, { actor: step.actor, deviceId: step.deviceId })
@@ -406,4 +410,24 @@ function resolveWaitTargets(
 
   const refs = Array.isArray(waitOn) ? waitOn : [waitOn]
   return refs.map((ref) => getDevice(context, ref))
+}
+
+async function removeDevice(context: ScenarioContext, actorId: ActorId, deviceId: string) {
+  const actor = getActor(context, actorId)
+  if (!actor.mainAppKeysManager) {
+    throw new Error(`No AppKeysManager found for actor '${actorId}'`)
+  }
+
+  const device = actor.devices.get(deviceId)
+  if (!device) {
+    throw new Error(`Device '${deviceId}' not found for actor '${actorId}'`)
+  }
+
+  // Get the device's identity pubkey and remove from AppKeys
+  const devicePubkey = device.manager.getDeviceId()
+  actor.mainAppKeysManager.revokeDevice(devicePubkey)
+  await actor.mainAppKeysManager.publish()
+
+  // Wait for AppKeys update to propagate
+  await new Promise(resolve => setTimeout(resolve, 100))
 }
