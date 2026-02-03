@@ -1,4 +1,5 @@
 use anyhow::Result;
+use nostr::ToBech32;
 use nostr_double_ratchet::{Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND};
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -25,6 +26,13 @@ struct GroupInfo {
     created_at: u64,
 }
 
+fn hex_to_npub(hex: &str) -> String {
+    nostr::PublicKey::from_hex(hex)
+        .ok()
+        .and_then(|pk| pk.to_bech32().ok())
+        .unwrap_or_else(|| hex.to_string())
+}
+
 impl From<&nostr_double_ratchet::group::GroupData> for GroupInfo {
     fn from(g: &nostr_double_ratchet::group::GroupData) -> Self {
         GroupInfo {
@@ -32,8 +40,8 @@ impl From<&nostr_double_ratchet::group::GroupData> for GroupInfo {
             name: g.name.clone(),
             description: g.description.clone(),
             picture: g.picture.clone(),
-            members: g.members.clone(),
-            admins: g.admins.clone(),
+            members: g.members.iter().map(|m| hex_to_npub(m)).collect(),
+            admins: g.admins.iter().map(|a| hex_to_npub(a)).collect(),
             created_at: g.created_at,
         }
     }
