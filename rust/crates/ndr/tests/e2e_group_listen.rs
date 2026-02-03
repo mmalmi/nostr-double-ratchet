@@ -8,6 +8,11 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
+struct Listener {
+    child: Child,
+    stdout: BufReader<tokio::process::ChildStdout>,
+}
+
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &Path, args: &[&str]) -> serde_json::Value {
     let output = Command::new("cargo")
@@ -112,6 +117,40 @@ async fn read_until_event(
                     if json.get("event").and_then(|v| v.as_str()) == Some(event_name) {
                         return Some(json);
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+async fn read_until_event_with_content(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    event_name: &str,
+    content: Option<&str>,
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let mut line = String::new();
+        match tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => return None, // EOF
+            Ok(Ok(_)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if json.get("event").and_then(|v| v.as_str()) != Some(event_name) {
+                        continue;
+                    }
+                    if let Some(expected) = content {
+                        if json.get("content").and_then(|v| v.as_str()) != Some(expected) {
+                            continue;
+                        }
+                    }
+                    return Some(json);
                 }
             }
             _ => {}
@@ -286,6 +325,183 @@ async fn test_listen_group_metadata_and_message() {
     }
     if let Some(child) = bob_child {
         stop_child(child).await;
+    }
+    relay.stop().await;
+
+    if let Err(err) = result {
+        panic!("{:?}", err);
+    }
+}
+
+#[tokio::test]
+async fn test_group_chat_six_participants_everyone_receives() {
+    let mut relay = common::WsRelay::new();
+    let addr = relay.start().await.expect("Failed to start relay");
+    let relay_url = format!("ws://{}", addr);
+    println!("Relay started at: {}", relay_url);
+
+    struct Participant {
+        name: &'static str,
+        dir: TempDir,
+        pubkey: String,
+    }
+
+    let participants_spec = [
+        ("alice", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        ("bob", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"),
+        ("carol", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        ("dave", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        ("erin", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+        ("frank", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+    ];
+
+    let mut participants: Vec<Participant> = Vec::new();
+    for (name, secret) in participants_spec {
+        let dir = setup_ndr_dir(&relay_url);
+        let login = run_ndr(dir.path(), &["login", secret]).await;
+        let pubkey = login["data"]["pubkey"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        participants.push(Participant { name, dir, pubkey });
+    }
+
+    let mut listeners: Vec<Listener> = Vec::new();
+    let result = async {
+        // Create full mesh of 1:1 sessions.
+        for i in 0..participants.len() {
+            for j in (i + 1)..participants.len() {
+                let inviter = &participants[i];
+                let invitee = &participants[j];
+                let label = format!("mesh-{}-{}", inviter.name, invitee.name);
+                let invite = run_ndr(inviter.dir.path(), &["invite", "create", "-l", &label]).await;
+                let invite_id = invite["data"]["id"]
+                    .as_str()
+                    .expect("invite id")
+                    .to_string();
+                let invite_url = invite["data"]["url"]
+                    .as_str()
+                    .expect("invite url")
+                    .to_string();
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let join = run_ndr(invitee.dir.path(), &["chat", "join", &invite_url]).await;
+                let response_event = join["data"]["response_event"]
+                    .as_str()
+                    .expect("response event")
+                    .to_string();
+                let _ = run_ndr(
+                    inviter.dir.path(),
+                    &["invite", "accept", &invite_id, &response_event],
+                )
+                .await;
+            }
+        }
+
+        // Start listeners for all participants.
+        for p in &participants {
+            let (child, mut stdout) = start_ndr_listen(p.dir.path()).await;
+            assert!(
+                read_until_command(&mut stdout, "listen", Duration::from_secs(5)).await,
+                "{} should print listen message",
+                p.name
+            );
+            listeners.push(Listener { child, stdout });
+        }
+
+        // Kickoff so inviters can send to invitees.
+        for i in 0..participants.len() {
+            for j in (i + 1)..participants.len() {
+                let inviter = &participants[i];
+                let invitee = &participants[j];
+                let kickoff = format!("kickoff-{}-{}", invitee.name, inviter.name);
+                let _ = run_ndr(
+                    invitee.dir.path(),
+                    &["send", &inviter.pubkey, &kickoff],
+                )
+                .await;
+                let listener = listeners
+                    .get_mut(i)
+                    .expect("inviter listener should exist");
+                let kickoff_event = read_until_event_with_content(
+                    &mut listener.stdout,
+                    "message",
+                    Some(&kickoff),
+                    Duration::from_secs(10),
+                )
+                .await
+                .expect("inviter should receive kickoff message");
+                assert_eq!(kickoff_event["content"].as_str(), Some(kickoff.as_str()));
+            }
+        }
+
+        // Alice creates a group with everyone else.
+        let alice = &participants[0];
+        let members_csv = participants[1..]
+            .iter()
+            .map(|p| p.pubkey.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let group_create = run_ndr(
+            alice.dir.path(),
+            &[
+                "group",
+                "create",
+                "--name",
+                "Six Pack Group",
+                "--members",
+                &members_csv,
+            ],
+        )
+        .await;
+        let group_id = group_create["data"]["id"]
+            .as_str()
+            .expect("group id")
+            .to_string();
+
+        // Everyone else should receive the group metadata.
+        for idx in 1..participants.len() {
+            let listener = listeners
+                .get_mut(idx)
+                .expect("listener should exist");
+            let event = read_until_event(&mut listener.stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("member should receive group_metadata");
+            assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
+            assert_eq!(event["action"].as_str(), Some("created"));
+        }
+
+        // Each participant sends a group message; everyone else should receive it.
+        for sender_idx in 0..participants.len() {
+            let sender = &participants[sender_idx];
+            let msg = format!("group-msg-{}", sender.name);
+            let _ = run_ndr(sender.dir.path(), &["group", "send", &group_id, &msg]).await;
+
+            for recipient_idx in 0..participants.len() {
+                if recipient_idx == sender_idx {
+                    continue;
+                }
+                let listener = listeners
+                    .get_mut(recipient_idx)
+                    .expect("recipient listener should exist");
+                let event = read_until_event_with_content(
+                    &mut listener.stdout,
+                    "group_message",
+                    Some(&msg),
+                    Duration::from_secs(10),
+                )
+                .await
+                .expect("recipient should receive group_message");
+                assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
+                assert_eq!(event["content"].as_str(), Some(msg.as_str()));
+            }
+        }
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    for listener in listeners {
+        stop_child(listener.child).await;
     }
     relay.stop().await;
 
