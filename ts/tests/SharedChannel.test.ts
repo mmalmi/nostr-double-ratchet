@@ -47,7 +47,7 @@ describe("SharedChannel", () => {
 
     expect(event.kind).toBe(SHARED_CHANNEL_KIND);
     expect(event.pubkey).toBe(channel.publicKey);
-    expect(event.tags).toEqual([["d", rumor.pubkey]]);
+    expect(event.tags).toEqual([]);
   });
 
   it("isChannelEvent identifies channel events", () => {

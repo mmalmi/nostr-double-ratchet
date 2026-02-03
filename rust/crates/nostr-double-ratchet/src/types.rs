@@ -9,7 +9,7 @@ pub const CHAT_MESSAGE_KIND: u32 = 14;
 pub const REACTION_KIND: u32 = 7;
 pub const RECEIPT_KIND: u32 = 15;
 pub const TYPING_KIND: u32 = 25;
-pub const SHARED_CHANNEL_KIND: u32 = 10444;
+pub const SHARED_CHANNEL_KIND: u32 = 4;
 pub const MAX_SKIP: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

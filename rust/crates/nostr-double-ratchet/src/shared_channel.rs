@@ -1,6 +1,6 @@
 use base64::Engine;
 use nostr::nips::nip44;
-use nostr::{EventBuilder, Keys, PublicKey, Tag};
+use nostr::{EventBuilder, Keys, PublicKey};
 
 use crate::{Error, Result, SHARED_CHANNEL_KIND};
 
@@ -30,23 +30,17 @@ impl SharedChannel {
         })
     }
 
-    /// Encrypt a rumor JSON string and return a signed kind 10444 outer event.
+    /// Encrypt a rumor JSON string and return a signed kind 4 outer event.
     pub fn create_event(&self, rumor_json: &str) -> Result<nostr::Event> {
         let encrypted = nip44::v2::encrypt_to_bytes(&self.conversation_key, rumor_json)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&encrypted);
 
-        // Extract pubkey from rumor for the "d" tag
-        let rumor_pubkey = serde_json::from_str::<serde_json::Value>(rumor_json)
-            .ok()
-            .and_then(|v| v["pubkey"].as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-
         let secret_key = nostr::SecretKey::from_slice(&self.secret_key)?;
         let keys = Keys::new(secret_key);
 
-        let unsigned = EventBuilder::new(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16), &encoded)
-            .tag(Tag::identifier(&rumor_pubkey))
-            .build(keys.public_key());
+        let unsigned =
+            EventBuilder::new(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16), &encoded)
+                .build(keys.public_key());
 
         let event = unsigned
             .sign_with_keys(&keys)
@@ -117,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn create_event_returns_kind_10444() {
+    fn create_event_returns_kind_4() {
         let secret = test_secret();
         let channel = SharedChannel::new(&secret).unwrap();
         let rumor = make_rumor_json("deadbeef", "hello");
@@ -132,22 +126,6 @@ mod tests {
         let rumor = make_rumor_json("deadbeef", "hello");
         let event = channel.create_event(&rumor).unwrap();
         assert_eq!(event.pubkey, channel.public_key());
-    }
-
-    #[test]
-    fn create_event_has_d_tag_with_rumor_pubkey() {
-        let secret = test_secret();
-        let channel = SharedChannel::new(&secret).unwrap();
-        let rumor = make_rumor_json("deadbeef", "hello");
-        let event = channel.create_event(&rumor).unwrap();
-
-        let d_tag = event
-            .tags
-            .iter()
-            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"));
-        assert!(d_tag.is_some());
-        let d_value = d_tag.unwrap().as_slice().get(1).map(|s| s.as_str());
-        assert_eq!(d_value, Some("deadbeef"));
     }
 
     #[test]

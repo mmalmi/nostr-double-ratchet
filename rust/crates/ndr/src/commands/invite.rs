@@ -184,7 +184,7 @@ pub async fn delete(id: &str, storage: &Storage, output: &Output) -> Result<()> 
 async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
     match client.send_event(event).await {
         Ok(_) => Ok(()),
-        Err(err) if should_ignore_publish_errors() => Ok(()),
+        Err(_) if should_ignore_publish_errors() => Ok(()),
         Err(err) => Err(err.into()),
     }
 }

@@ -141,6 +141,7 @@ export const RECEIPT_KIND = 15;
 export const TYPING_KIND = 25;
 
 /**
- * Kind constant for shared channel events (group invite exchange)
+ * Kind constant for shared channel events (group invite exchange).
+ * Uses the standard Nostr encrypted DM kind.
  */
-export const SHARED_CHANNEL_KIND = 10444;
+export const SHARED_CHANNEL_KIND = 4;

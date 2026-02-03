@@ -58,13 +58,6 @@ fn test_shared_channel_roundtrip() {
     assert_eq!(event.kind, nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16));
     assert_eq!(event.pubkey, channel.public_key());
 
-    // Verify d tag
-    let d_tag = event
-        .tags
-        .iter()
-        .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"));
-    assert!(d_tag.is_some());
-
     // Decrypt
     let decrypted = channel.decrypt_event(&event).unwrap();
     let original: serde_json::Value = serde_json::from_str(&rumor).unwrap();

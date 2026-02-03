@@ -715,7 +715,7 @@ fn collect_chat_pubkeys(storage: &Storage, chat_id: Option<&str>) -> Result<Vec<
 async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
     match client.send_event(event).await {
         Ok(_) => Ok(()),
-        Err(err) if should_ignore_publish_errors() => Ok(()),
+        Err(_) if should_ignore_publish_errors() => Ok(()),
         Err(err) => Err(err.into()),
     }
 }
@@ -1044,7 +1044,7 @@ pub async fn listen(
                 continue;
             }
 
-            // Handle SharedChannel events (kind 10444)
+            // Handle SharedChannel events (kind 4)
             if event_kind == SHARED_CHANNEL_KIND {
                 let sender_hex = event.pubkey.to_hex();
                 if let Some((channel, group_id)) = channel_map.get(&sender_hex) {
