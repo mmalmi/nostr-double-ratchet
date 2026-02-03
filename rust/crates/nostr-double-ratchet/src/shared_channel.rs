@@ -1,6 +1,6 @@
 use base64::Engine;
 use nostr::nips::nip44;
-use nostr::{EventBuilder, Keys, PublicKey};
+use nostr::{EventBuilder, Keys, PublicKey, Tag};
 
 use crate::{Error, Result, SHARED_CHANNEL_KIND};
 
@@ -40,6 +40,7 @@ impl SharedChannel {
 
         let unsigned =
             EventBuilder::new(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16), &encoded)
+                .tag(Tag::public_key(keys.public_key()))
                 .build(keys.public_key());
 
         let event = unsigned

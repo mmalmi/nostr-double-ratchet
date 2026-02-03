@@ -31,7 +31,7 @@ export class SharedChannel {
       {
         kind: SHARED_CHANNEL_KIND,
         content: encrypted,
-        tags: [],
+        tags: [["p", this.publicKey]],
         created_at: Math.floor(Date.now() / 1000),
       },
       this.secretKey
