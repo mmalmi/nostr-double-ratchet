@@ -117,6 +117,21 @@ export class Session {
   }
 
   /**
+   * Sends a reply to a specific message through the encrypted session.
+   * @param text The reply text content
+   * @param replyTo The ID of the message being replied to
+   * @returns A verified Nostr event containing the encrypted reply. You need to publish this event to the Nostr network.
+   * @throws Error if we are not the initiator and trying to send the first message
+   */
+  sendReply(text: string, replyTo: string): {event: VerifiedEvent, innerEvent: Rumor} {
+    return this.sendEvent({
+      content: text,
+      kind: CHAT_MESSAGE_KIND,
+      tags: [["e", replyTo]]
+    });
+  }
+
+  /**
    * Sends a reaction to a message through the encrypted session.
    * @param messageId The ID of the message being reacted to
    * @param emoji The emoji or reaction content (e.g., "👍", "❤️", "+1")

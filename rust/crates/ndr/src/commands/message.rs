@@ -128,6 +128,7 @@ struct ReactionInfo {
 pub async fn send(
     target: &str,
     message: &str,
+    reply_to: Option<&str>,
     config: &Config,
     storage: &Storage,
     output: &Output,
@@ -169,10 +170,15 @@ pub async fn send(
 
     let mut session = Session::new(session_state, chat_id.to_string());
 
-    // Encrypt the message
-    let encrypted_event = session
-        .send(message.to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to encrypt message: {}", e))?;
+    // Encrypt the message (with optional reply reference)
+    let encrypted_event = match reply_to {
+        Some(reply_id) => session
+            .send_reply(message.to_string(), reply_id)
+            .map_err(|e| anyhow::anyhow!("Failed to encrypt reply: {}", e))?,
+        None => session
+            .send(message.to_string())
+            .map_err(|e| anyhow::anyhow!("Failed to encrypt message: {}", e))?,
+    };
 
     let pubkey = config.public_key()?;
     let timestamp = std::time::SystemTime::now()
