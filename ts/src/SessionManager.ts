@@ -82,6 +82,8 @@ export class SessionManager {
   private delegateToOwner: Map<string, string> = new Map()
   // Track processed InviteResponse event IDs to prevent replay
   private processedInviteResponses: Set<string> = new Set()
+  // Cached AppKeys for authorization checks
+  private cachedAppKeys: Map<string, AppKeys> = new Map()
 
   // Subscriptions
   private ourInviteResponseSubscription: Unsubscribe | null = null
@@ -336,20 +338,47 @@ export class SessionManager {
    */
   private updateDelegateMapping(ownerPubkey: string, appKeys: AppKeys): void {
     const userRecord = this.getOrCreateUserRecord(ownerPubkey)
-    const deviceIdentities = appKeys.getAllDevices()
-      .map(d => d.identityPubkey)
-      .filter(Boolean) as string[]
+    const newDeviceIdentities = new Set(
+      appKeys.getAllDevices()
+        .map(d => d.identityPubkey)
+        .filter(Boolean) as string[]
+    )
 
-    // Update user record with known device identities
-    userRecord.knownDeviceIdentities = deviceIdentities
+    // Remove stale mappings for devices no longer in AppKeys
+    const oldIdentities = userRecord.knownDeviceIdentities || []
+    for (const identity of oldIdentities) {
+      if (!newDeviceIdentities.has(identity)) {
+        this.delegateToOwner.delete(identity)
+      }
+    }
 
-    // Update in-memory mapping
-    for (const identity of deviceIdentities) {
+    // Update user record with current device identities
+    userRecord.knownDeviceIdentities = Array.from(newDeviceIdentities)
+
+    // Update in-memory mapping for current devices
+    for (const identity of newDeviceIdentities) {
       this.delegateToOwner.set(identity, ownerPubkey)
     }
 
+    // Cache AppKeys for authorization checks
+    this.cachedAppKeys.set(ownerPubkey, appKeys)
+
     // Persist
     this.storeUserRecord(ownerPubkey).catch(() => {})
+  }
+
+  /**
+   * Check if a device is currently authorized by the owner's AppKeys.
+   * Returns true if the device is in the owner's current AppKeys.
+   */
+  private isDeviceAuthorized(ownerPubkey: string, deviceId: string): boolean {
+    const appKeys = this.cachedAppKeys.get(ownerPubkey)
+    if (!appKeys) {
+      // Fall back to cached identities if AppKeys not yet loaded
+      const userRecord = this.userRecords.get(ownerPubkey)
+      return userRecord?.knownDeviceIdentities.includes(deviceId) ?? false
+    }
+    return appKeys.getAllDevices().some(d => d.identityPubkey === deviceId)
   }
 
   private subscribeToUserAppKeys(
@@ -446,6 +475,12 @@ export class SessionManager {
 
     // Subscribe to session events - when message received, promote to active
     const unsub = session.onEvent((event) => {
+      // Verify sender device is still authorized
+      const senderOwner = this.resolveToOwner(deviceRecord.deviceId)
+      if (senderOwner !== deviceRecord.deviceId && !this.isDeviceAuthorized(senderOwner, deviceRecord.deviceId)) {
+        return
+      }
+
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       promoteToActive(session)
       this.storeUserRecord(userPubkey).catch(() => {})
@@ -760,6 +795,13 @@ export class SessionManager {
         if (!activeSession) {
           return
         }
+
+        // Check if device is still authorized
+        const deviceOwner = this.resolveToOwner(device.deviceId)
+        if (deviceOwner !== device.deviceId && !this.isDeviceAuthorized(deviceOwner, device.deviceId)) {
+          return
+        }
+
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         await this.nostrPublish(verifiedEvent).catch(() => {})
       })
@@ -826,6 +868,9 @@ export class SessionManager {
     for (const session of deviceRecord.inactiveSessions) {
       this.removeSessionSubscription(publicKey, deviceId, session.name)
     }
+
+    // Remove delegate mapping
+    this.delegateToOwner.delete(deviceId)
 
     // Delete the device record entirely
     userRecord.devices.delete(deviceId)
