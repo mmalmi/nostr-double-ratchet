@@ -121,10 +121,11 @@ async fn test_publish_fetch_and_message_both_ways() {
     let alice_invite = Invite::deserialize(&stored.serialized)
         .expect("Failed to deserialize Alice's stored invite");
 
-    let (mut alice_session, _bob_identity, _device_id) = alice_invite
+    let response = alice_invite
         .process_invite_response(&response_event, alice_sk_key.secret_bytes())
         .expect("Failed to process invite response")
         .expect("Expected session from invite response");
+    let mut alice_session = response.session;
 
     // Helper to extract content from decrypted inner event JSON
     fn extract_content(decrypted: Option<String>) -> String {

@@ -7,6 +7,8 @@ pub struct StoredDeviceRecord {
     pub device_id: String,
     pub active_session: Option<SessionState>,
     pub inactive_sessions: Vec<SessionState>,
+    #[serde(default)]
+    pub created_at: u64,
     pub is_stale: bool,
     pub stale_timestamp: Option<u64>,
     pub last_activity: Option<u64>,
@@ -17,6 +19,7 @@ pub struct DeviceRecord {
     pub public_key: String,
     pub active_session: Option<Session>,
     pub inactive_sessions: Vec<Session>,
+    pub created_at: u64,
     pub is_stale: bool,
     pub stale_timestamp: Option<u64>,
     pub last_activity: Option<u64>,
@@ -25,6 +28,7 @@ pub struct DeviceRecord {
 pub struct UserRecord {
     pub user_id: String,
     pub device_records: HashMap<String, DeviceRecord>,
+    pub known_device_identities: Vec<String>,
     is_stale: bool,
     _stale_timestamp: Option<u64>,
 }
@@ -34,6 +38,7 @@ impl UserRecord {
         Self {
             user_id,
             device_records: HashMap::new(),
+            known_device_identities: Vec::new(),
             is_stale: false,
             _stale_timestamp: None,
         }
@@ -50,6 +55,10 @@ impl UserRecord {
                 public_key: String::new(),
                 active_session: None,
                 inactive_sessions: Vec::new(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
                 is_stale: false,
                 stale_timestamp: None,
                 last_activity: Some(
@@ -159,11 +168,13 @@ impl UserRecord {
                         .iter()
                         .map(|s| s.state.clone())
                         .collect(),
+                    created_at: d.created_at,
                     is_stale: d.is_stale,
                     stale_timestamp: d.stale_timestamp,
                     last_activity: d.last_activity,
                 })
                 .collect(),
+            known_device_identities: self.known_device_identities.clone(),
         }
     }
 }
@@ -172,4 +183,6 @@ impl UserRecord {
 pub struct StoredUserRecord {
     pub user_id: String,
     pub devices: Vec<StoredDeviceRecord>,
+    #[serde(default)]
+    pub known_device_identities: Vec<String>,
 }

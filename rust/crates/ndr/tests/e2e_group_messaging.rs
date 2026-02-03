@@ -122,7 +122,7 @@ fn create_session_pair(
         .process_invite_response(&response_event, alice_sk.clone())
         .unwrap()
         .unwrap()
-        .0;
+        .session;
 
     (alice_session, bob_session, response_event)
 }

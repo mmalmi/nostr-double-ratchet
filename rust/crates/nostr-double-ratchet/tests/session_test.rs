@@ -229,10 +229,11 @@ fn test_reaction_roundtrip() {
         .unwrap();
 
     // Alice processes the response - Alice needs to receive first
-    let (mut alice_session, _, _) = invite
+    let mut alice_session = invite
         .process_invite_response(&response, alice_keys.secret_key().to_secret_bytes())
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .session;
 
     // Bob sends the first message (he's the ratchet initiator after accept)
     let msg_event = bob_session.send("Hello Alice!".to_string()).unwrap();

@@ -281,7 +281,8 @@ async fn create_chat_from_public_invite(
         .ok_or_else(|| anyhow::anyhow!("No public invite found for {}", target_pubkey_hex))?;
 
     let their_pubkey_hex = invite.inviter.to_hex();
-    let (session, response_event) = invite.accept(our_pubkey, our_private_key, None)?;
+    let (session, response_event) =
+        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(our_pubkey))?;
 
     let session_state = serde_json::to_string(&session.state)?;
     let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
@@ -1002,7 +1003,11 @@ pub async fn listen(
                     };
 
                     match invite.process_invite_response(&event, our_private_key) {
-                        Ok(Some((session, their_pubkey, _device_id))) => {
+                        Ok(Some(response)) => {
+                            let session = response.session;
+                            let their_pubkey = response
+                                .owner_public_key
+                                .unwrap_or(response.invitee_identity);
                             let session_state = serde_json::to_string(&session.state)?;
                             let new_chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
                             let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
@@ -1092,8 +1097,14 @@ pub async fn listen(
                                                 nostr_double_ratchet::Invite::from_url(invite_url)
                                             {
                                                 let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+                                                let owner_pk = my_pk.clone();
                                                 if let Ok((accept_session, response_event)) =
-                                                    invite.accept(my_pk, our_private_key, None)
+                                                    invite.accept_with_owner(
+                                                        my_pk,
+                                                        our_private_key,
+                                                        None,
+                                                        Some(owner_pk),
+                                                    )
                                                 {
                                                     // Save the new chat
                                                     let new_chat_id = uuid::Uuid::new_v4()
@@ -1453,11 +1464,13 @@ mod tests {
             nostr_double_ratchet::Invite::create_new(alice_keys.public_key(), None, None).unwrap();
 
         // Bob accepts the invite - this creates a session where Bob can send
+        let bob_pk = bob_keys.public_key();
         let (bob_session, _response) = invite
-            .accept(
-                bob_keys.public_key(),
+            .accept_with_owner(
+                bob_pk,
                 bob_keys.secret_key().to_secret_bytes(),
                 None,
+                Some(bob_pk),
             )
             .unwrap();
 

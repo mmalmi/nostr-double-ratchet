@@ -236,8 +236,11 @@ pub async fn accept(
     // Process the acceptance - creates session
     let result = invite.process_invite_response(&event, our_private_key)?;
 
-    let (session, their_pubkey, _device_id) =
-        result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+    let response = result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+    let session = response.session;
+    let their_pubkey = response
+        .owner_public_key
+        .unwrap_or(response.invitee_identity);
 
     // Serialize session state
     let session_state = serde_json::to_string(&session.state)?;

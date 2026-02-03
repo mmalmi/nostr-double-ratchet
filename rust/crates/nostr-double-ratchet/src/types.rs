@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 pub const MESSAGE_EVENT_KIND: u32 = 1060;
 pub const INVITE_EVENT_KIND: u32 = 30078;
+pub const APP_KEYS_EVENT_KIND: u32 = 30078;
 pub const INVITE_RESPONSE_KIND: u32 = 1059;
 pub const CHAT_MESSAGE_KIND: u32 = 14;
 pub const REACTION_KIND: u32 = 7;
