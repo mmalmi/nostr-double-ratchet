@@ -1218,12 +1218,15 @@ pub async fn listen(
                                                             &existing_group.data,
                                                             &metadata,
                                                         );
-                                                        storage.save_group(&StoredGroup { data: updated })?;
+                                                        storage.save_group(&StoredGroup { data: updated.clone() })?;
                                                         storage.save_chat(&updated_chat)?;
                                                         output.event("group_metadata", serde_json::json!({
                                                             "group_id": gid,
                                                             "action": "updated",
                                                             "sender_pubkey": from_pubkey_hex,
+                                                            "name": updated.name,
+                                                            "members": updated.members,
+                                                            "admins": updated.admins,
                                                         }));
                                                     }
                                                     nostr_double_ratchet::group::MetadataValidation::Removed => {
@@ -1247,11 +1250,11 @@ pub async fn listen(
                                                 ) {
                                                     let group_data = nostr_double_ratchet::group::GroupData {
                                                         id: metadata.id.clone(),
-                                                        name: metadata.name,
+                                                        name: metadata.name.clone(),
                                                         description: metadata.description,
                                                         picture: metadata.picture,
-                                                        members: metadata.members,
-                                                        admins: metadata.admins,
+                                                        members: metadata.members.clone(),
+                                                        admins: metadata.admins.clone(),
                                                         created_at: timestamp * 1000,
                                                         secret: metadata.secret,
                                                         accepted: None,
@@ -1262,6 +1265,9 @@ pub async fn listen(
                                                         "group_id": gid,
                                                         "action": "created",
                                                         "sender_pubkey": from_pubkey_hex,
+                                                        "name": metadata.name,
+                                                        "members": metadata.members,
+                                                        "admins": metadata.admins,
                                                     }));
                                                 }
                                             }

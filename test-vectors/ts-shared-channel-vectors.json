@@ -3,9 +3,9 @@
   "secret_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "channel_pubkey": "4646ae5047316b4230d0086c8acec687f00b1cd9d1dc634f6cb358ac0a9a8fff",
   "encrypted_event": {
-    "id": "ff29ec4d36bdd6d5dab64e8d8929502c4d4af22c00472af7a5d9fc3ab411cbf0",
+    "id": "df2c7b26ff2181da1d6d22bf7b4e6d4d1fdcb8fd07fd9f4abc762a95900cae95",
     "pubkey": "4646ae5047316b4230d0086c8acec687f00b1cd9d1dc634f6cb358ac0a9a8fff",
-    "created_at": 1770111339,
+    "created_at": 1770113087,
     "kind": 4,
     "tags": [
       [
@@ -13,8 +13,8 @@
         "4646ae5047316b4230d0086c8acec687f00b1cd9d1dc634f6cb358ac0a9a8fff"
       ]
     ],
-    "content": "AhAekYC9xi+us0rpm6qavjngXql/X3uE3CRwIgnleLceZENhOq08hfICHXiBFhuiPA5vAVnyWcSuBs8NO5wyBqz1coVgntuw3E/KiDo86c9nuTKgHr0ETTjVEmboQoYLQfRbZMRKLo2bQzlZpRIHRYea7HTY0J9e8KLeYpdxqMlCjHSXImgrQOLTkA57PF3BXrdbTMqk5ccMro/zzaw4blTDita/S7c7tAIPeTzN5f25WrQtKHEozjUVr7WsBT4kmH+aDhxcpFi8Hkf/e5f8WOHk25tLldKFLj/SHJVGEP4bEJxA7mDoOV09rwVGXYG1LvoaTwCeGp97H5idJ6O6/yL0rMOokcC3JzkLuEVBWWjfSdvAzddawQVlMmXOSdWO+KjepF++mNvBJrMfQV+CGdd2LegpdNlk+rd14PXQxJzEQgs=",
-    "sig": "3a06432bce3cfb70d9f3e739140bcc3bd40934077c1ba9a84da31af7928aa9e58d225dfd17228a859eda258f65b0334da43761ecb21c5d208df399cce80f188f"
+    "content": "AspYIeq5mmQDi2vV/cVzhrigOvyIvmUhaoaMTeWQL/kBOy7RjVjffjPDMo33fNJfoyQ6IYmLFHzWK4R8+CuvopwSPzrf15GwWxGS1iptMjo9V1ox5Nj3BtEANjLGuVs8R/ce+phBca5ktd0PGeiMCVAUYXoI1u1lIzAL33onXhuCeyhufwsjJnB+TKaRI//ZxsgrRsmbrT2MKeaEx2IHXO4PAVtTxHW68B6Gq65xqrvC7Lsq6B1kJ0csVwRWohIDPgP2rSbwW0poVBLFQIUJDgenFp9CaBKp5lY/nhSe8HlEu/BviyjikeL69t/c0A7gALDzVqYYeaSHsIAHoBQ1rqU3acPuntKja16ubHER0ur67Xa/fH2FwQWrze3QHHZqhJ06+zT2Qt0VDTzcQRMZ7Pi5CAiG/az6NB1RShILim+g4Ns=",
+    "sig": "72582242a298c2d3bc4fed86a2cf053dae6da7c1eea4225fccfeac2fb2bd41d783232c14f4768a090976a76c5b6476e4547e6ee93ed88e112ac83a5a47653bce"
   },
   "plaintext_rumor": {
     "id": "interop-test-rumor",
