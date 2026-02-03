@@ -55,6 +55,9 @@ enum Commands {
         target: String,
         /// Message content
         message: String,
+        /// Reply to a specific message ID
+        #[arg(long)]
+        reply: Option<String>,
     },
 
     /// React to a message
@@ -251,6 +254,9 @@ enum GroupCommands {
         id: String,
         /// Message content
         message: String,
+        /// Reply to a specific message ID
+        #[arg(long)]
+        reply: Option<String>,
     },
 
     /// React to a group message
@@ -378,8 +384,8 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             ChatCommands::Show { id } => commands::chat::show(&id, &storage, output).await,
             ChatCommands::Delete { id } => commands::chat::delete(&id, &storage, output).await,
         },
-        Commands::Send { target, message } => {
-            commands::message::send(&target, &message, &config, &storage, output).await
+        Commands::Send { target, message, reply } => {
+            commands::message::send(&target, &message, reply.as_deref(), &config, &storage, output).await
         }
         Commands::React {
             target,
@@ -452,8 +458,8 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             GroupCommands::RemoveAdmin { id, pubkey } => {
                 commands::group::remove_admin(&id, &pubkey, &config, &storage, output).await
             }
-            GroupCommands::Send { id, message } => {
-                commands::group::send_message(&id, &message, &config, &storage, output).await
+            GroupCommands::Send { id, message, reply } => {
+                commands::group::send_message(&id, &message, reply.as_deref(), &config, &storage, output).await
             }
             GroupCommands::React {
                 id,

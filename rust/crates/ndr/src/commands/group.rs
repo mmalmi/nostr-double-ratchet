@@ -460,6 +460,7 @@ pub async fn remove_admin(
 pub async fn send_message(
     id: &str,
     message: &str,
+    reply_to: Option<&str>,
     config: &Config,
     storage: &Storage,
     output: &Output,
@@ -479,11 +480,16 @@ pub async fn send_message(
 
     let msg_id = uuid::Uuid::new_v4().to_string();
 
+    let tags = match reply_to {
+        Some(reply_id) => vec![vec!["e".to_string(), reply_id.to_string()]],
+        None => vec![],
+    };
+
     let sent_count = fan_out(
         &group.data,
         CHAT_MESSAGE_KIND,
         message,
-        vec![],
+        tags,
         config,
         storage,
     )
