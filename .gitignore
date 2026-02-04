@@ -31,3 +31,4 @@ test-vectors/
 target/
 Cargo.lock
 .pnpm-store
+test-vectors/*.json
