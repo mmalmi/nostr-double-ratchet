@@ -12,6 +12,9 @@ import { AppKeysManager, DelegateManager } from "../../src/AppKeysManager"
 
 export type ActorId = "alice" | "bob"
 
+// Module-level debug flag, set by runControlledScenario
+let scenarioDebug = false
+
 export interface ControlledScenarioContext {
   relay: ControlledMockRelay
   actors: Record<ActorId, ActorState>
@@ -153,6 +156,7 @@ export type ControlledScenarioDefinition = {
 export async function runControlledScenario(
   def: ControlledScenarioDefinition
 ): Promise<ControlledScenarioContext> {
+  scenarioDebug = def.debug ?? false
   const relay = new ControlledMockRelay({ debug: def.debug })
   const context: ControlledScenarioContext = {
     relay,
@@ -218,7 +222,9 @@ async function executeStep(
       break
     case "deliverEvent": {
       const eventId = getEventRef(context, step.ref)
-      console.log(`[executeStep] deliverEvent ref=${step.ref} eventId=${eventId?.slice(0,8)}`)
+      if (scenarioDebug) {
+        console.log(`[executeStep] deliverEvent ref=${step.ref} eventId=${eventId?.slice(0,8)}`)
+      }
       context.relay.deliverEvent(eventId)
       break
     }
@@ -387,7 +393,9 @@ async function sendMessage(
   const allEvents = context.relay.getAllEvents()
   const sentEvent = allEvents[allEvents.length - 1]
 
-  console.log(`[sendMessage] sent "${message.slice(0,30)}" ref=${ref} eventCount=${allEvents.length} lastEvent=${sentEvent?.id?.slice(0,8)}`)
+  if (scenarioDebug) {
+    console.log(`[sendMessage] sent "${message.slice(0,30)}" ref=${ref} eventCount=${allEvents.length} lastEvent=${sentEvent?.id?.slice(0,8)}`)
+  }
 
   if (sentEvent && ref) {
     context.eventRefs.set(ref, sentEvent.id)
@@ -550,7 +558,9 @@ function attachManagerListener(_actor: ActorState, device: DeviceState): () => v
     const content = event.content ?? ""
     const currentCount = device.messageCounts.get(content) ?? 0
     const nextCount = currentCount + 1
-    console.log(`[TestListener] device=${device.deviceId} content="${content.slice(0,30)}" count=${nextCount}`)
+    if (scenarioDebug) {
+      console.log(`[TestListener] device=${device.deviceId} content="${content.slice(0,30)}" count=${nextCount}`)
+    }
     device.messageCounts.set(content, nextCount)
     resolveWaiters(device, content, nextCount)
   }
@@ -563,12 +573,14 @@ function attachManagerListener(_actor: ActorState, device: DeviceState): () => v
 
 function resolveWaiters(device: DeviceState, content: string, count: number) {
   const pending = device.waiters.slice()
-  if (pending.length > 0) {
+  if (scenarioDebug && pending.length > 0) {
     console.log(`[resolveWaiters] device=${device.deviceId} content="${content.slice(0,30)}" count=${count} waiters=${pending.length} waitingFor=[${pending.map(w => `"${w.message.slice(0,20)}"@${w.targetCount}`).join(',')}]`)
   }
   for (const waiter of pending) {
     if (waiter.message === content && count >= waiter.targetCount) {
-      console.log(`[resolveWaiters] RESOLVING waiter for "${content.slice(0,30)}"`)
+      if (scenarioDebug) {
+        console.log(`[resolveWaiters] RESOLVING waiter for "${content.slice(0,30)}"`)
+      }
       waiter.resolve()
     }
   }
@@ -582,9 +594,13 @@ function waitForMessage(
 ): Promise<void> {
   const { existingOk } = options
   const currentCount = device.messageCounts.get(message) ?? 0
-  console.log(`[waitForMessage] device=${device.deviceId} message="${message.slice(0,30)}" currentCount=${currentCount} existingOk=${existingOk}`)
+  if (scenarioDebug) {
+    console.log(`[waitForMessage] device=${device.deviceId} message="${message.slice(0,30)}" currentCount=${currentCount} existingOk=${existingOk}`)
+  }
   if (existingOk && currentCount > 0) {
-    console.log(`[waitForMessage] immediately resolved (already exists)`)
+    if (scenarioDebug) {
+      console.log(`[waitForMessage] immediately resolved (already exists)`)
+    }
     return Promise.resolve()
   }
 

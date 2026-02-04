@@ -1,4 +1,3 @@
-console.log("[DR] Using LOCAL nostr-double-ratchet")
 
 export * from "./Session"
 export * from "./Invite"

@@ -96,7 +96,6 @@ describe('Session', () => {
       messageQueue.push(sender.send(message).event);
       const receivedMessage = await receiver.next();
 
-      console.log(`${receiverSession.name} got from ${sender.name}: ${receivedMessage.value.content}`)
       expect(receivedMessage.value?.content).toBe(message);
 
       // Check that the chain keys have changed

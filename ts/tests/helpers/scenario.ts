@@ -8,6 +8,9 @@ import { AppKeysManager } from "../../src/AppKeysManager"
 
 export type ActorId = "alice" | "bob"
 
+// Module-level debug flag
+let scenarioDebug = false
+
 export interface ScenarioContext {
   relay: MockRelay
   actors: Record<ActorId, ActorState>
@@ -66,10 +69,12 @@ type ScenarioStep =
 
 type ScenarioDefinition = {
   steps: ScenarioStep[]
+  debug?: boolean
 }
 
 export async function runScenario(def: ScenarioDefinition): Promise<ScenarioContext> {
-  const relay = new MockRelay()
+  scenarioDebug = def.debug ?? false
+  const relay = new MockRelay(scenarioDebug)
   const context: ScenarioContext = {
     relay,
     actors: {
@@ -79,7 +84,9 @@ export async function runScenario(def: ScenarioDefinition): Promise<ScenarioCont
   }
 
   for (const step of def.steps) {
-    console.log(`\n--- Executing step: ${JSON.stringify(step)} ---`)
+    if (scenarioDebug) {
+      console.log(`\n--- Executing step: ${JSON.stringify(step)} ---`)
+    }
     switch (step.type) {
       case "send":
         await sendMessage(context, step.from, step.to, step.message, step.waitOn)
@@ -173,7 +180,9 @@ async function expectAllMessages(
   deviceId: string,
   messages: string[]
 ) {
-  console.log(`\n\n\nExpecting all messages on ${actor}:`, messages)
+  if (scenarioDebug) {
+    console.log(`\n\n\nExpecting all messages on ${actor}:`, messages)
+  }
   const actorState = context.actors[actor]
   const device = getDevice(context, { actor, deviceId })
   for (const msg of messages) {

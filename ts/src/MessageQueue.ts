@@ -1,7 +1,10 @@
 import { StorageAdapter } from "./StorageAdapter"
 import { Rumor } from "./types"
 
-const log = (...args: unknown[]) => console.log("[DR:Queue]", ...args)
+const DEBUG = typeof process !== "undefined" && process.env?.DEBUG?.includes("nostr-double-ratchet")
+const log = (...args: unknown[]) => {
+  if (DEBUG) console.log("[DR:Queue]", ...args)
+}
 
 /**
  * Persistent queue item for messages waiting to be sent.
