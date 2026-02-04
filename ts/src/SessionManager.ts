@@ -14,6 +14,7 @@ import { Session } from "./Session"
 import { serializeSessionState, deserializeSessionState } from "./utils"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
 import { getEventHash } from "nostr-tools"
+import { MessageQueue, StoredQueueItem } from "./MessageQueue"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
 
@@ -75,9 +76,15 @@ export class SessionManager {
   // Credentials for invite handshake
   private inviteKeys: InviteCredentials
 
+  // Message queue for outgoing messages
+  private messageQueue: MessageQueue
+
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
-  private messageHistory: Map<string, Rumor[]> = new Map()
+  // Flag to prevent concurrent queue processing
+  private processingQueue: boolean = false
+  // Flag to indicate queue needs reprocessing after current run
+  private queueNeedsReprocess: boolean = false
   // Map delegate device pubkeys to their owner's pubkey
   private delegateToOwner: Map<string, string> = new Map()
   // Track processed InviteResponse event IDs to prevent replay
@@ -116,6 +123,10 @@ export class SessionManager {
     this.inviteKeys = inviteKeys
     this.storage = storage || new InMemoryStorageAdapter()
     this.versionPrefix = `v${this.storageVersion}`
+    this.messageQueue = new MessageQueue({
+      storage: this.storage,
+      versionPrefix: this.versionPrefix,
+    })
   }
 
   async init() {
@@ -141,6 +152,11 @@ export class SessionManager {
     // Setup sessions with our own other devices
     // Use ownerPublicKey to find sibling devices (important for delegates)
     this.setupUser(this.ownerPublicKey)
+
+    // Process any queued messages from previous session (recovery after crash/close)
+    setTimeout(() => {
+      this.processQueue().catch(() => {})
+    }, 100)
   }
 
   /**
@@ -220,7 +236,14 @@ export class SessionManager {
             name: event.id,
           })
 
+          // Attach session FIRST (synchronous) to create subscription before any async operations
           this.attachSessionSubscription(ownerPubkey, deviceRecord, session, true)
+
+          // Add device to queue items and process (async, fire-and-forget)
+          this.addDeviceToExistingQueueItems(ownerPubkey, decrypted.inviteeIdentity)
+            .then(() => this.processQueue())
+            .catch(() => {})
+
           this.storeUserRecord(ownerPubkey).catch(() => {})
         } catch {
         }
@@ -319,8 +342,205 @@ export class SessionManager {
   private userRecordKeyPrefix() {
     return `${this.versionPrefix}/user/`
   }
+
   private versionKey() {
     return `storage-version`
+  }
+
+  /**
+   * Add newly discovered devices to relevant queue items.
+   * Called when AppKeys reveals new devices.
+   */
+  private async addNewDevicesToQueue(ownerPubkey: string, newDevices: string[]): Promise<void> {
+    const queueItems = await this.messageQueue.loadAll()
+    const isOurOwner = ownerPubkey === this.ownerPublicKey
+
+    for (const item of queueItems) {
+      // Add devices to queue items where:
+      // 1. The recipient matches this owner, OR
+      // 2. This is OUR owner (own sibling devices should receive all our outgoing messages)
+      if (item.recipientOwnerPubkey === ownerPubkey || isOurOwner) {
+        for (const deviceId of newDevices) {
+          // Don't add our own sending device
+          if (deviceId !== this.deviceId) {
+            await this.messageQueue.addDeviceToItem(item.id, deviceId)
+          }
+        }
+      }
+    }
+    // Process queue to send to newly discovered devices
+    await this.processQueue()
+  }
+
+  /**
+   * Add a single device to existing queue items for a given owner.
+   * Called when a device record is created (session established).
+   */
+  private async addDeviceToExistingQueueItems(ownerPubkey: string, deviceId: string): Promise<void> {
+    if (deviceId === this.deviceId) return // Don't add our own device
+
+    const queueItems = await this.messageQueue.loadAll()
+    const isOurOwner = ownerPubkey === this.ownerPublicKey
+
+    for (const item of queueItems) {
+      // Add device to queue items where:
+      // 1. The recipient matches this owner, OR
+      // 2. This is OUR owner (own sibling devices should receive all our outgoing messages)
+      if (item.recipientOwnerPubkey === ownerPubkey || isOurOwner) {
+        await this.messageQueue.addDeviceToItem(item.id, deviceId)
+      }
+    }
+  }
+
+  /**
+   * Process a single queue item, sending to all pending devices.
+   */
+  private async processQueueItem(queueItem: StoredQueueItem): Promise<void> {
+    const { id: messageId, rumor, recipientOwnerPubkey, targetDevices, deviceStatus } = queueItem
+
+    // Get devices that haven't received the message yet
+    const pendingDevices = targetDevices.filter(
+      (deviceId) => !deviceStatus[deviceId]?.sent
+    )
+
+    // All target devices received - but check if there are new devices in AppKeys
+    // that should also receive this message before dequeueing
+    if (pendingDevices.length === 0) {
+      // Check if all devices in recipient's current AppKeys have received
+      const recipientAppKeys = this.cachedAppKeys.get(recipientOwnerPubkey)
+      const ownerAppKeys = this.cachedAppKeys.get(this.ownerPublicKey)
+
+      const allRecipientDevices = recipientAppKeys?.getAllDevices()
+        .map(d => d.identityPubkey)
+        .filter((id): id is string => !!id && id !== this.deviceId) ?? []
+      const allOwnerDevices = ownerAppKeys?.getAllDevices()
+        .map(d => d.identityPubkey)
+        .filter((id): id is string => !!id && id !== this.deviceId) ?? []
+
+      const allRelevantDevices = new Set([...allRecipientDevices, ...allOwnerDevices])
+      const missingDevices = Array.from(allRelevantDevices).filter(
+        (deviceId) => !deviceStatus[deviceId]?.sent
+      )
+
+      if (missingDevices.length > 0) {
+        // Add missing devices to queue item and continue processing
+        for (const deviceId of missingDevices) {
+          await this.messageQueue.addDeviceToItem(messageId, deviceId)
+        }
+        // Re-process with updated target devices
+        const updatedItem = await this.messageQueue.getItem(messageId)
+        if (updatedItem) {
+          await this.processQueueItem(updatedItem)
+        }
+        return
+      }
+
+      // Only dequeue if the message has been in the queue long enough
+      // This gives time for new devices to be discovered via AppKeys
+      if (!this.messageQueue.isReadyForDequeue(queueItem)) {
+        return // Keep in queue, will be processed again later
+      }
+
+      await this.messageQueue.dequeue(messageId)
+      return
+    }
+
+    // Get user records for recipient and owner (for sibling devices)
+    const recipientRecord = this.userRecords.get(recipientOwnerPubkey)
+    const ownerRecord = this.userRecords.get(this.ownerPublicKey)
+
+    for (const deviceId of pendingDevices) {
+      // Check if device is still authorized (skip revoked devices)
+      const deviceOwner = this.resolveToOwner(deviceId)
+      if (deviceOwner !== deviceId && !this.isDeviceAuthorized(deviceOwner, deviceId)) {
+        // Device was revoked - mark as sent to avoid blocking queue
+        await this.messageQueue.updateDeviceStatus(messageId, deviceId, true)
+        continue
+      }
+
+      // Find the device record (could be in recipient or owner record)
+      const deviceRecord = recipientRecord?.devices.get(deviceId)
+        ?? ownerRecord?.devices.get(deviceId)
+
+      // Use active session, or fall back to first inactive session
+      const session = deviceRecord?.activeSession ?? deviceRecord?.inactiveSessions[0]
+      if (!session) {
+        // No session yet - schedule a retry to pick up sessions being established
+        setTimeout(() => {
+          this.processQueue().catch(() => {})
+        }, 50)
+        continue
+      }
+
+      // Send the message
+      try {
+        const { event: verifiedEvent } = session.sendEvent(rumor)
+        await this.nostrPublish(verifiedEvent)
+        await this.messageQueue.updateDeviceStatus(messageId, deviceId, true)
+      } catch {
+        // Failed to send - will retry on next processQueue call
+      }
+    }
+
+    // Store session state after sending
+    await this.storeUserRecord(recipientOwnerPubkey)
+    if (this.ownerPublicKey !== recipientOwnerPubkey) {
+      await this.storeUserRecord(this.ownerPublicKey)
+    }
+
+    // Check if complete after processing (all target devices sent)
+    const updatedItem = await this.messageQueue.getItem(messageId)
+    if (updatedItem && this.messageQueue.isComplete(updatedItem)) {
+      // Double-check against current AppKeys before dequeueing
+      const recipientAppKeys = this.cachedAppKeys.get(recipientOwnerPubkey)
+      const ownerAppKeys = this.cachedAppKeys.get(this.ownerPublicKey)
+
+      const allRecipientDevices = recipientAppKeys?.getAllDevices()
+        .map(d => d.identityPubkey)
+        .filter((id): id is string => !!id && id !== this.deviceId) ?? []
+      const allOwnerDevices = ownerAppKeys?.getAllDevices()
+        .map(d => d.identityPubkey)
+        .filter((id): id is string => !!id && id !== this.deviceId) ?? []
+
+      const allRelevantDevices = new Set([...allRecipientDevices, ...allOwnerDevices])
+      const missingDevices = Array.from(allRelevantDevices).filter(
+        (deviceId) => !updatedItem.deviceStatus[deviceId]?.sent
+      )
+
+      if (missingDevices.length === 0) {
+        // Only dequeue if the message has been in the queue long enough
+        // This gives time for new devices to be discovered via AppKeys
+        if (!this.messageQueue.isReadyForDequeue(updatedItem)) {
+          return // Keep in queue, will be processed again later
+        }
+        await this.messageQueue.dequeue(messageId)
+      }
+    }
+  }
+
+  /**
+   * Process all queued messages.
+   * Called on init (for recovery) and when sessions are established.
+   */
+  async processQueue(): Promise<void> {
+    // If already processing, mark that we need to reprocess after
+    if (this.processingQueue) {
+      this.queueNeedsReprocess = true
+      return
+    }
+    this.processingQueue = true
+
+    try {
+      do {
+        this.queueNeedsReprocess = false
+        const queueItems = await this.messageQueue.loadAll()
+        for (const item of queueItems) {
+          await this.processQueueItem(item)
+        }
+      } while (this.queueNeedsReprocess)
+    } finally {
+      this.processingQueue = false
+    }
   }
 
   /**
@@ -355,6 +575,11 @@ export class SessionManager {
     // Update user record with current device identities
     userRecord.knownDeviceIdentities = Array.from(newDeviceIdentities)
 
+    // Find newly discovered devices (not in old identities)
+    const newDevices = Array.from(newDeviceIdentities).filter(
+      (identity) => !oldIdentities.includes(identity)
+    )
+
     // Update in-memory mapping for current devices
     for (const identity of newDeviceIdentities) {
       this.delegateToOwner.set(identity, ownerPubkey)
@@ -365,6 +590,11 @@ export class SessionManager {
 
     // Persist
     this.storeUserRecord(ownerPubkey).catch(() => {})
+
+    // Add newly discovered devices to existing queue items and process queue
+    if (newDevices.length > 0) {
+      this.addNewDevicesToQueue(ownerPubkey, newDevices).catch(() => {})
+    }
   }
 
   /**
@@ -468,9 +698,13 @@ export class SessionManager {
             this.removeSessionSubscription(userPubkey, dr.deviceId, s.name)
           }
         }
+        // Process queue - inactive sessions can also be used for sending
+        this.processQueue().catch(() => {})
       }
     } else {
       promoteToActive(session)
+      // Session is active - process queue to send any pending messages
+      this.processQueue().catch(() => {})
     }
 
     // Subscribe to session events - when message received, promote to active
@@ -543,9 +777,11 @@ export class SessionManager {
       )
       return this.nostrPublish(event)
         .then(() => {
+          // Attach session FIRST (synchronous) to create subscription
           this.attachSessionSubscription(userPubkey, deviceRecord, session)
         })
-        .then(() => this.sendMessageHistory(userPubkey, device.identityPubkey))
+        .then(() => this.addDeviceToExistingQueueItems(userPubkey, device.identityPubkey))
+        .then(() => this.processQueue())
         .catch(() => {})
     }
 
@@ -699,12 +935,18 @@ export class SessionManager {
       this.inviteSubscriptions.delete(appKeysKey)
     }
 
-    this.messageHistory.delete(userPubkey)
-
     await Promise.allSettled([
       this.deleteUserSessionsFromStorage(userPubkey),
       this.storage.del(this.userRecordKey(userPubkey)),
+      this.deleteUserQueueItems(userPubkey),
     ])
+  }
+
+  /**
+   * Delete all queue items for a user.
+   */
+  private async deleteUserQueueItems(userPubkey: string): Promise<void> {
+    await this.messageQueue.deleteItemsForRecipient(userPubkey)
   }
 
   private removeSessionSubscription(
@@ -726,98 +968,65 @@ export class SessionManager {
     await Promise.all(keys.map((key) => this.storage.del(key)))
   }
 
-  private async sendMessageHistory(
-    recipientPublicKey: string,
-    deviceId: string
-  ): Promise<void> {
-    const history = this.messageHistory.get(recipientPublicKey) || []
-    const userRecord = this.userRecords.get(recipientPublicKey)
-    if (!userRecord) {
-      return
-    }
-    const device = userRecord.devices.get(deviceId)
-    if (!device) {
-      return
-    }
-    for (const event of history) {
-      const { activeSession } = device
-
-      if (!activeSession) {
-        continue
-      }
-      const { event: verifiedEvent } = activeSession.sendEvent(event)
-      await this.nostrPublish(verifiedEvent)
-      await this.storeUserRecord(recipientPublicKey)
-    }
-  }
-
   async sendEvent(
     recipientIdentityKey: string,
     event: Partial<Rumor>
   ): Promise<Rumor | undefined> {
     await this.init()
 
-    // Add to message history queue (will be sent when session is established)
     const completeEvent = event as Rumor
-    // Use ownerPublicKey for history targets so delegates share history with owner
-    const historyTargets = new Set([recipientIdentityKey, this.ownerPublicKey])
-    for (const key of historyTargets) {
-      const existing = this.messageHistory.get(key) || []
-      this.messageHistory.set(key, [...existing, completeEvent])
-    }
 
-    const userRecord = this.getOrCreateUserRecord(recipientIdentityKey)
-    // Use ownerPublicKey to find sibling devices (important for delegates)
+    // Resolve recipient to owner pubkey (in case it's a delegate device)
+    const recipientOwnerPubkey = this.resolveToOwner(recipientIdentityKey)
+
+    // Get user records to determine target devices
+    const userRecord = this.getOrCreateUserRecord(recipientOwnerPubkey)
     const ourUserRecord = this.getOrCreateUserRecord(this.ownerPublicKey)
 
-    this.setupUser(recipientIdentityKey)
-    // Use ownerPublicKey to setup sessions with sibling devices
+    // Setup users to start session establishment
+    this.setupUser(recipientOwnerPubkey)
     this.setupUser(this.ownerPublicKey)
 
-    const recipientDevices = Array.from(userRecord.devices.values())
-    const ownDevices = Array.from(ourUserRecord.devices.values())
+    // Collect target devices from:
+    // 1. Devices with established sessions (from userRecord.devices)
+    // 2. Known devices from AppKeys (from knownDeviceIdentities)
+    // This ensures we queue for devices even before sessions are established
+    const deviceSet = new Set<string>()
 
-    // Merge and deduplicate by deviceId, excluding our own sending device
-    // This fixes the self-message bug where sending to yourself would duplicate devices
-    const deviceMap = new Map<string, DeviceRecord>()
-    for (const d of [...recipientDevices, ...ownDevices]) {
-      if (d.deviceId !== this.deviceId) {  // Exclude sender's own device
-        deviceMap.set(d.deviceId, d)
+    // Add devices from established sessions
+    for (const d of userRecord.devices.values()) {
+      if (d.deviceId !== this.deviceId) {
+        deviceSet.add(d.deviceId)
       }
     }
-    const devices = Array.from(deviceMap.values())
-
-    // Send to all devices and await completion before returning
-    // This ensures session state is ratcheted and persisted before function returns
-    await Promise.allSettled(
-      devices.map(async (device) => {
-        const { activeSession } = device
-        if (!activeSession) {
-          return
-        }
-
-        // Check if device is still authorized
-        const deviceOwner = this.resolveToOwner(device.deviceId)
-        if (deviceOwner !== device.deviceId && !this.isDeviceAuthorized(deviceOwner, device.deviceId)) {
-          return
-        }
-
-        const { event: verifiedEvent } = activeSession.sendEvent(event)
-        await this.nostrPublish(verifiedEvent).catch(() => {})
-      })
-    )
-
-    // Store recipient's user record after all messages sent
-    await this.storeUserRecord(recipientIdentityKey)
-    // Also store owner's record if different (for sibling device sessions)
-    // This ensures session state is persisted after ratcheting for both:
-    // - recipientDevices stored under recipientIdentityKey
-    // - Own sibling devices stored under ownerPublicKey
-    if (this.ownerPublicKey !== recipientIdentityKey) {
-      await this.storeUserRecord(this.ownerPublicKey)
+    for (const d of ourUserRecord.devices.values()) {
+      if (d.deviceId !== this.deviceId) {
+        deviceSet.add(d.deviceId)
+      }
     }
 
-    // Return the event with computed ID (same as library would compute)
+    // Add known devices from AppKeys (may not have sessions yet)
+    for (const identity of userRecord.knownDeviceIdentities) {
+      if (identity !== this.deviceId) {
+        deviceSet.add(identity)
+      }
+    }
+    for (const identity of ourUserRecord.knownDeviceIdentities) {
+      if (identity !== this.deviceId) {
+        deviceSet.add(identity)
+      }
+    }
+
+    const targetDevices = Array.from(deviceSet)
+
+    // PERSIST FIRST: Queue the message before any send attempt
+    // This ensures the message survives browser crash/close
+    await this.messageQueue.enqueue(completeEvent, recipientOwnerPubkey, targetDevices)
+
+    // Process the queue immediately to send to devices with active sessions
+    await this.processQueue()
+
+    // Return the event with computed ID
     return completeEvent
   }
 
