@@ -6,6 +6,10 @@ import {
   Unsubscribe,
   APP_KEYS_EVENT_KIND,
   CHAT_MESSAGE_KIND,
+  DeviceDeliveryStatus,
+  MessageDeliveryStatus,
+  DeliveryStatusChangeEvent,
+  OnDeliveryStatusChangeCallback,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { AppKeys, DeviceEntry } from "./AppKeys"
@@ -99,6 +103,7 @@ export class SessionManager {
 
   // Callbacks
   private internalSubscriptions: Set<OnEventCallback> = new Set()
+  private deliveryStatusCallbacks: Set<OnDeliveryStatusChangeCallback> = new Set()
 
   // Initialization flag
   private initialized: boolean = false
@@ -441,6 +446,13 @@ export class SessionManager {
         return // Keep in queue, will be processed again later
       }
 
+      // Emit complete event before dequeue
+      this.emitDeliveryStatusChange({
+        messageId,
+        status: this.toMessageDeliveryStatus(queueItem),
+        changeType: 'complete',
+      })
+
       await this.messageQueue.dequeue(messageId)
       return
     }
@@ -477,6 +489,17 @@ export class SessionManager {
         const { event: verifiedEvent } = session.sendEvent(rumor)
         await this.nostrPublish(verifiedEvent)
         await this.messageQueue.updateDeviceStatus(messageId, deviceId, true)
+
+        // Emit device_delivered event
+        const updatedItemForEmit = await this.messageQueue.getItem(messageId)
+        if (updatedItemForEmit) {
+          this.emitDeliveryStatusChange({
+            messageId,
+            deviceId,
+            status: this.toMessageDeliveryStatus(updatedItemForEmit),
+            changeType: 'device_delivered',
+          })
+        }
       } catch {
         // Failed to send - will retry on next processQueue call
       }
@@ -513,6 +536,14 @@ export class SessionManager {
         if (!this.messageQueue.isReadyForDequeue(updatedItem)) {
           return // Keep in queue, will be processed again later
         }
+
+        // Emit complete event before dequeue
+        this.emitDeliveryStatusChange({
+          messageId,
+          status: this.toMessageDeliveryStatus(updatedItem),
+          changeType: 'complete',
+        })
+
         await this.messageQueue.dequeue(messageId)
       }
     }
@@ -881,6 +912,79 @@ export class SessionManager {
     return this.userRecords
   }
 
+  // -------------------
+  // Delivery Status API
+  // -------------------
+
+  /**
+   * Get the delivery status for a specific message.
+   * Returns undefined if the message is not in the queue (either never queued or already dequeued).
+   */
+  async getDeliveryStatus(messageId: string): Promise<MessageDeliveryStatus | undefined> {
+    const item = await this.messageQueue.getItem(messageId)
+    if (!item) return undefined
+    return this.toMessageDeliveryStatus(item)
+  }
+
+  /**
+   * Get delivery statuses for all queued messages.
+   */
+  async getAllDeliveryStatuses(): Promise<MessageDeliveryStatus[]> {
+    const items = await this.messageQueue.loadAll()
+    return items.map(item => this.toMessageDeliveryStatus(item))
+  }
+
+  /**
+   * Get delivery statuses for all queued messages to a specific recipient.
+   */
+  async getDeliveryStatusesForRecipient(recipientPubkey: string): Promise<MessageDeliveryStatus[]> {
+    const items = await this.messageQueue.getItemsForRecipient(recipientPubkey)
+    return items.map(item => this.toMessageDeliveryStatus(item))
+  }
+
+  /**
+   * Register a callback to be notified when delivery status changes.
+   * Returns an unsubscribe function.
+   */
+  onDeliveryStatusChange(callback: OnDeliveryStatusChangeCallback): Unsubscribe {
+    this.deliveryStatusCallbacks.add(callback)
+    return () => {
+      this.deliveryStatusCallbacks.delete(callback)
+    }
+  }
+
+  /**
+   * Convert a StoredQueueItem to MessageDeliveryStatus.
+   */
+  private toMessageDeliveryStatus(item: StoredQueueItem): MessageDeliveryStatus {
+    const devices: DeviceDeliveryStatus[] = item.targetDevices.map(deviceId => ({
+      deviceId,
+      sent: item.deviceStatus[deviceId]?.sent ?? false,
+      sentAt: item.deviceStatus[deviceId]?.sentAt,
+    }))
+
+    return {
+      messageId: item.id,
+      recipientOwnerPubkey: item.recipientOwnerPubkey,
+      queuedAt: item.queuedAt,
+      devices,
+      isComplete: this.messageQueue.isComplete(item),
+    }
+  }
+
+  /**
+   * Emit a delivery status change event to all registered callbacks.
+   */
+  private emitDeliveryStatusChange(event: DeliveryStatusChangeEvent): void {
+    for (const callback of this.deliveryStatusCallbacks) {
+      try {
+        callback(event)
+      } catch {
+        // Callback error - ignore to prevent breaking other callbacks
+      }
+    }
+  }
+
   close() {
     for (const unsubscribe of this.inviteSubscriptions.values()) {
       unsubscribe()
@@ -1021,7 +1125,14 @@ export class SessionManager {
 
     // PERSIST FIRST: Queue the message before any send attempt
     // This ensures the message survives browser crash/close
-    await this.messageQueue.enqueue(completeEvent, recipientOwnerPubkey, targetDevices)
+    const queuedItem = await this.messageQueue.enqueue(completeEvent, recipientOwnerPubkey, targetDevices)
+
+    // Emit queued event
+    this.emitDeliveryStatusChange({
+      messageId: completeEvent.id,
+      status: this.toMessageDeliveryStatus(queuedItem),
+      changeType: 'queued',
+    })
 
     // Process the queue immediately to send to devices with active sessions
     await this.processQueue()

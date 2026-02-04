@@ -1,6 +1,8 @@
 import { StorageAdapter } from "./StorageAdapter"
 import { Rumor } from "./types"
 
+const log = (...args: unknown[]) => console.log("[DR:Queue]", ...args)
+
 /**
  * Persistent queue item for messages waiting to be sent.
  * Stored immediately when sendEvent is called, ensuring no data loss on crash.
@@ -52,6 +54,13 @@ export class MessageQueue {
     recipientOwnerPubkey: string,
     targetDevices: string[]
   ): Promise<StoredQueueItem> {
+    log("enqueue", {
+      messageId: rumor.id.slice(0, 8),
+      recipient: recipientOwnerPubkey.slice(0, 8),
+      devices: targetDevices.map((d) => d.slice(0, 8)),
+      content: rumor.content?.slice(0, 50),
+    })
+
     const deviceStatus: Record<string, { sent: boolean; sentAt?: number }> = {}
     for (const deviceId of targetDevices) {
       deviceStatus[deviceId] = { sent: false }
@@ -74,6 +83,7 @@ export class MessageQueue {
    * Remove a message from the queue.
    */
   async dequeue(messageId: string): Promise<void> {
+    log("dequeue", { messageId: messageId.slice(0, 8) })
     await this.storage.del(this.queueItemKey(messageId))
   }
 
@@ -101,6 +111,17 @@ export class MessageQueue {
 
     // Sort by queuedAt to process oldest first
     items.sort((a, b) => a.queuedAt - b.queuedAt)
+    log("loadAll", {
+      count: items.length,
+      items: items.map((i) => ({
+        id: i.id.slice(0, 8),
+        recipient: i.recipientOwnerPubkey.slice(0, 8),
+        devices: Object.entries(i.deviceStatus).map(([d, s]) => ({
+          device: d.slice(0, 8),
+          sent: s.sent,
+        })),
+      })),
+    })
     return items
   }
 
@@ -115,7 +136,25 @@ export class MessageQueue {
     const queueItem = await this.storage.get<StoredQueueItem>(
       this.queueItemKey(messageId)
     )
-    if (!queueItem) return
+    if (!queueItem) {
+      log("updateDeviceStatus: item not found", {
+        messageId: messageId.slice(0, 8),
+      })
+      return
+    }
+
+    log("updateDeviceStatus", {
+      messageId: messageId.slice(0, 8),
+      device: deviceId.slice(0, 8),
+      sent,
+      complete: this.isComplete({
+        ...queueItem,
+        deviceStatus: {
+          ...queueItem.deviceStatus,
+          [deviceId]: { sent, sentAt: sent ? Date.now() : undefined },
+        },
+      }),
+    })
 
     queueItem.deviceStatus[deviceId] = {
       sent,
@@ -137,6 +176,11 @@ export class MessageQueue {
 
     // Only add if not already in target devices
     if (!queueItem.targetDevices.includes(deviceId)) {
+      log("addDeviceToItem", {
+        messageId: messageId.slice(0, 8),
+        newDevice: deviceId.slice(0, 8),
+        existingDevices: queueItem.targetDevices.map((d) => d.slice(0, 8)),
+      })
       queueItem.targetDevices.push(deviceId)
       queueItem.deviceStatus[deviceId] = { sent: false }
       await this.storage.put(this.queueItemKey(messageId), queueItem)
@@ -168,7 +212,14 @@ export class MessageQueue {
    */
   async getItemsForRecipient(ownerPubkey: string): Promise<StoredQueueItem[]> {
     const allItems = await this.loadAll()
-    return allItems.filter((item) => item.recipientOwnerPubkey === ownerPubkey)
+    const filtered = allItems.filter(
+      (item) => item.recipientOwnerPubkey === ownerPubkey
+    )
+    log("getItemsForRecipient", {
+      recipient: ownerPubkey.slice(0, 8),
+      count: filtered.length,
+    })
+    return filtered
   }
 
   /**
@@ -176,6 +227,10 @@ export class MessageQueue {
    */
   async deleteItemsForRecipient(ownerPubkey: string): Promise<void> {
     const items = await this.getItemsForRecipient(ownerPubkey)
+    log("deleteItemsForRecipient", {
+      recipient: ownerPubkey.slice(0, 8),
+      count: items.length,
+    })
     for (const item of items) {
       await this.dequeue(item.id)
     }
