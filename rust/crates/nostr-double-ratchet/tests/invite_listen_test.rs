@@ -1,5 +1,5 @@
 use nostr::Keys;
-use nostr_double_ratchet::{ChannelPubSub, Invite, Result, SessionManagerEvent};
+use nostr_double_ratchet::{Invite, Result, SessionManagerEvent};
 
 #[test]
 fn test_invite_listen_and_accept() -> Result<()> {
@@ -18,12 +18,11 @@ fn test_invite_listen_and_accept() -> Result<()> {
 
     // Create event channel for listen()
     let (event_tx, _event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-    let pubsub = ChannelPubSub::new(event_tx);
 
     // Simulate receiving the acceptance event
     // In real usage, this would be handled by the relay/subscription system
     // For this test, we'll directly process it
-    invite.listen(&pubsub)?;
+    invite.listen(&event_tx)?;
 
     // Since we can't mock the subscription system easily, we'll directly test
     // invite response processing via process_invite_response
@@ -56,9 +55,8 @@ fn test_from_user_subscription() -> Result<()> {
 
     // Create event channel for from_user()
     let (event_tx, _event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-    let pubsub = ChannelPubSub::new(event_tx);
 
-    Invite::from_user(alice_pk, &pubsub)?;
+    Invite::from_user(alice_pk, &event_tx)?;
 
     // Test that we can parse the invite from the signed event
     let parsed_invite = Invite::from_event(&signed_event)?;
@@ -84,9 +82,8 @@ fn test_listen_without_device_id() -> Result<()> {
 
     // Create event channel for listen()
     let (event_tx, _event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-    let pubsub = ChannelPubSub::new(event_tx);
 
-    invite.listen(&pubsub)?;
+    invite.listen(&event_tx)?;
 
     // Directly process the invite response
     if let Some((_alice_session, identity, device_id)) =

@@ -1,5 +1,6 @@
 use crate::{
     pubsub::build_filter,
+    pubsub::NostrPubSub,
     utils::{kdf, pubkey_from_hex},
     Error, EventCallback, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry,
     Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
@@ -20,8 +21,7 @@ pub struct Session {
     pub(crate) internal_subscriptions: Arc<Mutex<Vec<EventCallback>>>,
     pub(crate) current_key_subid: Arc<Mutex<Option<String>>>,
     pub(crate) next_key_subid: Arc<Mutex<Option<String>>>,
-    pub(crate) event_tx: Option<crossbeam_channel::Sender<crate::SessionManagerEvent>>,
-    pub(crate) pubsub: Option<Arc<dyn crate::NostrPubSub>>,
+    pub(crate) pubsub: Option<Arc<dyn NostrPubSub>>,
 }
 
 impl Session {
@@ -35,7 +35,6 @@ impl Session {
             internal_subscriptions: Arc::new(Mutex::new(Vec::new())),
             current_key_subid: Arc::new(Mutex::new(None)),
             next_key_subid: Arc::new(Mutex::new(None)),
-            event_tx: None,
             pubsub: None,
         }
     }
@@ -44,10 +43,11 @@ impl Session {
         &mut self,
         event_tx: crossbeam_channel::Sender<crate::SessionManagerEvent>,
     ) {
-        self.event_tx = Some(event_tx);
+        let pubsub: Arc<dyn NostrPubSub> = Arc::new(event_tx);
+        self.pubsub = Some(pubsub);
     }
 
-    pub fn set_pubsub(&mut self, pubsub: Arc<dyn crate::NostrPubSub>) {
+    pub fn set_pubsub(&mut self, pubsub: Arc<dyn NostrPubSub>) {
         self.pubsub = Some(pubsub);
     }
 }
@@ -123,36 +123,13 @@ impl Session {
             internal_subscriptions: Arc::new(Mutex::new(Vec::new())),
             current_key_subid: Arc::new(Mutex::new(None)),
             next_key_subid: Arc::new(Mutex::new(None)),
-            event_tx: None,
             pubsub: None,
         })
     }
 
     /// Subscribe to kind 1060 messages for this session's ratchet keys
     pub fn subscribe_to_messages(&mut self) -> Result<()> {
-        // Prefer pubsub if available, fallback to event_tx for backward compat
         if let Some(ref pubsub) = self.pubsub {
-            if let Some(current_pk) = self.state.their_current_nostr_public_key {
-                let filter = build_filter()
-                    .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
-                    .authors(vec![current_pk])
-                    .build();
-
-                let subid = pubsub.subscribe(filter)?;
-                *self.current_key_subid.lock().unwrap() = Some(subid);
-            }
-
-            if let Some(next_pk) = self.state.their_next_nostr_public_key {
-                let filter = build_filter()
-                    .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
-                    .authors(vec![next_pk])
-                    .build();
-
-                let subid = pubsub.subscribe(filter)?;
-                *self.next_key_subid.lock().unwrap() = Some(subid);
-            }
-        } else if let Some(ref event_tx) = self.event_tx {
-            // Fallback to old event_tx method
             if let Some(current_pk) = self.state.their_current_nostr_public_key {
                 let filter = build_filter()
                     .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
@@ -162,9 +139,7 @@ impl Session {
                 let filter_json = serde_json::to_string(&filter)?;
                 let subid = format!("session-current-{}", uuid::Uuid::new_v4());
 
-                event_tx
-                    .send(crate::SessionManagerEvent::Subscribe(filter_json))
-                    .map_err(|_| crate::Error::Storage("Failed to send subscribe".to_string()))?;
+                pubsub.subscribe(subid.clone(), filter_json)?;
 
                 *self.current_key_subid.lock().unwrap() = Some(subid);
             }
@@ -178,9 +153,7 @@ impl Session {
                 let filter_json = serde_json::to_string(&filter)?;
                 let subid = format!("session-next-{}", uuid::Uuid::new_v4());
 
-                event_tx
-                    .send(crate::SessionManagerEvent::Subscribe(filter_json))
-                    .map_err(|_| crate::Error::Storage("Failed to send subscribe".to_string()))?;
+                pubsub.subscribe(subid.clone(), filter_json)?;
 
                 *self.next_key_subid.lock().unwrap() = Some(subid);
             }
@@ -192,12 +165,12 @@ impl Session {
     /// Update subscriptions after ratchet step (keys changed)
     pub fn update_subscriptions(&mut self) -> Result<()> {
         // Unsubscribe from old keys
-        if let Some(event_tx) = &self.event_tx {
+        if let Some(pubsub) = &self.pubsub {
             if let Some(old_subid) = self.current_key_subid.lock().unwrap().take() {
-                let _ = event_tx.send(crate::SessionManagerEvent::Unsubscribe(old_subid));
+                let _ = pubsub.unsubscribe(old_subid);
             }
             if let Some(old_subid) = self.next_key_subid.lock().unwrap().take() {
-                let _ = event_tx.send(crate::SessionManagerEvent::Unsubscribe(old_subid));
+                let _ = pubsub.unsubscribe(old_subid);
             }
         }
 
@@ -597,12 +570,12 @@ impl Session {
         self.internal_subscriptions.lock().unwrap().clear();
 
         // Unsubscribe from session-managed subscriptions
-        if let Some(event_tx) = &self.event_tx {
+        if let Some(pubsub) = &self.pubsub {
             if let Some(subid) = self.current_key_subid.lock().unwrap().take() {
-                let _ = event_tx.send(crate::SessionManagerEvent::Unsubscribe(subid));
+                let _ = pubsub.unsubscribe(subid);
             }
             if let Some(subid) = self.next_key_subid.lock().unwrap().take() {
-                let _ = event_tx.send(crate::SessionManagerEvent::Unsubscribe(subid));
+                let _ = pubsub.unsubscribe(subid);
             }
         }
     }

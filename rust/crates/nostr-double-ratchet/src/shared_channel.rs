@@ -38,10 +38,9 @@ impl SharedChannel {
         let secret_key = nostr::SecretKey::from_slice(&self.secret_key)?;
         let keys = Keys::new(secret_key);
 
-        let unsigned =
-            EventBuilder::new(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16), &encoded)
-                .tag(Tag::public_key(keys.public_key()))
-                .build(keys.public_key());
+        let unsigned = EventBuilder::new(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16), &encoded)
+            .tag(Tag::public_key(keys.public_key()))
+            .build(keys.public_key());
 
         let event = unsigned
             .sign_with_keys(&keys)

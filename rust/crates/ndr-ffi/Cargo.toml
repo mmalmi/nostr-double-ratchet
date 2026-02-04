@@ -23,6 +23,7 @@ serde_json.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 uniffi = { version = "0.28", features = ["cli"] }
+crossbeam-channel.workspace = true
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }

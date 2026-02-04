@@ -15,7 +15,7 @@ pub use error::{Error, Result};
 pub use file_storage::{DebouncedFileStorage, FileStorageAdapter};
 pub use group::*;
 pub use invite::Invite;
-pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
+pub use pubsub::{NostrPubSub, SessionEvent};
 pub use session::Session;
 pub use session_manager::{SessionManager, SessionManagerEvent};
 pub use shared_channel::SharedChannel;

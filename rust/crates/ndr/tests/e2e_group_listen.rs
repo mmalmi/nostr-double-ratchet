@@ -347,12 +347,30 @@ async fn test_group_chat_six_participants_everyone_receives() {
     }
 
     let participants_spec = [
-        ("alice", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-        ("bob", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"),
-        ("carol", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        ("dave", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-        ("erin", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
-        ("frank", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+        (
+            "alice",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+        (
+            "bob",
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        ),
+        (
+            "carol",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        (
+            "dave",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "erin",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ),
+        (
+            "frank",
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        ),
     ];
 
     let mut participants: Vec<Participant> = Vec::new();
@@ -414,14 +432,8 @@ async fn test_group_chat_six_participants_everyone_receives() {
                 let inviter = &participants[i];
                 let invitee = &participants[j];
                 let kickoff = format!("kickoff-{}-{}", invitee.name, inviter.name);
-                let _ = run_ndr(
-                    invitee.dir.path(),
-                    &["send", &inviter.pubkey, &kickoff],
-                )
-                .await;
-                let listener = listeners
-                    .get_mut(i)
-                    .expect("inviter listener should exist");
+                let _ = run_ndr(invitee.dir.path(), &["send", &inviter.pubkey, &kickoff]).await;
+                let listener = listeners.get_mut(i).expect("inviter listener should exist");
                 let kickoff_event = read_until_event_with_content(
                     &mut listener.stdout,
                     "message",
@@ -460,12 +472,14 @@ async fn test_group_chat_six_participants_everyone_receives() {
 
         // Everyone else should receive the group metadata.
         for idx in 1..participants.len() {
-            let listener = listeners
-                .get_mut(idx)
-                .expect("listener should exist");
-            let event = read_until_event(&mut listener.stdout, "group_metadata", Duration::from_secs(10))
-                .await
-                .expect("member should receive group_metadata");
+            let listener = listeners.get_mut(idx).expect("listener should exist");
+            let event = read_until_event(
+                &mut listener.stdout,
+                "group_metadata",
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("member should receive group_metadata");
             assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
             assert_eq!(event["action"].as_str(), Some("created"));
         }

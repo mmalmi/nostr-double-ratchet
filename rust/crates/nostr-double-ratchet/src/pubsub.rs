@@ -1,20 +1,64 @@
-use crate::Result;
 use nostr::{Filter, Kind, PublicKey};
 
-/// Bidirectional interface for Nostr pub/sub operations.
-/// Allows components (Invite, Session) to manage their own subscriptions.
+use crate::{Error, Result, SessionManagerEvent};
+
+/// Nostr publish/subscribe interface used by the library.
+///
+/// This lets callers provide their own Nostr event system while keeping
+/// the double-ratchet logic inside this crate.
 pub trait NostrPubSub: Send + Sync {
-    /// Subscribe to events matching the filter. Returns subscription ID.
-    fn subscribe(&self, filter: Filter) -> Result<String>;
-
-    /// Unsubscribe from a subscription by ID.
-    fn unsubscribe(&self, sub_id: &str) -> Result<()>;
-
-    /// Publish an unsigned event (to be signed by main identity key).
     fn publish(&self, event: nostr::UnsignedEvent) -> Result<()>;
-
-    /// Publish an already-signed event (e.g., with ephemeral keys).
     fn publish_signed(&self, event: nostr::Event) -> Result<()>;
+    fn subscribe(&self, subid: String, filter_json: String) -> Result<()>;
+    fn unsubscribe(&self, subid: String) -> Result<()>;
+    fn decrypted_message(
+        &self,
+        sender: PublicKey,
+        content: String,
+        event_id: Option<String>,
+    ) -> Result<()>;
+    fn received_event(&self, event: nostr::Event) -> Result<()>;
+}
+
+impl NostrPubSub for crossbeam_channel::Sender<SessionManagerEvent> {
+    fn publish(&self, event: nostr::UnsignedEvent) -> Result<()> {
+        self.send(SessionManagerEvent::Publish(event))
+            .map_err(|_| Error::Storage("Failed to send publish".to_string()))
+    }
+
+    fn publish_signed(&self, event: nostr::Event) -> Result<()> {
+        self.send(SessionManagerEvent::PublishSigned(event))
+            .map_err(|_| Error::Storage("Failed to send publish".to_string()))
+    }
+
+    fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
+        self.send(SessionManagerEvent::Subscribe { subid, filter_json })
+            .map_err(|_| Error::Storage("Failed to send subscribe".to_string()))
+    }
+
+    fn unsubscribe(&self, subid: String) -> Result<()> {
+        self.send(SessionManagerEvent::Unsubscribe(subid))
+            .map_err(|_| Error::Storage("Failed to send unsubscribe".to_string()))
+    }
+
+    fn decrypted_message(
+        &self,
+        sender: PublicKey,
+        content: String,
+        event_id: Option<String>,
+    ) -> Result<()> {
+        self.send(SessionManagerEvent::DecryptedMessage {
+            sender,
+            content,
+            event_id,
+        })
+        .map_err(|_| Error::Storage("Failed to send decrypted message".to_string()))
+    }
+
+    fn received_event(&self, event: nostr::Event) -> Result<()> {
+        self.send(SessionManagerEvent::ReceivedEvent(event))
+            .map_err(|_| Error::Storage("Failed to send received event".to_string()))
+    }
 }
 
 /// Event types emitted by SessionManager for external handling.
@@ -29,7 +73,10 @@ pub trait NostrPubSub: Send + Sync {
 pub enum SessionEvent {
     Publish(nostr::UnsignedEvent),
     PublishSigned(nostr::Event),
-    Subscribe(String),
+    Subscribe {
+        subid: String,
+        filter_json: String,
+    },
     Unsubscribe(String),
     DecryptedMessage {
         sender: PublicKey,
@@ -37,50 +84,6 @@ pub enum SessionEvent {
         event_id: Option<String>,
     },
     ReceivedEvent(nostr::Event),
-}
-
-/// Channel-based implementation of NostrPubSub for backward compatibility.
-/// Bridges the old event_tx channel pattern to the new trait.
-pub struct ChannelPubSub {
-    event_tx: crossbeam_channel::Sender<crate::SessionManagerEvent>,
-}
-
-impl ChannelPubSub {
-    pub fn new(event_tx: crossbeam_channel::Sender<crate::SessionManagerEvent>) -> Self {
-        Self { event_tx }
-    }
-}
-
-impl NostrPubSub for ChannelPubSub {
-    fn subscribe(&self, filter: Filter) -> Result<String> {
-        let filter_json = serde_json::to_string(&filter)?;
-        let sub_id = format!("sub-{}", uuid::Uuid::new_v4());
-        self.event_tx
-            .send(crate::SessionManagerEvent::Subscribe(filter_json))
-            .map_err(|_| crate::Error::Storage("Failed to send subscribe".to_string()))?;
-        Ok(sub_id)
-    }
-
-    fn unsubscribe(&self, sub_id: &str) -> Result<()> {
-        self.event_tx
-            .send(crate::SessionManagerEvent::Unsubscribe(sub_id.to_string()))
-            .map_err(|_| crate::Error::Storage("Failed to send unsubscribe".to_string()))?;
-        Ok(())
-    }
-
-    fn publish(&self, event: nostr::UnsignedEvent) -> Result<()> {
-        self.event_tx
-            .send(crate::SessionManagerEvent::Publish(event))
-            .map_err(|_| crate::Error::Storage("Failed to send publish".to_string()))?;
-        Ok(())
-    }
-
-    fn publish_signed(&self, event: nostr::Event) -> Result<()> {
-        self.event_tx
-            .send(crate::SessionManagerEvent::PublishSigned(event))
-            .map_err(|_| crate::Error::Storage("Failed to send publish_signed".to_string()))?;
-        Ok(())
-    }
 }
 
 /// Helper to build filters for this crate
@@ -164,8 +167,8 @@ pub mod test_utils {
                 crate::session_manager::SessionManagerEvent::PublishSigned(signed) => {
                     SessionEvent::PublishSigned(signed)
                 }
-                crate::session_manager::SessionManagerEvent::Subscribe(filter) => {
-                    SessionEvent::Subscribe(filter)
+                crate::session_manager::SessionManagerEvent::Subscribe { subid, filter_json } => {
+                    SessionEvent::Subscribe { subid, filter_json }
                 }
                 crate::session_manager::SessionManagerEvent::Unsubscribe(subid) => {
                     SessionEvent::Unsubscribe(subid)

@@ -1,5 +1,6 @@
 use crate::{
-    pubsub::build_filter, Error, Result, Session, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+    pubsub::{build_filter, NostrPubSub},
+    Error, Result, Session, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
@@ -311,23 +312,46 @@ impl Invite {
         })
     }
 
-    pub fn listen(&self, pubsub: &dyn crate::NostrPubSub) -> Result<()> {
+    pub fn listen_with_pubsub(&self, pubsub: &dyn NostrPubSub) -> Result<String> {
         let filter = build_filter()
             .kinds(vec![INVITE_RESPONSE_KIND as u64])
             .pubkeys(vec![self.inviter_ephemeral_public_key])
             .build();
 
-        pubsub.subscribe(filter)?;
+        let filter_json = serde_json::to_string(&filter)?;
+        let subid = format!("invite-response-{}", uuid::Uuid::new_v4());
+        pubsub.subscribe(subid.clone(), filter_json)?;
+        Ok(subid)
+    }
+
+    pub fn listen(
+        &self,
+        event_tx: &crossbeam_channel::Sender<crate::SessionManagerEvent>,
+    ) -> Result<()> {
+        let _ = self.listen_with_pubsub(event_tx)?;
         Ok(())
     }
 
-    pub fn from_user(user_pubkey: PublicKey, pubsub: &dyn crate::NostrPubSub) -> Result<()> {
+    pub fn from_user_with_pubsub(
+        user_pubkey: PublicKey,
+        pubsub: &dyn NostrPubSub,
+    ) -> Result<String> {
         let filter = build_filter()
             .kinds(vec![INVITE_EVENT_KIND as u64])
             .authors(vec![user_pubkey])
             .build();
 
-        pubsub.subscribe(filter)?;
+        let filter_json = serde_json::to_string(&filter)?;
+        let subid = format!("invite-user-{}", uuid::Uuid::new_v4());
+        pubsub.subscribe(subid.clone(), filter_json)?;
+        Ok(subid)
+    }
+
+    pub fn from_user(
+        user_pubkey: PublicKey,
+        event_tx: &crossbeam_channel::Sender<crate::SessionManagerEvent>,
+    ) -> Result<()> {
+        let _ = Self::from_user_with_pubsub(user_pubkey, event_tx)?;
         Ok(())
     }
 

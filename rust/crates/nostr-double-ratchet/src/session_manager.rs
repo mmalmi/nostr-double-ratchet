@@ -1,4 +1,4 @@
-use crate::{InMemoryStorage, Invite, Result, StorageAdapter, UserRecord};
+use crate::{pubsub::NostrPubSub, InMemoryStorage, Invite, Result, StorageAdapter, UserRecord};
 use nostr::PublicKey;
 use nostr::UnsignedEvent;
 use std::collections::{HashMap, VecDeque};
@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub enum SessionManagerEvent {
-    Subscribe(String),
+    Subscribe {
+        subid: String,
+        filter_json: String,
+    },
     Unsubscribe(String),
     Publish(UnsignedEvent),
     PublishSigned(nostr::Event), // For events pre-signed with ephemeral keys (kind 1059, 1060)
@@ -36,7 +39,7 @@ pub struct SessionManager {
     our_identity_key: [u8; 32],
     device_id: String,
     storage: Arc<dyn StorageAdapter>,
-    event_tx: crossbeam_channel::Sender<SessionManagerEvent>,
+    pubsub: Arc<dyn NostrPubSub>,
     initialized: Arc<Mutex<bool>>,
     invite_state: Arc<Mutex<Option<InviteState>>>,
     pending_invites: Arc<Mutex<HashMap<PublicKey, Invite>>>,
@@ -51,13 +54,24 @@ impl SessionManager {
         event_tx: crossbeam_channel::Sender<SessionManagerEvent>,
         storage: Option<Arc<dyn StorageAdapter>>,
     ) -> Self {
+        let pubsub: Arc<dyn NostrPubSub> = Arc::new(event_tx);
+        Self::new_with_pubsub(our_public_key, our_identity_key, device_id, pubsub, storage)
+    }
+
+    pub fn new_with_pubsub(
+        our_public_key: PublicKey,
+        our_identity_key: [u8; 32],
+        device_id: String,
+        pubsub: Arc<dyn NostrPubSub>,
+        storage: Option<Arc<dyn StorageAdapter>>,
+    ) -> Self {
         Self {
             user_records: Arc::new(Mutex::new(HashMap::new())),
             our_public_key,
             our_identity_key,
             device_id,
             storage: storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new())),
-            event_tx,
+            pubsub,
             initialized: Arc::new(Mutex::new(false)),
             invite_state: Arc::new(Mutex::new(None)),
             pending_invites: Arc::new(Mutex::new(HashMap::new())),
@@ -89,13 +103,14 @@ impl SessionManager {
         });
 
         // Subscribe to invite responses using Invite's own filter (with #p tag)
-        let pubsub = crate::ChannelPubSub::new(self.event_tx.clone());
-        invite.listen(&pubsub)?;
+        invite.listen_with_pubsub(self.pubsub.as_ref())?;
 
-        let event = invite.get_event()?;
-        self.event_tx
-            .send(SessionManagerEvent::Publish(event))
-            .map_err(|_| crate::Error::Storage("Failed to send publish".to_string()))?;
+        let unsigned_event = invite.get_event()?;
+        let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
+        let signed_event = unsigned_event
+            .sign_with_keys(&keys)
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
+        self.pubsub.publish_signed(signed_event)?;
 
         // Sessions manage their own kind 1060 subscriptions
         // Load existing sessions and set up their subscriptions
@@ -103,11 +118,11 @@ impl SessionManager {
         for user_record in records.values_mut() {
             for device_record in user_record.device_records.values_mut() {
                 if let Some(ref mut session) = device_record.active_session {
-                    session.set_event_tx(self.event_tx.clone());
+                    session.set_pubsub(self.pubsub.clone());
                     let _ = session.subscribe_to_messages();
                 }
                 for session in &mut device_record.inactive_sessions {
-                    session.set_event_tx(self.event_tx.clone());
+                    session.set_pubsub(self.pubsub.clone());
                     let _ = session.subscribe_to_messages();
                 }
             }
@@ -212,9 +227,7 @@ impl SessionManager {
                 match session.send_event(event.clone()) {
                     Ok(signed_event) => {
                         event_ids.push(signed_event.id.to_string());
-                        let _ = self
-                            .event_tx
-                            .send(SessionManagerEvent::PublishSigned(signed_event));
+                        let _ = self.pubsub.publish_signed(signed_event);
                     }
                     Err(_) => continue,
                 }
@@ -228,9 +241,7 @@ impl SessionManager {
                     match session.send_event(event.clone()) {
                         Ok(signed_event) => {
                             event_ids.push(signed_event.id.to_string());
-                            let _ = self
-                                .event_tx
-                                .send(SessionManagerEvent::PublishSigned(signed_event));
+                            let _ = self.pubsub.publish_signed(signed_event);
                         }
                         Err(_) => continue,
                     }
@@ -280,6 +291,45 @@ impl SessionManager {
                     .count()
             })
             .sum()
+    }
+
+    pub fn import_session_state(
+        &self,
+        peer_pubkey: PublicKey,
+        device_id: Option<String>,
+        state: crate::SessionState,
+    ) -> Result<()> {
+        let mut session = crate::Session::new(state, "imported".to_string());
+        session.set_pubsub(self.pubsub.clone());
+        let _ = session.subscribe_to_messages();
+
+        let mut records = self.user_records.lock().unwrap();
+        let user_record = records
+            .entry(peer_pubkey)
+            .or_insert_with(|| UserRecord::new(hex::encode(peer_pubkey.to_bytes())));
+        user_record.upsert_session(device_id.as_deref(), session);
+        drop(records);
+
+        let _ = self.store_user_record(&peer_pubkey);
+        Ok(())
+    }
+
+    pub fn export_active_session_state(
+        &self,
+        peer_pubkey: PublicKey,
+    ) -> Result<Option<crate::SessionState>> {
+        let mut records = self.user_records.lock().unwrap();
+        let user_record = match records.get_mut(&peer_pubkey) {
+            Some(record) => record,
+            None => return Ok(None),
+        };
+
+        let mut sessions = user_record.get_active_sessions_mut();
+        if let Some(session) = sessions.first_mut() {
+            return Ok(Some(session.state.clone()));
+        }
+
+        Ok(None)
     }
 
     pub fn debug_session_keys(&self) -> String {
@@ -337,6 +387,59 @@ impl SessionManager {
     }
 
     fn load_all_user_records(&self) -> Result<()> {
+        let mut keys = self.storage.list("user/")?;
+        if keys.is_empty() {
+            keys = self.storage.list("user_")?;
+        }
+
+        let mut records = self.user_records.lock().unwrap();
+
+        for key in keys {
+            let json = match self.storage.get(&key)? {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let stored: crate::StoredUserRecord = serde_json::from_str(&json)?;
+            let user_pubkey = crate::utils::pubkey_from_hex(&stored.user_id)?;
+            let mut user_record = UserRecord::new(stored.user_id.clone());
+
+            for device in stored.devices {
+                let mut active_session = device
+                    .active_session
+                    .map(|state| crate::Session::new(state, "restored".to_string()));
+                let inactive_sessions = device
+                    .inactive_sessions
+                    .into_iter()
+                    .map(|state| crate::Session::new(state, "restored".to_string()))
+                    .collect::<Vec<_>>();
+
+                if let Some(ref mut session) = active_session {
+                    session.set_pubsub(self.pubsub.clone());
+                }
+
+                let mut device_record = crate::DeviceRecord {
+                    device_id: device.device_id.clone(),
+                    public_key: stored.user_id.clone(),
+                    active_session,
+                    inactive_sessions,
+                    is_stale: device.is_stale,
+                    stale_timestamp: device.stale_timestamp,
+                    last_activity: device.last_activity,
+                };
+
+                for session in device_record.inactive_sessions.iter_mut() {
+                    session.set_pubsub(self.pubsub.clone());
+                }
+
+                user_record
+                    .device_records
+                    .insert(device_record.device_id.clone(), device_record);
+            }
+
+            records.insert(user_pubkey, user_record);
+        }
+
         Ok(())
     }
 
@@ -429,8 +532,7 @@ impl SessionManager {
             }
         }
 
-        let pubsub = crate::ChannelPubSub::new(self.event_tx.clone());
-        crate::Invite::from_user(user_pubkey, &pubsub)?;
+        crate::Invite::from_user_with_pubsub(user_pubkey, self.pubsub.as_ref())?;
 
         // Create a placeholder invite to track that we're fetching
         let placeholder = Invite {
@@ -474,7 +576,7 @@ impl SessionManager {
                                 if self.storage.get(&acceptance_key).ok().flatten().is_none() {
                                     let _ = self.storage.put(&acceptance_key, "1".to_string());
 
-                                    sess.set_event_tx(self.event_tx.clone());
+                                    sess.set_pubsub(self.pubsub.clone());
                                     let _ = sess.subscribe_to_messages();
 
                                     let mut records = self.user_records.lock().unwrap();
@@ -526,11 +628,9 @@ impl SessionManager {
                                 "✅ Accepting invite from {}",
                                 &hex::encode(inviter.to_bytes())[..16]
                             );
-                            let _ = self
-                                .event_tx
-                                .send(SessionManagerEvent::PublishSigned(event));
+                            let _ = self.pubsub.publish_signed(event);
 
-                            session.set_event_tx(self.event_tx.clone());
+                            session.set_pubsub(self.pubsub.clone());
                             let _ = session.subscribe_to_messages();
 
                             let mut records = self.user_records.lock().unwrap();
@@ -564,11 +664,7 @@ impl SessionManager {
                         );
                         let sender = *user_pubkey;
                         drop(user_records);
-                        let _ = self.event_tx.send(SessionManagerEvent::DecryptedMessage {
-                            sender,
-                            content: plaintext,
-                            event_id,
-                        });
+                        let _ = self.pubsub.decrypted_message(sender, plaintext, event_id);
                         let _ = self.store_user_record(&sender);
                         return;
                     }

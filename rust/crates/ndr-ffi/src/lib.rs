@@ -5,7 +5,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use nostr_double_ratchet::{Invite, Session, SessionState};
+use crossbeam_channel::Receiver;
+use nostr_double_ratchet::{
+    FileStorageAdapter, Invite, Session, SessionManager, SessionManagerEvent, SessionState,
+};
 
 mod error;
 pub use error::NdrError;
@@ -42,6 +45,18 @@ pub struct SendResult {
 pub struct DecryptResult {
     pub plaintext: String,
     pub inner_event_json: String,
+}
+
+/// Event emitted by SessionManager for external publish/subscribe handling.
+#[derive(uniffi::Record)]
+pub struct PubSubEvent {
+    pub kind: String,
+    pub subid: Option<String>,
+    pub filter_json: Option<String>,
+    pub event_json: Option<String>,
+    pub sender_pubkey_hex: Option<String>,
+    pub content: Option<String>,
+    pub event_id: Option<String>,
 }
 
 /// Generate a new keypair.
@@ -261,6 +276,217 @@ impl SessionHandle {
         } else {
             false
         }
+    }
+}
+
+/// FFI wrapper for SessionManager.
+#[derive(uniffi::Object)]
+pub struct SessionManagerHandle {
+    inner: Mutex<SessionManager>,
+    event_rx: Mutex<Receiver<SessionManagerEvent>>,
+}
+
+#[uniffi::export]
+impl SessionManagerHandle {
+    /// Create a new session manager with an internal event queue.
+    #[uniffi::constructor]
+    pub fn new(
+        our_pubkey_hex: String,
+        our_identity_privkey_hex: String,
+        device_id: String,
+    ) -> Result<Arc<Self>, NdrError> {
+        let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
+        let our_identity_key = parse_private_key(&our_identity_privkey_hex)?;
+
+        let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
+        let manager = SessionManager::new(our_pubkey, our_identity_key, device_id, tx, None);
+
+        Ok(Arc::new(Self {
+            inner: Mutex::new(manager),
+            event_rx: Mutex::new(rx),
+        }))
+    }
+
+    /// Create a new session manager with file-backed storage.
+    #[uniffi::constructor]
+    pub fn new_with_storage_path(
+        our_pubkey_hex: String,
+        our_identity_privkey_hex: String,
+        device_id: String,
+        storage_path: String,
+    ) -> Result<Arc<Self>, NdrError> {
+        let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
+        let our_identity_key = parse_private_key(&our_identity_privkey_hex)?;
+
+        let storage = FileStorageAdapter::new(std::path::PathBuf::from(storage_path))
+            .map_err(NdrError::from)?;
+
+        let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
+        let manager = SessionManager::new(
+            our_pubkey,
+            our_identity_key,
+            device_id,
+            tx,
+            Some(Arc::new(storage)),
+        );
+
+        Ok(Arc::new(Self {
+            inner: Mutex::new(manager),
+            event_rx: Mutex::new(rx),
+        }))
+    }
+
+    /// Initialize the session manager (loads state, creates device invite, subscribes).
+    pub fn init(&self) -> Result<(), NdrError> {
+        let manager = self.inner.lock().unwrap();
+        manager.init()?;
+        Ok(())
+    }
+
+    /// Send a text message to a recipient.
+    pub fn send_text(
+        &self,
+        recipient_pubkey_hex: String,
+        text: String,
+    ) -> Result<Vec<String>, NdrError> {
+        let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
+        let manager = self.inner.lock().unwrap();
+        Ok(manager.send_text(recipient, text)?)
+    }
+
+    /// Import a session state for a peer.
+    pub fn import_session_state(
+        &self,
+        peer_pubkey_hex: String,
+        state_json: String,
+        device_id: Option<String>,
+    ) -> Result<(), NdrError> {
+        let peer_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&peer_pubkey_hex)?;
+        let state: SessionState =
+            nostr_double_ratchet::utils::deserialize_session_state(&state_json)?;
+        let manager = self.inner.lock().unwrap();
+        manager.import_session_state(peer_pubkey, device_id, state)?;
+        Ok(())
+    }
+
+    /// Export the active session state for a peer.
+    pub fn get_active_session_state(
+        &self,
+        peer_pubkey_hex: String,
+    ) -> Result<Option<String>, NdrError> {
+        let peer_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&peer_pubkey_hex)?;
+        let manager = self.inner.lock().unwrap();
+        if let Some(state) = manager.export_active_session_state(peer_pubkey)? {
+            Ok(Some(nostr_double_ratchet::utils::serialize_session_state(
+                &state,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Process a received Nostr event JSON.
+    pub fn process_event(&self, event_json: String) -> Result<(), NdrError> {
+        let event: nostr::Event = serde_json::from_str(&event_json)?;
+        let manager = self.inner.lock().unwrap();
+        manager.process_received_event(event);
+        Ok(())
+    }
+
+    /// Drain pending pubsub events from the internal queue.
+    pub fn drain_events(&self) -> Result<Vec<PubSubEvent>, NdrError> {
+        let rx = self.event_rx.lock().unwrap();
+        let mut events = Vec::new();
+
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    let pubsub_event = match event {
+                        SessionManagerEvent::Publish(unsigned) => PubSubEvent {
+                            kind: "publish".to_string(),
+                            subid: None,
+                            filter_json: None,
+                            event_json: Some(serde_json::to_string(&unsigned)?),
+                            sender_pubkey_hex: None,
+                            content: None,
+                            event_id: None,
+                        },
+                        SessionManagerEvent::PublishSigned(signed) => PubSubEvent {
+                            kind: "publish_signed".to_string(),
+                            subid: None,
+                            filter_json: None,
+                            event_json: Some(serde_json::to_string(&signed)?),
+                            sender_pubkey_hex: None,
+                            content: None,
+                            event_id: None,
+                        },
+                        SessionManagerEvent::Subscribe { subid, filter_json } => PubSubEvent {
+                            kind: "subscribe".to_string(),
+                            subid: Some(subid),
+                            filter_json: Some(filter_json),
+                            event_json: None,
+                            sender_pubkey_hex: None,
+                            content: None,
+                            event_id: None,
+                        },
+                        SessionManagerEvent::Unsubscribe(subid) => PubSubEvent {
+                            kind: "unsubscribe".to_string(),
+                            subid: Some(subid),
+                            filter_json: None,
+                            event_json: None,
+                            sender_pubkey_hex: None,
+                            content: None,
+                            event_id: None,
+                        },
+                        SessionManagerEvent::DecryptedMessage {
+                            sender,
+                            content,
+                            event_id,
+                        } => PubSubEvent {
+                            kind: "decrypted_message".to_string(),
+                            subid: None,
+                            filter_json: None,
+                            event_json: None,
+                            sender_pubkey_hex: Some(sender.to_hex()),
+                            content: Some(content),
+                            event_id,
+                        },
+                        SessionManagerEvent::ReceivedEvent(event) => PubSubEvent {
+                            kind: "received_event".to_string(),
+                            subid: None,
+                            filter_json: None,
+                            event_json: Some(serde_json::to_string(&event)?),
+                            sender_pubkey_hex: None,
+                            content: None,
+                            event_id: None,
+                        },
+                    };
+                    events.push(pubsub_event);
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        Ok(events)
+    }
+
+    /// Get our device id.
+    pub fn get_device_id(&self) -> String {
+        let manager = self.inner.lock().unwrap();
+        manager.get_device_id().to_string()
+    }
+
+    /// Get our public key as hex.
+    pub fn get_our_pubkey_hex(&self) -> String {
+        let manager = self.inner.lock().unwrap();
+        manager.get_our_pubkey().to_hex()
+    }
+
+    /// Get total active sessions.
+    pub fn get_total_sessions(&self) -> u64 {
+        let manager = self.inner.lock().unwrap();
+        manager.get_total_sessions() as u64
     }
 }
 
