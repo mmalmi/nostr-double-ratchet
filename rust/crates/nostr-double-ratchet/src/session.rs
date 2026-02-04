@@ -3,7 +3,7 @@ use crate::{
     pubsub::NostrPubSub,
     utils::{kdf, pubkey_from_hex},
     Error, EventCallback, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry,
-    Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+    Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, CHAT_MESSAGE_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
@@ -202,6 +202,27 @@ impl Session {
         let event = EventBuilder::new(nostr::Kind::from(REACTION_KIND as u16), emoji)
             .tag(
                 Tag::parse(&["e".to_string(), message_id.to_string()])
+                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+            )
+            .build(dummy_keys.public_key());
+
+        self.send_event(event)
+    }
+
+    /// Send a reply to a specific message through the encrypted session.
+    ///
+    /// # Arguments
+    /// * `text` - The reply text content
+    /// * `reply_to` - The ID of the message being replied to
+    ///
+    /// # Returns
+    /// A signed Nostr event containing the encrypted reply.
+    pub fn send_reply(&mut self, text: String, reply_to: &str) -> Result<nostr::Event> {
+        let dummy_keys = Keys::generate();
+
+        let event = EventBuilder::new(nostr::Kind::from(CHAT_MESSAGE_KIND as u16), &text)
+            .tag(
+                Tag::parse(&["e".to_string(), reply_to.to_string()])
                     .map_err(|e| Error::InvalidEvent(e.to_string()))?,
             )
             .build(dummy_keys.public_key());

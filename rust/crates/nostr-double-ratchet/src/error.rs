@@ -54,6 +54,9 @@ pub enum Error {
     Nostr(#[from] nostr::event::Error),
 
     #[error(transparent)]
+    UnsignedEvent(#[from] nostr::event::unsigned::Error),
+
+    #[error(transparent)]
     Nip44(#[from] nostr::nips::nip44::Error),
 }
 

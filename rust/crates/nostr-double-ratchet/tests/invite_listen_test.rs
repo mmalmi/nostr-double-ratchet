@@ -13,8 +13,14 @@ fn test_invite_listen_and_accept() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (_bob_session, acceptance_event) =
-        invite.accept(bob_pk, bob_sk, Some("bob-device".to_string()))?;
+    let owner_keys = Keys::generate();
+    let owner_pk = owner_keys.public_key();
+    let (_bob_session, acceptance_event) = invite.accept_with_owner(
+        bob_pk,
+        bob_sk,
+        Some("bob-device".to_string()),
+        Some(owner_pk),
+    )?;
 
     // Create event channel for listen()
     let (event_tx, _event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
@@ -26,13 +32,12 @@ fn test_invite_listen_and_accept() -> Result<()> {
 
     // Since we can't mock the subscription system easily, we'll directly test
     // invite response processing via process_invite_response
-    if let Some((alice_session, identity, device_id)) =
-        invite.process_invite_response(&acceptance_event, alice_sk)?
-    {
-        assert_eq!(identity.to_bytes(), bob_pk.to_bytes());
-        assert_eq!(device_id, Some("bob-device".to_string()));
-        assert!(alice_session.state.receiving_chain_key.is_none());
-        assert!(alice_session.state.sending_chain_key.is_none());
+    if let Some(response) = invite.process_invite_response(&acceptance_event, alice_sk)? {
+        assert_eq!(response.invitee_identity.to_bytes(), bob_pk.to_bytes());
+        assert_eq!(response.device_id, Some("bob-device".to_string()));
+        assert_eq!(response.owner_public_key.map(|pk| pk.to_bytes()), Some(owner_pk.to_bytes()));
+        assert!(response.session.state.receiving_chain_key.is_none());
+        assert!(response.session.state.sending_chain_key.is_none());
     } else {
         panic!("Expected invite response to be processed successfully");
     }
@@ -78,7 +83,7 @@ fn test_listen_without_device_id() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (_bob_session, acceptance_event) = invite.accept(bob_pk, bob_sk, None)?;
+    let (_bob_session, acceptance_event) = invite.accept_with_owner(bob_pk, bob_sk, None, None)?;
 
     // Create event channel for listen()
     let (event_tx, _event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
@@ -86,11 +91,10 @@ fn test_listen_without_device_id() -> Result<()> {
     invite.listen(&event_tx)?;
 
     // Directly process the invite response
-    if let Some((_alice_session, identity, device_id)) =
-        invite.process_invite_response(&acceptance_event, alice_sk)?
-    {
-        assert_eq!(identity.to_bytes(), bob_pk.to_bytes());
-        assert_eq!(device_id, None);
+    if let Some(response) = invite.process_invite_response(&acceptance_event, alice_sk)? {
+        assert_eq!(response.invitee_identity.to_bytes(), bob_pk.to_bytes());
+        assert_eq!(response.device_id, None);
+        assert!(response.owner_public_key.is_none());
     } else {
         panic!("Expected invite response to be processed successfully");
     }

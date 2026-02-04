@@ -60,7 +60,8 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
     let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
 
     // Accept the invite - creates session and response event
-    let (session, response_event) = invite.accept(our_pubkey, our_private_key, None)?;
+    let (session, response_event) =
+        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(our_pubkey))?;
 
     // Serialize session state
     let session_state = serde_json::to_string(&session.state)?;

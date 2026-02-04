@@ -128,6 +128,7 @@ struct ReactionInfo {
 pub async fn send(
     target: &str,
     message: &str,
+    reply_to: Option<&str>,
     config: &Config,
     storage: &Storage,
     output: &Output,
@@ -169,10 +170,15 @@ pub async fn send(
 
     let mut session = Session::new(session_state, chat_id.to_string());
 
-    // Encrypt the message
-    let encrypted_event = session
-        .send(message.to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to encrypt message: {}", e))?;
+    // Encrypt the message (with optional reply reference)
+    let encrypted_event = match reply_to {
+        Some(reply_id) => session
+            .send_reply(message.to_string(), reply_id)
+            .map_err(|e| anyhow::anyhow!("Failed to encrypt reply: {}", e))?,
+        None => session
+            .send(message.to_string())
+            .map_err(|e| anyhow::anyhow!("Failed to encrypt message: {}", e))?,
+    };
 
     let pubkey = config.public_key()?;
     let timestamp = std::time::SystemTime::now()
@@ -275,7 +281,8 @@ async fn create_chat_from_public_invite(
         .ok_or_else(|| anyhow::anyhow!("No public invite found for {}", target_pubkey_hex))?;
 
     let their_pubkey_hex = invite.inviter.to_hex();
-    let (session, response_event) = invite.accept(our_pubkey, our_private_key, None)?;
+    let (session, response_event) =
+        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(our_pubkey))?;
 
     let session_state = serde_json::to_string(&session.state)?;
     let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
@@ -996,7 +1003,11 @@ pub async fn listen(
                     };
 
                     match invite.process_invite_response(&event, our_private_key) {
-                        Ok(Some((session, their_pubkey, _device_id))) => {
+                        Ok(Some(response)) => {
+                            let session = response.session;
+                            let their_pubkey = response
+                                .owner_public_key
+                                .unwrap_or(response.invitee_identity);
                             let session_state = serde_json::to_string(&session.state)?;
                             let new_chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
                             let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
@@ -1086,8 +1097,14 @@ pub async fn listen(
                                                 nostr_double_ratchet::Invite::from_url(invite_url)
                                             {
                                                 let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+                                                let owner_pk = my_pk.clone();
                                                 if let Ok((accept_session, response_event)) =
-                                                    invite.accept(my_pk, our_private_key, None)
+                                                    invite.accept_with_owner(
+                                                        my_pk,
+                                                        our_private_key,
+                                                        None,
+                                                        Some(owner_pk),
+                                                    )
                                                 {
                                                     // Save the new chat
                                                     let new_chat_id = uuid::Uuid::new_v4()
@@ -1218,12 +1235,15 @@ pub async fn listen(
                                                             &existing_group.data,
                                                             &metadata,
                                                         );
-                                                        storage.save_group(&StoredGroup { data: updated })?;
+                                                        storage.save_group(&StoredGroup { data: updated.clone() })?;
                                                         storage.save_chat(&updated_chat)?;
                                                         output.event("group_metadata", serde_json::json!({
                                                             "group_id": gid,
                                                             "action": "updated",
                                                             "sender_pubkey": from_pubkey_hex,
+                                                            "name": updated.name,
+                                                            "members": updated.members,
+                                                            "admins": updated.admins,
                                                         }));
                                                     }
                                                     nostr_double_ratchet::group::MetadataValidation::Removed => {
@@ -1247,11 +1267,11 @@ pub async fn listen(
                                                 ) {
                                                     let group_data = nostr_double_ratchet::group::GroupData {
                                                         id: metadata.id.clone(),
-                                                        name: metadata.name,
+                                                        name: metadata.name.clone(),
                                                         description: metadata.description,
                                                         picture: metadata.picture,
-                                                        members: metadata.members,
-                                                        admins: metadata.admins,
+                                                        members: metadata.members.clone(),
+                                                        admins: metadata.admins.clone(),
                                                         created_at: timestamp * 1000,
                                                         secret: metadata.secret,
                                                         accepted: None,
@@ -1262,6 +1282,9 @@ pub async fn listen(
                                                         "group_id": gid,
                                                         "action": "created",
                                                         "sender_pubkey": from_pubkey_hex,
+                                                        "name": metadata.name,
+                                                        "members": metadata.members,
+                                                        "admins": metadata.admins,
                                                     }));
                                                 }
                                             }
@@ -1441,11 +1464,13 @@ mod tests {
             nostr_double_ratchet::Invite::create_new(alice_keys.public_key(), None, None).unwrap();
 
         // Bob accepts the invite - this creates a session where Bob can send
+        let bob_pk = bob_keys.public_key();
         let (bob_session, _response) = invite
-            .accept(
-                bob_keys.public_key(),
+            .accept_with_owner(
+                bob_pk,
                 bob_keys.secret_key().to_secret_bytes(),
                 None,
+                Some(bob_pk),
             )
             .unwrap();
 

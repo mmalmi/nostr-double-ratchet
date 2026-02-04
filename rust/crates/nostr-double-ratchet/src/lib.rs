@@ -1,4 +1,7 @@
 pub mod error;
+pub mod app_keys;
+pub mod app_keys_manager;
+pub mod delegate_manager;
 pub mod file_storage;
 pub mod group;
 pub mod invite;
@@ -12,10 +15,13 @@ pub mod user_record;
 pub mod utils;
 
 pub use error::{Error, Result};
+pub use app_keys::{AppKeys, DeviceEntry, is_app_keys_event};
+pub use app_keys_manager::AppKeysManager;
+pub use delegate_manager::{DelegateManager, DelegatePayload};
 pub use file_storage::{DebouncedFileStorage, FileStorageAdapter};
 pub use group::*;
-pub use invite::Invite;
-pub use pubsub::{NostrPubSub, SessionEvent};
+pub use invite::{Invite, InviteResponse};
+pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
 pub use session::Session;
 pub use session_manager::{SessionManager, SessionManagerEvent};
 pub use shared_channel::SharedChannel;

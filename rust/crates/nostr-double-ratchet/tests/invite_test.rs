@@ -27,9 +27,9 @@ fn test_url_generation_and_parsing() -> Result<()> {
     let alice_pk = alice_keys.public_key();
 
     let invite = Invite::create_new(alice_pk, None, None)?;
-    let url = invite.get_url("https://iris.to")?;
+    let url = invite.get_url("https://chat.iris.to")?;
 
-    assert!(url.contains("https://iris.to#"));
+    assert!(url.contains("https://chat.iris.to#"));
 
     let parsed_invite = Invite::from_url(&url)?;
     assert_eq!(parsed_invite.inviter.to_bytes(), invite.inviter.to_bytes());

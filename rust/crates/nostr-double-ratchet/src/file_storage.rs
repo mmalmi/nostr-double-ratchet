@@ -218,6 +218,7 @@ mod tests {
         let user_record = StoredUserRecord {
             user_id: "test-user".to_string(),
             devices: vec![],
+            known_device_identities: vec![],
         };
 
         let json = serde_json::to_string(&user_record).unwrap();

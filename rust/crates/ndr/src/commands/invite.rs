@@ -51,7 +51,7 @@ pub async fn create(
 
     // Create invite using nostr-double-ratchet
     let invite = nostr_double_ratchet::Invite::create_new(pubkey, None, None)?;
-    let url = invite.get_url("https://iris.to")?;
+    let url = invite.get_url("https://chat.iris.to")?;
     let serialized = invite.serialize()?;
 
     let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
@@ -236,8 +236,11 @@ pub async fn accept(
     // Process the acceptance - creates session
     let result = invite.process_invite_response(&event, our_private_key)?;
 
-    let (session, their_pubkey, _device_id) =
-        result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+    let response = result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+    let session = response.session;
+    let their_pubkey = response
+        .owner_public_key
+        .unwrap_or(response.invitee_identity);
 
     // Serialize session state
     let session_state = serde_json::to_string(&session.state)?;

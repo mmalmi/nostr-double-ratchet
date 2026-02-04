@@ -1,7 +1,8 @@
-use crate::{pubsub::NostrPubSub, InMemoryStorage, Invite, Result, StorageAdapter, UserRecord};
-use nostr::PublicKey;
-use nostr::UnsignedEvent;
-use std::collections::{HashMap, VecDeque};
+use crate::{
+    is_app_keys_event, AppKeys, InMemoryStorage, Invite, Result, StorageAdapter, UserRecord,
+};
+use nostr::{Keys, PublicKey, Tag, UnsignedEvent};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,24 +27,24 @@ struct InviteState {
     our_identity_key: [u8; 32],
 }
 
-struct PendingMessage {
-    text: String,
-    #[allow(dead_code)]
-    timestamp: u64,
-    first_sent_at: Option<u64>,
-}
-
 pub struct SessionManager {
     user_records: Arc<Mutex<HashMap<PublicKey, UserRecord>>>,
     our_public_key: PublicKey,
     our_identity_key: [u8; 32],
     device_id: String,
+    owner_public_key: PublicKey,
     storage: Arc<dyn StorageAdapter>,
     pubsub: Arc<dyn NostrPubSub>,
     initialized: Arc<Mutex<bool>>,
     invite_state: Arc<Mutex<Option<InviteState>>>,
-    pending_invites: Arc<Mutex<HashMap<PublicKey, Invite>>>,
-    pending_messages: Arc<Mutex<HashMap<PublicKey, VecDeque<PendingMessage>>>>,
+    provided_invite: Option<Invite>,
+    delegate_to_owner: Arc<Mutex<HashMap<PublicKey, PublicKey>>>,
+    cached_app_keys: Arc<Mutex<HashMap<PublicKey, AppKeys>>>,
+    processed_invite_responses: Arc<Mutex<HashSet<String>>>,
+    message_history: Arc<Mutex<HashMap<PublicKey, Vec<UnsignedEvent>>>>,
+    invite_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
+    app_keys_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
+    pending_acceptances: Arc<Mutex<HashSet<PublicKey>>>,
 }
 
 impl SessionManager {
@@ -51,8 +52,10 @@ impl SessionManager {
         our_public_key: PublicKey,
         our_identity_key: [u8; 32],
         device_id: String,
+        owner_public_key: PublicKey,
         event_tx: crossbeam_channel::Sender<SessionManagerEvent>,
         storage: Option<Arc<dyn StorageAdapter>>,
+        invite: Option<Invite>,
     ) -> Self {
         let pubsub: Arc<dyn NostrPubSub> = Arc::new(event_tx);
         Self::new_with_pubsub(our_public_key, our_identity_key, device_id, pubsub, storage)
@@ -70,12 +73,19 @@ impl SessionManager {
             our_public_key,
             our_identity_key,
             device_id,
+            owner_public_key,
             storage: storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new())),
             pubsub,
             initialized: Arc::new(Mutex::new(false)),
             invite_state: Arc::new(Mutex::new(None)),
-            pending_invites: Arc::new(Mutex::new(HashMap::new())),
-            pending_messages: Arc::new(Mutex::new(HashMap::new())),
+            provided_invite: invite,
+            delegate_to_owner: Arc::new(Mutex::new(HashMap::new())),
+            cached_app_keys: Arc::new(Mutex::new(HashMap::new())),
+            processed_invite_responses: Arc::new(Mutex::new(HashSet::new())),
+            message_history: Arc::new(Mutex::new(HashMap::new())),
+            invite_subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            app_keys_subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            pending_acceptances: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -89,13 +99,32 @@ impl SessionManager {
 
         self.load_all_user_records()?;
 
+        // Ensure our own device is present in our owner's record
+        {
+            let mut records = self.user_records.lock().unwrap();
+            let record = records
+                .entry(self.owner_public_key)
+                .or_insert_with(|| UserRecord::new(hex::encode(self.owner_public_key.to_bytes())));
+            self.upsert_device_record(record, &self.device_id);
+        }
+
         let device_invite_key = self.device_invite_key(&self.device_id);
-        let invite = match self.storage.get(&device_invite_key)? {
-            Some(data) => Invite::deserialize(&data)?,
-            None => Invite::create_new(self.our_public_key, Some(self.device_id.clone()), None)?,
+        let invite = if let Some(invite) = self.provided_invite.clone() {
+            invite
+        } else {
+            match self.storage.get(&device_invite_key)? {
+                Some(data) => Invite::deserialize(&data)?,
+                None => Invite::create_new(self.our_public_key, Some(self.device_id.clone()), None)?,
+            }
         };
 
         self.storage.put(&device_invite_key, invite.serialize()?)?;
+
+        if invite.inviter_ephemeral_private_key.is_none() {
+            return Err(crate::Error::Invite(
+                "Invite missing ephemeral keys".to_string(),
+            ));
+        }
 
         *self.invite_state.lock().unwrap() = Some(InviteState {
             invite: invite.clone(),
@@ -105,15 +134,15 @@ impl SessionManager {
         // Subscribe to invite responses using Invite's own filter (with #p tag)
         invite.listen_with_pubsub(self.pubsub.as_ref())?;
 
-        let unsigned_event = invite.get_event()?;
-        let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
-        let signed_event = unsigned_event
-            .sign_with_keys(&keys)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
-        self.pubsub.publish_signed(signed_event)?;
+        // Publish our invite (signed with device identity key)
+        if let Ok(unsigned) = invite.get_event() {
+            let keys = Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
+            if let Ok(signed) = unsigned.sign_with_keys(&keys) {
+                let _ = self.event_tx.send(SessionManagerEvent::PublishSigned(signed));
+            }
+        }
 
         // Sessions manage their own kind 1060 subscriptions
-        // Load existing sessions and set up their subscriptions
         let mut records = self.user_records.lock().unwrap();
         for user_record in records.values_mut() {
             for device_record in user_record.device_records.values_mut() {
@@ -127,145 +156,92 @@ impl SessionManager {
                 }
             }
         }
+        drop(records);
+
+        // Start listening for AppKeys for our owner (to discover sibling devices)
+        self.setup_user(self.owner_public_key);
 
         Ok(())
     }
 
     pub fn send_text(&self, recipient: PublicKey, text: String) -> Result<Vec<String>> {
-        eprintln!(
-            "🚀 send_text called: recipient={}, text_len={}",
-            &hex::encode(recipient.to_bytes())[..16],
-            text.len()
-        );
-
         if text.trim().is_empty() {
-            eprintln!("⚠️  Ignoring empty text send");
             return Ok(Vec::new());
         }
 
-        let mut event_ids = Vec::new();
-        let mut user_records = self.user_records.lock().unwrap();
-
-        // Check if recipient has any active sessions
-        let has_recipient_sessions = user_records
-            .get(&recipient)
-            .map(|record| {
-                let count = record
-                    .device_records
-                    .values()
-                    .filter(|dr| dr.active_session.is_some())
-                    .count();
-                eprintln!(
-                    "  Recipient {} has {} active sessions",
-                    &hex::encode(recipient.to_bytes())[..16],
-                    count
-                );
-                count > 0
-            })
-            .unwrap_or_else(|| {
-                eprintln!(
-                    "  Recipient {} not in user_records yet",
-                    &hex::encode(recipient.to_bytes())[..16]
-                );
-                false
-            });
-
-        // If no sessions exist, queue the message and setup user to fetch invites (if not already setup)
-        if !has_recipient_sessions {
-            drop(user_records);
-
-            // Setup recipient to subscribe to their invites (only if not already done)
-            let needs_setup = {
-                let pending = self.pending_invites.lock().unwrap();
-                !pending.contains_key(&recipient)
-            };
-
-            if needs_setup {
-                if recipient != self.our_public_key {
-                    let _ = self.setup_user(recipient);
-                }
-                let _ = self.setup_user(self.our_public_key);
-            }
-
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            let pending_msg = PendingMessage {
-                text: text.clone(),
-                timestamp,
-                first_sent_at: None,
-            };
-
-            self.pending_messages
-                .lock()
-                .unwrap()
-                .entry(recipient)
-                .or_default()
-                .push_back(pending_msg);
-
-            eprintln!(
-                "📮 Queued message to {} (no active sessions)",
-                &hex::encode(recipient.to_bytes())[..16]
-            );
-
-            return Ok(event_ids);
-        }
+        let recipient_owner = self.resolve_to_owner(&recipient);
 
         // Build event with p-tag for recipient (iris-client compatibility)
         let event = nostr::EventBuilder::text_note(&text)
             .tag(
-                nostr::Tag::parse(&["p".to_string(), hex::encode(recipient.to_bytes())])
+                Tag::parse(&["p".to_string(), hex::encode(recipient.to_bytes())])
                     .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
             )
             .build(self.our_public_key);
 
-        // Send to recipient's devices
-        if let Some(recipient_record) = user_records.get_mut(&recipient) {
-            for session in recipient_record.get_active_sessions_mut().iter_mut() {
-                match session.send_event(event.clone()) {
-                    Ok(signed_event) => {
-                        event_ids.push(signed_event.id.to_string());
-                        let _ = self.pubsub.publish_signed(signed_event);
-                    }
-                    Err(_) => continue,
-                }
-            }
+        // Add to history for recipient and our owner (for sibling device sync)
+        let mut history = self.message_history.lock().unwrap();
+        for key in [recipient_owner, self.owner_public_key] {
+            history.entry(key).or_default().push(event.clone());
         }
+        drop(history);
 
-        // Send to own devices (for multi-device sync), unless sending to self
-        if recipient != self.our_public_key {
-            if let Some(self_record) = user_records.get_mut(&self.our_public_key) {
-                for session in self_record.get_active_sessions_mut().iter_mut() {
-                    match session.send_event(event.clone()) {
-                        Ok(signed_event) => {
-                            event_ids.push(signed_event.id.to_string());
-                            let _ = self.pubsub.publish_signed(signed_event);
+        // Ensure we are set up for recipient and our own owner
+        self.setup_user(recipient_owner);
+        self.setup_user(self.owner_public_key);
+
+        // Gather target devices (recipient + own siblings), de-dup, exclude ourselves
+        let mut device_targets: Vec<(PublicKey, String)> = Vec::new();
+        {
+            let records = self.user_records.lock().unwrap();
+            for owner in [recipient_owner, self.owner_public_key] {
+                if let Some(record) = records.get(&owner) {
+                    for device_id in record.device_records.keys() {
+                        if device_id != &self.device_id {
+                            device_targets.push((owner, device_id.clone()));
                         }
-                        Err(_) => continue,
                     }
                 }
             }
         }
 
-        if !event_ids.is_empty() {
-            eprintln!(
-                "📤 Sent message to {} ({} sessions)",
-                &hex::encode(recipient.to_bytes())[..16],
-                event_ids.len()
-            );
+        let mut seen = HashSet::new();
+        device_targets.retain(|(_, device_id)| seen.insert(device_id.clone()));
+
+        let mut event_ids = Vec::new();
+
+        for (owner, device_id) in device_targets {
+            let mut records = self.user_records.lock().unwrap();
+            let Some(user_record) = records.get_mut(&owner) else {
+                continue;
+            };
+
+            // Check if device is still authorized
+            if let Ok(device_pk) = crate::utils::pubkey_from_hex(&device_id) {
+                if !self.is_device_authorized_with_record(owner, device_pk, Some(&*user_record)) {
+                    continue;
+                }
+            }
+
+            let Some(device_record) = user_record.device_records.get_mut(&device_id) else {
+                continue;
+            };
+
+            if let Some(ref mut session) = device_record.active_session {
+                if let Ok(signed_event) = session.send_event(event.clone()) {
+                    event_ids.push(signed_event.id.to_string());
+                    let _ = self
+                        .event_tx
+                        .send(SessionManagerEvent::PublishSigned(signed_event));
+                }
+            }
         }
 
-        drop(user_records);
-        let _ = self.store_user_record(&recipient);
-        if recipient != self.our_public_key {
-            let _ = self.store_user_record(&self.our_public_key);
-        }
-
-        // If we successfully sent to at least one session, try to flush any pending messages
         if !event_ids.is_empty() {
-            self.flush_pending_messages(recipient);
+            let _ = self.store_user_record(&recipient_owner);
+            if self.owner_public_key != recipient_owner {
+                let _ = self.store_user_record(&self.owner_public_key);
+            }
         }
 
         Ok(event_ids)
@@ -354,7 +330,8 @@ impl SessionManager {
                     }
                     output.push_str(&format!(
                         "  our_next:       {}\n",
-                        &hex::encode(session.state.our_next_nostr_key.public_key.to_bytes())[..16]
+                        &hex::encode(session.state.our_next_nostr_key.public_key.to_bytes())
+                            [..16]
                     ));
                     if let Some(their_current) = session.state.their_current_nostr_public_key {
                         output.push_str(&format!(
@@ -382,296 +359,628 @@ impl SessionManager {
         self.our_public_key
     }
 
+    pub fn get_owner_pubkey(&self) -> PublicKey {
+        self.owner_public_key
+    }
+
     fn device_invite_key(&self, device_id: &str) -> String {
         format!("device-invite/{}", device_id)
     }
 
-    fn load_all_user_records(&self) -> Result<()> {
-        let mut keys = self.storage.list("user/")?;
-        if keys.is_empty() {
-            keys = self.storage.list("user_")?;
+    fn user_record_key(&self, pubkey: &PublicKey) -> String {
+        format!("user/{}", hex::encode(pubkey.to_bytes()))
+    }
+
+    fn user_record_key_prefix(&self) -> String {
+        "user/".to_string()
+    }
+
+    fn resolve_to_owner(&self, pubkey: &PublicKey) -> PublicKey {
+        self.delegate_to_owner
+            .lock()
+            .unwrap()
+            .get(pubkey)
+            .copied()
+            .unwrap_or(*pubkey)
+    }
+
+    fn update_delegate_mapping(&self, owner_pubkey: PublicKey, app_keys: &AppKeys) {
+        let mut records = self.user_records.lock().unwrap();
+        let user_record = records
+            .entry(owner_pubkey)
+            .or_insert_with(|| UserRecord::new(hex::encode(owner_pubkey.to_bytes())));
+
+        let new_identities: HashSet<String> = app_keys
+            .get_all_devices()
+            .into_iter()
+            .map(|d| hex::encode(d.identity_pubkey.to_bytes()))
+            .collect();
+
+        // Remove stale mappings
+        let old_identities = user_record.known_device_identities.clone();
+        for identity_hex in old_identities.iter() {
+            if !new_identities.contains(identity_hex) {
+                if let Ok(pk) = crate::utils::pubkey_from_hex(identity_hex) {
+                    self.delegate_to_owner.lock().unwrap().remove(&pk);
+                }
+            }
+        }
+
+        user_record.known_device_identities = new_identities.iter().cloned().collect();
+
+        for identity_hex in new_identities.iter() {
+            if let Ok(pk) = crate::utils::pubkey_from_hex(identity_hex) {
+                self.delegate_to_owner.lock().unwrap().insert(pk, owner_pubkey);
+            }
+        }
+
+        self.cached_app_keys
+            .lock()
+            .unwrap()
+            .insert(owner_pubkey, app_keys.clone());
+
+        drop(records);
+        let _ = self.store_user_record(&owner_pubkey);
+    }
+
+    fn is_device_authorized(&self, owner_pubkey: PublicKey, device_pubkey: PublicKey) -> bool {
+        if owner_pubkey == device_pubkey {
+            return true;
+        }
+
+        if let Some(app_keys) = self.cached_app_keys.lock().unwrap().get(&owner_pubkey) {
+            return app_keys.get_device(&device_pubkey).is_some();
+        }
+
+        let records = self.user_records.lock().unwrap();
+        if let Some(record) = records.get(&owner_pubkey) {
+            let device_hex = hex::encode(device_pubkey.to_bytes());
+            return record.known_device_identities.contains(&device_hex);
+        }
+
+        false
+    }
+
+    fn is_device_authorized_with_record(
+        &self,
+        owner_pubkey: PublicKey,
+        device_pubkey: PublicKey,
+        user_record: Option<&UserRecord>,
+    ) -> bool {
+        if owner_pubkey == device_pubkey {
+            return true;
+        }
+
+        if let Some(app_keys) = self.cached_app_keys.lock().unwrap().get(&owner_pubkey) {
+            return app_keys.get_device(&device_pubkey).is_some();
+        }
+
+        if let Some(record) = user_record {
+            let device_hex = hex::encode(device_pubkey.to_bytes());
+            return record.known_device_identities.contains(&device_hex);
+        }
+
+        false
+    }
+
+    fn subscribe_to_app_keys(&self, owner_pubkey: PublicKey) {
+        let mut subs = self.app_keys_subscriptions.lock().unwrap();
+        if subs.contains(&owner_pubkey) {
+            return;
+        }
+        subs.insert(owner_pubkey);
+        drop(subs);
+
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::Custom(crate::APP_KEYS_EVENT_KIND as u16))
+            .authors(vec![owner_pubkey])
+            .custom_tag(
+                nostr::types::filter::SingleLetterTag::lowercase(
+                    nostr::types::filter::Alphabet::D,
+                ),
+                ["double-ratchet/app-keys"],
+            );
+        if let Ok(filter_json) = serde_json::to_string(&filter) {
+            let _ = self.event_tx.send(SessionManagerEvent::Subscribe(filter_json));
+        }
+    }
+
+    pub fn setup_user(&self, user_pubkey: PublicKey) {
+        let owner_pubkey = self.resolve_to_owner(&user_pubkey);
+
+        // Ensure record exists
+        {
+            let mut records = self.user_records.lock().unwrap();
+            records
+                .entry(owner_pubkey)
+                .or_insert_with(|| UserRecord::new(hex::encode(owner_pubkey.to_bytes())));
+        }
+
+        self.subscribe_to_app_keys(owner_pubkey);
+
+        // Subscribe to invites for any known devices from stored identities
+        let known_identities = {
+            let records = self.user_records.lock().unwrap();
+            records
+                .get(&owner_pubkey)
+                .map(|r| r.known_device_identities.clone())
+                .unwrap_or_default()
+        };
+
+        for identity_hex in known_identities {
+            if let Ok(pk) = crate::utils::pubkey_from_hex(&identity_hex) {
+                self.subscribe_to_device_invite(owner_pubkey, pk);
+            }
+        }
+    }
+
+    fn subscribe_to_device_invite(&self, owner_pubkey: PublicKey, device_pubkey: PublicKey) {
+        let mut subs = self.invite_subscriptions.lock().unwrap();
+        if subs.contains(&device_pubkey) {
+            return;
+        }
+        subs.insert(device_pubkey);
+        drop(subs);
+
+        let records = self.user_records.lock().unwrap();
+        if let Some(record) = records.get(&owner_pubkey) {
+            let device_hex = hex::encode(device_pubkey.to_bytes());
+            if let Some(device_record) = record.device_records.get(&device_hex) {
+                if device_record.active_session.is_some() {
+                    return;
+                }
+            }
+        }
+        drop(records);
+
+        let pubsub = crate::ChannelPubSub::new(self.event_tx.clone());
+        let _ = Invite::from_user(device_pubkey, &pubsub);
+    }
+
+    fn upsert_device_record(&self, record: &mut UserRecord, device_id: &str) {
+        if record.device_records.contains_key(device_id) {
+            return;
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        record.device_records.insert(
+            device_id.to_string(),
+            crate::DeviceRecord {
+                device_id: device_id.to_string(),
+                public_key: String::new(),
+                active_session: None,
+                inactive_sessions: Vec::new(),
+                created_at: now,
+                is_stale: false,
+                stale_timestamp: None,
+                last_activity: Some(now),
+            },
+        );
+    }
+
+    fn record_known_device_identity(&self, owner_pubkey: PublicKey, device_pubkey: PublicKey) {
+        let identity_hex = hex::encode(device_pubkey.to_bytes());
+        let mut records = self.user_records.lock().unwrap();
+        let record = records
+            .entry(owner_pubkey)
+            .or_insert_with(|| UserRecord::new(hex::encode(owner_pubkey.to_bytes())));
+        let mut updated = false;
+        if !record.known_device_identities.contains(&identity_hex) {
+            record.known_device_identities.push(identity_hex.clone());
+            updated = true;
+        }
+        self.delegate_to_owner
+            .lock()
+            .unwrap()
+            .insert(device_pubkey, owner_pubkey);
+        drop(records);
+        if updated {
+            let _ = self.store_user_record(&owner_pubkey);
+        }
+    }
+
+    fn send_message_history(&self, owner_pubkey: PublicKey, device_id: &str) {
+        let history = {
+            self.message_history
+                .lock()
+                .unwrap()
+                .get(&owner_pubkey)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        if history.is_empty() {
+            return;
         }
 
         let mut records = self.user_records.lock().unwrap();
+        let Some(user_record) = records.get_mut(&owner_pubkey) else {
+            return;
+        };
+        let Some(device_record) = user_record.device_records.get_mut(device_id) else {
+            return;
+        };
+        let Some(ref mut session) = device_record.active_session else {
+            return;
+        };
 
-        for key in keys {
-            let json = match self.storage.get(&key)? {
-                Some(v) => v,
-                None => continue,
-            };
-
-            let stored: crate::StoredUserRecord = serde_json::from_str(&json)?;
-            let user_pubkey = crate::utils::pubkey_from_hex(&stored.user_id)?;
-            let mut user_record = UserRecord::new(stored.user_id.clone());
-
-            for device in stored.devices {
-                let mut active_session = device
-                    .active_session
-                    .map(|state| crate::Session::new(state, "restored".to_string()));
-                let inactive_sessions = device
-                    .inactive_sessions
-                    .into_iter()
-                    .map(|state| crate::Session::new(state, "restored".to_string()))
-                    .collect::<Vec<_>>();
-
-                if let Some(ref mut session) = active_session {
-                    session.set_pubsub(self.pubsub.clone());
-                }
-
-                let mut device_record = crate::DeviceRecord {
-                    device_id: device.device_id.clone(),
-                    public_key: stored.user_id.clone(),
-                    active_session,
-                    inactive_sessions,
-                    is_stale: device.is_stale,
-                    stale_timestamp: device.stale_timestamp,
-                    last_activity: device.last_activity,
-                };
-
-                for session in device_record.inactive_sessions.iter_mut() {
-                    session.set_pubsub(self.pubsub.clone());
-                }
-
-                user_record
-                    .device_records
-                    .insert(device_record.device_id.clone(), device_record);
+        for event in history {
+            if let Ok(signed_event) = session.send_event(event.clone()) {
+                let _ = self
+                    .event_tx
+                    .send(SessionManagerEvent::PublishSigned(signed_event));
             }
+        }
+        drop(records);
+        let _ = self.store_user_record(&owner_pubkey);
+    }
 
-            records.insert(user_pubkey, user_record);
+    fn cleanup_device(&self, owner_pubkey: PublicKey, device_id: &str) {
+        let mut records = self.user_records.lock().unwrap();
+        let Some(user_record) = records.get_mut(&owner_pubkey) else {
+            return;
+        };
+
+        if let Some(device_record) = user_record.device_records.remove(device_id) {
+            if let Some(session) = device_record.active_session {
+                session.close();
+            }
+            for session in device_record.inactive_sessions {
+                session.close();
+            }
         }
 
-        Ok(())
+        if let Ok(device_pk) = crate::utils::pubkey_from_hex(device_id) {
+            self.delegate_to_owner.lock().unwrap().remove(&device_pk);
+        }
+
+        drop(records);
+        let _ = self.store_user_record(&owner_pubkey);
+    }
+
+    fn handle_app_keys_event(&self, owner_pubkey: PublicKey, app_keys: AppKeys) {
+        self.update_delegate_mapping(owner_pubkey, &app_keys);
+
+        let devices = app_keys.get_all_devices();
+        let active_ids: HashSet<String> = devices
+            .iter()
+            .map(|d| hex::encode(d.identity_pubkey.to_bytes()))
+            .collect();
+
+        // Cleanup revoked devices
+        let existing_devices = {
+            let records = self.user_records.lock().unwrap();
+            records
+                .get(&owner_pubkey)
+                .map(|r| r.device_records.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+
+        for device_id in existing_devices {
+            if !active_ids.contains(&device_id) {
+                self.cleanup_device(owner_pubkey, &device_id);
+                self.invite_subscriptions
+                    .lock()
+                    .unwrap()
+                    .retain(|pk| hex::encode(pk.to_bytes()) != device_id);
+            }
+        }
+
+        for device in devices {
+            self.subscribe_to_device_invite(owner_pubkey, device.identity_pubkey);
+        }
     }
 
     fn store_user_record(&self, pubkey: &PublicKey) -> Result<()> {
         let user_records = self.user_records.lock().unwrap();
         if let Some(user_record) = user_records.get(pubkey) {
             let stored = user_record.to_stored();
-            let key = format!("user/{}", hex::encode(pubkey.to_bytes()));
+            let key = self.user_record_key(pubkey);
             let json = serde_json::to_string(&stored)?;
             self.storage.put(&key, json)?;
         }
         Ok(())
     }
 
-    fn flush_pending_messages(&self, recipient: PublicKey) {
-        let mut pending_messages = self.pending_messages.lock().unwrap();
+    fn load_all_user_records(&self) -> Result<()> {
+        let prefix = self.user_record_key_prefix();
+        let keys = self.storage.list(&prefix)?;
 
-        if let Some(message_queue) = pending_messages.get_mut(&recipient) {
-            let current_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+        let mut records = self.user_records.lock().unwrap();
 
-            let mut messages_to_process = Vec::new();
+        for key in keys {
+            let Some(data) = self.storage.get(&key)? else {
+                continue;
+            };
 
-            // Process all pending messages
-            while let Some(msg) = message_queue.pop_front() {
-                messages_to_process.push(msg);
+            let stored: crate::StoredUserRecord = match serde_json::from_str(&data) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let pubkey_hex = key.strip_prefix(&prefix).unwrap_or(&stored.user_id);
+            let owner_pubkey = match crate::utils::pubkey_from_hex(pubkey_hex) {
+                Ok(pk) => pk,
+                Err(_) => continue,
+            };
+
+            let mut user_record = UserRecord::new(stored.user_id.clone());
+            user_record.known_device_identities = stored.known_device_identities.clone();
+
+            for device in stored.devices {
+                let mut device_record = crate::DeviceRecord {
+                    device_id: device.device_id.clone(),
+                    public_key: String::new(),
+                    active_session: None,
+                    inactive_sessions: Vec::new(),
+                    created_at: device.created_at,
+                    is_stale: device.is_stale,
+                    stale_timestamp: device.stale_timestamp,
+                    last_activity: device.last_activity,
+                };
+
+                if let Some(state) = device.active_session {
+                    let mut session = crate::Session::new(state, format!("session-{}", device.device_id));
+                    session.set_event_tx(self.event_tx.clone());
+                    let _ = session.subscribe_to_messages();
+                    device_record.active_session = Some(session);
+                }
+
+                for state in device.inactive_sessions {
+                    let mut session = crate::Session::new(state, format!("session-{}-inactive", device.device_id));
+                    session.set_event_tx(self.event_tx.clone());
+                    let _ = session.subscribe_to_messages();
+                    device_record.inactive_sessions.push(session);
+                }
+
+                user_record
+                    .device_records
+                    .insert(device.device_id.clone(), device_record);
             }
 
-            drop(pending_messages);
-
-            // Try to send each pending message
-            for mut pending_msg in messages_to_process {
-                match self.send_text(recipient, pending_msg.text.clone()) {
-                    Ok(event_ids) if !event_ids.is_empty() => {
-                        // Successfully sent to at least one session
-                        tracing::info!(
-                            "Flushed pending message to {} (sent to {} sessions)",
-                            hex::encode(recipient.to_bytes()),
-                            event_ids.len()
-                        );
-
-                        // Mark first send time if not set
-                        if pending_msg.first_sent_at.is_none() {
-                            pending_msg.first_sent_at = Some(current_time);
-                        }
-
-                        // Keep in queue for 5 seconds after first send (for additional devices)
-                        if let Some(first_sent) = pending_msg.first_sent_at {
-                            if current_time - first_sent < 5 {
-                                self.pending_messages
-                                    .lock()
-                                    .unwrap()
-                                    .entry(recipient)
-                                    .or_default()
-                                    .push_back(pending_msg);
-                            } else {
-                                tracing::info!("Removing message from queue (sent 5+ seconds ago)");
-                            }
-                        }
-                    }
-                    _ => {
-                        // Failed to send or no sessions - re-queue the message
-                        self.pending_messages
-                            .lock()
-                            .unwrap()
-                            .entry(recipient)
-                            .or_default()
-                            .push_back(pending_msg);
-                    }
+            for identity_hex in stored.known_device_identities.iter() {
+                if let Ok(pk) = crate::utils::pubkey_from_hex(identity_hex) {
+                    self.delegate_to_owner.lock().unwrap().insert(pk, owner_pubkey);
                 }
             }
+
+            records.insert(owner_pubkey, user_record);
         }
-    }
-
-    pub fn setup_user(&self, user_pubkey: PublicKey) -> Result<()> {
-        // Check if already set up (has sessions or pending invite)
-        {
-            let user_records = self.user_records.lock().unwrap();
-            if user_records.contains_key(&user_pubkey) {
-                return Ok(());
-            }
-        }
-
-        {
-            let pending = self.pending_invites.lock().unwrap();
-            if pending.contains_key(&user_pubkey) {
-                return Ok(());
-            }
-        }
-
-        crate::Invite::from_user_with_pubsub(user_pubkey, self.pubsub.as_ref())?;
-
-        // Create a placeholder invite to track that we're fetching
-        let placeholder = Invite {
-            inviter_ephemeral_public_key: nostr::Keys::generate().public_key(),
-            shared_secret: [0u8; 32],
-            inviter: user_pubkey,
-            inviter_ephemeral_private_key: None,
-            device_id: None,
-            max_uses: None,
-            used_by: Vec::new(),
-            created_at: 0,
-        };
-        self.pending_invites
-            .lock()
-            .unwrap()
-            .insert(user_pubkey, placeholder);
 
         Ok(())
     }
 
+    fn promote_session_to_active(user_record: &mut UserRecord, device_id: &str, session_index: usize) {
+        let Some(device_record) = user_record.device_records.get_mut(device_id) else {
+            return;
+        };
+
+        if session_index >= device_record.inactive_sessions.len() {
+            return;
+        }
+
+        let session = device_record.inactive_sessions.remove(session_index);
+        if let Some(active) = device_record.active_session.take() {
+            device_record.inactive_sessions.insert(0, active);
+        }
+        device_record.active_session = Some(session);
+
+        const MAX_INACTIVE: usize = 10;
+        if device_record.inactive_sessions.len() > MAX_INACTIVE {
+            device_record.inactive_sessions.truncate(MAX_INACTIVE);
+        }
+    }
+
     pub fn process_received_event(&self, event: nostr::Event) {
+        if is_app_keys_event(&event) {
+            if let Ok(app_keys) = AppKeys::from_event(&event) {
+                self.handle_app_keys_event(event.pubkey, app_keys);
+            }
+            return;
+        }
+
         if event.kind.as_u16() == crate::INVITE_RESPONSE_KIND as u16 {
+            if self
+                .processed_invite_responses
+                .lock()
+                .unwrap()
+                .contains(&event.id.to_string())
+            {
+                return;
+            }
+
             if let Some(state) = self.invite_state.lock().unwrap().as_ref() {
-                match state
-                    .invite
-                    .process_invite_response(&event, state.our_identity_key)
+                if let Ok(Some(response)) =
+                    state.invite.process_invite_response(&event, state.our_identity_key)
                 {
-                    Ok(Some((mut sess, invitee_pubkey, device_id))) => {
-                        tracing::info!(
-                            "✅ Accepted invite response from {}",
-                            &hex::encode(invitee_pubkey.to_bytes())[..16]
-                        );
+                    if response.invitee_identity == self.our_public_key {
+                        return;
+                    }
 
-                        if let Some(ref dev_id) = device_id {
-                            if dev_id != &self.device_id {
-                                let acceptance_key = format!(
-                                    "invite-accept/{}/{}",
-                                    hex::encode(invitee_pubkey.to_bytes()),
-                                    dev_id
+                    let owner_pubkey = response
+                        .owner_public_key
+                        .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
+
+                    if !self.is_device_authorized(owner_pubkey, response.invitee_identity) {
+                        return;
+                    }
+
+                    self.record_known_device_identity(owner_pubkey, response.invitee_identity);
+
+                    let device_id = response.device_id.unwrap_or_else(|| {
+                        hex::encode(response.invitee_identity.to_bytes())
+                    });
+
+                    let mut session = response.session;
+                    session.set_event_tx(self.event_tx.clone());
+                    let _ = session.subscribe_to_messages();
+
+                    {
+                        let mut records = self.user_records.lock().unwrap();
+                        let user_record = records
+                            .entry(owner_pubkey)
+                            .or_insert_with(|| {
+                                UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
+                            });
+                        self.upsert_device_record(user_record, &device_id);
+                        user_record.upsert_session(Some(&device_id), session);
+                    }
+
+                    let _ = self.store_user_record(&owner_pubkey);
+                    self.send_message_history(owner_pubkey, &device_id);
+
+                    self.processed_invite_responses
+                        .lock()
+                        .unwrap()
+                        .insert(event.id.to_string());
+                }
+            }
+            return;
+        }
+
+        if event.kind.as_u16() == crate::INVITE_EVENT_KIND as u16 {
+            if let Ok(invite) = Invite::from_event(&event) {
+                if invite.inviter == self.our_public_key {
+                    return;
+                }
+
+                let inviter_device = invite.inviter;
+                let owner_pubkey = self.resolve_to_owner(&inviter_device);
+
+                if !self.is_device_authorized(owner_pubkey, inviter_device) {
+                    return;
+                }
+
+                let device_id = invite.device_id.clone().unwrap_or_else(|| {
+                    hex::encode(inviter_device.to_bytes())
+                });
+
+                let already_has_session = {
+                    let records = self.user_records.lock().unwrap();
+                    records
+                        .get(&owner_pubkey)
+                        .and_then(|r| r.device_records.get(&device_id))
+                        .and_then(|d| d.active_session.as_ref())
+                        .is_some()
+                };
+
+                if already_has_session {
+                    return;
+                }
+
+                {
+                    let mut pending = self.pending_acceptances.lock().unwrap();
+                    if pending.contains(&inviter_device) {
+                        return;
+                    }
+                    pending.insert(inviter_device);
+                }
+
+                let accept_result = invite.accept_with_owner(
+                    self.our_public_key,
+                    self.our_identity_key,
+                    Some(self.device_id.clone()),
+                    Some(self.owner_public_key),
+                );
+
+                match accept_result {
+                    Ok((mut session, response_event)) => {
+                        let _ = self
+                            .event_tx
+                            .send(SessionManagerEvent::PublishSigned(response_event));
+                        session.set_event_tx(self.event_tx.clone());
+                        let _ = session.subscribe_to_messages();
+
+                        {
+                            let mut records = self.user_records.lock().unwrap();
+                            let user_record = records
+                                .entry(owner_pubkey)
+                                .or_insert_with(|| {
+                                    UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
+                                });
+                            self.upsert_device_record(user_record, &device_id);
+                            user_record.upsert_session(Some(&device_id), session);
+                        }
+
+                        self.record_known_device_identity(owner_pubkey, inviter_device);
+                        let _ = self.store_user_record(&owner_pubkey);
+                        self.send_message_history(owner_pubkey, &device_id);
+                    }
+                    Err(_) => {}
+                }
+
+                self.pending_acceptances.lock().unwrap().remove(&inviter_device);
+            }
+            return;
+        }
+
+        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16 {
+            let event_id = Some(event.id.to_string());
+            let mut decrypted: Option<(PublicKey, String, String)> = None;
+
+            {
+                let mut records = self.user_records.lock().unwrap();
+                'outer: for (owner_pubkey, user_record) in records.iter_mut() {
+                    let device_ids: Vec<String> =
+                        user_record.device_records.keys().cloned().collect();
+
+                    for device_id in device_ids {
+                        let Some(device_record) =
+                            user_record.device_records.get_mut(&device_id)
+                        else {
+                            continue;
+                        };
+
+                        if let Some(ref mut session) = device_record.active_session {
+                            if let Ok(Some(plaintext)) = session.receive(&event) {
+                                decrypted =
+                                    Some((*owner_pubkey, plaintext, device_id.clone()));
+                                break 'outer;
+                            }
+                        }
+
+                        for idx in 0..device_record.inactive_sessions.len() {
+                            let plaintext_opt = {
+                                let session = &mut device_record.inactive_sessions[idx];
+                                session.receive(&event).ok().flatten()
+                            };
+
+                            if let Some(plaintext) = plaintext_opt {
+                                SessionManager::promote_session_to_active(
+                                    user_record,
+                                    &device_id,
+                                    idx,
                                 );
-                                if self.storage.get(&acceptance_key).ok().flatten().is_none() {
-                                    let _ = self.storage.put(&acceptance_key, "1".to_string());
-
-                                    sess.set_pubsub(self.pubsub.clone());
-                                    let _ = sess.subscribe_to_messages();
-
-                                    let mut records = self.user_records.lock().unwrap();
-                                    let user_record =
-                                        records.entry(invitee_pubkey).or_insert_with(|| {
-                                            UserRecord::new(hex::encode(invitee_pubkey.to_bytes()))
-                                        });
-                                    user_record.upsert_session(Some(dev_id), sess);
-                                    drop(records);
-
-                                    let _ = self.store_user_record(&invitee_pubkey);
-
-                                    // Try to flush any pending messages for this user
-                                    self.flush_pending_messages(invitee_pubkey);
-                                }
+                                decrypted =
+                                    Some((*owner_pubkey, plaintext, device_id.clone()));
+                                break 'outer;
                             }
                         }
                     }
-                    Ok(None) => {}
-                    Err(_) => {}
                 }
             }
-        } else if event.kind.as_u16() == crate::INVITE_EVENT_KIND as u16 {
-            if let Ok(invite) = Invite::from_event(&event) {
-                tracing::info!(
-                    "📨 Received invite from {}",
-                    &hex::encode(invite.inviter.to_bytes())[..16]
-                );
 
-                if let Some(ref dev_id) = invite.device_id {
-                    let inviter = invite.inviter;
-
-                    // Check if we already have a session with this user/device
-                    let mut records = self.user_records.lock().unwrap();
-                    let user_record = records
-                        .entry(inviter)
-                        .or_insert_with(|| UserRecord::new(hex::encode(inviter.to_bytes())));
-
-                    // Only accept if we don't already have a session for this device
-                    if !user_record.device_records.contains_key(dev_id) {
-                        drop(records);
-
-                        if let Ok((mut session, event)) = invite.accept(
-                            self.our_public_key,
-                            self.our_identity_key,
-                            Some(self.device_id.clone()),
-                        ) {
-                            tracing::info!(
-                                "✅ Accepting invite from {}",
-                                &hex::encode(inviter.to_bytes())[..16]
-                            );
-                            let _ = self.pubsub.publish_signed(event);
-
-                            session.set_pubsub(self.pubsub.clone());
-                            let _ = session.subscribe_to_messages();
-
-                            let mut records = self.user_records.lock().unwrap();
-                            let user_record = records.entry(inviter).or_insert_with(|| {
-                                UserRecord::new(hex::encode(inviter.to_bytes()))
-                            });
-                            user_record.upsert_session(Some(dev_id), session);
-                            drop(records);
-
-                            let _ = self.store_user_record(&inviter);
-
-                            // Try to flush any pending messages for this user
-                            self.flush_pending_messages(inviter);
-                        }
-                    }
-                }
-            }
-        } else if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16 {
-            let event_id = Some(event.id.to_string());
-            let mut user_records = self.user_records.lock().unwrap();
-
-            for (user_pubkey, user_record) in user_records.iter_mut() {
-                let mut all_sessions = user_record.get_all_sessions_mut();
-
-                for session in all_sessions.iter_mut() {
-                    if let Ok(Some(plaintext)) = session.receive(&event) {
-                        tracing::info!(
-                            "💬 Decrypted message from {}: {}",
-                            &hex::encode(user_pubkey.to_bytes())[..16],
-                            &plaintext[..plaintext.len().min(50)]
-                        );
-                        let sender = *user_pubkey;
-                        drop(user_records);
-                        let _ = self.pubsub.decrypted_message(sender, plaintext, event_id);
-                        let _ = self.store_user_record(&sender);
+            if let Some((owner_pubkey, plaintext, device_id)) = decrypted {
+                if let Ok(sender_pk) = crate::utils::pubkey_from_hex(&device_id) {
+                    let sender_owner = self.resolve_to_owner(&sender_pk);
+                    if sender_owner != sender_pk
+                        && !self.is_device_authorized(sender_owner, sender_pk)
+                    {
                         return;
                     }
                 }
-            }
 
-            drop(user_records);
+                let _ = self.event_tx.send(SessionManagerEvent::DecryptedMessage {
+                    sender: owner_pubkey,
+                    content: plaintext,
+                    event_id,
+                });
+                let _ = self.store_user_record(&owner_pubkey);
+            }
         }
     }
 }
@@ -690,7 +999,15 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
 
-        let manager = SessionManager::new(pubkey, identity_key, device_id.clone(), tx, None);
+        let manager = SessionManager::new(
+            pubkey,
+            identity_key,
+            device_id.clone(),
+            pubkey,
+            tx,
+            None,
+            None,
+        );
 
         assert_eq!(manager.get_device_id(), device_id);
     }
@@ -704,12 +1021,11 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
 
-        let manager = SessionManager::new(pubkey, identity_key, device_id, tx, None);
+        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
 
         let recipient = Keys::generate().public_key();
         let result = manager.send_text(recipient, "test".to_string());
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 0);
     }
 }

@@ -74,4 +74,4 @@ Tests cover:
 
 ## Status
 
-Core functionality complete. SessionManager and Invite mechanisms are stubs for future implementation.
+Core functionality complete, including SessionManager, Invite, and multi-device support via AppKeys.

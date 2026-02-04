@@ -1,4 +1,5 @@
 use anyhow::Result;
+use nostr::ToBech32;
 use nostr_double_ratchet::{Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND};
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -25,6 +26,13 @@ struct GroupInfo {
     created_at: u64,
 }
 
+fn hex_to_npub(hex: &str) -> String {
+    nostr::PublicKey::from_hex(hex)
+        .ok()
+        .and_then(|pk| pk.to_bech32().ok())
+        .unwrap_or_else(|| hex.to_string())
+}
+
 impl From<&nostr_double_ratchet::group::GroupData> for GroupInfo {
     fn from(g: &nostr_double_ratchet::group::GroupData) -> Self {
         GroupInfo {
@@ -32,8 +40,8 @@ impl From<&nostr_double_ratchet::group::GroupData> for GroupInfo {
             name: g.name.clone(),
             description: g.description.clone(),
             picture: g.picture.clone(),
-            members: g.members.clone(),
-            admins: g.admins.clone(),
+            members: g.members.iter().map(|m| hex_to_npub(m)).collect(),
+            admins: g.admins.iter().map(|a| hex_to_npub(a)).collect(),
             created_at: g.created_at,
         }
     }
@@ -452,6 +460,7 @@ pub async fn remove_admin(
 pub async fn send_message(
     id: &str,
     message: &str,
+    reply_to: Option<&str>,
     config: &Config,
     storage: &Storage,
     output: &Output,
@@ -471,11 +480,16 @@ pub async fn send_message(
 
     let msg_id = uuid::Uuid::new_v4().to_string();
 
+    let tags = match reply_to {
+        Some(reply_id) => vec![vec!["e".to_string(), reply_id.to_string()]],
+        None => vec![],
+    };
+
     let sent_count = fan_out(
         &group.data,
         CHAT_MESSAGE_KIND,
         message,
-        vec![],
+        tags,
         config,
         storage,
     )
@@ -577,7 +591,7 @@ pub async fn accept(id: &str, config: &Config, storage: &Storage, output: &Outpu
                     // Create an invite for group members to establish 1:1 sessions
                     let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
                     let invite = nostr_double_ratchet::Invite::create_new(my_pk, None, None)?;
-                    let invite_url = invite.get_url("https://iris.to")?;
+                    let invite_url = invite.get_url("https://chat.iris.to")?;
 
                     let rumor_json = serde_json::json!({
                         "id": uuid::Uuid::new_v4().to_string(),

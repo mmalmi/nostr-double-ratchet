@@ -432,7 +432,7 @@ describe('Invite', () => {
       expect(invite.sharedSecret).toHaveLength(64)
 
       const url = invite.getUrl()
-      expect(url).toContain('https://iris.to/#')
+      expect(url).toContain('https://chat.iris.to/#')
       const urlData = JSON.parse(decodeURIComponent(new URL(url).hash.slice(1)))
       expect(urlData.inviter).toBe(alicePublicKey)
       expect(urlData.ephemeralKey).toBe(invite.inviterEphemeralPublicKey)
@@ -460,8 +460,8 @@ describe('Invite', () => {
 
     it('should throw error for invalid URL', () => {
       expect(() => Invite.fromUrl('https://iris.to/')).toThrow('No invite data found in the URL hash')
-      expect(() => Invite.fromUrl('https://iris.to/#invalid')).toThrow('Invite data in URL hash is not valid JSON')
-      expect(() => Invite.fromUrl('https://iris.to/#{}')).toThrow('Missing required fields')
+      expect(() => Invite.fromUrl('https://chat.iris.to/#invalid')).toThrow('Invite data in URL hash is not valid JSON')
+      expect(() => Invite.fromUrl('https://chat.iris.to/#{}')).toThrow('Missing required fields')
     })
 
     it('should allow communication after serializing and deserializing invite for both parties', async () => {

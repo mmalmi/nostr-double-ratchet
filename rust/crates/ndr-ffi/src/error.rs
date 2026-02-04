@@ -65,6 +65,9 @@ impl From<nostr_double_ratchet::Error> for NdrError {
             nostr_double_ratchet::Error::NostrKey(e) => NdrError::InvalidKey(e.to_string()),
             nostr_double_ratchet::Error::Nostr(e) => NdrError::InvalidEvent(e.to_string()),
             nostr_double_ratchet::Error::Nip44(e) => NdrError::CryptoFailure(e.to_string()),
+            nostr_double_ratchet::Error::UnsignedEvent(e) => {
+                NdrError::InvalidEvent(e.to_string())
+            }
         }
     }
 }

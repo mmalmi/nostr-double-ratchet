@@ -1,7 +1,7 @@
 /**
  * Interop test - generates test vectors and verifies they can be processed
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import { getPublicKey } from "nostr-tools";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 import { Session } from "../src/Session";
@@ -42,10 +42,15 @@ interface TestVector {
   }>;
 }
 
+// Fixed timestamp for deterministic test vectors (2024-01-01 00:00:00 UTC)
+const FIXED_TIMESTAMP = 1704067200000;
+
 describe("Interop Test Vector Generation", () => {
   let vectors: TestVector;
 
   beforeAll(() => {
+    // Mock Date.now() to return a fixed timestamp for deterministic vectors
+    vi.spyOn(Date, "now").mockReturnValue(FIXED_TIMESTAMP);
     const aliceEphemeralPk = getPublicKey(ALICE_EPHEMERAL_SK);
     const bobEphemeralPk = getPublicKey(BOB_EPHEMERAL_SK);
 
@@ -135,11 +140,17 @@ describe("Interop Test Vector Generation", () => {
       messages,
     };
 
-    // Write vectors to file
+    // Write vectors to file only if it doesn't exist or REGENERATE_VECTORS is set
     const outputPath = path.join(__dirname, "../../test-vectors/ts-generated.json");
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    fs.writeFileSync(outputPath, JSON.stringify(vectors, null, 2));
-    console.log(`Generated test vectors at ${outputPath}`);
+    const shouldRegenerate = process.env.REGENERATE_VECTORS === "true" || !fs.existsSync(outputPath);
+
+    if (shouldRegenerate) {
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, JSON.stringify(vectors, null, 2));
+      console.log(`Generated test vectors at ${outputPath}`);
+    } else {
+      console.log(`Test vectors already exist at ${outputPath} (set REGENERATE_VECTORS=true to regenerate)`);
+    }
   });
 
   it("should generate valid test vectors", () => {
@@ -208,7 +219,7 @@ describe("Rust-generated vectors", () => {
 
     const vectors: TestVector = JSON.parse(fs.readFileSync(vectorPath, "utf-8"));
 
-    const aliceEphemeralSk = hexToBytes(vectors.alice_ephemeral_sk);
+    const _aliceEphemeralSk = hexToBytes(vectors.alice_ephemeral_sk);
     const bobEphemeralSk = hexToBytes(vectors.bob_ephemeral_sk);
     const sharedSecret = hexToBytes(vectors.shared_secret);
 

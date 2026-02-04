@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from '../src/Session'
 import { getPublicKey, generateSecretKey, matchFilter } from 'nostr-tools'
-import { MESSAGE_EVENT_KIND, REACTION_KIND } from '../src/types';
+import { MESSAGE_EVENT_KIND, REACTION_KIND, CHAT_MESSAGE_KIND } from '../src/types';
 import { createEventStream, parseReaction, isReaction } from '../src/utils';
 import { serializeSessionState, deserializeSessionState } from '../src/utils';
 
@@ -455,5 +455,48 @@ describe('Session', () => {
     const wrongKind = { kind: 1, content: '👍', tags: [["e", "abc123"]] };
     expect(isReaction(wrongKind)).toBe(false);
     expect(parseReaction(wrongKind)).toBeNull();
+  });
+
+  it('should send and receive replies correctly', async () => {
+    const messageQueue: any[] = [];
+
+    const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
+      const checkQueue = () => {
+        const index = messageQueue.findIndex(event => matchFilter(filter, event));
+        if (index !== -1) {
+          onEvent(messageQueue.splice(index, 1)[0]);
+        }
+        setTimeout(checkQueue, 100);
+      };
+      checkQueue();
+      return () => {};
+    };
+
+    const alice = Session.init(createSubscribe(), getPublicKey(bobSecretKey), aliceSecretKey, true, new Uint8Array(), 'alice');
+    const bob = Session.init(createSubscribe(), getPublicKey(aliceSecretKey), bobSecretKey, false, new Uint8Array(), 'bob');
+
+    const aliceMessages = createEventStream(alice);
+    const bobMessages = createEventStream(bob);
+
+    // Alice sends a message
+    const { event: messageEvent, innerEvent: messageInner } = alice.send('Hello Bob!');
+    messageQueue.push(messageEvent);
+    await bobMessages.next();
+
+    // Bob replies to Alice's message
+    const messageId = messageInner.id;
+    const { event: replyEvent, innerEvent: replyInner } = bob.sendReply('Hey Alice, great to hear from you!', messageId);
+
+    // Verify reply is a chat message (not a reaction)
+    expect(replyInner.kind).toBe(CHAT_MESSAGE_KIND);
+    expect(replyInner.content).toBe('Hey Alice, great to hear from you!');
+    expect(replyInner.tags).toContainEqual(['e', messageId]);
+
+    // Alice receives the reply
+    messageQueue.push(replyEvent);
+    const aliceReply = await aliceMessages.next();
+    expect(aliceReply.value?.content).toBe('Hey Alice, great to hear from you!');
+    expect(aliceReply.value?.kind).toBe(CHAT_MESSAGE_KIND);
+    expect(aliceReply.value?.tags).toContainEqual(['e', messageId]);
   });
 })

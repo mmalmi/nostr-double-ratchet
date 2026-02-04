@@ -6,6 +6,7 @@ use base64::Engine;
 use nostr::nips::nip44::{self, Version};
 use nostr::PublicKey;
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
+use nostr::types::filter::{Alphabet, SingleLetterTag};
 
 #[derive(Clone)]
 pub struct Invite {
@@ -17,6 +18,13 @@ pub struct Invite {
     pub max_uses: Option<usize>,
     pub used_by: Vec<PublicKey>,
     pub created_at: u64,
+}
+
+pub struct InviteResponse {
+    pub session: Session,
+    pub invitee_identity: PublicKey,
+    pub device_id: Option<String>,
+    pub owner_public_key: Option<PublicKey>,
 }
 
 impl Invite {
@@ -172,6 +180,16 @@ impl Invite {
         invitee_private_key: [u8; 32],
         device_id: Option<String>,
     ) -> Result<(Session, nostr::Event)> {
+        self.accept_with_owner(invitee_public_key, invitee_private_key, device_id, None)
+    }
+
+    pub fn accept_with_owner(
+        &self,
+        invitee_public_key: PublicKey,
+        invitee_private_key: [u8; 32],
+        device_id: Option<String>,
+        owner_public_key: Option<PublicKey>,
+    ) -> Result<(Session, nostr::Event)> {
         let invitee_session_keys = Keys::generate();
         let invitee_session_key = invitee_session_keys.secret_key().to_secret_bytes();
         let invitee_session_public_key = invitee_session_keys.public_key();
@@ -184,10 +202,24 @@ impl Invite {
             None,
         )?;
 
-        let payload = serde_json::json!({
-            "sessionKey": hex::encode(invitee_session_public_key.to_bytes()),
-            "deviceId": device_id,
-        });
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "sessionKey".to_string(),
+            serde_json::Value::String(hex::encode(invitee_session_public_key.to_bytes())),
+        );
+        if let Some(device_id) = device_id.clone() {
+            payload.insert(
+                "deviceId".to_string(),
+                serde_json::Value::String(device_id),
+            );
+        }
+        if let Some(owner_pk) = owner_public_key {
+            payload.insert(
+                "ownerPublicKey".to_string(),
+                serde_json::Value::String(hex::encode(owner_pk.to_bytes())),
+            );
+        }
+        let payload = serde_json::Value::Object(payload);
 
         let invitee_sk = nostr::SecretKey::from_slice(&invitee_private_key)?;
         let dh_encrypted =
@@ -332,14 +364,14 @@ impl Invite {
         Ok(())
     }
 
-    pub fn from_user_with_pubsub(
-        user_pubkey: PublicKey,
-        pubsub: &dyn NostrPubSub,
-    ) -> Result<String> {
-        let filter = build_filter()
-            .kinds(vec![INVITE_EVENT_KIND as u64])
+    pub fn from_user(user_pubkey: PublicKey, pubsub: &dyn crate::NostrPubSub) -> Result<()> {
+        let filter = nostr::Filter::new()
+            .kind(Kind::from(INVITE_EVENT_KIND as u16))
             .authors(vec![user_pubkey])
-            .build();
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                ["double-ratchet/invites"],
+            );
 
         let filter_json = serde_json::to_string(&filter)?;
         let subid = format!("invite-user-{}", uuid::Uuid::new_v4());
@@ -359,7 +391,7 @@ impl Invite {
         &self,
         event: &nostr::Event,
         _inviter_private_key: [u8; 32],
-    ) -> Result<Option<(Session, PublicKey, Option<String>)>> {
+    ) -> Result<Option<InviteResponse>> {
         let inviter_ephemeral_private_key = self
             .inviter_ephemeral_private_key
             .ok_or(Error::Invite("Ephemeral key not available".to_string()))?;
@@ -405,7 +437,12 @@ impl Invite {
                     self.shared_secret,
                     Some(event.id.to_string()),
                 )?;
-                return Ok(Some((session, invitee_identity, None)));
+                return Ok(Some(InviteResponse {
+                    session,
+                    invitee_identity,
+                    device_id: None,
+                    owner_public_key: None,
+                }));
             }
         };
 
@@ -414,6 +451,9 @@ impl Invite {
             .ok_or(Error::Invite("Missing sessionKey".to_string()))?;
         let invitee_session_pubkey = crate::utils::pubkey_from_hex(invitee_session_key_hex)?;
         let device_id = payload["deviceId"].as_str().map(String::from);
+        let owner_public_key = payload["ownerPublicKey"]
+            .as_str()
+            .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
 
         let session = Session::init(
             invitee_session_pubkey,
@@ -423,6 +463,11 @@ impl Invite {
             Some(event.id.to_string()),
         )?;
 
-        Ok(Some((session, invitee_identity, device_id)))
+        Ok(Some(InviteResponse {
+            session,
+            invitee_identity,
+            device_id,
+            owner_public_key,
+        }))
     }
 }
