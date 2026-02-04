@@ -147,9 +147,6 @@ describe("Interop Test Vector Generation", () => {
     if (shouldRegenerate) {
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
       fs.writeFileSync(outputPath, JSON.stringify(vectors, null, 2));
-      console.log(`Generated test vectors at ${outputPath}`);
-    } else {
-      console.log(`Test vectors already exist at ${outputPath} (set REGENERATE_VECTORS=true to regenerate)`);
     }
   });
 
@@ -213,7 +210,6 @@ describe("Rust-generated vectors", () => {
     const vectorPath = path.join(__dirname, "../../test-vectors/rust-generated.json");
 
     if (!fs.existsSync(vectorPath)) {
-      console.log("Rust vectors not found, skipping...");
       return;
     }
 

@@ -145,3 +145,38 @@ export const TYPING_KIND = 25;
  * Uses the standard Nostr encrypted DM kind.
  */
 export const SHARED_CHANNEL_KIND = 4;
+
+/**
+ * Delivery status for a single device.
+ */
+export interface DeviceDeliveryStatus {
+  deviceId: string
+  sent: boolean
+  sentAt?: number
+}
+
+/**
+ * Delivery status for a message across all target devices.
+ */
+export interface MessageDeliveryStatus {
+  messageId: string
+  recipientOwnerPubkey: string
+  queuedAt: number
+  devices: DeviceDeliveryStatus[]
+  isComplete: boolean
+}
+
+/**
+ * Event emitted when delivery status changes.
+ */
+export interface DeliveryStatusChangeEvent {
+  messageId: string
+  deviceId?: string  // undefined for queue/complete events
+  status: MessageDeliveryStatus
+  changeType: 'queued' | 'device_delivered' | 'complete'
+}
+
+/**
+ * Callback for delivery status change notifications.
+ */
+export type OnDeliveryStatusChangeCallback = (event: DeliveryStatusChangeEvent) => void

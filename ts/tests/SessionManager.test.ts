@@ -4,6 +4,7 @@ import { createControlledMockSessionManager } from "./helpers/controlledMockSess
 import { MockRelay } from "./helpers/mockRelay"
 import { ControlledMockRelay } from "./helpers/ControlledMockRelay"
 import { runScenario } from "./helpers/scenario"
+import { DeliveryStatusChangeEvent } from "../src/types"
 
 type DeviceRecordSnapshot = { inactiveSessions: unknown[] }
 
@@ -669,4 +670,390 @@ describe("SessionManager AppKeys Respect", () => {
     // Bob should NOT have received the message since his device was marked stale
     expect(messagesAfterChange).not.toContain(msg3)
   }, 30000)
+})
+
+describe("SessionManager Delivery Status API", () => {
+  it("should emit 'queued' callback when message is sent", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    // sendMessage doesn't await sendEvent internally, so we need to wait for the event
+    const queuedPromise = new Promise<DeliveryStatusChangeEvent>((resolve) => {
+      const unsub = aliceManager.onDeliveryStatusChange((event) => {
+        if (event.changeType === 'queued') {
+          unsub()
+          resolve(event)
+        }
+      })
+    })
+
+    aliceManager.sendMessage(bobPubkey, "Hello Bob")
+
+    const queuedEvent = await queuedPromise
+
+    // Should have received a 'queued' event
+    expect(queuedEvent).toBeDefined()
+    expect(queuedEvent.status.messageId).toBeTruthy()
+    expect(queuedEvent.status.recipientOwnerPubkey).toBe(bobPubkey)
+    expect(queuedEvent.status.queuedAt).toBeGreaterThan(0)
+  })
+
+  it("should emit 'device_delivered' callback for each device", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager, publicKey: alicePubkey } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { manager: bobManager, publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    // Establish session first
+    const bobReceived = new Promise<void>((resolve) => {
+      bobManager.onEvent((event) => {
+        if (event.content === "setup") resolve()
+      })
+    })
+    await aliceManager.sendMessage(bobPubkey, "setup")
+    await bobReceived
+
+    // Bob replies to complete bidirectional session
+    const aliceReceived = new Promise<void>((resolve) => {
+      aliceManager.onEvent((event) => {
+        if (event.content === "setup reply") resolve()
+      })
+    })
+    await bobManager.sendMessage(alicePubkey, "setup reply")
+    await aliceReceived
+
+    // Now track delivery status for a new message
+    const statusEvents: DeliveryStatusChangeEvent[] = []
+    aliceManager.onDeliveryStatusChange((event) => {
+      statusEvents.push(event)
+    })
+
+    const bobReceived2 = new Promise<void>((resolve) => {
+      bobManager.onEvent((event) => {
+        if (event.content === "tracked message") resolve()
+      })
+    })
+
+    await aliceManager.sendMessage(bobPubkey, "tracked message")
+    await bobReceived2
+
+    // Wait for async processing
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    // Should have queued and device_delivered events
+    const queuedEvent = statusEvents.find(e => e.changeType === 'queued')
+    const deliveredEvents = statusEvents.filter(e => e.changeType === 'device_delivered')
+
+    expect(queuedEvent).toBeDefined()
+    expect(deliveredEvents.length).toBeGreaterThan(0)
+
+    // device_delivered events should have deviceId populated
+    for (const event of deliveredEvents) {
+      expect(event.deviceId).toBeTruthy()
+    }
+  })
+
+  it("should emit 'complete' callback when all devices have received", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager, publicKey: alicePubkey } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { manager: bobManager, publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    // Establish session
+    const bobReceived = new Promise<void>((resolve) => {
+      bobManager.onEvent((event) => {
+        if (event.content === "setup") resolve()
+      })
+    })
+    await aliceManager.sendMessage(bobPubkey, "setup")
+    await bobReceived
+
+    const aliceReceived = new Promise<void>((resolve) => {
+      aliceManager.onEvent((event) => {
+        if (event.content === "setup reply") resolve()
+      })
+    })
+    await bobManager.sendMessage(alicePubkey, "setup reply")
+    await aliceReceived
+
+    // Set up promise to wait for complete event before sending
+    const completePromise = new Promise<DeliveryStatusChangeEvent>((resolve) => {
+      const unsub = aliceManager.onDeliveryStatusChange((event) => {
+        if (event.changeType === 'complete') {
+          unsub()
+          resolve(event)
+        }
+      })
+    })
+
+    const bobReceived2 = new Promise<void>((resolve) => {
+      bobManager.onEvent((event) => {
+        if (event.content === "complete test") resolve()
+      })
+    })
+
+    aliceManager.sendMessage(bobPubkey, "complete test")
+    await bobReceived2
+
+    // Wait for hold time to pass (HOLD_TIME_MS is 500ms), then trigger processQueue
+    await new Promise(resolve => setTimeout(resolve, 600))
+    await aliceManager.processQueue()
+
+    // Wait for complete event (requires hold time + processing)
+    const completeEvent = await Promise.race([
+      completePromise,
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 500))
+    ])
+
+    expect(completeEvent).toBeDefined()
+    expect(completeEvent!.status.isComplete).toBe(true)
+    expect(completeEvent!.deviceId).toBeUndefined() // complete events don't have deviceId
+  })
+
+  it("should return correct status from getDeliveryStatus()", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager, publicKey: alicePubkey } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { manager: bobManager, publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    // Establish session
+    const bobReceived = new Promise<void>((resolve) => {
+      bobManager.onEvent((event) => {
+        if (event.content === "setup") resolve()
+      })
+    })
+    await aliceManager.sendMessage(bobPubkey, "setup")
+    await bobReceived
+
+    const aliceReceived = new Promise<void>((resolve) => {
+      aliceManager.onEvent((event) => {
+        if (event.content === "setup reply") resolve()
+      })
+    })
+    await bobManager.sendMessage(alicePubkey, "setup reply")
+    await aliceReceived
+
+    // Send a message and capture its ID
+    const queuedPromise = new Promise<string>((resolve) => {
+      const unsub = aliceManager.onDeliveryStatusChange((event) => {
+        if (event.changeType === 'queued') {
+          unsub()
+          resolve(event.messageId)
+        }
+      })
+    })
+
+    aliceManager.sendMessage(bobPubkey, "status check")
+
+    const messageId = await queuedPromise
+    expect(messageId).toBeTruthy()
+
+    // Query the status immediately
+    const status = await aliceManager.getDeliveryStatus(messageId!)
+    expect(status).toBeDefined()
+    expect(status!.messageId).toBe(messageId)
+    expect(status!.recipientOwnerPubkey).toBe(bobPubkey)
+  })
+
+  it("should return undefined from getDeliveryStatus() after dequeue", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager, publicKey: alicePubkey } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { manager: bobManager, publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    // Establish session
+    const bobReceived = new Promise<void>((resolve) => {
+      bobManager.onEvent((event) => {
+        if (event.content === "setup") resolve()
+      })
+    })
+    await aliceManager.sendMessage(bobPubkey, "setup")
+    await bobReceived
+
+    const aliceReceived = new Promise<void>((resolve) => {
+      aliceManager.onEvent((event) => {
+        if (event.content === "setup reply") resolve()
+      })
+    })
+    await bobManager.sendMessage(alicePubkey, "setup reply")
+    await aliceReceived
+
+    let messageId: string | undefined
+    const completePromise = new Promise<string>((resolve) => {
+      const unsub = aliceManager.onDeliveryStatusChange((event) => {
+        if (event.changeType === 'queued') {
+          messageId = event.messageId
+        }
+        if (event.changeType === 'complete') {
+          unsub()
+          resolve(messageId!)
+        }
+      })
+    })
+
+    const bobReceived2 = new Promise<void>((resolve) => {
+      bobManager.onEvent((event) => {
+        if (event.content === "dequeue test") resolve()
+      })
+    })
+
+    aliceManager.sendMessage(bobPubkey, "dequeue test")
+    await bobReceived2
+
+    // Wait for hold time to pass (HOLD_TIME_MS is 500ms), then trigger processQueue
+    await new Promise(resolve => setTimeout(resolve, 600))
+    await aliceManager.processQueue()
+
+    // Wait for complete (dequeue happens after complete event)
+    const completedMessageId = await Promise.race([
+      completePromise,
+      new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timeout")), 1000))
+    ])
+
+    // After dequeue, status should be undefined
+    const status = await aliceManager.getDeliveryStatus(completedMessageId)
+    expect(status).toBeUndefined()
+  })
+
+  it("should stop receiving callbacks after unsubscribe", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    const statusEvents: DeliveryStatusChangeEvent[] = []
+    const unsubscribe = aliceManager.onDeliveryStatusChange((event) => {
+      statusEvents.push(event)
+    })
+
+    // Wait for queued event before counting
+    const firstQueued = new Promise<void>((resolve) => {
+      const unsub = aliceManager.onDeliveryStatusChange((event) => {
+        if (event.changeType === 'queued') {
+          unsub()
+          resolve()
+        }
+      })
+    })
+
+    aliceManager.sendMessage(bobPubkey, "before unsubscribe")
+    await firstQueued
+
+    // Should have received at least one event
+    expect(statusEvents.length).toBeGreaterThan(0)
+
+    const countBeforeUnsub = statusEvents.length
+    unsubscribe()
+
+    aliceManager.sendMessage(bobPubkey, "after unsubscribe")
+
+    // Wait a bit for any async processing
+    await new Promise(resolve => setTimeout(resolve, 200))
+
+    // Count should not have increased after unsubscribe
+    expect(statusEvents.length).toBe(countBeforeUnsub)
+  })
+
+  it("should return all statuses from getAllDeliveryStatuses()", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    // Send multiple messages
+    await aliceManager.sendMessage(bobPubkey, "msg1")
+    await aliceManager.sendMessage(bobPubkey, "msg2")
+
+    const allStatuses = await aliceManager.getAllDeliveryStatuses()
+    expect(allStatuses.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it("should filter statuses by recipient with getDeliveryStatusesForRecipient()", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: aliceManager } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+
+    const { publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    const { publicKey: charliePubkey } = await createMockSessionManager(
+      "charlie-device-1",
+      sharedRelay
+    )
+
+    await aliceManager.sendMessage(bobPubkey, "to bob")
+    await aliceManager.sendMessage(charliePubkey, "to charlie")
+
+    const bobStatuses = await aliceManager.getDeliveryStatusesForRecipient(bobPubkey)
+    const charlieStatuses = await aliceManager.getDeliveryStatusesForRecipient(charliePubkey)
+
+    expect(bobStatuses.length).toBeGreaterThanOrEqual(1)
+    expect(charlieStatuses.length).toBeGreaterThanOrEqual(1)
+
+    // All bob statuses should be for bob
+    for (const status of bobStatuses) {
+      expect(status.recipientOwnerPubkey).toBe(bobPubkey)
+    }
+
+    // All charlie statuses should be for charlie
+    for (const status of charlieStatuses) {
+      expect(status.recipientOwnerPubkey).toBe(charliePubkey)
+    }
+  })
 })

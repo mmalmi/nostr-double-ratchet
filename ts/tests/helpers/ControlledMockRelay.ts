@@ -133,9 +133,11 @@ export class ControlledMockRelay {
     }
 
     this.deliveredEvents.push(verifiedEvent)
-    const activeSubs = Array.from(this.subscriptions.values()).filter(s => !s.closed)
-    const subFilters = activeSubs.map(s => s.filters.map(f => f.authors?.map(a => a.slice(0, 8)).join(',') || 'none').join(';')).join(' | ')
-    console.warn(`[ControlledMockRelay] Event (pubkey=${verifiedEvent.pubkey?.slice(0, 8)}) published, ${activeSubs.length} subs: [${subFilters}]`)
+    if (this.debug) {
+      const activeSubs = Array.from(this.subscriptions.values()).filter(s => !s.closed)
+      const subFilters = activeSubs.map(s => s.filters.map(f => f.authors?.map(a => a.slice(0, 8)).join(',') || 'none').join(';')).join(' | ')
+      this.log(`Event (pubkey=${verifiedEvent.pubkey?.slice(0, 8)}) published, ${activeSubs.length} subs: [${subFilters}]`)
+    }
 
     for (const sub of this.subscriptions.values()) {
       if (!sub.closed) {
@@ -373,15 +375,17 @@ export class ControlledMockRelay {
   private deliverEventToSubscriber(sub: Subscription, event: VerifiedEvent): void {
     // Check if already delivered to this subscriber
     if (sub.delivered.has(event.id)) {
-      console.warn(`[ControlledMockRelay] Event ${event.id?.slice(0, 8)} already delivered to ${sub.id}, skipping`)
+      this.log(`Event ${event.id?.slice(0, 8)} already delivered to ${sub.id}, skipping`)
       return
     }
 
     // Check if event matches any of the subscription's filters
     const matches = sub.filters.some((filter) => matchFilter(filter, event))
     if (!matches) {
-      const filterInfo = sub.filters.map(f => `authors:${f.authors?.map(a => a.slice(0, 8)).join(',') || 'none'}, kinds:${f.kinds?.join(',') || 'any'}`).join('; ')
-      console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}, kind=${event.kind}) doesn't match ${sub.id} (${filterInfo})`)
+      if (this.debug) {
+        const filterInfo = sub.filters.map(f => `authors:${f.authors?.map(a => a.slice(0, 8)).join(',') || 'none'}, kinds:${f.kinds?.join(',') || 'any'}`).join('; ')
+        this.log(`Event (pubkey=${event.pubkey?.slice(0, 8)}, kind=${event.kind}) doesn't match ${sub.id} (${filterInfo})`)
+      }
       return
     }
 
@@ -394,7 +398,7 @@ export class ControlledMockRelay {
       filters: sub.filters,
     })
 
-    console.warn(`[ControlledMockRelay] Event (pubkey=${event.pubkey?.slice(0, 8)}, kind=${event.kind}) DELIVERED to ${sub.id}`)
+    this.log(`Event (pubkey=${event.pubkey?.slice(0, 8)}, kind=${event.kind}) DELIVERED to ${sub.id}`)
     sub.onEvent(event)
   }
 
@@ -451,7 +455,7 @@ export class ControlledMockRelay {
 
       if (newSubs.length === 0) break
 
-      console.warn(`[ControlledMockRelay] replayWithCascade: iteration ${iteration}, replaying to ${newSubs.length} new sub(s): ${newSubs.map(s => s.id).join(', ')}`)
+      this.log(`replayWithCascade: iteration ${iteration}, replaying to ${newSubs.length} new sub(s): ${newSubs.map(s => s.id).join(', ')}`)
 
       for (const sub of newSubs) {
         replayedTo.add(sub.id)
@@ -464,7 +468,7 @@ export class ControlledMockRelay {
     }
 
     if (iteration >= maxIterations) {
-      console.warn(`[ControlledMockRelay] replayWithCascade: hit max iterations (${maxIterations})`)
+      this.log(`replayWithCascade: hit max iterations (${maxIterations})`)
     }
   }
 

@@ -145,7 +145,9 @@ export class MockRelay {
       subscriber.onEvent(event)
     } catch (error) {
       if (this.shouldIgnoreDecryptionError(error)) {
-        console.warn("MockRelay: ignored decrypt error", error)
+        if (this.debug) {
+          console.warn("MockRelay: ignored decrypt error", error)
+        }
         return
       }
       throw error

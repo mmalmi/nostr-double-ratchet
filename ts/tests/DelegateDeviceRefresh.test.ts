@@ -433,7 +433,6 @@ describe("Delegate Device Refresh Bug", () => {
      */
     it("should NOT create new invite acceptances for self after restart", async () => {
       await runControlledScenario({
-        debug: true, // Enable debug to see what's happening
         steps: [
           // Setup
           { type: "addDevice", actor: "alice", deviceId: "alice-main" },
