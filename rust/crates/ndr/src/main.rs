@@ -361,6 +361,12 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             | Commands::Typing { .. }
             | Commands::Receipt { .. }
             | Commands::Listen { .. }
+            | Commands::Group(GroupCommands::Create { .. })
+            | Commands::Group(GroupCommands::Update { .. })
+            | Commands::Group(GroupCommands::AddMember { .. })
+            | Commands::Group(GroupCommands::RemoveMember { .. })
+            | Commands::Group(GroupCommands::AddAdmin { .. })
+            | Commands::Group(GroupCommands::RemoveAdmin { .. })
             | Commands::Group(GroupCommands::Send { .. })
             | Commands::Group(GroupCommands::React { .. })
             | Commands::Group(GroupCommands::Accept { .. })
