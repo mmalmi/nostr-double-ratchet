@@ -125,6 +125,13 @@ export interface ReactionPayload {
   emoji: string;
 }
 
+export type ReceiptType = "delivered" | "seen";
+
+export interface ReceiptPayload {
+  type: ReceiptType;
+  messageIds: string[];
+}
+
 /**
  * Kind constant for reaction inner events
  */

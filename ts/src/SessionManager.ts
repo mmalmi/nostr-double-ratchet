@@ -6,6 +6,9 @@ import {
   Unsubscribe,
   APP_KEYS_EVENT_KIND,
   CHAT_MESSAGE_KIND,
+  RECEIPT_KIND,
+  TYPING_KIND,
+  ReceiptType,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { AppKeys, DeviceEntry } from "./AppKeys"
@@ -853,6 +856,24 @@ export class SessionManager {
     this.sendEvent(recipientPublicKey, rumor).catch(() => {})
 
     return rumor
+  }
+
+  async sendReceipt(
+    recipientPublicKey: string,
+    receiptType: ReceiptType,
+    messageIds: string[]
+  ): Promise<Rumor | undefined> {
+    if (messageIds.length === 0) return
+    return this.sendMessage(recipientPublicKey, receiptType, {
+      kind: RECEIPT_KIND,
+      tags: messageIds.map((id) => ["e", id]),
+    })
+  }
+
+  async sendTyping(recipientPublicKey: string): Promise<Rumor> {
+    return this.sendMessage(recipientPublicKey, "typing", {
+      kind: TYPING_KIND,
+    })
   }
 
   private async cleanupDevice(publicKey: string, deviceId: string): Promise<void> {

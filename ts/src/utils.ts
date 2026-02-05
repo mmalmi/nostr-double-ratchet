@@ -1,5 +1,14 @@
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
-import { Rumor, SessionState, ReactionPayload, REACTION_KIND } from "./types";
+import {
+  Rumor,
+  SessionState,
+  ReactionPayload,
+  REACTION_KIND,
+  ReceiptPayload,
+  ReceiptType,
+  RECEIPT_KIND,
+  TYPING_KIND,
+} from "./types";
 import { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -215,4 +224,42 @@ export function parseReaction(rumor: { kind: number; content: string; tags?: str
  */
 export function isReaction(rumor: { kind: number }): boolean {
   return rumor.kind === REACTION_KIND;
+}
+
+const RECEIPT_STATUS_ORDER: Record<ReceiptType, number> = {
+  delivered: 1,
+  seen: 2,
+};
+
+export function isReceiptType(value: string): value is ReceiptType {
+  return value === "delivered" || value === "seen";
+}
+
+export function shouldAdvanceReceiptStatus(
+  current: ReceiptType | undefined,
+  incoming: ReceiptType
+): boolean {
+  const currentOrder = current ? RECEIPT_STATUS_ORDER[current] ?? 0 : 0;
+  const incomingOrder = RECEIPT_STATUS_ORDER[incoming] ?? 0;
+  return incomingOrder > currentOrder;
+}
+
+export function parseReceipt(rumor: {
+  kind: number;
+  content: string;
+  tags?: string[][];
+}): ReceiptPayload | null {
+  if (rumor.kind !== RECEIPT_KIND) return null;
+  if (!isReceiptType(rumor.content)) return null;
+  const messageIds =
+    rumor.tags?.filter((tag) => tag[0] === "e").map((tag) => tag[1]) || [];
+  if (messageIds.length === 0) return null;
+  return {
+    type: rumor.content,
+    messageIds,
+  };
+}
+
+export function isTyping(rumor: { kind: number }): boolean {
+  return rumor.kind === TYPING_KIND;
 }
