@@ -206,6 +206,13 @@ struct InviteAccepted {
     their_pubkey: String,
 }
 
+#[derive(Serialize)]
+struct LinkInviteAccepted {
+    invite_id: String,
+    owner_pubkey: String,
+    device_pubkey: String,
+}
+
 /// Process an invite acceptance event (creates a chat session for the inviter)
 pub async fn accept(
     invite_id: &str,
@@ -237,6 +244,29 @@ pub async fn accept(
     let result = invite.process_invite_response(&event, our_private_key)?;
 
     let response = result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+
+    if invite.purpose.as_deref() == Some("link") {
+        let owner_pubkey = response
+            .owner_public_key
+            .unwrap_or(response.invitee_identity);
+        let owner_pubkey_hex = owner_pubkey.to_hex();
+        let mut config = config.clone();
+        config.set_linked_owner(&owner_pubkey_hex)?;
+
+        storage.delete_invite(invite_id)?;
+
+        output.success(
+            "link.accepted",
+            LinkInviteAccepted {
+                invite_id: invite_id.to_string(),
+                owner_pubkey: owner_pubkey_hex,
+                device_pubkey: invite.inviter.to_hex(),
+            },
+        );
+
+        return Ok(());
+    }
+
     let session = response.session;
     let their_pubkey = response
         .owner_public_key
@@ -334,5 +364,56 @@ mod tests {
         delete(id, &storage, &output).await.unwrap();
 
         assert!(storage.list_invites().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_accept_link_invite_sets_linked_owner() {
+        let (temp, config, storage) = setup();
+        let output = Output::new(true);
+
+        let device_pubkey_hex = config.public_key().unwrap();
+        let device_pubkey =
+            nostr_double_ratchet::utils::pubkey_from_hex(&device_pubkey_hex).unwrap();
+
+        let mut invite =
+            nostr_double_ratchet::Invite::create_new(device_pubkey, None, None).unwrap();
+        invite.purpose = Some("link".to_string());
+        let serialized = invite.serialize().unwrap();
+
+        storage
+            .save_invite(&StoredInvite {
+                id: "link".to_string(),
+                label: Some("link".to_string()),
+                url: invite.get_url("https://iris.to").unwrap(),
+                created_at: 0,
+                serialized,
+            })
+            .unwrap();
+
+        let owner_keys = nostr::Keys::generate();
+        let owner_pubkey = owner_keys.public_key();
+
+        let (_session, response_event) = invite
+            .accept_with_owner(
+                owner_pubkey,
+                owner_keys.secret_key().to_secret_bytes(),
+                None,
+                Some(owner_pubkey),
+            )
+            .unwrap();
+
+        accept(
+            "link",
+            &nostr::JsonUtil::as_json(&response_event),
+            &config,
+            &storage,
+            &output,
+        )
+        .await
+        .unwrap();
+
+        let updated = Config::load(temp.path()).unwrap();
+        assert_eq!(updated.linked_owner, Some(owner_pubkey.to_hex()));
+        assert!(storage.list_chats().unwrap().is_empty());
     }
 }

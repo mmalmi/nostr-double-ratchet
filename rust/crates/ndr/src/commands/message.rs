@@ -758,6 +758,7 @@ pub async fn listen(
     }
 
     let our_private_key = config.private_key_bytes()?;
+    let mut config = config.clone();
     let chat_id_owned = chat_id.map(|s| s.to_string());
 
     // Prepare client (don't connect until we have something to subscribe to)
@@ -1004,6 +1005,26 @@ pub async fn listen(
 
                     match invite.process_invite_response(&event, our_private_key) {
                         Ok(Some(response)) => {
+                            if invite.purpose.as_deref() == Some("link") {
+                                let owner_pubkey = response
+                                    .owner_public_key
+                                    .unwrap_or(response.invitee_identity);
+                                let owner_pubkey_hex = owner_pubkey.to_hex();
+
+                                config.set_linked_owner(&owner_pubkey_hex)?;
+                                storage.delete_invite(&stored_invite.id)?;
+
+                                output.event(
+                                    "link_accepted",
+                                    serde_json::json!({
+                                        "invite_id": stored_invite.id,
+                                        "owner_pubkey": owner_pubkey_hex,
+                                        "device_pubkey": invite.inviter.to_hex(),
+                                    }),
+                                );
+                                continue;
+                            }
+
                             let session = response.session;
                             let their_pubkey = response
                                 .owner_public_key
@@ -1518,7 +1539,7 @@ mod tests {
         let (_temp, config, storage, _) = setup();
         let output = Output::new(true);
 
-        send("test-chat", "Hello!", &config, &storage, &output)
+        send("test-chat", "Hello!", None, &config, &storage, &output)
             .await
             .unwrap();
 
@@ -1533,10 +1554,10 @@ mod tests {
         let (_temp, config, storage, _) = setup();
         let output = Output::new(true);
 
-        send("test-chat", "One", &config, &storage, &output)
+        send("test-chat", "One", None, &config, &storage, &output)
             .await
             .unwrap();
-        send("test-chat", "Two", &config, &storage, &output)
+        send("test-chat", "Two", None, &config, &storage, &output)
             .await
             .unwrap();
 
@@ -1551,7 +1572,7 @@ mod tests {
         let before = storage.get_chat("test-chat").unwrap().unwrap();
         assert!(before.last_message_at.is_none());
 
-        send("test-chat", "Hello!", &config, &storage, &output)
+        send("test-chat", "Hello!", None, &config, &storage, &output)
             .await
             .unwrap();
 

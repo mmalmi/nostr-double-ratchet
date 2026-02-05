@@ -79,6 +79,19 @@ Notes:
 - Re-run `ndr invite publish` to refresh the public invite.
 - Override the device id with `--device-id <name>` if you need multiple parallel invites.
 
+### Link Devices
+
+```bash
+# On the device to be linked
+ndr link create             # Create a private link invite (stores it locally)
+
+# On the owner device
+ndr link accept <url>       # Accept the link invite and publish response
+
+# Back on the device to be linked
+ndr listen                  # Wait for the response and finalize linking
+```
+
 ### Chats
 
 ```bash
