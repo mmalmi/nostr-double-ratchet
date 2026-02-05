@@ -43,6 +43,36 @@ fn test_url_generation_and_parsing() -> Result<()> {
 }
 
 #[test]
+fn test_url_parses_inviter_ephemeral_public_key_field() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let alice_pk = alice_keys.public_key();
+
+    let invite = Invite::create_new(alice_pk, None, None)?;
+
+    let payload = serde_json::json!({
+        "inviter": alice_pk.to_hex(),
+        "inviterEphemeralPublicKey": hex::encode(invite.inviter_ephemeral_public_key.to_bytes()),
+        "sharedSecret": hex::encode(invite.shared_secret),
+        "purpose": "link",
+        "ownerPubkey": alice_pk.to_hex(),
+    });
+
+    let url = format!(
+        "https://chat.iris.to#{}",
+        urlencoding::encode(&payload.to_string())
+    );
+
+    let parsed_invite = Invite::from_url(&url)?;
+    assert_eq!(
+        parsed_invite.inviter_ephemeral_public_key.to_bytes(),
+        invite.inviter_ephemeral_public_key.to_bytes()
+    );
+    assert_eq!(parsed_invite.inviter.to_bytes(), invite.inviter.to_bytes());
+
+    Ok(())
+}
+
+#[test]
 fn test_url_with_purpose_and_owner() -> Result<()> {
     let alice_keys = Keys::generate();
     let alice_pk = alice_keys.public_key();

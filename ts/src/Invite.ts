@@ -89,13 +89,31 @@ export class Invite {
             throw new Error("Invite data in URL hash is not valid JSON: " + err);
         }
 
-        const { inviter, ephemeralKey, sharedSecret, purpose, owner } = data;
-        if (!inviter || !ephemeralKey || !sharedSecret) {
+        const {
+            inviter,
+            ephemeralKey,
+            inviterEphemeralPublicKey,
+            sharedSecret,
+            purpose,
+            owner,
+            ownerPubkey,
+        } = data as {
+            inviter?: string;
+            ephemeralKey?: string;
+            inviterEphemeralPublicKey?: string;
+            sharedSecret?: string;
+            purpose?: string;
+            owner?: string;
+            ownerPubkey?: string;
+        };
+        const resolvedEphemeralKey = ephemeralKey || inviterEphemeralPublicKey;
+        if (!inviter || !resolvedEphemeralKey || !sharedSecret) {
             throw new Error("Missing required fields (inviter, ephemeralKey, sharedSecret) in invite data.");
         }
+        const resolvedOwner = owner || ownerPubkey;
 
         return new Invite(
-            ephemeralKey,
+            resolvedEphemeralKey,
             sharedSecret,
             inviter,
             undefined,
@@ -104,7 +122,7 @@ export class Invite {
             [],
             now(),
             purpose === "link" || purpose === "chat" ? (purpose as InvitePurpose) : undefined,
-            owner && /^[0-9a-fA-F]{64}$/.test(owner) ? owner : undefined
+            resolvedOwner && /^[0-9a-fA-F]{64}$/.test(resolvedOwner) ? resolvedOwner : undefined
         );
     }
 

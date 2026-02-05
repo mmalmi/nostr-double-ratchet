@@ -466,6 +466,24 @@ describe('Invite', () => {
       expect(parsedInvite.ownerPubkey).toBe(ownerPublicKey)
     })
 
+    it('should parse inviterEphemeralPublicKey from invite URL hash', () => {
+      const alicePrivateKey = generateSecretKey()
+      const alicePublicKey = getPublicKey(alicePrivateKey)
+      const invite = Invite.createNew(alicePublicKey, 'Alias Field Test')
+
+      const payload = {
+        inviter: alicePublicKey,
+        inviterEphemeralPublicKey: invite.inviterEphemeralPublicKey,
+        sharedSecret: invite.sharedSecret,
+      }
+      const url = `https://chat.iris.to/#${encodeURIComponent(JSON.stringify(payload))}`
+
+      const parsedInvite = Invite.fromUrl(url)
+      expect(parsedInvite.inviter).toBe(alicePublicKey)
+      expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
+      expect(parsedInvite.sharedSecret).toBe(invite.sharedSecret)
+    })
+
     it('should handle invite link with custom root URL', () => {
       const alicePrivateKey = generateSecretKey()
       const alicePublicKey = getPublicKey(alicePrivateKey)

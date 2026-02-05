@@ -105,11 +105,13 @@ impl Invite {
                 .as_str()
                 .ok_or(Error::Invite("Missing inviter".to_string()))?,
         )?;
-        let ephemeral_key = crate::utils::pubkey_from_hex(
-            data["ephemeralKey"]
-                .as_str()
-                .ok_or(Error::Invite("Missing ephemeralKey".to_string()))?,
-        )?;
+        let ephemeral_key_str = data["ephemeralKey"]
+            .as_str()
+            .or_else(|| data["inviterEphemeralPublicKey"].as_str())
+            .ok_or(Error::Invite(
+                "Missing ephemeralKey".to_string(),
+            ))?;
+        let ephemeral_key = crate::utils::pubkey_from_hex(ephemeral_key_str)?;
         let shared_secret_hex = data["sharedSecret"]
             .as_str()
             .ok_or(Error::Invite("Missing sharedSecret".to_string()))?;
@@ -120,6 +122,7 @@ impl Invite {
         let purpose = data["purpose"].as_str().map(|s| s.to_string());
         let owner_public_key = data["owner"]
             .as_str()
+            .or_else(|| data["ownerPubkey"].as_str())
             .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
 
         Ok(Self {
