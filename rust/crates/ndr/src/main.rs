@@ -45,6 +45,10 @@ enum Commands {
     #[command(subcommand)]
     Invite(InviteCommands),
 
+    /// Link a device using a private invite
+    #[command(subcommand)]
+    Link(LinkCommands),
+
     /// Chat management
     #[command(subcommand)]
     Chat(ChatCommands),
@@ -151,6 +155,18 @@ enum InviteCommands {
         invite_id: String,
         /// The acceptance event JSON
         event: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LinkCommands {
+    /// Create a private link invite for a new device
+    Create,
+
+    /// Accept a link invite URL
+    Accept {
+        /// Invite URL
+        url: String,
     },
 }
 
@@ -374,6 +390,12 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             InviteCommands::Delete { id } => commands::invite::delete(&id, &storage, output).await,
             InviteCommands::Accept { invite_id, event } => {
                 commands::invite::accept(&invite_id, &event, &config, &storage, output).await
+            }
+        },
+        Commands::Link(cmd) => match cmd {
+            LinkCommands::Create => commands::link::create(&config, &storage, output).await,
+            LinkCommands::Accept { url } => {
+                commands::link::accept(&url, &config, &storage, output).await
             }
         },
         Commands::Chat(cmd) => match cmd {

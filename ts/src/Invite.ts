@@ -11,6 +11,13 @@ import {
 
 const now = () => Math.round(Date.now() / 1000)
 
+export type InvitePurpose = "chat" | "link"
+
+export interface InviteLinkOptions {
+    purpose?: InvitePurpose
+    ownerPubkey?: string
+}
+
 /**
  * Invite is a safe way to exchange session keys and initiate secret sessions.
  * 
@@ -31,10 +38,17 @@ export class Invite {
         public maxUses?: number,
         public usedBy: string[] = [],
         public createdAt: number = now(),
+        public purpose?: InvitePurpose,
+        public ownerPubkey?: string,
     ) {
     }
 
-    static createNew(inviter: string, deviceId?: string, maxUses?: number): Invite {
+    static createNew(
+        inviter: string,
+        deviceId?: string,
+        maxUses?: number,
+        options?: InviteLinkOptions
+    ): Invite {
         if (!inviter) {
             throw new Error("Inviter public key is required");
         }
@@ -46,7 +60,11 @@ export class Invite {
             inviter,
             ephemeralKeypair.privateKey,
             deviceId,
-            maxUses
+            maxUses,
+            [],
+            now(),
+            options?.purpose,
+            options?.ownerPubkey
         );
     }
 
@@ -58,14 +76,20 @@ export class Invite {
         }
 
         const decodedHash = decodeURIComponent(rawHash);
-        let data: { inviter?: string; ephemeralKey?: string; sharedSecret?: string };
+        let data: {
+            inviter?: string;
+            ephemeralKey?: string;
+            sharedSecret?: string;
+            purpose?: string;
+            owner?: string;
+        };
         try {
             data = JSON.parse(decodedHash);
         } catch (err) {
             throw new Error("Invite data in URL hash is not valid JSON: " + err);
         }
 
-        const { inviter, ephemeralKey, sharedSecret } = data;
+        const { inviter, ephemeralKey, sharedSecret, purpose, owner } = data;
         if (!inviter || !ephemeralKey || !sharedSecret) {
             throw new Error("Missing required fields (inviter, ephemeralKey, sharedSecret) in invite data.");
         }
@@ -73,7 +97,14 @@ export class Invite {
         return new Invite(
             ephemeralKey,
             sharedSecret,
-            inviter
+            inviter,
+            undefined,
+            undefined,
+            undefined,
+            [],
+            now(),
+            purpose === "link" || purpose === "chat" ? (purpose as InvitePurpose) : undefined,
+            owner && /^[0-9a-fA-F]{64}$/.test(owner) ? owner : undefined
         );
     }
 
@@ -88,6 +119,8 @@ export class Invite {
             data.maxUses,
             data.usedBy,
             data.createdAt,
+            data.purpose,
+            data.ownerPubkey,
         );
     }
 
@@ -159,6 +192,8 @@ export class Invite {
             maxUses: this.maxUses,
             usedBy: this.usedBy,
             createdAt: this.createdAt,
+            purpose: this.purpose,
+            ownerPubkey: this.ownerPubkey,
         });
     }
 
@@ -169,7 +204,9 @@ export class Invite {
         const data = {
             inviter: this.inviter,
             ephemeralKey: this.inviterEphemeralPublicKey,
-            sharedSecret: this.sharedSecret
+            sharedSecret: this.sharedSecret,
+            ...(this.purpose ? { purpose: this.purpose } : {}),
+            ...(this.ownerPubkey ? { owner: this.ownerPubkey } : {}),
         };
         const url = new URL(root);
         url.hash = encodeURIComponent(JSON.stringify(data));

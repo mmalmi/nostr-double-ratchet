@@ -43,6 +43,29 @@ fn test_url_generation_and_parsing() -> Result<()> {
 }
 
 #[test]
+fn test_url_with_purpose_and_owner() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let alice_pk = alice_keys.public_key();
+    let owner_keys = Keys::generate();
+    let owner_pk = owner_keys.public_key();
+
+    let mut invite = Invite::create_new(alice_pk, None, None)?;
+    invite.purpose = Some("link".to_string());
+    invite.owner_public_key = Some(owner_pk);
+
+    let url = invite.get_url("https://chat.iris.to")?;
+    let parsed_invite = Invite::from_url(&url)?;
+
+    assert_eq!(parsed_invite.purpose.as_deref(), Some("link"));
+    assert_eq!(
+        parsed_invite.owner_public_key.map(|pk| pk.to_bytes()),
+        Some(owner_pk.to_bytes())
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_invite_get_event_requires_device_id() -> Result<()> {
     let alice_keys = Keys::generate();
     let alice_pk = alice_keys.public_key();

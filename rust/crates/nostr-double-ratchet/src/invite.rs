@@ -18,6 +18,8 @@ pub struct Invite {
     pub max_uses: Option<usize>,
     pub used_by: Vec<PublicKey>,
     pub created_at: u64,
+    pub purpose: Option<String>,
+    pub owner_public_key: Option<PublicKey>,
 }
 
 pub struct InviteResponse {
@@ -53,17 +55,40 @@ impl Invite {
             max_uses,
             used_by: Vec::new(),
             created_at: now,
+            purpose: None,
+            owner_public_key: None,
         })
     }
 
     pub fn get_url(&self, root: &str) -> Result<String> {
-        let data = serde_json::json!({
-            "inviter": hex::encode(self.inviter.to_bytes()),
-            "ephemeralKey": hex::encode(self.inviter_ephemeral_public_key.to_bytes()),
-            "sharedSecret": hex::encode(self.shared_secret),
-        });
+        let mut data = serde_json::Map::new();
+        data.insert(
+            "inviter".to_string(),
+            serde_json::Value::String(hex::encode(self.inviter.to_bytes())),
+        );
+        data.insert(
+            "ephemeralKey".to_string(),
+            serde_json::Value::String(hex::encode(self.inviter_ephemeral_public_key.to_bytes())),
+        );
+        data.insert(
+            "sharedSecret".to_string(),
+            serde_json::Value::String(hex::encode(self.shared_secret)),
+        );
+        if let Some(purpose) = &self.purpose {
+            data.insert("purpose".to_string(), serde_json::Value::String(purpose.clone()));
+        }
+        if let Some(owner_pk) = &self.owner_public_key {
+            data.insert(
+                "owner".to_string(),
+                serde_json::Value::String(hex::encode(owner_pk.to_bytes())),
+            );
+        }
 
-        let url = format!("{}#{}", root, urlencoding::encode(&data.to_string()));
+        let url = format!(
+            "{}#{}",
+            root,
+            urlencoding::encode(&serde_json::Value::Object(data).to_string())
+        );
         Ok(url)
     }
 
@@ -92,6 +117,11 @@ impl Invite {
         let mut shared_secret = [0u8; 32];
         shared_secret.copy_from_slice(&shared_secret_bytes);
 
+        let purpose = data["purpose"].as_str().map(|s| s.to_string());
+        let owner_public_key = data["owner"]
+            .as_str()
+            .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
+
         Ok(Self {
             inviter_ephemeral_public_key: ephemeral_key,
             shared_secret,
@@ -101,6 +131,8 @@ impl Invite {
             max_uses: None,
             used_by: Vec::new(),
             created_at: 0,
+            purpose,
+            owner_public_key,
         })
     }
 
@@ -171,6 +203,8 @@ impl Invite {
             max_uses: None,
             used_by: Vec::new(),
             created_at: event.created_at.as_u64(),
+            purpose: None,
+            owner_public_key: None,
         })
     }
 
@@ -287,6 +321,11 @@ impl Invite {
             "maxUses": self.max_uses,
             "usedBy": self.used_by.iter().map(|pk| hex::encode(pk.to_bytes())).collect::<Vec<_>>(),
             "createdAt": self.created_at,
+            "purpose": self.purpose.clone(),
+            "ownerPublicKey": self
+                .owner_public_key
+                .as_ref()
+                .map(|pk| hex::encode(pk.to_bytes())),
         });
         Ok(data.to_string())
     }
@@ -332,6 +371,11 @@ impl Invite {
             Vec::new()
         };
 
+        let purpose = data["purpose"].as_str().map(|s| s.to_string());
+        let owner_public_key = data["ownerPublicKey"]
+            .as_str()
+            .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
+
         Ok(Self {
             inviter_ephemeral_public_key,
             shared_secret,
@@ -341,6 +385,8 @@ impl Invite {
             max_uses: data["maxUses"].as_u64().map(|u| u as usize),
             used_by,
             created_at: data["createdAt"].as_u64().unwrap_or(0),
+            purpose,
+            owner_public_key,
         })
     }
 
@@ -364,7 +410,10 @@ impl Invite {
         Ok(())
     }
 
-    pub fn from_user(user_pubkey: PublicKey, pubsub: &dyn crate::NostrPubSub) -> Result<()> {
+    pub fn from_user_with_pubsub(
+        user_pubkey: PublicKey,
+        pubsub: &dyn crate::NostrPubSub,
+    ) -> Result<String> {
         let filter = nostr::Filter::new()
             .kind(Kind::from(INVITE_EVENT_KIND as u16))
             .authors(vec![user_pubkey])

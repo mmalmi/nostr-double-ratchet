@@ -9,6 +9,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
 
+    /// Linked owner pubkey (hex) for linked-device mode
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_owner: Option<String>,
+
     /// Default relays
     #[serde(default = "default_relays")]
     pub relays: Vec<String>,
@@ -32,6 +36,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             private_key: None,
+            linked_owner: None,
             relays: default_relays(),
             path: PathBuf::new(),
         }
@@ -68,14 +73,23 @@ impl Config {
     /// Set the private key and save
     pub fn set_private_key(&mut self, key: &str) -> Result<()> {
         self.private_key = Some(key.to_string());
+        self.linked_owner = None;
         self.save()
     }
 
     /// Clear the private key and save
     pub fn clear_private_key(&mut self) -> Result<()> {
         self.private_key = None;
+        self.linked_owner = None;
         self.save()
     }
+
+    /// Set linked owner pubkey and save
+    pub fn set_linked_owner(&mut self, pubkey: &str) -> Result<()> {
+        self.linked_owner = Some(pubkey.to_string());
+        self.save()
+    }
+
 
     /// Check if logged in
     pub fn is_logged_in(&self) -> bool {
@@ -113,6 +127,14 @@ impl Config {
         let sk = nostr::SecretKey::from_slice(&sk_bytes)?;
         let keys = nostr::Keys::new(sk);
         Ok(keys.public_key().to_hex())
+    }
+
+    /// Get the owner public key (hex). Falls back to identity key when not linked.
+    pub fn owner_public_key_hex(&self) -> Result<String> {
+        if let Some(owner) = &self.linked_owner {
+            return Ok(owner.clone());
+        }
+        self.public_key()
     }
 
     /// Resolve relays with environment overrides and optional local relay detection.

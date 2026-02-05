@@ -1,5 +1,6 @@
 use crate::{
-    is_app_keys_event, AppKeys, InMemoryStorage, Invite, Result, StorageAdapter, UserRecord,
+    is_app_keys_event, AppKeys, InMemoryStorage, Invite, NostrPubSub, Result, StorageAdapter,
+    UserRecord,
 };
 use nostr::{Keys, PublicKey, Tag, UnsignedEvent};
 use std::collections::{HashMap, HashSet};
@@ -58,15 +59,25 @@ impl SessionManager {
         invite: Option<Invite>,
     ) -> Self {
         let pubsub: Arc<dyn NostrPubSub> = Arc::new(event_tx);
-        Self::new_with_pubsub(our_public_key, our_identity_key, device_id, pubsub, storage)
+        Self::new_with_pubsub(
+            our_public_key,
+            our_identity_key,
+            device_id,
+            owner_public_key,
+            pubsub,
+            storage,
+            invite,
+        )
     }
 
     pub fn new_with_pubsub(
         our_public_key: PublicKey,
         our_identity_key: [u8; 32],
         device_id: String,
+        owner_public_key: PublicKey,
         pubsub: Arc<dyn NostrPubSub>,
         storage: Option<Arc<dyn StorageAdapter>>,
+        invite: Option<Invite>,
     ) -> Self {
         Self {
             user_records: Arc::new(Mutex::new(HashMap::new())),
@@ -138,7 +149,7 @@ impl SessionManager {
         if let Ok(unsigned) = invite.get_event() {
             let keys = Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
             if let Ok(signed) = unsigned.sign_with_keys(&keys) {
-                let _ = self.event_tx.send(SessionManagerEvent::PublishSigned(signed));
+                let _ = self.pubsub.publish_signed(signed);
             }
         }
 
@@ -230,9 +241,7 @@ impl SessionManager {
             if let Some(ref mut session) = device_record.active_session {
                 if let Ok(signed_event) = session.send_event(event.clone()) {
                     event_ids.push(signed_event.id.to_string());
-                    let _ = self
-                        .event_tx
-                        .send(SessionManagerEvent::PublishSigned(signed_event));
+                    let _ = self.pubsub.publish_signed(signed_event);
                 }
             }
         }
@@ -481,7 +490,8 @@ impl SessionManager {
                 ["double-ratchet/app-keys"],
             );
         if let Ok(filter_json) = serde_json::to_string(&filter) {
-            let _ = self.event_tx.send(SessionManagerEvent::Subscribe(filter_json));
+            let subid = format!("app-keys-{}", uuid::Uuid::new_v4());
+            let _ = self.pubsub.subscribe(subid, filter_json);
         }
     }
 
@@ -533,8 +543,7 @@ impl SessionManager {
         }
         drop(records);
 
-        let pubsub = crate::ChannelPubSub::new(self.event_tx.clone());
-        let _ = Invite::from_user(device_pubkey, &pubsub);
+        let _ = Invite::from_user_with_pubsub(device_pubkey, self.pubsub.as_ref());
     }
 
     fn upsert_device_record(&self, record: &mut UserRecord, device_id: &str) {
@@ -610,9 +619,7 @@ impl SessionManager {
 
         for event in history {
             if let Ok(signed_event) = session.send_event(event.clone()) {
-                let _ = self
-                    .event_tx
-                    .send(SessionManagerEvent::PublishSigned(signed_event));
+                let _ = self.pubsub.publish_signed(signed_event);
             }
         }
         drop(records);
@@ -725,14 +732,14 @@ impl SessionManager {
 
                 if let Some(state) = device.active_session {
                     let mut session = crate::Session::new(state, format!("session-{}", device.device_id));
-                    session.set_event_tx(self.event_tx.clone());
+                    session.set_pubsub(self.pubsub.clone());
                     let _ = session.subscribe_to_messages();
                     device_record.active_session = Some(session);
                 }
 
                 for state in device.inactive_sessions {
                     let mut session = crate::Session::new(state, format!("session-{}-inactive", device.device_id));
-                    session.set_event_tx(self.event_tx.clone());
+                    session.set_pubsub(self.pubsub.clone());
                     let _ = session.subscribe_to_messages();
                     device_record.inactive_sessions.push(session);
                 }
@@ -816,7 +823,7 @@ impl SessionManager {
                     });
 
                     let mut session = response.session;
-                    session.set_event_tx(self.event_tx.clone());
+                    session.set_pubsub(self.pubsub.clone());
                     let _ = session.subscribe_to_messages();
 
                     {
@@ -889,10 +896,8 @@ impl SessionManager {
 
                 match accept_result {
                     Ok((mut session, response_event)) => {
-                        let _ = self
-                            .event_tx
-                            .send(SessionManagerEvent::PublishSigned(response_event));
-                        session.set_event_tx(self.event_tx.clone());
+                        let _ = self.pubsub.publish_signed(response_event);
+                        session.set_pubsub(self.pubsub.clone());
                         let _ = session.subscribe_to_messages();
 
                         {
@@ -974,11 +979,9 @@ impl SessionManager {
                     }
                 }
 
-                let _ = self.event_tx.send(SessionManagerEvent::DecryptedMessage {
-                    sender: owner_pubkey,
-                    content: plaintext,
-                    event_id,
-                });
+                let _ = self
+                    .pubsub
+                    .decrypted_message(owner_pubkey, plaintext, event_id);
                 let _ = self.store_user_record(&owner_pubkey);
             }
         }

@@ -61,6 +61,53 @@ impl NostrPubSub for crossbeam_channel::Sender<SessionManagerEvent> {
     }
 }
 
+/// Convenience wrapper around a crossbeam channel sender that implements NostrPubSub.
+#[derive(Clone)]
+pub struct ChannelPubSub {
+    tx: crossbeam_channel::Sender<SessionManagerEvent>,
+}
+
+impl ChannelPubSub {
+    pub fn new(tx: crossbeam_channel::Sender<SessionManagerEvent>) -> Self {
+        Self { tx }
+    }
+
+    pub fn sender(&self) -> &crossbeam_channel::Sender<SessionManagerEvent> {
+        &self.tx
+    }
+}
+
+impl NostrPubSub for ChannelPubSub {
+    fn publish(&self, event: nostr::UnsignedEvent) -> Result<()> {
+        self.tx.publish(event)
+    }
+
+    fn publish_signed(&self, event: nostr::Event) -> Result<()> {
+        self.tx.publish_signed(event)
+    }
+
+    fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
+        self.tx.subscribe(subid, filter_json)
+    }
+
+    fn unsubscribe(&self, subid: String) -> Result<()> {
+        self.tx.unsubscribe(subid)
+    }
+
+    fn decrypted_message(
+        &self,
+        sender: PublicKey,
+        content: String,
+        event_id: Option<String>,
+    ) -> Result<()> {
+        self.tx.decrypted_message(sender, content, event_id)
+    }
+
+    fn received_event(&self, event: nostr::Event) -> Result<()> {
+        self.tx.received_event(event)
+    }
+}
+
 /// Event types emitted by SessionManager for external handling.
 ///
 /// SessionManager sends these events to a channel. The receiver is responsible for:

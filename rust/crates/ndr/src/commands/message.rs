@@ -240,6 +240,8 @@ async fn create_chat_from_public_invite(
     let our_private_key = config.private_key_bytes()?;
     let our_pubkey_hex = config.public_key()?;
     let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
+    let owner_pubkey_hex = config.owner_public_key_hex()?;
+    let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
 
     let client = Client::default();
     let relays = config.resolved_relays();
@@ -282,7 +284,7 @@ async fn create_chat_from_public_invite(
 
     let their_pubkey_hex = invite.inviter.to_hex();
     let (session, response_event) =
-        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(our_pubkey))?;
+        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(owner_pubkey))?;
 
     let session_state = serde_json::to_string(&session.state)?;
     let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
@@ -870,6 +872,9 @@ pub async fn listen(
 
     // Build initial filters
     let my_pubkey = config.public_key()?;
+    let my_pubkey_key = nostr::PublicKey::from_hex(&my_pubkey)?;
+    let owner_pubkey_hex = config.owner_public_key_hex()?;
+    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
     let mut channel_map = build_channel_map(storage)?;
     let (
         mut filters,
@@ -1117,14 +1122,12 @@ pub async fn listen(
                                             if let Ok(invite) =
                                                 nostr_double_ratchet::Invite::from_url(invite_url)
                                             {
-                                                let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
-                                                let owner_pk = my_pk.clone();
                                                 if let Ok((accept_session, response_event)) =
                                                     invite.accept_with_owner(
-                                                        my_pk,
+                                                        my_pubkey_key.clone(),
                                                         our_private_key,
                                                         None,
-                                                        Some(owner_pk),
+                                                        Some(owner_pubkey.clone()),
                                                     )
                                                 {
                                                     // Save the new chat

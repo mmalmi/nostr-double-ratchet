@@ -445,6 +445,27 @@ describe('Invite', () => {
       expect(parsedInvite.maxUses).toBeUndefined() // maxUses is not included in URL
     })
 
+    it('should include purpose and owner pubkey in invite link when provided', () => {
+      const alicePrivateKey = generateSecretKey()
+      const alicePublicKey = getPublicKey(alicePrivateKey)
+      const ownerPublicKey = getPublicKey(generateSecretKey())
+
+      const invite = Invite.createNew(alicePublicKey, undefined, undefined, {
+        purpose: 'link',
+        ownerPubkey: ownerPublicKey,
+      })
+
+      const url = invite.getUrl()
+      const urlData = JSON.parse(decodeURIComponent(new URL(url).hash.slice(1)))
+
+      expect(urlData.purpose).toBe('link')
+      expect(urlData.owner).toBe(ownerPublicKey)
+
+      const parsedInvite = Invite.fromUrl(url)
+      expect(parsedInvite.purpose).toBe('link')
+      expect(parsedInvite.ownerPubkey).toBe(ownerPublicKey)
+    })
+
     it('should handle invite link with custom root URL', () => {
       const alicePrivateKey = generateSecretKey()
       const alicePublicKey = getPublicKey(alicePrivateKey)

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::Receiver;
 use nostr_double_ratchet::{
     FileStorageAdapter, Invite, Session, SessionManager, SessionManagerEvent, SessionState,
+    StorageAdapter,
 };
 
 mod error;
@@ -299,7 +300,15 @@ impl SessionManagerHandle {
         let our_identity_key = parse_private_key(&our_identity_privkey_hex)?;
 
         let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-        let manager = SessionManager::new(our_pubkey, our_identity_key, device_id, tx, None);
+        let manager = SessionManager::new(
+            our_pubkey,
+            our_identity_key,
+            device_id,
+            our_pubkey,
+            tx,
+            None,
+            None,
+        );
 
         Ok(Arc::new(Self {
             inner: Mutex::new(manager),
@@ -326,8 +335,10 @@ impl SessionManagerHandle {
             our_pubkey,
             our_identity_key,
             device_id,
+            our_pubkey,
             tx,
-            Some(Arc::new(storage)),
+            Some(Arc::new(storage) as Arc<dyn StorageAdapter>),
+            None,
         );
 
         Ok(Arc::new(Self {

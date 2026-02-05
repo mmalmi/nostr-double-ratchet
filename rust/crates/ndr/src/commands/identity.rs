@@ -18,6 +18,8 @@ struct WhoamiResult {
     pubkey: String,
     npub: String,
     logged_in: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linked_owner: Option<String>,
 }
 
 /// Login with a private key (nsec or hex)
@@ -77,6 +79,7 @@ pub async fn whoami(config: &Config, output: &Output) -> Result<()> {
             pubkey: String::new(),
             npub: String::new(),
             logged_in: false,
+            linked_owner: config.linked_owner.clone(),
         };
         output.success("whoami", result);
         return Ok(());
@@ -89,6 +92,7 @@ pub async fn whoami(config: &Config, output: &Output) -> Result<()> {
         pubkey,
         npub: pk.to_bech32().unwrap_or_default(),
         logged_in: true,
+        linked_owner: config.linked_owner.clone(),
     };
 
     output.success("whoami", result);

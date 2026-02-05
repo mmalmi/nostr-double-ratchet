@@ -52,16 +52,21 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
 
     // Parse the invite URL
     let invite = nostr_double_ratchet::Invite::from_url(url)?;
+    if invite.purpose.as_deref() == Some("link") {
+        anyhow::bail!("Link invite detected. Use 'ndr link accept <url>' instead.");
+    }
     let their_pubkey = hex::encode(invite.inviter.to_bytes());
 
     // Get our keys
     let our_private_key = config.private_key_bytes()?;
     let our_pubkey_hex = config.public_key()?;
     let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
+    let owner_pubkey_hex = config.owner_public_key_hex()?;
+    let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
 
     // Accept the invite - creates session and response event
     let (session, response_event) =
-        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(our_pubkey))?;
+        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(owner_pubkey))?;
 
     // Serialize session state
     let session_state = serde_json::to_string(&session.state)?;
