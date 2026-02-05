@@ -367,12 +367,7 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
     );
 
     if needs_identity {
-        let (pubkey, was_generated) = config.ensure_identity()?;
-        if was_generated {
-            let pk = nostr::PublicKey::from_hex(&pubkey)?;
-            let npub = nostr::ToBech32::to_bech32(&pk)?;
-            eprintln!("Generated new identity: {}", npub);
-        }
+        let _ = config.ensure_identity()?;
     }
 
     match cli.command {

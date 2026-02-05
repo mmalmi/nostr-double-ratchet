@@ -89,18 +89,14 @@ async fn test_link_flow_publishes_app_keys_and_links_device() {
     // Start listener on device (waits for link acceptance)
     let (mut device_listen, mut device_stdout) = start_ndr_listen(device_dir.path()).await;
 
-    // Owner device: login and accept the link invite
+    // Owner device: accept the link invite (auto-generates identity)
     let owner_dir = setup_ndr_dir(&relay_url);
-    let owner_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let login = run_ndr(owner_dir.path(), &["login", owner_sk]).await;
-    assert_eq!(login["status"], "ok");
-    let owner_pubkey = login["data"]["pubkey"]
+    let accepted = run_ndr(owner_dir.path(), &["link", "accept", &link_url]).await;
+    assert_eq!(accepted["status"], "ok");
+    let owner_pubkey = accepted["data"]["owner_pubkey"]
         .as_str()
         .expect("Expected owner pubkey")
         .to_string();
-
-    let accepted = run_ndr(owner_dir.path(), &["link", "accept", &link_url]).await;
-    assert_eq!(accepted["status"], "ok");
 
     // Wait for link_accepted event from device listener
     let mut linked_owner: Option<String> = None;
@@ -188,4 +184,3 @@ async fn test_link_flow_publishes_app_keys_and_links_device() {
 
     relay.stop().await;
 }
-

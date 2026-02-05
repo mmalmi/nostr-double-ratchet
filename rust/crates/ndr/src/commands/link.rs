@@ -174,11 +174,13 @@ pub async fn accept(
     storage: &Storage,
     output: &Output,
 ) -> Result<()> {
-    if !config.is_logged_in() {
-        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
-    }
+    let mut config = config.clone();
     if config.linked_owner.is_some() {
         anyhow::bail!("Linked devices cannot accept link invites.");
+    }
+
+    if !config.is_logged_in() {
+        let _ = config.ensure_identity()?;
     }
 
     let invite = nostr_double_ratchet::Invite::from_url(url)?;
@@ -398,6 +400,36 @@ mod tests {
         assert!(devices
             .iter()
             .any(|d| d.identity_pubkey == owner_keys.public_key()));
+        assert!(devices
+            .iter()
+            .any(|d| d.identity_pubkey == device_keys.public_key()));
+    }
+
+    #[tokio::test]
+    async fn test_accept_autogenerates_owner_identity_when_missing() {
+        let (temp, config, storage) = setup();
+        let output = Output::new(true);
+
+        assert!(!config.is_logged_in());
+
+        let device_keys = nostr::Keys::generate();
+        let invite = build_link_invite(&device_keys.public_key().to_hex()).unwrap();
+        let url = invite.get_url("https://iris.to").unwrap();
+
+        accept(&url, &config, &storage, &output).await.unwrap();
+
+        let updated = Config::load(temp.path()).unwrap();
+        assert!(updated.is_logged_in());
+
+        let owner_pk_hex = updated.public_key().unwrap();
+        let owner_pk = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pk_hex).unwrap();
+
+        let app_keys = storage
+            .load_app_keys()
+            .unwrap()
+            .expect("expected app keys");
+        let devices = app_keys.get_all_devices();
+        assert!(devices.iter().any(|d| d.identity_pubkey == owner_pk));
         assert!(devices
             .iter()
             .any(|d| d.identity_pubkey == device_keys.public_key()));
