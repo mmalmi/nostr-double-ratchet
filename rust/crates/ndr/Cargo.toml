@@ -21,6 +21,7 @@ thiserror.workspace = true
 hex.workspace = true
 uuid.workspace = true
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+qrcode = "0.14"
 
 [dev-dependencies]
 tempfile = "3"

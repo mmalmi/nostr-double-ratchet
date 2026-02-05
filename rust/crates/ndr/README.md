@@ -28,7 +28,7 @@ ndr whoami
 # Create an invite
 ndr invite create
 
-# Publish a public invite (default device id = "public")
+# Publish a device invite (default device id = your identity pubkey hex)
 ndr invite publish
 
 # Join someone's invite
@@ -68,16 +68,16 @@ ndr whoami          # Show current identity
 
 ```bash
 ndr invite create           # Create new invite URL
-ndr invite publish          # Create + publish invite event on Nostr (default device id: "public")
+ndr invite publish          # Create + publish invite event on Nostr (default device id: your pubkey hex)
 ndr invite list             # List pending invites
 ndr invite delete <id>      # Delete an invite
 ndr invite listen           # Listen for invite acceptances
 ```
 
 Notes:
-- `ndr invite publish` defaults to device id `public`, which makes the event replaceable on relays.
-- Re-run `ndr invite publish` to refresh the public invite.
-- Override the device id with `--device-id <name>` if you need multiple parallel invites.
+- `ndr invite publish` defaults to device id = your identity pubkey (hex), matching Iris multi-device expectations.
+- Re-run `ndr invite publish` to refresh the device invite.
+- If you want a single "public" invite per identity across devices, use `--device-id public`.
 
 ### Link Devices
 
@@ -86,7 +86,7 @@ Notes:
 ndr link create             # Create a private link invite (stores it locally)
 
 # On the owner device
-ndr link accept <url>       # Accept the link invite and publish response
+ndr link accept <url>       # Accept the link invite, publish response, and register device in AppKeys
 
 # Back on the device to be linked
 ndr listen                  # Wait for the response and finalize linking

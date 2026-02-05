@@ -96,8 +96,11 @@ pub async fn publish(
     let pubkey_hex = config.public_key()?;
     let pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&pubkey_hex)?;
 
-    let device_id = device_id.unwrap_or_else(|| "public".to_string());
-    let device_id = normalize_device_id(&device_id);
+    // For multi-device compatibility, default device_id to our identity pubkey.
+    let device_id = match device_id {
+        Some(id) => normalize_device_id(&id),
+        None => pubkey_hex.clone(),
+    };
 
     let invite = nostr_double_ratchet::Invite::create_new(pubkey, Some(device_id.clone()), None)?;
     let url = invite.get_url("https://iris.to")?;

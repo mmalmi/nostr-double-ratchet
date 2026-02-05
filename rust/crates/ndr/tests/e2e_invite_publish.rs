@@ -102,7 +102,7 @@ async fn test_invite_publish_creates_event() {
 }
 
 #[tokio::test]
-async fn test_invite_publish_defaults_public_device_id() {
+async fn test_invite_publish_defaults_device_id_to_pubkey() {
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -141,7 +141,10 @@ async fn test_invite_publish_defaults_public_device_id() {
             .any(|t| t.len() >= 2 && t[0] == name && t[1] == value)
     };
 
-    assert!(has_tag("d", "double-ratchet/invites/public"));
+    let sk = nostr::SecretKey::from_hex(alice_sk).unwrap();
+    let keys = nostr::Keys::new(sk);
+    let expected_pubkey = keys.public_key().to_hex();
+    assert!(has_tag("d", &format!("double-ratchet/invites/{}", expected_pubkey)));
 
     relay.stop().await;
 }

@@ -105,6 +105,37 @@ impl Storage {
         })
     }
 
+    // === Multi-device (AppKeys) operations ===
+
+    fn app_keys_path(&self) -> PathBuf {
+        self.base_dir.join("app_keys.json")
+    }
+
+    pub fn load_app_keys(&self) -> Result<Option<nostr_double_ratchet::AppKeys>> {
+        let path = self.app_keys_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        match nostr_double_ratchet::AppKeys::deserialize(&content) {
+            Ok(keys) => Ok(Some(keys)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn save_app_keys(&self, keys: &nostr_double_ratchet::AppKeys) -> Result<()> {
+        let path = self.app_keys_path();
+        let temp_path = self.base_dir.join("app_keys.json.tmp");
+        let json = keys.serialize()?;
+        let content = match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(v) => serde_json::to_string_pretty(&v)?,
+            Err(_) => json,
+        };
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
+        Ok(())
+    }
+
     // === Invite operations ===
 
     pub fn save_invite(&self, invite: &StoredInvite) -> Result<()> {
@@ -667,6 +698,31 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let storage = Storage::open(temp.path()).unwrap();
         (temp, storage)
+    }
+
+    #[test]
+    fn test_app_keys_save_and_load() {
+        let (_temp, storage) = test_storage();
+
+        let owner_keys = nostr::Keys::generate();
+        let device_keys = nostr::Keys::generate();
+
+        let app_keys = nostr_double_ratchet::AppKeys::new(vec![
+            nostr_double_ratchet::DeviceEntry::new(owner_keys.public_key(), 1),
+            nostr_double_ratchet::DeviceEntry::new(device_keys.public_key(), 2),
+        ]);
+
+        storage.save_app_keys(&app_keys).unwrap();
+
+        let loaded = storage.load_app_keys().unwrap().expect("expected app keys");
+        let devices = loaded.get_all_devices();
+        assert_eq!(devices.len(), 2);
+        assert!(devices
+            .iter()
+            .any(|d| d.identity_pubkey == owner_keys.public_key()));
+        assert!(devices
+            .iter()
+            .any(|d| d.identity_pubkey == device_keys.public_key()));
     }
 
     #[test]

@@ -10,6 +10,10 @@ impl Output {
         Self { json }
     }
 
+    pub fn is_json(&self) -> bool {
+        self.json
+    }
+
     /// Output a successful result
     pub fn success<T: Serialize>(&self, command: &str, data: T) {
         if self.json {
