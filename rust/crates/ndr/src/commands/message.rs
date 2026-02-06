@@ -3,10 +3,10 @@ use nostr_double_ratchet::{
     OneToManyChannel, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, INVITE_EVENT_KIND,
     REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
-use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
 use crate::storage::{
     Storage, StoredChat, StoredGroup, StoredGroupMessage, StoredGroupSender, StoredMessage,
@@ -207,12 +207,7 @@ pub async fn send(
     storage.save_chat(&updated_chat)?;
 
     // Publish to relays
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().await;
+    let client = connect_client(config).await?;
     send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success(
@@ -244,12 +239,7 @@ async fn create_chat_from_public_invite(
     let owner_pubkey_hex = config.owner_public_key_hex()?;
     let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
 
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().await;
+    let client = connect_client(config).await?;
 
     let filter = Filter::new()
         .kind(nostr::Kind::Custom(INVITE_EVENT_KIND as u16))
@@ -361,12 +351,7 @@ pub async fn react(
     storage.save_chat(&updated_chat)?;
 
     // Publish to relays
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().await;
+    let client = connect_client(config).await?;
     send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success(
@@ -428,12 +413,7 @@ pub async fn receipt(
     storage.save_chat(&updated_chat)?;
 
     // Publish to relays
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().await;
+    let client = connect_client(config).await?;
     send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success(
@@ -482,12 +462,7 @@ pub async fn typing(
     storage.save_chat(&updated_chat)?;
 
     // Publish to relays
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().await;
+    let client = connect_client(config).await?;
     send_event_or_ignore(&client, encrypted_event.clone()).await?;
 
     output.success(
@@ -720,24 +695,6 @@ fn collect_chat_pubkeys(storage: &Storage, chat_id: Option<&str>) -> Result<Vec<
         }
     }
     Ok(pubkeys)
-}
-
-async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
-    match client.send_event(event).await {
-        Ok(_) => Ok(()),
-        Err(_) if should_ignore_publish_errors() => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn should_ignore_publish_errors() -> bool {
-    for key in ["NDR_IGNORE_PUBLISH_ERRORS", "NOSTR_IGNORE_PUBLISH_ERRORS"] {
-        if let Ok(val) = std::env::var(key) {
-            let val = val.trim().to_lowercase();
-            return matches!(val.as_str(), "1" | "true" | "yes" | "on");
-        }
-    }
-    false
 }
 
 fn allow_insecure_shared_channel_sender_keys() -> bool {

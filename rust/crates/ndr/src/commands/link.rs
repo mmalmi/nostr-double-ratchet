@@ -3,6 +3,7 @@ use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
 use crate::storage::Storage;
 
@@ -282,24 +283,6 @@ async fn fetch_latest_app_keys(
         }
     }
     Ok(latest.map(|(_, k)| k))
-}
-
-async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
-    match client.send_event(event).await {
-        Ok(_) => Ok(()),
-        Err(_) if should_ignore_publish_errors() => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn should_ignore_publish_errors() -> bool {
-    for key in ["NDR_IGNORE_PUBLISH_ERRORS", "NOSTR_IGNORE_PUBLISH_ERRORS"] {
-        if let Ok(val) = std::env::var(key) {
-            let val = val.trim().to_lowercase();
-            return matches!(val.as_str(), "1" | "true" | "yes" | "on");
-        }
-    }
-    false
 }
 
 #[cfg(test)]

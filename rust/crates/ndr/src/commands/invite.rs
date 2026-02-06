@@ -1,8 +1,8 @@
 use anyhow::Result;
-use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
 use crate::storage::{Storage, StoredChat, StoredInvite};
 
@@ -129,12 +129,7 @@ pub async fn publish(
         .map_err(|e| anyhow::anyhow!("Failed to sign invite event: {}", e))?;
 
     // Publish to relays
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().await;
+    let client = connect_client(config).await?;
     send_event_or_ignore(&client, event.clone()).await?;
 
     output.success(
@@ -182,24 +177,6 @@ pub async fn delete(id: &str, storage: &Storage, output: &Output) -> Result<()> 
         anyhow::bail!("Invite not found: {}", id);
     }
     Ok(())
-}
-
-async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
-    match client.send_event(event).await {
-        Ok(_) => Ok(()),
-        Err(_) if should_ignore_publish_errors() => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn should_ignore_publish_errors() -> bool {
-    for key in ["NDR_IGNORE_PUBLISH_ERRORS", "NOSTR_IGNORE_PUBLISH_ERRORS"] {
-        if let Ok(val) = std::env::var(key) {
-            let val = val.trim().to_lowercase();
-            return matches!(val.as_str(), "1" | "true" | "yes" | "on");
-        }
-    }
-    false
 }
 
 #[derive(Serialize)]
