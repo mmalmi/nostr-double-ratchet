@@ -391,7 +391,7 @@ pub async fn remove_admin(
     Ok(())
 }
 
-/// Send a message to all group members (fan-out)
+/// Send a group message (published once on the SharedChannel, encrypted with our sender key).
 pub async fn send_message(
     id: &str,
     message: &str,
@@ -551,7 +551,7 @@ pub async fn send_message(
     Ok(())
 }
 
-/// React to a group message (fan-out)
+/// React to a group message (published once on the SharedChannel, encrypted with our sender key).
 pub async fn react(
     id: &str,
     message_id: &str,
