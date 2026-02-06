@@ -534,14 +534,7 @@ async fn ensure_group_sender_key(
             let dist_json = serde_json::to_string(&dist)?;
 
             let _ = fan_out_sender_key_distribution(
-                group,
-                &dist_json,
-                key_id,
-                now_ms,
-                now_s,
-                config,
-                storage,
-                client,
+                group, &dist_json, key_id, now_ms, now_s, config, storage, client,
             )
             .await;
 

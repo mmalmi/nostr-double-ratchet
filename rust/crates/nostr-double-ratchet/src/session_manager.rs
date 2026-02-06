@@ -285,8 +285,7 @@ impl SessionManager {
         let tag = Tag::parse(&["e".to_string(), message_id])
             .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
 
-        let event =
-            self.build_message_event(recipient, crate::REACTION_KIND, emoji, vec![tag])?;
+        let event = self.build_message_event(recipient, crate::REACTION_KIND, emoji, vec![tag])?;
 
         self.send_event(recipient, event)
     }

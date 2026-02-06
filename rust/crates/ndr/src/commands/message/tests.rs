@@ -1,8 +1,8 @@
 use super::*;
 use crate::config::Config;
 use crate::output::Output;
-use crate::storage::StoredChat;
 use crate::storage::Storage;
+use crate::storage::StoredChat;
 use std::sync::Once;
 use tempfile::TempDir;
 

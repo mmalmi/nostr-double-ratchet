@@ -30,4 +30,3 @@ pub(crate) fn should_ignore_publish_errors() -> bool {
     }
     false
 }
-

@@ -96,7 +96,10 @@ pub(super) fn extract_e_tags(event: &serde_json::Value) -> Vec<String> {
 }
 
 /// Helper to collect ephemeral pubkeys from chats for subscription
-pub(super) fn collect_chat_pubkeys(storage: &Storage, chat_id: Option<&str>) -> Result<Vec<nostr::PublicKey>> {
+pub(super) fn collect_chat_pubkeys(
+    storage: &Storage,
+    chat_id: Option<&str>,
+) -> Result<Vec<nostr::PublicKey>> {
     let chats = if let Some(id) = chat_id {
         vec![storage
             .get_chat(id)?

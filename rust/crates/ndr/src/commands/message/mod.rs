@@ -6,7 +6,7 @@ mod types;
 
 pub use listen::listen;
 pub use receive::receive;
-pub use send::{read, react, receipt, send, typing};
+pub use send::{react, read, receipt, send, typing};
 
 pub fn resolve_target(
     target: &str,

@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use nostr_double_ratchet::{
-    OneToManyChannel, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND,
-    RECEIPT_KIND, TYPING_KIND,
+    OneToManyChannel, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND,
+    TYPING_KIND,
 };
 
 use crate::config::Config;
@@ -12,8 +12,7 @@ use crate::storage::{
 };
 
 use super::common::{
-    allow_insecure_shared_channel_sender_keys, collect_chat_pubkeys, extract_e_tag,
-    extract_e_tags,
+    allow_insecure_shared_channel_sender_keys, collect_chat_pubkeys, extract_e_tag, extract_e_tags,
 };
 use super::types::{IncomingMessage, IncomingReaction};
 
