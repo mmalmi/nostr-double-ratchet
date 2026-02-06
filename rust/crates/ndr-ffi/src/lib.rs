@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Receiver;
 use nostr_double_ratchet::{
-    FileStorageAdapter, Invite, Session, SessionManager, SessionManagerEvent, SessionState,
-    StorageAdapter,
+    AppKeys, DeviceEntry, FileStorageAdapter, Invite, Session, SessionManager, SessionManagerEvent,
+    SessionState, StorageAdapter,
 };
 
 mod error;
@@ -68,6 +68,66 @@ pub fn generate_keypair() -> FfiKeyPair {
         public_key_hex: keys.public_key().to_hex(),
         private_key_hex: keys.secret_key().to_secret_hex(),
     }
+}
+
+/// Derive a public key from a hex-encoded private key.
+#[uniffi::export]
+pub fn derive_public_key(privkey_hex: String) -> Result<String, NdrError> {
+    let privkey = parse_private_key(&privkey_hex)?;
+    let secret_key =
+        nostr::SecretKey::from_slice(&privkey).map_err(|e| NdrError::InvalidKey(e.to_string()))?;
+    Ok(nostr::Keys::new(secret_key).public_key().to_hex())
+}
+
+/// FFI-friendly device entry for AppKeys.
+#[derive(uniffi::Record)]
+pub struct FfiDeviceEntry {
+    pub identity_pubkey_hex: String,
+    pub created_at: u64,
+}
+
+/// Create a signed AppKeys event JSON for publishing to relays.
+#[uniffi::export]
+pub fn create_signed_app_keys_event(
+    owner_pubkey_hex: String,
+    owner_privkey_hex: String,
+    devices: Vec<FfiDeviceEntry>,
+) -> Result<String, NdrError> {
+    let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
+    let owner_privkey = parse_private_key(&owner_privkey_hex)?;
+    let owner_sk = nostr::SecretKey::from_slice(&owner_privkey)
+        .map_err(|e| NdrError::InvalidKey(e.to_string()))?;
+
+    let entries = devices
+        .into_iter()
+        .filter_map(|d| {
+            let pk = nostr_double_ratchet::utils::pubkey_from_hex(&d.identity_pubkey_hex).ok()?;
+            Some(DeviceEntry::new(pk, d.created_at))
+        })
+        .collect::<Vec<_>>();
+
+    let app_keys = AppKeys::new(entries);
+    let unsigned = app_keys.get_event(owner_pubkey);
+    let keys = nostr::Keys::new(owner_sk);
+    let signed = unsigned
+        .sign_with_keys(&keys)
+        .map_err(|e| NdrError::Serialization(e.to_string()))?;
+    Ok(serde_json::to_string(&signed)?)
+}
+
+/// Parse an AppKeys event JSON and return the contained device entries.
+#[uniffi::export]
+pub fn parse_app_keys_event(event_json: String) -> Result<Vec<FfiDeviceEntry>, NdrError> {
+    let event: nostr::Event = serde_json::from_str(&event_json)?;
+    let app_keys = AppKeys::from_event(&event)?;
+    Ok(app_keys
+        .get_all_devices()
+        .into_iter()
+        .map(|d| FfiDeviceEntry {
+            identity_pubkey_hex: hex::encode(d.identity_pubkey.to_bytes()),
+            created_at: d.created_at,
+        })
+        .collect())
 }
 
 /// FFI wrapper for Invite.
@@ -160,6 +220,81 @@ impl InviteHandle {
             }),
             response_event_json,
         })
+    }
+
+    /// Accept the invite as an owner and include the owner pubkey in the response payload.
+    pub fn accept_with_owner(
+        &self,
+        invitee_pubkey_hex: String,
+        invitee_privkey_hex: String,
+        device_id: Option<String>,
+        owner_pubkey_hex: Option<String>,
+    ) -> Result<InviteAcceptResult, NdrError> {
+        let invite = self.inner.lock().unwrap();
+        let invitee_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&invitee_pubkey_hex)?;
+        let invitee_privkey = parse_private_key(&invitee_privkey_hex)?;
+        let owner_pubkey = match owner_pubkey_hex {
+            Some(h) => Some(nostr_double_ratchet::utils::pubkey_from_hex(&h)?),
+            None => None,
+        };
+
+        let (session, response_event) = invite.accept_with_owner(
+            invitee_pubkey,
+            invitee_privkey,
+            device_id,
+            owner_pubkey,
+        )?;
+        let response_event_json = serde_json::to_string(&response_event)?;
+
+        Ok(InviteAcceptResult {
+            session: Arc::new(SessionHandle {
+                inner: Mutex::new(session),
+            }),
+            response_event_json,
+        })
+    }
+
+    /// Update the invite purpose (e.g. \"link\").
+    pub fn set_purpose(&self, purpose: Option<String>) {
+        let mut invite = self.inner.lock().unwrap();
+        invite.purpose = purpose;
+    }
+
+    /// Update the owner pubkey embedded in invite URLs.
+    pub fn set_owner_pubkey_hex(&self, owner_pubkey_hex: Option<String>) -> Result<(), NdrError> {
+        let mut invite = self.inner.lock().unwrap();
+        invite.owner_public_key = match owner_pubkey_hex {
+            Some(h) => Some(nostr_double_ratchet::utils::pubkey_from_hex(&h)?),
+            None => None,
+        };
+        Ok(())
+    }
+
+    /// Process an invite response event and create a session (inviter side).
+    ///
+    /// Returns `None` if the event is not a valid response for this invite.
+    pub fn process_response(
+        &self,
+        event_json: String,
+        inviter_privkey_hex: String,
+    ) -> Result<Option<InviteProcessResult>, NdrError> {
+        let invite = self.inner.lock().unwrap();
+        let event: nostr::Event = serde_json::from_str(&event_json)?;
+        let inviter_privkey = parse_private_key(&inviter_privkey_hex)?;
+
+        let response = invite.process_invite_response(&event, inviter_privkey)?;
+        let Some(response) = response else {
+            return Ok(None);
+        };
+
+        Ok(Some(InviteProcessResult {
+            session: Arc::new(SessionHandle {
+                inner: Mutex::new(response.session),
+            }),
+            invitee_pubkey_hex: response.invitee_identity.to_hex(),
+            device_id: response.device_id,
+            owner_pubkey_hex: response.owner_public_key.map(|pk| pk.to_hex()),
+        }))
     }
 
     /// Get the inviter's public key as hex.
@@ -295,16 +430,21 @@ impl SessionManagerHandle {
         our_pubkey_hex: String,
         our_identity_privkey_hex: String,
         device_id: String,
+        owner_pubkey_hex: Option<String>,
     ) -> Result<Arc<Self>, NdrError> {
         let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
         let our_identity_key = parse_private_key(&our_identity_privkey_hex)?;
+        let owner_pubkey = match owner_pubkey_hex {
+            Some(h) => nostr_double_ratchet::utils::pubkey_from_hex(&h)?,
+            None => our_pubkey,
+        };
 
         let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
         let manager = SessionManager::new(
             our_pubkey,
             our_identity_key,
             device_id,
-            our_pubkey,
+            owner_pubkey,
             tx,
             None,
             None,
@@ -323,9 +463,14 @@ impl SessionManagerHandle {
         our_identity_privkey_hex: String,
         device_id: String,
         storage_path: String,
+        owner_pubkey_hex: Option<String>,
     ) -> Result<Arc<Self>, NdrError> {
         let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
         let our_identity_key = parse_private_key(&our_identity_privkey_hex)?;
+        let owner_pubkey = match owner_pubkey_hex {
+            Some(h) => nostr_double_ratchet::utils::pubkey_from_hex(&h)?,
+            None => our_pubkey,
+        };
 
         let storage = FileStorageAdapter::new(std::path::PathBuf::from(storage_path))
             .map_err(NdrError::from)?;
@@ -335,7 +480,7 @@ impl SessionManagerHandle {
             our_pubkey,
             our_identity_key,
             device_id,
-            our_pubkey,
+            owner_pubkey,
             tx,
             Some(Arc::new(storage) as Arc<dyn StorageAdapter>),
             None,
@@ -363,6 +508,41 @@ impl SessionManagerHandle {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
         Ok(manager.send_text(recipient, text)?)
+    }
+
+    /// Send a text message and return both the stable inner (rumor) id and the
+    /// list of outer message event ids that were published.
+    pub fn send_text_with_inner_id(
+        &self,
+        recipient_pubkey_hex: String,
+        text: String,
+    ) -> Result<SendTextResult, NdrError> {
+        let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
+        let manager = self.inner.lock().unwrap();
+        let (inner_id, outer_event_ids) = manager.send_text_with_inner_id(recipient, text)?;
+        Ok(SendTextResult {
+            inner_id,
+            outer_event_ids,
+        })
+    }
+
+    /// Send a delivery/read receipt for messages.
+    pub fn send_receipt(
+        &self,
+        recipient_pubkey_hex: String,
+        receipt_type: String,
+        message_ids: Vec<String>,
+    ) -> Result<Vec<String>, NdrError> {
+        let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
+        let manager = self.inner.lock().unwrap();
+        Ok(manager.send_receipt(recipient, &receipt_type, message_ids)?)
+    }
+
+    /// Send a typing indicator.
+    pub fn send_typing(&self, recipient_pubkey_hex: String) -> Result<Vec<String>, NdrError> {
+        let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
+        let manager = self.inner.lock().unwrap();
+        Ok(manager.send_typing(recipient)?)
     }
 
     /// Import a session state for a peer.
@@ -494,6 +674,12 @@ impl SessionManagerHandle {
         manager.get_our_pubkey().to_hex()
     }
 
+    /// Get owner public key as hex.
+    pub fn get_owner_pubkey_hex(&self) -> String {
+        let manager = self.inner.lock().unwrap();
+        manager.get_owner_pubkey().to_hex()
+    }
+
     /// Get total active sessions.
     pub fn get_total_sessions(&self) -> u64 {
         let manager = self.inner.lock().unwrap();
@@ -525,6 +711,22 @@ fn parse_secret(hex_str: &str) -> Result<[u8; 32], NdrError> {
 
 uniffi::setup_scaffolding!();
 
+/// Result of processing an invite response.
+#[derive(uniffi::Record)]
+pub struct InviteProcessResult {
+    pub session: Arc<SessionHandle>,
+    pub invitee_pubkey_hex: String,
+    pub device_id: Option<String>,
+    pub owner_pubkey_hex: Option<String>,
+}
+
+/// Result of sending a text message including stable inner id.
+#[derive(uniffi::Record)]
+pub struct SendTextResult {
+    pub inner_id: String,
+    pub outer_event_ids: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,6 +746,13 @@ mod tests {
         // Verify they're valid hex
         assert!(hex::decode(&kp.public_key_hex).is_ok());
         assert!(hex::decode(&kp.private_key_hex).is_ok());
+    }
+
+    #[test]
+    fn test_derive_public_key_matches_generate() {
+        let kp = generate_keypair();
+        let pubkey = derive_public_key(kp.private_key_hex.clone()).unwrap();
+        assert_eq!(pubkey, kp.public_key_hex);
     }
 
     #[test]
@@ -605,6 +814,41 @@ mod tests {
 
         assert!(!result.response_event_json.is_empty());
         assert!(result.session.can_send());
+    }
+
+    #[test]
+    fn test_invite_process_response_yields_working_session_pair() {
+        let alice_kp = generate_keypair();
+        let bob_kp = generate_keypair();
+
+        let invite = InviteHandle::create_new(alice_kp.public_key_hex.clone(), None, None).unwrap();
+        let accept = invite
+            .accept(
+                bob_kp.public_key_hex.clone(),
+                bob_kp.private_key_hex.clone(),
+                None,
+            )
+            .unwrap();
+
+        let processed = invite
+            .process_response(accept.response_event_json.clone(), alice_kp.private_key_hex.clone())
+            .unwrap()
+            .unwrap();
+
+        // Bob sends first (initiator), Alice receives first (non-initiator)
+        let bob_send = accept.session.send_text("hi".to_string()).unwrap();
+        let alice_decrypt = processed
+            .session
+            .decrypt_event(bob_send.outer_event_json.clone())
+            .unwrap();
+        assert!(alice_decrypt.plaintext.contains("hi"));
+
+        // After receiving, Alice should be able to send.
+        assert!(processed.session.can_send());
+
+        let alice_reply = processed.session.send_text("ok".to_string()).unwrap();
+        let bob_decrypt = accept.session.decrypt_event(alice_reply.outer_event_json).unwrap();
+        assert!(bob_decrypt.plaintext.contains("ok"));
     }
 
     #[test]

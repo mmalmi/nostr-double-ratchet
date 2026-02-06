@@ -274,15 +274,11 @@ impl Session {
             return Err(Error::NotInitiator);
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let now_s = now.as_secs();
+        let now_ms = now.as_millis();
 
-        event.created_at = Timestamp::from(now);
-        event.pubkey = Keys::generate().public_key();
-
-        let ms_tag = Tag::parse(&["ms".to_string(), (now * 1000).to_string()])
+        let ms_tag = Tag::parse(&["ms".to_string(), now_ms.to_string()])
             .map_err(|e| Error::InvalidEvent(e.to_string()))?;
         let has_ms_tag = event.tags.iter().any(|t| {
             let v = t.clone().to_vec();
@@ -329,7 +325,7 @@ impl Session {
         let unsigned_event =
             nostr::EventBuilder::new(nostr::Kind::from(MESSAGE_EVENT_KIND as u16), encrypted_data)
                 .tags(tags)
-                .custom_created_at(Timestamp::from(now))
+                .custom_created_at(Timestamp::from(now_s))
                 .build(author_pubkey);
 
         // Sign with the ephemeral private key before returning

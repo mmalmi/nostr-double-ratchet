@@ -180,80 +180,75 @@ impl SessionManager {
             return Ok(Vec::new());
         }
 
-        let recipient_owner = self.resolve_to_owner(&recipient);
-
-        // Build event with p-tag for recipient (iris-client compatibility)
-        let event = nostr::EventBuilder::text_note(&text)
-            .tag(
-                Tag::parse(&["p".to_string(), hex::encode(recipient.to_bytes())])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            )
-            .build(self.our_public_key);
-
-        // Add to history for recipient and our owner (for sibling device sync)
-        let mut history = self.message_history.lock().unwrap();
-        for key in [recipient_owner, self.owner_public_key] {
-            history.entry(key).or_default().push(event.clone());
-        }
-        drop(history);
-
-        // Ensure we are set up for recipient and our own owner
-        self.setup_user(recipient_owner);
-        self.setup_user(self.owner_public_key);
-
-        // Gather target devices (recipient + own siblings), de-dup, exclude ourselves
-        let mut device_targets: Vec<(PublicKey, String)> = Vec::new();
-        {
-            let records = self.user_records.lock().unwrap();
-            for owner in [recipient_owner, self.owner_public_key] {
-                if let Some(record) = records.get(&owner) {
-                    for device_id in record.device_records.keys() {
-                        if device_id != &self.device_id {
-                            device_targets.push((owner, device_id.clone()));
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut seen = HashSet::new();
-        device_targets.retain(|(_, device_id)| seen.insert(device_id.clone()));
-
-        let mut event_ids = Vec::new();
-
-        for (owner, device_id) in device_targets {
-            let mut records = self.user_records.lock().unwrap();
-            let Some(user_record) = records.get_mut(&owner) else {
-                continue;
-            };
-
-            // Check if device is still authorized
-            if let Ok(device_pk) = crate::utils::pubkey_from_hex(&device_id) {
-                if !self.is_device_authorized_with_record(owner, device_pk, Some(&*user_record)) {
-                    continue;
-                }
-            }
-
-            let Some(device_record) = user_record.device_records.get_mut(&device_id) else {
-                continue;
-            };
-
-            if let Some(ref mut session) = device_record.active_session {
-                if let Ok(signed_event) = session.send_event(event.clone()) {
-                    event_ids.push(signed_event.id.to_string());
-                    let _ = self.pubsub.publish_signed(signed_event);
-                }
-            }
-        }
-
-        if !event_ids.is_empty() {
-            let _ = self.store_user_record(&recipient_owner);
-            if self.owner_public_key != recipient_owner {
-                let _ = self.store_user_record(&self.owner_public_key);
-            }
-        }
-
+        let (_, event_ids) = self.send_text_with_inner_id(recipient, text)?;
         Ok(event_ids)
+    }
+
+    /// Send a chat message and return both its stable inner (rumor) id and the
+    /// list of outer message event ids that were published.
+    pub fn send_text_with_inner_id(
+        &self,
+        recipient: PublicKey,
+        text: String,
+    ) -> Result<(String, Vec<String>)> {
+        if text.trim().is_empty() {
+            return Ok((String::new(), Vec::new()));
+        }
+
+        let event = self.build_message_event(
+            recipient,
+            crate::CHAT_MESSAGE_KIND,
+            text,
+            Vec::new(),
+        )?;
+
+        let inner_id = event
+            .id
+            .as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
+        let event_ids = self.send_event(recipient, event)?;
+        Ok((inner_id, event_ids))
+    }
+
+    pub fn send_receipt(
+        &self,
+        recipient: PublicKey,
+        receipt_type: &str,
+        message_ids: Vec<String>,
+    ) -> Result<Vec<String>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut tags: Vec<Tag> = Vec::new();
+        for id in message_ids {
+            tags.push(
+                Tag::parse(&["e".to_string(), id])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        let event = self.build_message_event(
+            recipient,
+            crate::RECEIPT_KIND,
+            receipt_type.to_string(),
+            tags,
+        )?;
+
+        self.send_event(recipient, event)
+    }
+
+    pub fn send_typing(&self, recipient: PublicKey) -> Result<Vec<String>> {
+        let event = self.build_message_event(
+            recipient,
+            crate::TYPING_KIND,
+            "typing".to_string(),
+            Vec::new(),
+        )?;
+
+        self.send_event(recipient, event)
     }
 
     pub fn get_device_id(&self) -> &str {
@@ -370,6 +365,122 @@ impl SessionManager {
 
     pub fn get_owner_pubkey(&self) -> PublicKey {
         self.owner_public_key
+    }
+
+    fn build_message_event(
+        &self,
+        recipient: PublicKey,
+        kind: u32,
+        content: String,
+        mut extra_tags: Vec<Tag>,
+    ) -> Result<UnsignedEvent> {
+        let recipient_hex = hex::encode(recipient.to_bytes());
+        let has_recipient_p_tag = extra_tags.iter().any(|t| {
+            let v = t.clone().to_vec();
+            v.first().map(|s| s.as_str()) == Some("p")
+                && v.get(1).map(|s| s.as_str()) == Some(recipient_hex.as_str())
+        });
+
+        if !has_recipient_p_tag {
+            extra_tags.insert(
+                0,
+                Tag::parse(&["p".to_string(), recipient_hex])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now_s = now.as_secs();
+        let now_ms = now.as_millis();
+
+        // Include an ms tag so the inner rumor id is stable (and matches what TS expects).
+        if !extra_tags.iter().any(|t| {
+            let v = t.clone().to_vec();
+            v.first().map(|s| s.as_str()) == Some("ms")
+        }) {
+            extra_tags.push(
+                Tag::parse(&["ms".to_string(), now_ms.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        let kind = nostr::Kind::from(kind as u16);
+        let mut event = nostr::EventBuilder::new(kind, &content)
+            .tags(extra_tags)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(self.owner_public_key);
+
+        event.ensure_id();
+        Ok(event)
+    }
+
+    pub fn send_event(&self, recipient: PublicKey, event: UnsignedEvent) -> Result<Vec<String>> {
+        let recipient_owner = self.resolve_to_owner(&recipient);
+
+        // Add to history for recipient and our owner (for sibling device sync)
+        let mut history = self.message_history.lock().unwrap();
+        for key in [recipient_owner, self.owner_public_key] {
+            history.entry(key).or_default().push(event.clone());
+        }
+        drop(history);
+
+        // Ensure we are set up for recipient and our own owner
+        self.setup_user(recipient_owner);
+        self.setup_user(self.owner_public_key);
+
+        // Gather target devices (recipient + own siblings), de-dup, exclude ourselves
+        let mut device_targets: Vec<(PublicKey, String)> = Vec::new();
+        {
+            let records = self.user_records.lock().unwrap();
+            for owner in [recipient_owner, self.owner_public_key] {
+                if let Some(record) = records.get(&owner) {
+                    for device_id in record.device_records.keys() {
+                        if device_id != &self.device_id {
+                            device_targets.push((owner, device_id.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut seen = HashSet::new();
+        device_targets.retain(|(_, device_id)| seen.insert(device_id.clone()));
+
+        let mut event_ids = Vec::new();
+
+        for (owner, device_id) in device_targets {
+            let mut records = self.user_records.lock().unwrap();
+            let Some(user_record) = records.get_mut(&owner) else {
+                continue;
+            };
+
+            // Check if device is still authorized
+            if let Ok(device_pk) = crate::utils::pubkey_from_hex(&device_id) {
+                if !self.is_device_authorized_with_record(owner, device_pk, Some(&*user_record)) {
+                    continue;
+                }
+            }
+
+            let Some(device_record) = user_record.device_records.get_mut(&device_id) else {
+                continue;
+            };
+
+            if let Some(ref mut session) = device_record.active_session {
+                if let Ok(signed_event) = session.send_event(event.clone()) {
+                    event_ids.push(signed_event.id.to_string());
+                    let _ = self.pubsub.publish_signed(signed_event);
+                }
+            }
+        }
+
+        if !event_ids.is_empty() {
+            let _ = self.store_user_record(&recipient_owner);
+            if self.owner_public_key != recipient_owner {
+                let _ = self.store_user_record(&self.owner_public_key);
+            }
+        }
+
+        Ok(event_ids)
     }
 
     fn device_invite_key(&self, device_id: &str) -> String {

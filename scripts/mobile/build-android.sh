@@ -44,43 +44,21 @@ fi
 
 cd "$RUST_ROOT"
 
-# Target configurations
-# ABI name -> Rust target
-declare -A TARGETS=(
-    ["arm64-v8a"]="aarch64-linux-android"
-    ["armeabi-v7a"]="armv7-linux-androideabi"
-    ["x86_64"]="x86_64-linux-android"
-    ["x86"]="i686-linux-android"
-)
-
 OUTPUT_DIR="$RUST_ROOT/target/android/jniLibs"
 mkdir -p "$OUTPUT_DIR"
 
-# Build each target
-for ABI in "${!TARGETS[@]}"; do
-    TARGET="${TARGETS[$ABI]}"
-    echo ""
-    echo "==> Building for $ABI ($TARGET)"
-    
-    cargo ndk -t "$TARGET" build -p ndr-ffi $CARGO_FLAGS
-    
-    # Copy output
-    ABI_DIR="$OUTPUT_DIR/$ABI"
-    mkdir -p "$ABI_DIR"
-    
-    if [[ "$BUILD_TYPE" == "release" ]]; then
-        SRC="$RUST_ROOT/target/$TARGET/release/libndr_ffi.so"
-    else
-        SRC="$RUST_ROOT/target/$TARGET/debug/libndr_ffi.so"
-    fi
-    
-    if [[ -f "$SRC" ]]; then
-        cp "$SRC" "$ABI_DIR/"
-        echo "    Copied to $ABI_DIR/libndr_ffi.so"
-    else
-        echo "    Warning: $SRC not found"
-    fi
-done
+echo ""
+echo "==> Building native libraries"
+echo "    Output: $OUTPUT_DIR"
+
+# Note: Use Android ABI names for cargo-ndk targets.
+cargo ndk \
+    -t arm64-v8a \
+    -t armeabi-v7a \
+    -t x86_64 \
+    -t x86 \
+    -o "$OUTPUT_DIR" \
+    build -p ndr-ffi $CARGO_FLAGS
 
 # Generate Kotlin bindings
 echo ""
@@ -89,8 +67,20 @@ echo "==> Generating Kotlin bindings"
 BINDINGS_DIR="$RUST_ROOT/target/android/bindings"
 mkdir -p "$BINDINGS_DIR"
 
+# Pick one built library for UniFFI metadata extraction.
+LIB_FOR_BINDGEN="$OUTPUT_DIR/arm64-v8a/libndr_ffi.so"
+if [[ ! -f "$LIB_FOR_BINDGEN" ]]; then
+    # Fall back to the first ABI that exists.
+    for ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+        if [[ -f "$OUTPUT_DIR/$ABI/libndr_ffi.so" ]]; then
+            LIB_FOR_BINDGEN="$OUTPUT_DIR/$ABI/libndr_ffi.so"
+            break
+        fi
+    done
+fi
+
 cargo run -p ndr-ffi --features uniffi/cli -- \
-    generate --library "$RUST_ROOT/target/aarch64-linux-android/$BUILD_TYPE/libndr_ffi.so" \
+    generate --library "$LIB_FOR_BINDGEN" \
     --language kotlin \
     --out-dir "$BINDINGS_DIR" 2>/dev/null || {
     echo "    Note: Binding generation requires the library to be built first."

@@ -325,6 +325,10 @@ export class Invite {
             throw new Error("Inviter session key is not available");
         }
 
+        // Nostr relays and test harnesses may deliver/re-publish the same response event multiple times.
+        // Deduplicate by event id so we don't create multiple sessions for the same acceptance.
+        const seenEventIds = new Set<string>();
+
         const filter = {
             kinds: [INVITE_RESPONSE_KIND],
             '#p': [this.inviterEphemeralPublicKey],
@@ -332,6 +336,11 @@ export class Invite {
 
         return nostrSubscribe(filter, async (event) => {
             try {
+                if (seenEventIds.has(event.id)) {
+                    return;
+                }
+                seenEventIds.add(event.id);
+
                 if (this.maxUses && this.usedBy.length >= this.maxUses) {
                     return;
                 }
