@@ -739,6 +739,14 @@ fn should_ignore_publish_errors() -> bool {
     false
 }
 
+fn allow_insecure_shared_channel_sender_keys() -> bool {
+    if let Ok(val) = std::env::var("NDR_ALLOW_INSECURE_SHARED_CHANNEL_SENDER_KEYS") {
+        let val = val.trim().to_lowercase();
+        return matches!(val.as_str(), "1" | "true" | "yes" | "on");
+    }
+    false
+}
+
 /// Listen for new messages and invite responses
 pub async fn listen(
     chat_id: Option<&str>,
@@ -1112,6 +1120,13 @@ pub async fn listen(
 
                             match inner_event.kind.as_u16() as u32 {
                                 GROUP_SENDER_KEY_DISTRIBUTION_KIND => {
+                                    // Forward secrecy note:
+                                    // SharedChannel encryption is a static shared secret; don't rely on it for sender-key
+                                    // distribution unless explicitly opted-in for compatibility.
+                                    if !allow_insecure_shared_channel_sender_keys() {
+                                        continue;
+                                    }
+
                                     // Sender-key distribution (one per sender per group, plus rotations).
                                     let dist = match serde_json::from_str::<
                                         nostr_double_ratchet::SenderKeyDistribution,
@@ -1133,16 +1148,26 @@ pub async fn listen(
                                         }
                                     }
 
-                                    let state = nostr_double_ratchet::SenderKeyState::new(
-                                        dist.key_id,
-                                        dist.chain_key,
-                                        dist.iteration,
-                                    );
-                                    storage.upsert_group_sender_key_state(
-                                        group_id,
-                                        &sender_pubkey_hex,
-                                        &state,
-                                    )?;
+                                    // Don't overwrite an existing progressed state (would break decrypt).
+                                    if storage
+                                        .get_group_sender_key_state(
+                                            group_id,
+                                            &sender_pubkey_hex,
+                                            dist.key_id,
+                                        )?
+                                        .is_none()
+                                    {
+                                        let state = nostr_double_ratchet::SenderKeyState::new(
+                                            dist.key_id,
+                                            dist.chain_key,
+                                            dist.iteration,
+                                        );
+                                        storage.upsert_group_sender_key_state(
+                                            group_id,
+                                            &sender_pubkey_hex,
+                                            &state,
+                                        )?;
+                                    }
 
                                     // Retry any pending messages for this (group,sender,key_id).
                                     let pending_key =
@@ -1277,6 +1302,7 @@ pub async fn listen(
                                             "sender_pubkey": sender_pubkey_hex,
                                             "key_id": dist.key_id,
                                             "iteration": dist.iteration,
+                                            "transport": "shared_channel",
                                         }),
                                     );
                                 }
@@ -1649,6 +1675,180 @@ pub async fn listen(
                                             }
                                         }
                                     }
+                                } else if rumor_kind == GROUP_SENDER_KEY_DISTRIBUTION_KIND {
+                                    // Sender-key distribution over the 1:1 Double Ratchet session (forward secrecy).
+                                    let dist = match serde_json::from_str::<
+                                        nostr_double_ratchet::SenderKeyDistribution,
+                                    >(&content)
+                                    {
+                                        Ok(d) => d,
+                                        Err(_) => continue,
+                                    };
+
+                                    if dist.group_id != *gid {
+                                        continue;
+                                    }
+
+                                    let Some(group) = storage.get_group(gid)? else {
+                                        continue;
+                                    };
+                                    if !group.data.members.contains(&from_pubkey_hex) {
+                                        continue;
+                                    }
+
+                                    // Don't overwrite an existing progressed state (would break decrypt).
+                                    if storage
+                                        .get_group_sender_key_state(
+                                            gid,
+                                            &from_pubkey_hex,
+                                            dist.key_id,
+                                        )?
+                                        .is_none()
+                                    {
+                                        let state = nostr_double_ratchet::SenderKeyState::new(
+                                            dist.key_id,
+                                            dist.chain_key,
+                                            dist.iteration,
+                                        );
+                                        storage.upsert_group_sender_key_state(
+                                            gid,
+                                            &from_pubkey_hex,
+                                            &state,
+                                        )?;
+                                    }
+
+                                    // Retry any pending SharedChannel messages for this (group,sender,key_id).
+                                    let pending_key =
+                                        (gid.clone(), from_pubkey_hex.clone(), dist.key_id);
+                                    if let Some(mut pending) =
+                                        pending_sender_key_messages.remove(&pending_key)
+                                    {
+                                        // Best-effort: process in message-number order.
+                                        pending.sort_by_key(|e| {
+                                            e.tags
+                                                .iter()
+                                                .find_map(|t| {
+                                                    let v = t.clone().to_vec();
+                                                    if v.first().map(|s| s.as_str()) == Some("n") {
+                                                        v.get(1)?.parse::<u64>().ok()
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .unwrap_or(0)
+                                        });
+
+                                        for env in pending {
+                                            let key_id = dist.key_id;
+                                            let n = env
+                                                .tags
+                                                .iter()
+                                                .find_map(|t| {
+                                                    let v = t.clone().to_vec();
+                                                    if v.first().map(|s| s.as_str()) == Some("n") {
+                                                        v.get(1)?.parse::<u32>().ok()
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .unwrap_or(0);
+
+                                            if let Some(mut st) = storage
+                                                .get_group_sender_key_state(
+                                                    gid,
+                                                    &from_pubkey_hex,
+                                                    key_id,
+                                                )?
+                                            {
+                                                if let Ok(plaintext_json) =
+                                                    st.decrypt(n, &env.content)
+                                                {
+                                                    storage.upsert_group_sender_key_state(
+                                                        gid,
+                                                        &from_pubkey_hex,
+                                                        &st,
+                                                    )?;
+
+                                                    if let Ok(decrypted_event) =
+                                                        serde_json::from_str::<serde_json::Value>(
+                                                            &plaintext_json,
+                                                        )
+                                                    {
+                                                        let rumor_kind = decrypted_event["kind"]
+                                                            .as_u64()
+                                                            .unwrap_or(CHAT_MESSAGE_KIND as u64)
+                                                            as u32;
+                                                        let content = decrypted_event["content"]
+                                                            .as_str()
+                                                            .unwrap_or(&plaintext_json)
+                                                            .to_string();
+
+                                                        let timestamp = env.created_at.as_u64();
+
+                                                        if rumor_kind == CHAT_MESSAGE_KIND
+                                                            || rumor_kind == 14
+                                                        {
+                                                            let msg_id = env.id.to_hex();
+                                                            let stored = StoredGroupMessage {
+                                                                id: msg_id.clone(),
+                                                                group_id: gid.clone(),
+                                                                sender_pubkey: from_pubkey_hex
+                                                                    .clone(),
+                                                                content: content.clone(),
+                                                                timestamp,
+                                                                is_outgoing: false,
+                                                            };
+                                                            storage.save_group_message(&stored)?;
+                                                            output.event(
+                                                                "group_message",
+                                                                serde_json::json!({
+                                                                    "group_id": gid,
+                                                                    "message_id": msg_id,
+                                                                    "sender_pubkey": from_pubkey_hex,
+                                                                    "content": content,
+                                                                    "timestamp": timestamp,
+                                                                }),
+                                                            );
+                                                        } else if rumor_kind == REACTION_KIND {
+                                                            let message_id =
+                                                                extract_e_tag(&decrypted_event);
+                                                            output.event(
+                                                                "group_reaction",
+                                                                serde_json::json!({
+                                                                    "group_id": gid,
+                                                                    "sender_pubkey": from_pubkey_hex,
+                                                                    "message_id": message_id,
+                                                                    "emoji": content,
+                                                                    "timestamp": timestamp,
+                                                                }),
+                                                            );
+                                                        } else if rumor_kind == TYPING_KIND {
+                                                            output.event(
+                                                                "group_typing",
+                                                                serde_json::json!({
+                                                                    "group_id": gid,
+                                                                    "sender_pubkey": from_pubkey_hex,
+                                                                    "timestamp": timestamp,
+                                                                }),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    storage.save_chat(&updated_chat)?;
+                                    output.event(
+                                        "group_sender_key",
+                                        serde_json::json!({
+                                            "group_id": gid,
+                                            "sender_pubkey": from_pubkey_hex,
+                                            "key_id": dist.key_id,
+                                            "iteration": dist.iteration,
+                                            "transport": "session",
+                                        }),
+                                    );
                                 } else if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
                                     // Group chat message
                                     let msg_id = event.id.to_hex();

@@ -189,6 +189,74 @@ async fn fan_out_metadata(
     Ok(())
 }
 
+/// Fan-out a sender-key distribution to group members over existing 1:1 Double Ratchet sessions.
+///
+/// This is the Signal-style approach: sender keys are distributed pairwise with forward secrecy,
+/// while group messages are later published once via the SharedChannel.
+async fn fan_out_sender_key_distribution(
+    group: &nostr_double_ratchet::group::GroupData,
+    dist_json: &str,
+    key_id: u32,
+    now_ms: u64,
+    now_s: u64,
+    config: &Config,
+    storage: &Storage,
+    client: &Client,
+) -> Result<()> {
+    let my_pubkey = config.public_key()?;
+
+    for member in &group.members {
+        if member == &my_pubkey {
+            continue;
+        }
+
+        let chat = match storage.get_chat_by_pubkey(member)? {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let session_state: nostr_double_ratchet::SessionState =
+            match serde_json::from_str(&chat.session_state) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+        let mut session = Session::new(session_state, chat.id.clone());
+
+        let tags: Vec<Vec<String>> = vec![
+            vec!["l".to_string(), group.id.clone()],
+            vec!["key".to_string(), key_id.to_string()],
+            vec!["ms".to_string(), now_ms.to_string()],
+        ];
+        let nostr_tags: Vec<nostr::Tag> = tags
+            .iter()
+            .filter_map(|t| nostr::Tag::parse(t).ok())
+            .collect();
+
+        let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+        let unsigned = nostr::EventBuilder::new(
+            nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+            dist_json,
+        )
+        .tags(nostr_tags)
+        .custom_created_at(nostr::Timestamp::from(now_s))
+        .build(my_pk);
+
+        let encrypted = match session.send_event(unsigned) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let mut updated_chat = chat;
+        updated_chat.session_state = serde_json::to_string(&session.state)?;
+        storage.save_chat(&updated_chat)?;
+
+        let _ = client.send_event(encrypted).await;
+    }
+
+    Ok(())
+}
+
 pub async fn create(
     name: &str,
     members: &[String],
@@ -439,7 +507,7 @@ pub async fn send_message(
     }
     client.connect().await;
 
-    // Ensure we have an active sender key; publish distribution if we just created one.
+    // Ensure we have an active sender key; distribute it to members over 1:1 sessions if we just created one.
     let mut sender_key = match storage.get_latest_group_sender_key_state(id, &my_pubkey)? {
         Some(s) => s,
         None => {
@@ -448,30 +516,20 @@ pub async fn send_message(
             let state = SenderKeyState::new(key_id, chain_key, 0);
             storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
 
-            // Broadcast the sender key to the group via the SharedChannel.
             let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
             let dist_json = serde_json::to_string(&dist)?;
 
-            let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
-            let dist_event = nostr::EventBuilder::new(
-                nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+            let _ = fan_out_sender_key_distribution(
+                &group.data,
                 &dist_json,
+                key_id,
+                now_ms,
+                now_s,
+                config,
+                storage,
+                &client,
             )
-            .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
-            .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()])?)
-            .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
-            .custom_created_at(nostr::Timestamp::from(now_s))
-            .build(my_pk);
-
-            let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
-            let my_keys = nostr::Keys::new(my_sk);
-            let signed_dist = dist_event
-                .sign_with_keys(&my_keys)
-                .map_err(|e| anyhow::anyhow!("Failed to sign distribution: {}", e))?;
-
-            let signed_dist_json = serde_json::to_string(&signed_dist)?;
-            let outer = channel.create_event(&signed_dist_json)?;
-            client.send_event(outer).await?;
+            .await;
 
             state
         }
@@ -609,26 +667,17 @@ pub async fn react(
             let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
             let dist_json = serde_json::to_string(&dist)?;
 
-            let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
-            let dist_event = nostr::EventBuilder::new(
-                nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+            let _ = fan_out_sender_key_distribution(
+                &group.data,
                 &dist_json,
+                key_id,
+                now_ms,
+                now_s,
+                config,
+                storage,
+                &client,
             )
-            .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
-            .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()])?)
-            .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
-            .custom_created_at(nostr::Timestamp::from(now_s))
-            .build(my_pk);
-
-            let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
-            let my_keys = nostr::Keys::new(my_sk);
-            let signed_dist = dist_event
-                .sign_with_keys(&my_keys)
-                .map_err(|e| anyhow::anyhow!("Failed to sign distribution: {}", e))?;
-
-            let signed_dist_json = serde_json::to_string(&signed_dist)?;
-            let outer = channel.create_event(&signed_dist_json)?;
-            client.send_event(outer).await?;
+            .await;
 
             state
         }
@@ -720,7 +769,8 @@ pub async fn rotate_sender_key(
     }
     let mut secret_arr = [0u8; 32];
     secret_arr.copy_from_slice(&secret_bytes);
-    let channel = SharedChannel::new(&secret_arr)?;
+    // Validate the secret is usable as a SharedChannel key.
+    let _ = SharedChannel::new(&secret_arr)?;
 
     let my_pubkey = config.public_key()?;
 
@@ -742,30 +792,20 @@ pub async fn rotate_sender_key(
     let state = SenderKeyState::new(key_id, chain_key, 0);
     storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
 
-    // Broadcast the sender key to the group via the SharedChannel.
+    // Distribute the sender key to the group via 1:1 Double Ratchet sessions (forward secrecy).
     let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
     let dist_json = serde_json::to_string(&dist)?;
-
-    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
-    let dist_event = nostr::EventBuilder::new(
-        nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+    let _ = fan_out_sender_key_distribution(
+        &group.data,
         &dist_json,
+        key_id,
+        now_ms,
+        now_s,
+        config,
+        storage,
+        &client,
     )
-    .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
-    .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()])?)
-    .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
-    .custom_created_at(nostr::Timestamp::from(now_s))
-    .build(my_pk);
-
-    let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
-    let my_keys = nostr::Keys::new(my_sk);
-    let signed_dist = dist_event
-        .sign_with_keys(&my_keys)
-        .map_err(|e| anyhow::anyhow!("Failed to sign distribution: {}", e))?;
-
-    let signed_dist_json = serde_json::to_string(&signed_dist)?;
-    let outer = channel.create_event(&signed_dist_json)?;
-    client.send_event(outer).await?;
+    .await;
 
     output.success(
         "group.rotate-sender-key",

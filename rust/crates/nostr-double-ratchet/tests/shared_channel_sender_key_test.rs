@@ -1,11 +1,11 @@
 use nostr_double_ratchet::{
     group::{GROUP_SENDER_KEY_DISTRIBUTION_KIND, GROUP_SENDER_KEY_MESSAGE_KIND},
     sender_key::{SenderKeyDistribution, SenderKeyState},
-    SharedChannel, CHAT_MESSAGE_KIND,
+    Invite, SharedChannel, CHAT_MESSAGE_KIND,
 };
 
 #[test]
-fn shared_channel_sender_key_distribution_and_message_roundtrip() {
+fn session_sender_key_distribution_then_shared_channel_message_roundtrip() {
     // Use a valid secp256k1 secret key for the shared channel.
     let channel_keys = nostr::Keys::generate();
     let secret_bytes = channel_keys.secret_key().to_secret_bytes();
@@ -13,8 +13,23 @@ fn shared_channel_sender_key_distribution_and_message_roundtrip() {
 
     let group_id = "g1".to_string();
 
-    let identity_keys = nostr::Keys::generate();
-    let identity_pk = identity_keys.public_key();
+    // Set up a 1:1 session pair (Alice inviter, Bob acceptor).
+    let alice_keys = nostr::Keys::generate();
+    let bob_keys = nostr::Keys::generate();
+
+    let alice_pk = alice_keys.public_key();
+    let bob_pk = bob_keys.public_key();
+
+    let invite = Invite::create_new(alice_pk, None, None).unwrap();
+    let (mut bob_session, response_event) = invite
+        .accept(bob_pk, bob_keys.secret_key().to_secret_bytes(), None)
+        .unwrap();
+
+    let mut alice_session = invite
+        .process_invite_response(&response_event, alice_keys.secret_key().to_secret_bytes())
+        .unwrap()
+        .unwrap()
+        .session;
 
     // === Distribution ===
     let key_id = 123u32;
@@ -34,21 +49,16 @@ fn shared_channel_sender_key_distribution_and_message_roundtrip() {
     .tag(nostr::Tag::parse(&["l".to_string(), group_id.clone()]).unwrap())
     .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()]).unwrap())
     .custom_created_at(nostr::Timestamp::from(now))
-    .build(identity_pk);
+    .build(bob_pk);
 
-    let dist_inner_signed = dist_inner_unsigned.sign_with_keys(&identity_keys).unwrap();
-    assert!(dist_inner_signed.verify().is_ok());
-
-    let dist_outer = channel
-        .create_event(&serde_json::to_string(&dist_inner_signed).unwrap())
-        .unwrap();
-    let dist_decrypted = channel.decrypt_event(&dist_outer).unwrap();
-    let parsed_dist_inner: nostr::Event =
-        nostr::JsonUtil::from_json(dist_decrypted.as_str()).unwrap();
-    assert!(parsed_dist_inner.verify().is_ok());
+    // Bob (acceptor) must send first to complete the ratchet, then Alice can send later.
+    // Distribution travels over the session (forward secrecy).
+    let dist_outer = bob_session.send_event(dist_inner_unsigned).unwrap();
+    let dist_decrypted = alice_session.receive(&dist_outer).unwrap().unwrap();
+    let parsed_dist_inner: serde_json::Value = serde_json::from_str(&dist_decrypted).unwrap();
 
     let parsed_dist: SenderKeyDistribution =
-        serde_json::from_str(&parsed_dist_inner.content).unwrap();
+        serde_json::from_str(parsed_dist_inner["content"].as_str().unwrap()).unwrap();
     assert_eq!(parsed_dist.group_id, group_id);
     assert_eq!(parsed_dist.key_id, key_id);
     assert_eq!(parsed_dist.chain_key, chain_key);
@@ -57,6 +67,9 @@ fn shared_channel_sender_key_distribution_and_message_roundtrip() {
     let mut receiver_state = SenderKeyState::new(key_id, chain_key, 0);
 
     // === Message ===
+    let identity_keys = bob_keys;
+    let identity_pk = identity_keys.public_key();
+
     let inner_plaintext =
         nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), "hello")
             .tag(nostr::Tag::parse(&["l".to_string(), group_id.clone()]).unwrap())
