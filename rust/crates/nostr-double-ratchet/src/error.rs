@@ -41,9 +41,6 @@ pub enum Error {
     #[error("Invite error: {0}")]
     Invite(String),
 
-    #[error("Invalid rumor: {reason}")]
-    InvalidRumor { reason: String, plaintext: String },
-
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 

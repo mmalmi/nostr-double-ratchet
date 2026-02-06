@@ -6,29 +6,13 @@ use crossbeam_channel::Receiver;
 use nostr::nips::nip44::{self, Version};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    utils::kdf, Error, Header, InMemoryStorage, Invite, Session, SessionManager,
-    SessionManagerEvent, MESSAGE_EVENT_KIND,
+    utils::kdf, Header, InMemoryStorage, Invite, Session, SessionManager, SessionManagerEvent,
+    MESSAGE_EVENT_KIND,
 };
+use sha2::{Digest, Sha256};
 
 fn drain_events(rx: &Receiver<SessionManagerEvent>) {
     while rx.try_recv().is_ok() {}
-}
-
-fn recv_invalid_rumor(rx: &Receiver<SessionManagerEvent>) -> (String, String) {
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > Duration::from_secs(2) {
-            panic!("Timed out waiting for InvalidRumor event");
-        }
-        if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
-            if let SessionManagerEvent::InvalidRumor {
-                reason, content, ..
-            } = ev
-            {
-                return (reason, content);
-            }
-        }
-    }
 }
 
 fn recv_decrypted_message(rx: &Receiver<SessionManagerEvent>) -> String {
@@ -103,7 +87,7 @@ fn craft_outer_from_plaintext(session: &mut Session, plaintext: &str, now_s: u64
     unsigned_event.sign_with_keys(&author_keys).unwrap()
 }
 
-fn build_invalid_rumor_json(pubkey: nostr::PublicKey) -> String {
+fn build_bad_id_rumor_json(pubkey: nostr::PublicKey) -> String {
     let mut rumor: UnsignedEvent = EventBuilder::new(Kind::from(14u16), "hello")
         .custom_created_at(Timestamp::from(1))
         .build(pubkey);
@@ -116,8 +100,30 @@ fn build_invalid_rumor_json(pubkey: nostr::PublicKey) -> String {
     serde_json::to_string(&rumor).unwrap()
 }
 
+fn compute_event_hash(rumor: &serde_json::Value) -> String {
+    let pubkey = rumor["pubkey"].as_str().expect("pubkey string");
+    let created_at = rumor["created_at"].as_u64().expect("created_at u64");
+    let kind = rumor["kind"].as_u64().expect("kind u64");
+    let content = rumor["content"].as_str().expect("content string");
+
+    let tags_value = rumor["tags"].as_array().expect("tags array");
+    let mut tags: Vec<Vec<String>> = Vec::with_capacity(tags_value.len());
+    for tag in tags_value {
+        let arr = tag.as_array().expect("tag array");
+        let mut out: Vec<String> = Vec::with_capacity(arr.len());
+        for v in arr {
+            out.push(v.as_str().expect("tag elem string").to_string());
+        }
+        tags.push(out);
+    }
+
+    let canonical = serde_json::json!([0, pubkey, created_at, kind, tags, content]);
+    let canonical_json = serde_json::to_string(&canonical).expect("canonical to_string");
+    hex::encode(Sha256::digest(canonical_json.as_bytes()))
+}
+
 #[test]
-fn test_session_receive_invalid_rumor_id_is_reported_and_consumed() {
+fn test_session_receive_recomputes_inner_rumor_id_and_stays_in_sync() {
     let alice_keys = Keys::generate();
     let bob_keys = Keys::generate();
 
@@ -139,56 +145,36 @@ fn test_session_receive_invalid_rumor_id_is_reported_and_consumed() {
         .unwrap()
         .session;
 
-    let invalid_inner = build_invalid_rumor_json(bob_keys.public_key());
-    let outer = craft_outer_from_plaintext(&mut bob_session, &invalid_inner, 10);
+    let bad_inner = build_bad_id_rumor_json(bob_keys.public_key());
+    let outer = craft_outer_from_plaintext(&mut bob_session, &bad_inner, 10);
 
-    let err = alice_session
-        .receive(&outer)
-        .expect_err("expected invalid rumor to error");
-    match err {
-        Error::InvalidRumor { reason, plaintext } => {
-            assert!(reason.contains("id"));
-            assert!(plaintext.contains("tampered"));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    let plaintext = alice_session.receive(&outer).unwrap().unwrap();
+    let rumor: serde_json::Value = serde_json::from_str(&plaintext).unwrap();
+    assert_eq!(rumor["content"].as_str().unwrap(), "tampered");
 
-    // Even though the rumor was invalid, the ratchet state should have advanced consistently.
+    // Receiver ignores sender-provided `id` and recomputes it locally.
+    let expected_id = compute_event_hash(&rumor);
+    assert_eq!(rumor["id"].as_str().unwrap(), expected_id);
+
+    // Ratchet state should still be aligned.
     assert_eq!(
         bob_session.state.sending_chain_key.unwrap(),
         alice_session.state.receiving_chain_key.unwrap(),
-        "chain keys desynced after invalid rumor"
+        "chain keys desynced after receiving message with bad id"
     );
 
-    // Header encryption/decryption should still be aligned (identity keys didn't change).
-    let inviter_ephemeral_sk =
-        nostr::SecretKey::from_slice(&invite.inviter_ephemeral_private_key.unwrap()).unwrap();
-    let inviter_ephemeral_pk = nostr::Keys::new(inviter_ephemeral_sk).public_key();
-    assert_eq!(
-        bob_session.state.their_next_nostr_public_key.unwrap(),
-        inviter_ephemeral_pk
-    );
-    assert_eq!(
-        alice_session
-            .state
-            .our_current_nostr_key
-            .as_ref()
-            .unwrap()
-            .public_key,
-        inviter_ephemeral_pk
-    );
-
-    // Replaying the same outer event should NOT decrypt again (message key already consumed).
+    // Replaying the same outer event should fail (message key already consumed) and must not corrupt
+    // state (receive rolls back on decryption errors).
     assert!(alice_session.receive(&outer).is_err());
 
-    // Next valid message should still decrypt (ratchet state advanced).
+    // Next valid message should still decrypt.
     let valid_outer = bob_session.send("ok".to_string()).unwrap();
     let decrypted = alice_session.receive(&valid_outer).unwrap().unwrap();
     assert!(decrypted.contains("\"content\":\"ok\""));
 }
 
 #[test]
-fn test_session_manager_emits_invalid_rumor_event() {
+fn test_session_manager_delivers_messages_with_recomputed_inner_id() {
     let alice_keys = Keys::generate();
     let bob_keys = Keys::generate();
 
@@ -234,19 +220,14 @@ fn test_session_manager_emits_invalid_rumor_event() {
 
     drain_events(&rx);
 
-    // Send an invalid inner rumor
-    let invalid_inner = build_invalid_rumor_json(bob_keys.public_key());
-    let invalid_outer = craft_outer_from_plaintext(&mut bob_session, &invalid_inner, 10);
-    manager.process_received_event(invalid_outer);
+    let bad_inner = build_bad_id_rumor_json(bob_keys.public_key());
+    let bad_outer = craft_outer_from_plaintext(&mut bob_session, &bad_inner, 10);
+    manager.process_received_event(bad_outer);
 
-    let (reason, plaintext) = recv_invalid_rumor(&rx);
-    assert!(reason.contains("id"));
-    assert!(plaintext.contains("tampered"));
+    let delivered = recv_decrypted_message(&rx);
+    let rumor: serde_json::Value = serde_json::from_str(&delivered).unwrap();
+    assert_eq!(rumor["content"].as_str().unwrap(), "tampered");
 
-    // Now send a valid message and ensure it decrypts.
-    let valid_outer = bob_session.send("ok".to_string()).unwrap();
-    manager.process_received_event(valid_outer);
-
-    let decrypted = recv_decrypted_message(&rx);
-    assert!(decrypted.contains("\"content\":\"ok\""));
+    let expected_id = compute_event_hash(&rumor);
+    assert_eq!(rumor["id"].as_str().unwrap(), expected_id);
 }

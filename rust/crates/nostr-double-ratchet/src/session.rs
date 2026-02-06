@@ -497,10 +497,6 @@ impl Session {
 
     pub fn receive(&mut self, event: &nostr::Event) -> Result<Option<String>> {
         // Snapshot state so we can roll back on decryption failures (e.g. duplicates/replays).
-        //
-        // We intentionally do *not* roll back for `InvalidRumor`: decryption succeeded and the
-        // ratchet should advance (message keys consumed) even if the decrypted inner rumor is
-        // malformed or has a bad id hash.
         let snapshot = crate::utils::deep_copy_state(&self.state);
 
         let result = (|| {
@@ -569,22 +565,11 @@ impl Session {
                 let _ = self.update_subscriptions();
             }
 
-            // Validate that the decrypted plaintext is a well-formed NIP-01-like event ("rumor") and
-            // that its `id` matches the computed event hash.
-            //
-            // Important: this does *not* roll back ratchet state. If decryption succeeded, the message
-            // keys are considered consumed to avoid desync; we simply don't deliver invalid rumors.
-            verify_inner_rumor_id(&plaintext)?;
-
-            Ok(Some(plaintext))
+            Ok(Some(normalize_inner_rumor_id(&plaintext)))
         })();
 
-        match &result {
-            Err(Error::InvalidRumor { .. }) => {}
-            Err(_) => {
-                self.state = snapshot;
-            }
-            Ok(_) => {}
+        if result.is_err() {
+            self.state = snapshot;
         }
 
         result
@@ -635,111 +620,69 @@ impl Session {
     }
 }
 
-fn verify_inner_rumor_id(plaintext: &str) -> Result<()> {
-    let v: serde_json::Value =
-        serde_json::from_str(plaintext).map_err(|e| Error::InvalidRumor {
-            reason: format!("inner rumor is not valid JSON: {e}"),
-            plaintext: plaintext.to_string(),
-        })?;
+fn normalize_inner_rumor_id(plaintext: &str) -> String {
+    let mut v: serde_json::Value = match serde_json::from_str(plaintext) {
+        Ok(v) => v,
+        Err(_) => return plaintext.to_string(),
+    };
 
-    let obj = v.as_object().ok_or_else(|| Error::InvalidRumor {
-        reason: "inner rumor is not a JSON object".to_string(),
-        plaintext: plaintext.to_string(),
-    })?;
+    let obj = match v.as_object_mut() {
+        Some(obj) => obj,
+        None => return plaintext.to_string(),
+    };
 
-    let id = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::InvalidRumor {
-            reason: "inner rumor missing string field `id`".to_string(),
-            plaintext: plaintext.to_string(),
-        })?;
+    let pubkey = match obj.get("pubkey").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return plaintext.to_string(),
+    };
 
-    let pubkey = obj
-        .get("pubkey")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::InvalidRumor {
-            reason: "inner rumor missing string field `pubkey`".to_string(),
-            plaintext: plaintext.to_string(),
-        })?;
+    let created_at = match obj.get("created_at").and_then(|v| v.as_u64()) {
+        Some(n) => n,
+        None => return plaintext.to_string(),
+    };
 
-    let created_at = obj
-        .get("created_at")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| Error::InvalidRumor {
-            reason: "inner rumor missing integer field `created_at`".to_string(),
-            plaintext: plaintext.to_string(),
-        })?;
+    let kind = match obj.get("kind").and_then(|v| v.as_u64()) {
+        Some(n) => n,
+        None => return plaintext.to_string(),
+    };
 
-    let kind = obj
-        .get("kind")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| Error::InvalidRumor {
-            reason: "inner rumor missing integer field `kind`".to_string(),
-            plaintext: plaintext.to_string(),
-        })?;
+    let content = match obj.get("content").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return plaintext.to_string(),
+    };
 
-    let content =
-        obj.get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::InvalidRumor {
-                reason: "inner rumor missing string field `content`".to_string(),
-                plaintext: plaintext.to_string(),
-            })?;
+    let tags_value = match obj.get("tags").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return plaintext.to_string(),
+    };
 
-    let tags_value =
-        obj.get("tags")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| Error::InvalidRumor {
-                reason: "inner rumor missing array field `tags`".to_string(),
-                plaintext: plaintext.to_string(),
-            })?;
-
+    // NIP-01 expects tags to be an array of string arrays. If it's not, keep the plaintext as-is.
     let mut tags: Vec<Vec<String>> = Vec::with_capacity(tags_value.len());
     for tag in tags_value {
-        let arr = tag.as_array().ok_or_else(|| Error::InvalidRumor {
-            reason: "inner rumor `tags` must be an array of string arrays".to_string(),
-            plaintext: plaintext.to_string(),
-        })?;
+        let arr = match tag.as_array() {
+            Some(arr) => arr,
+            None => return plaintext.to_string(),
+        };
         let mut out: Vec<String> = Vec::with_capacity(arr.len());
         for v in arr {
-            let s = v.as_str().ok_or_else(|| Error::InvalidRumor {
-                reason: "inner rumor tag elements must be strings".to_string(),
-                plaintext: plaintext.to_string(),
-            })?;
+            let s = match v.as_str() {
+                Some(s) => s,
+                None => return plaintext.to_string(),
+            };
             out.push(s.to_string());
         }
         tags.push(out);
     }
 
-    let is_hex_32 = |s: &str| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
-    if !is_hex_32(id) {
-        return Err(Error::InvalidRumor {
-            reason: "inner rumor `id` must be 64 hex chars".to_string(),
-            plaintext: plaintext.to_string(),
-        });
-    }
-    if !is_hex_32(pubkey) {
-        return Err(Error::InvalidRumor {
-            reason: "inner rumor `pubkey` must be 64 hex chars".to_string(),
-            plaintext: plaintext.to_string(),
-        });
-    }
-
     // NIP-01 event id hash is sha256(JSON.stringify([0,pubkey,created_at,kind,tags,content])).
     let canonical = serde_json::json!([0, pubkey, created_at, kind, tags, content]);
-    let canonical_json = serde_json::to_string(&canonical).map_err(|e| Error::InvalidRumor {
-        reason: format!("failed to serialize canonical inner rumor for hashing: {e}"),
-        plaintext: plaintext.to_string(),
-    })?;
+    let canonical_json = match serde_json::to_string(&canonical) {
+        Ok(s) => s,
+        Err(_) => return plaintext.to_string(),
+    };
 
     let computed = hex::encode(Sha256::digest(canonical_json.as_bytes()));
-    if !id.eq_ignore_ascii_case(&computed) {
-        return Err(Error::InvalidRumor {
-            reason: format!("inner rumor id hash mismatch (claimed {id}, computed {computed})"),
-            plaintext: plaintext.to_string(),
-        });
-    }
+    obj.insert("id".to_string(), serde_json::Value::String(computed));
 
-    Ok(())
+    serde_json::to_string(&v).unwrap_or_else(|_| plaintext.to_string())
 }

@@ -418,10 +418,8 @@ export class Session {
         this.state = snapshot;
         return;
       }
-      if (innerEvent.id !== getEventHash(innerEvent)) {
-        this.state = snapshot;
-        return;
-      }
+      // The `id` field is derived; don't trust the sender-provided value.
+      innerEvent.id = getEventHash(innerEvent);
 
       if (pendingSwitch) {
         this.nostrUnsubscribe?.();

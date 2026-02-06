@@ -57,7 +57,6 @@ pub struct PubSubEvent {
     pub event_json: Option<String>,
     pub sender_pubkey_hex: Option<String>,
     pub content: Option<String>,
-    pub reason: Option<String>,
     pub event_id: Option<String>,
 }
 
@@ -597,7 +596,6 @@ impl SessionManagerHandle {
                             event_json: Some(serde_json::to_string(&unsigned)?),
                             sender_pubkey_hex: None,
                             content: None,
-                            reason: None,
                             event_id: None,
                         },
                         SessionManagerEvent::PublishSigned(signed) => PubSubEvent {
@@ -607,7 +605,6 @@ impl SessionManagerHandle {
                             event_json: Some(serde_json::to_string(&signed)?),
                             sender_pubkey_hex: None,
                             content: None,
-                            reason: None,
                             event_id: None,
                         },
                         SessionManagerEvent::Subscribe { subid, filter_json } => PubSubEvent {
@@ -617,7 +614,6 @@ impl SessionManagerHandle {
                             event_json: None,
                             sender_pubkey_hex: None,
                             content: None,
-                            reason: None,
                             event_id: None,
                         },
                         SessionManagerEvent::Unsubscribe(subid) => PubSubEvent {
@@ -627,7 +623,6 @@ impl SessionManagerHandle {
                             event_json: None,
                             sender_pubkey_hex: None,
                             content: None,
-                            reason: None,
                             event_id: None,
                         },
                         SessionManagerEvent::DecryptedMessage {
@@ -641,22 +636,6 @@ impl SessionManagerHandle {
                             event_json: None,
                             sender_pubkey_hex: Some(sender.to_hex()),
                             content: Some(content),
-                            reason: None,
-                            event_id,
-                        },
-                        SessionManagerEvent::InvalidRumor {
-                            sender,
-                            reason,
-                            content,
-                            event_id,
-                        } => PubSubEvent {
-                            kind: "invalid_rumor".to_string(),
-                            subid: None,
-                            filter_json: None,
-                            event_json: None,
-                            sender_pubkey_hex: Some(sender.to_hex()),
-                            content: Some(content),
-                            reason: Some(reason),
                             event_id,
                         },
                         SessionManagerEvent::ReceivedEvent(event) => PubSubEvent {
@@ -666,7 +645,6 @@ impl SessionManagerHandle {
                             event_json: Some(serde_json::to_string(&event)?),
                             sender_pubkey_hex: None,
                             content: None,
-                            reason: None,
                             event_id: None,
                         },
                     };
