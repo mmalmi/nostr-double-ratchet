@@ -103,8 +103,11 @@ async fn test_link_flow_publishes_app_keys_and_links_device() {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(15) {
         let mut line = String::new();
-        let read = tokio::time::timeout(Duration::from_millis(250), device_stdout.read_line(&mut line))
-            .await;
+        let read = tokio::time::timeout(
+            Duration::from_millis(250),
+            device_stdout.read_line(&mut line),
+        )
+        .await;
         match read {
             Ok(Ok(0)) => break, // EOF
             Ok(Ok(_)) => {
@@ -173,9 +176,11 @@ async fn test_link_flow_publishes_app_keys_and_links_device() {
     let expected_invite_d = format!("double-ratchet/invites/{}", device_pubkey);
     let device_invite_event = events
         .iter()
-        .find(|e| e.kind == nostr_double_ratchet::INVITE_EVENT_KIND
-            && e.pubkey == device_pubkey
-            && is_d(e, &expected_invite_d))
+        .find(|e| {
+            e.kind == nostr_double_ratchet::INVITE_EVENT_KIND
+                && e.pubkey == device_pubkey
+                && is_d(e, &expected_invite_d)
+        })
         .expect("Expected device Invite event to be published");
     assert!(device_invite_event
         .tags

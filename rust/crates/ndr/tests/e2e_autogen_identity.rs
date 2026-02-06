@@ -35,14 +35,7 @@ async fn test_group_create_autogenerates_identity_without_warnings() {
         .arg("--json")
         .arg("--data-dir")
         .arg(dir.path())
-        .args([
-            "group",
-            "create",
-            "--name",
-            "Test",
-            "--members",
-            &member,
-        ])
+        .args(["group", "create", "--name", "Test", "--members", &member])
         .output()
         .await
         .expect("Failed to run ndr");
@@ -50,7 +43,10 @@ async fn test_group_create_autogenerates_identity_without_warnings() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(output.status.success(), "ndr failed: stderr={stderr} stdout={stdout}");
+    assert!(
+        output.status.success(),
+        "ndr failed: stderr={stderr} stdout={stdout}"
+    );
     assert!(
         !stderr.contains("Generated new identity"),
         "unexpected autogen warning: {stderr}"

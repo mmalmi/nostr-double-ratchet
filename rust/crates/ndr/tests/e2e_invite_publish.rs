@@ -144,7 +144,10 @@ async fn test_invite_publish_defaults_device_id_to_pubkey() {
     let sk = nostr::SecretKey::from_hex(alice_sk).unwrap();
     let keys = nostr::Keys::new(sk);
     let expected_pubkey = keys.public_key().to_hex();
-    assert!(has_tag("d", &format!("double-ratchet/invites/{}", expected_pubkey)));
+    assert!(has_tag(
+        "d",
+        &format!("double-ratchet/invites/{}", expected_pubkey)
+    ));
 
     relay.stop().await;
 }

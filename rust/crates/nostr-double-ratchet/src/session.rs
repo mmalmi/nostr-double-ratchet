@@ -3,12 +3,14 @@ use crate::{
     pubsub::NostrPubSub,
     utils::{kdf, pubkey_from_hex},
     Error, EventCallback, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry,
-    Unsubscribe, MAX_SKIP, MESSAGE_EVENT_KIND, CHAT_MESSAGE_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+    Unsubscribe, CHAT_MESSAGE_KIND, MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND,
+    TYPING_KIND,
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
 use nostr::PublicKey;
 use nostr::{EventBuilder, Keys, Tag, Timestamp, UnsignedEvent};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -274,7 +276,9 @@ impl Session {
             return Err(Error::NotInitiator);
         }
 
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
         let now_s = now.as_secs();
         let now_ms = now.as_millis();
 
@@ -492,65 +496,98 @@ impl Session {
     }
 
     pub fn receive(&mut self, event: &nostr::Event) -> Result<Option<String>> {
-        let header_tag = event
-            .tags
-            .iter()
-            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("header"))
-            .cloned();
+        // Snapshot state so we can roll back on decryption failures (e.g. duplicates/replays).
+        //
+        // We intentionally do *not* roll back for `InvalidRumor`: decryption succeeded and the
+        // ratchet should advance (message keys consumed) even if the decrypted inner rumor is
+        // malformed or has a bad id hash.
+        let snapshot = crate::utils::deep_copy_state(&self.state);
 
-        let encrypted_header = match header_tag {
-            Some(tag) => {
-                let v = tag.to_vec();
-                v.get(1).ok_or(Error::InvalidHeader)?.clone()
+        let result = (|| {
+            let header_tag = event
+                .tags
+                .iter()
+                .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("header"))
+                .cloned();
+
+            let encrypted_header = match header_tag {
+                Some(tag) => {
+                    let v = tag.to_vec();
+                    v.get(1).ok_or(Error::InvalidHeader)?.clone()
+                }
+                None => return Err(Error::InvalidHeader),
+            };
+
+            let sender_pubkey = event.pubkey;
+            let (header, should_ratchet) =
+                self.decrypt_header(&encrypted_header, &sender_pubkey)?;
+
+            let sender_bytes = sender_pubkey.to_bytes();
+            let their_next_matches = self
+                .state
+                .their_next_nostr_public_key
+                .as_ref()
+                .map(|pk| pk.to_bytes() == sender_bytes)
+                .unwrap_or(false);
+            let their_current_matches = self
+                .state
+                .their_current_nostr_public_key
+                .as_ref()
+                .map(|pk| pk.to_bytes() == sender_bytes)
+                .unwrap_or(false);
+
+            if !their_next_matches && !their_current_matches {
+                return Err(Error::InvalidEvent("Unexpected sender".to_string()));
             }
-            None => return Err(Error::InvalidHeader),
-        };
 
-        let sender_pubkey = event.pubkey;
-        let (header, should_ratchet) = self.decrypt_header(&encrypted_header, &sender_pubkey)?;
+            let their_next_pk_hex = self
+                .state
+                .their_next_nostr_public_key
+                .map(|pk| hex::encode(pk.to_bytes()))
+                .unwrap_or_default();
 
-        let sender_bytes = sender_pubkey.to_bytes();
-        let their_next_matches = self
-            .state
-            .their_next_nostr_public_key
-            .as_ref()
-            .map(|pk| pk.to_bytes() == sender_bytes)
-            .unwrap_or(false);
-        let their_current_matches = self
-            .state
-            .their_current_nostr_public_key
-            .as_ref()
-            .map(|pk| pk.to_bytes() == sender_bytes)
-            .unwrap_or(false);
-
-        if !their_next_matches && !their_current_matches {
-            return Err(Error::InvalidEvent("Unexpected sender".to_string()));
-        }
-
-        let their_next_pk_hex = self
-            .state
-            .their_next_nostr_public_key
-            .map(|pk| hex::encode(pk.to_bytes()))
-            .unwrap_or_default();
-
-        if header.next_public_key != their_next_pk_hex {
-            self.state.their_current_nostr_public_key = self.state.their_next_nostr_public_key;
-            self.state.their_next_nostr_public_key =
-                Some(pubkey_from_hex(&header.next_public_key)?);
-        }
-
-        if should_ratchet {
-            if self.state.receiving_chain_key.is_some() {
-                self.skip_message_keys(header.previous_chain_length, &sender_pubkey)?;
+            if header.next_public_key != their_next_pk_hex {
+                self.state.their_current_nostr_public_key = self.state.their_next_nostr_public_key;
+                self.state.their_next_nostr_public_key =
+                    Some(pubkey_from_hex(&header.next_public_key)?);
             }
-            self.ratchet_step()?;
 
-            // Update subscriptions after ratchet (keys changed)
-            let _ = self.update_subscriptions();
+            let mut needs_subscription_update = false;
+            if should_ratchet {
+                if self.state.receiving_chain_key.is_some() {
+                    self.skip_message_keys(header.previous_chain_length, &sender_pubkey)?;
+                }
+                self.ratchet_step()?;
+                needs_subscription_update = true;
+            }
+
+            let plaintext = self.ratchet_decrypt(&header, &event.content, &sender_pubkey)?;
+
+            if needs_subscription_update {
+                // Update subscriptions after ratchet (keys changed). We do this only once we know the
+                // ciphertext decrypted successfully, so duplicates/replays don't thrash subscriptions.
+                let _ = self.update_subscriptions();
+            }
+
+            // Validate that the decrypted plaintext is a well-formed NIP-01-like event ("rumor") and
+            // that its `id` matches the computed event hash.
+            //
+            // Important: this does *not* roll back ratchet state. If decryption succeeded, the message
+            // keys are considered consumed to avoid desync; we simply don't deliver invalid rumors.
+            verify_inner_rumor_id(&plaintext)?;
+
+            Ok(Some(plaintext))
+        })();
+
+        match &result {
+            Err(Error::InvalidRumor { .. }) => {}
+            Err(_) => {
+                self.state = snapshot;
+            }
+            Ok(_) => {}
         }
 
-        let plaintext = self.ratchet_decrypt(&header, &event.content, &sender_pubkey)?;
-        Ok(Some(plaintext))
+        result
     }
 
     fn decrypt_header(&self, encrypted_header: &str, sender: &PublicKey) -> Result<(Header, bool)> {
@@ -596,4 +633,113 @@ impl Session {
             }
         }
     }
+}
+
+fn verify_inner_rumor_id(plaintext: &str) -> Result<()> {
+    let v: serde_json::Value =
+        serde_json::from_str(plaintext).map_err(|e| Error::InvalidRumor {
+            reason: format!("inner rumor is not valid JSON: {e}"),
+            plaintext: plaintext.to_string(),
+        })?;
+
+    let obj = v.as_object().ok_or_else(|| Error::InvalidRumor {
+        reason: "inner rumor is not a JSON object".to_string(),
+        plaintext: plaintext.to_string(),
+    })?;
+
+    let id = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::InvalidRumor {
+            reason: "inner rumor missing string field `id`".to_string(),
+            plaintext: plaintext.to_string(),
+        })?;
+
+    let pubkey = obj
+        .get("pubkey")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::InvalidRumor {
+            reason: "inner rumor missing string field `pubkey`".to_string(),
+            plaintext: plaintext.to_string(),
+        })?;
+
+    let created_at = obj
+        .get("created_at")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| Error::InvalidRumor {
+            reason: "inner rumor missing integer field `created_at`".to_string(),
+            plaintext: plaintext.to_string(),
+        })?;
+
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| Error::InvalidRumor {
+            reason: "inner rumor missing integer field `kind`".to_string(),
+            plaintext: plaintext.to_string(),
+        })?;
+
+    let content =
+        obj.get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::InvalidRumor {
+                reason: "inner rumor missing string field `content`".to_string(),
+                plaintext: plaintext.to_string(),
+            })?;
+
+    let tags_value =
+        obj.get("tags")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| Error::InvalidRumor {
+                reason: "inner rumor missing array field `tags`".to_string(),
+                plaintext: plaintext.to_string(),
+            })?;
+
+    let mut tags: Vec<Vec<String>> = Vec::with_capacity(tags_value.len());
+    for tag in tags_value {
+        let arr = tag.as_array().ok_or_else(|| Error::InvalidRumor {
+            reason: "inner rumor `tags` must be an array of string arrays".to_string(),
+            plaintext: plaintext.to_string(),
+        })?;
+        let mut out: Vec<String> = Vec::with_capacity(arr.len());
+        for v in arr {
+            let s = v.as_str().ok_or_else(|| Error::InvalidRumor {
+                reason: "inner rumor tag elements must be strings".to_string(),
+                plaintext: plaintext.to_string(),
+            })?;
+            out.push(s.to_string());
+        }
+        tags.push(out);
+    }
+
+    let is_hex_32 = |s: &str| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if !is_hex_32(id) {
+        return Err(Error::InvalidRumor {
+            reason: "inner rumor `id` must be 64 hex chars".to_string(),
+            plaintext: plaintext.to_string(),
+        });
+    }
+    if !is_hex_32(pubkey) {
+        return Err(Error::InvalidRumor {
+            reason: "inner rumor `pubkey` must be 64 hex chars".to_string(),
+            plaintext: plaintext.to_string(),
+        });
+    }
+
+    // NIP-01 event id hash is sha256(JSON.stringify([0,pubkey,created_at,kind,tags,content])).
+    let canonical = serde_json::json!([0, pubkey, created_at, kind, tags, content]);
+    let canonical_json = serde_json::to_string(&canonical).map_err(|e| Error::InvalidRumor {
+        reason: format!("failed to serialize canonical inner rumor for hashing: {e}"),
+        plaintext: plaintext.to_string(),
+    })?;
+
+    let computed = hex::encode(Sha256::digest(canonical_json.as_bytes()));
+    if !id.eq_ignore_ascii_case(&computed) {
+        return Err(Error::InvalidRumor {
+            reason: format!("inner rumor id hash mismatch (claimed {id}, computed {computed})"),
+            plaintext: plaintext.to_string(),
+        });
+    }
+
+    Ok(())
 }

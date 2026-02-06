@@ -90,7 +90,6 @@ impl Config {
         self.save()
     }
 
-
     /// Check if logged in
     pub fn is_logged_in(&self) -> bool {
         self.private_key.is_some()

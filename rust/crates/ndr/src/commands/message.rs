@@ -1122,8 +1122,8 @@ pub async fn listen(
                                             if let Ok(invite) =
                                                 nostr_double_ratchet::Invite::from_url(invite_url)
                                             {
-                                                if let Ok((accept_session, response_event)) =
-                                                    invite.accept_with_owner(
+                                                if let Ok((accept_session, response_event)) = invite
+                                                    .accept_with_owner(
                                                         my_pubkey_key.clone(),
                                                         our_private_key,
                                                         None,

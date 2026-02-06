@@ -407,8 +407,20 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             ChatCommands::Show { id } => commands::chat::show(&id, &storage, output).await,
             ChatCommands::Delete { id } => commands::chat::delete(&id, &storage, output).await,
         },
-        Commands::Send { target, message, reply } => {
-            commands::message::send(&target, &message, reply.as_deref(), &config, &storage, output).await
+        Commands::Send {
+            target,
+            message,
+            reply,
+        } => {
+            commands::message::send(
+                &target,
+                &message,
+                reply.as_deref(),
+                &config,
+                &storage,
+                output,
+            )
+            .await
         }
         Commands::React {
             target,
@@ -482,7 +494,15 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
                 commands::group::remove_admin(&id, &pubkey, &config, &storage, output).await
             }
             GroupCommands::Send { id, message, reply } => {
-                commands::group::send_message(&id, &message, reply.as_deref(), &config, &storage, output).await
+                commands::group::send_message(
+                    &id,
+                    &message,
+                    reply.as_deref(),
+                    &config,
+                    &storage,
+                    output,
+                )
+                .await
             }
             GroupCommands::React {
                 id,

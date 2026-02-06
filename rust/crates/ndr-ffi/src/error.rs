@@ -60,14 +60,15 @@ impl From<nostr_double_ratchet::Error> for NdrError {
                 NdrError::InviteError("Device ID required".into())
             }
             nostr_double_ratchet::Error::Invite(msg) => NdrError::InviteError(msg),
+            nostr_double_ratchet::Error::InvalidRumor { reason, .. } => {
+                NdrError::InvalidEvent(format!("Invalid rumor: {}", reason))
+            }
             nostr_double_ratchet::Error::Json(e) => NdrError::Serialization(e.to_string()),
             nostr_double_ratchet::Error::Hex(e) => NdrError::InvalidKey(e.to_string()),
             nostr_double_ratchet::Error::NostrKey(e) => NdrError::InvalidKey(e.to_string()),
             nostr_double_ratchet::Error::Nostr(e) => NdrError::InvalidEvent(e.to_string()),
             nostr_double_ratchet::Error::Nip44(e) => NdrError::CryptoFailure(e.to_string()),
-            nostr_double_ratchet::Error::UnsignedEvent(e) => {
-                NdrError::InvalidEvent(e.to_string())
-            }
+            nostr_double_ratchet::Error::UnsignedEvent(e) => NdrError::InvalidEvent(e.to_string()),
         }
     }
 }

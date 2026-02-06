@@ -35,9 +35,7 @@ impl AppKeys {
     }
 
     pub fn add_device(&mut self, device: DeviceEntry) {
-        self.devices
-            .entry(device.identity_pubkey)
-            .or_insert(device);
+        self.devices.entry(device.identity_pubkey).or_insert(device);
     }
 
     pub fn remove_device(&mut self, identity_pubkey: &PublicKey) {
@@ -54,8 +52,10 @@ impl AppKeys {
 
     pub fn get_event(&self, owner_pubkey: PublicKey) -> UnsignedEvent {
         let mut tags = Vec::new();
-        let d_tag = Tag::parse(&["d".to_string(), APP_KEYS_D_TAG.to_string()])
-            .unwrap_or_else(|_| Tag::parse(&["d".to_string(), APP_KEYS_D_TAG.to_string()]).unwrap());
+        let d_tag =
+            Tag::parse(&["d".to_string(), APP_KEYS_D_TAG.to_string()]).unwrap_or_else(|_| {
+                Tag::parse(&["d".to_string(), APP_KEYS_D_TAG.to_string()]).unwrap()
+            });
         tags.push(d_tag);
         tags.push(
             Tag::parse(&["version".to_string(), "1".to_string()])
@@ -173,7 +173,11 @@ impl AppKeys {
     pub fn merge(&self, other: &AppKeys) -> AppKeys {
         let mut merged = HashMap::new();
 
-        for device in self.get_all_devices().into_iter().chain(other.get_all_devices()) {
+        for device in self
+            .get_all_devices()
+            .into_iter()
+            .chain(other.get_all_devices())
+        {
             merged
                 .entry(device.identity_pubkey)
                 .and_modify(|existing: &mut DeviceEntry| {

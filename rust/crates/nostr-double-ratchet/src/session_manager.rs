@@ -21,6 +21,15 @@ pub enum SessionManagerEvent {
         content: String,
         event_id: Option<String>,
     },
+    /// Decryption succeeded, but the decrypted inner rumor failed validation (e.g. id hash mismatch).
+    ///
+    /// The session state has still advanced (message keys consumed) to avoid desync.
+    InvalidRumor {
+        sender: PublicKey,
+        reason: String,
+        content: String,
+        event_id: Option<String>,
+    },
 }
 
 struct InviteState {
@@ -1066,6 +1075,7 @@ impl SessionManager {
         if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16 {
             let event_id = Some(event.id.to_string());
             let mut decrypted: Option<(PublicKey, String, String)> = None;
+            let mut invalid: Option<(PublicKey, String, String, String)> = None;
 
             {
                 let mut records = self.user_records.lock().unwrap();
@@ -1080,27 +1090,48 @@ impl SessionManager {
                         };
 
                         if let Some(ref mut session) = device_record.active_session {
-                            if let Ok(Some(plaintext)) = session.receive(&event) {
-                                decrypted = Some((*owner_pubkey, plaintext, device_id.clone()));
-                                break 'outer;
-                            }
+                            match session.receive(&event) {
+                                Ok(Some(plaintext)) => {
+                                    decrypted = Some((*owner_pubkey, plaintext, device_id.clone()));
+                                    break 'outer;
+                                }
+                                Err(crate::Error::InvalidRumor { reason, plaintext }) => {
+                                    invalid =
+                                        Some((*owner_pubkey, reason, plaintext, device_id.clone()));
+                                    break 'outer;
+                                }
+                                _ => {}
+                            };
                         }
 
                         for idx in 0..device_record.inactive_sessions.len() {
-                            let plaintext_opt = {
+                            let result = {
                                 let session = &mut device_record.inactive_sessions[idx];
-                                session.receive(&event).ok().flatten()
+                                session.receive(&event)
                             };
 
-                            if let Some(plaintext) = plaintext_opt {
-                                SessionManager::promote_session_to_active(
-                                    user_record,
-                                    &device_id,
-                                    idx,
-                                );
-                                decrypted = Some((*owner_pubkey, plaintext, device_id.clone()));
-                                break 'outer;
-                            }
+                            match result {
+                                Ok(Some(plaintext)) => {
+                                    SessionManager::promote_session_to_active(
+                                        user_record,
+                                        &device_id,
+                                        idx,
+                                    );
+                                    decrypted = Some((*owner_pubkey, plaintext, device_id.clone()));
+                                    break 'outer;
+                                }
+                                Err(crate::Error::InvalidRumor { reason, plaintext }) => {
+                                    SessionManager::promote_session_to_active(
+                                        user_record,
+                                        &device_id,
+                                        idx,
+                                    );
+                                    invalid =
+                                        Some((*owner_pubkey, reason, plaintext, device_id.clone()));
+                                    break 'outer;
+                                }
+                                _ => {}
+                            };
                         }
                     }
                 }
@@ -1119,6 +1150,20 @@ impl SessionManager {
                 let _ = self
                     .pubsub
                     .decrypted_message(owner_pubkey, plaintext, event_id);
+                let _ = self.store_user_record(&owner_pubkey);
+            } else if let Some((owner_pubkey, reason, plaintext, device_id)) = invalid {
+                if let Ok(sender_pk) = crate::utils::pubkey_from_hex(&device_id) {
+                    let sender_owner = self.resolve_to_owner(&sender_pk);
+                    if sender_owner != sender_pk
+                        && !self.is_device_authorized(sender_owner, sender_pk)
+                    {
+                        return;
+                    }
+                }
+
+                let _ = self
+                    .pubsub
+                    .invalid_rumor(owner_pubkey, reason, plaintext, event_id);
                 let _ = self.store_user_record(&owner_pubkey);
             }
         }

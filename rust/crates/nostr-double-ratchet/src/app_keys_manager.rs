@@ -108,7 +108,8 @@ impl AppKeysManager {
     }
 
     fn save_app_keys(&self, app_keys: &AppKeys) -> Result<()> {
-        self.storage.put(&self.app_keys_key(), app_keys.serialize()?)?;
+        self.storage
+            .put(&self.app_keys_key(), app_keys.serialize()?)?;
         Ok(())
     }
 }

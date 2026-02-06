@@ -17,6 +17,13 @@ pub trait NostrPubSub: Send + Sync {
         content: String,
         event_id: Option<String>,
     ) -> Result<()>;
+    fn invalid_rumor(
+        &self,
+        sender: PublicKey,
+        reason: String,
+        content: String,
+        event_id: Option<String>,
+    ) -> Result<()>;
     fn received_event(&self, event: nostr::Event) -> Result<()>;
 }
 
@@ -53,6 +60,22 @@ impl NostrPubSub for crossbeam_channel::Sender<SessionManagerEvent> {
             event_id,
         })
         .map_err(|_| Error::Storage("Failed to send decrypted message".to_string()))
+    }
+
+    fn invalid_rumor(
+        &self,
+        sender: PublicKey,
+        reason: String,
+        content: String,
+        event_id: Option<String>,
+    ) -> Result<()> {
+        self.send(SessionManagerEvent::InvalidRumor {
+            sender,
+            reason,
+            content,
+            event_id,
+        })
+        .map_err(|_| Error::Storage("Failed to send invalid rumor".to_string()))
     }
 
     fn received_event(&self, event: nostr::Event) -> Result<()> {
@@ -103,6 +126,16 @@ impl NostrPubSub for ChannelPubSub {
         self.tx.decrypted_message(sender, content, event_id)
     }
 
+    fn invalid_rumor(
+        &self,
+        sender: PublicKey,
+        reason: String,
+        content: String,
+        event_id: Option<String>,
+    ) -> Result<()> {
+        self.tx.invalid_rumor(sender, reason, content, event_id)
+    }
+
     fn received_event(&self, event: nostr::Event) -> Result<()> {
         self.tx.received_event(event)
     }
@@ -127,6 +160,12 @@ pub enum SessionEvent {
     Unsubscribe(String),
     DecryptedMessage {
         sender: PublicKey,
+        content: String,
+        event_id: Option<String>,
+    },
+    InvalidRumor {
+        sender: PublicKey,
+        reason: String,
         content: String,
         event_id: Option<String>,
     },
@@ -226,6 +265,17 @@ pub mod test_utils {
                     event_id,
                 } => SessionEvent::DecryptedMessage {
                     sender,
+                    content,
+                    event_id,
+                },
+                crate::session_manager::SessionManagerEvent::InvalidRumor {
+                    sender,
+                    reason,
+                    content,
+                    event_id,
+                } => SessionEvent::InvalidRumor {
+                    sender,
+                    reason,
                     content,
                     event_id,
                 },

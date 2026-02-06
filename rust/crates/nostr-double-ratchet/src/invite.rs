@@ -4,9 +4,9 @@ use crate::{
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
+use nostr::types::filter::{Alphabet, SingleLetterTag};
 use nostr::PublicKey;
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
-use nostr::types::filter::{Alphabet, SingleLetterTag};
 
 #[derive(Clone)]
 pub struct Invite {
@@ -75,7 +75,10 @@ impl Invite {
             serde_json::Value::String(hex::encode(self.shared_secret)),
         );
         if let Some(purpose) = &self.purpose {
-            data.insert("purpose".to_string(), serde_json::Value::String(purpose.clone()));
+            data.insert(
+                "purpose".to_string(),
+                serde_json::Value::String(purpose.clone()),
+            );
         }
         if let Some(owner_pk) = &self.owner_public_key {
             data.insert(
@@ -108,9 +111,7 @@ impl Invite {
         let ephemeral_key_str = data["ephemeralKey"]
             .as_str()
             .or_else(|| data["inviterEphemeralPublicKey"].as_str())
-            .ok_or(Error::Invite(
-                "Missing ephemeralKey".to_string(),
-            ))?;
+            .ok_or(Error::Invite("Missing ephemeralKey".to_string()))?;
         let ephemeral_key = crate::utils::pubkey_from_hex(ephemeral_key_str)?;
         let shared_secret_hex = data["sharedSecret"]
             .as_str()
@@ -245,10 +246,7 @@ impl Invite {
             serde_json::Value::String(hex::encode(invitee_session_public_key.to_bytes())),
         );
         if let Some(device_id) = device_id.clone() {
-            payload.insert(
-                "deviceId".to_string(),
-                serde_json::Value::String(device_id),
-            );
+            payload.insert("deviceId".to_string(), serde_json::Value::String(device_id));
         }
         if let Some(owner_pk) = owner_public_key {
             payload.insert(

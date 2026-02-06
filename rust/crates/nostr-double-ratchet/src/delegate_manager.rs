@@ -201,10 +201,16 @@ impl DelegateManager {
     }
 
     fn identity_public_key_key(&self) -> String {
-        format!("v{}/delegate-manager/identity-public-key", self.storage_version)
+        format!(
+            "v{}/delegate-manager/identity-public-key",
+            self.storage_version
+        )
     }
 
     fn identity_private_key_key(&self) -> String {
-        format!("v{}/delegate-manager/identity-private-key", self.storage_version)
+        format!(
+            "v{}/delegate-manager/identity-private-key",
+            self.storage_version
+        )
     }
 }

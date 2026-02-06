@@ -51,7 +51,10 @@ fn build_device_invite(device_pubkey_hex: &str) -> Result<nostr_double_ratchet::
     .map_err(Into::into)
 }
 
-fn ensure_device_invite(config: &Config, storage: &Storage) -> Result<nostr_double_ratchet::Invite> {
+fn ensure_device_invite(
+    config: &Config,
+    storage: &Storage,
+) -> Result<nostr_double_ratchet::Invite> {
     let device_pubkey_hex = config.public_key()?;
 
     if let Ok(Some(stored)) = storage.get_invite(DEVICE_INVITE_ID) {
@@ -168,12 +171,7 @@ pub async fn create(config: &Config, storage: &Storage, output: &Output) -> Resu
 }
 
 /// Accept a link invite and publish the response event.
-pub async fn accept(
-    url: &str,
-    config: &Config,
-    storage: &Storage,
-    output: &Output,
-) -> Result<()> {
+pub async fn accept(url: &str, config: &Config, storage: &Storage, output: &Output) -> Result<()> {
     let mut config = config.clone();
     if config.linked_owner.is_some() {
         anyhow::bail!("Linked devices cannot accept link invites.");
@@ -189,16 +187,11 @@ pub async fn accept(
     }
 
     let owner_pubkey_hex = config.public_key()?;
-    let owner_pubkey =
-        nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
+    let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
     let owner_private_key = config.private_key_bytes()?;
 
-    let (_session, response_event) = invite.accept_with_owner(
-        owner_pubkey,
-        owner_private_key,
-        None,
-        Some(owner_pubkey),
-    )?;
+    let (_session, response_event) =
+        invite.accept_with_owner(owner_pubkey, owner_private_key, None, Some(owner_pubkey))?;
 
     // Publish to relays if configured
     let relays = config.resolved_relays();
@@ -265,7 +258,9 @@ async fn fetch_latest_app_keys(
     use std::time::Duration;
 
     let filter = Filter::new()
-        .kind(nostr::Kind::Custom(nostr_double_ratchet::APP_KEYS_EVENT_KIND as u16))
+        .kind(nostr::Kind::Custom(
+            nostr_double_ratchet::APP_KEYS_EVENT_KIND as u16,
+        ))
         .author(owner_pubkey)
         .limit(20);
 
@@ -325,8 +320,7 @@ mod tests {
 
     #[test]
     fn test_build_link_invite_sets_purpose() {
-        let device_pubkey_hex =
-            "5d21f6f47fbcdd6b8f0be05a9e9b4a1fdb2f4d9cced65c0b6f965c2a3a9a1b5c";
+        let device_pubkey_hex = "5d21f6f47fbcdd6b8f0be05a9e9b4a1fdb2f4d9cced65c0b6f965c2a3a9a1b5c";
 
         let invite = build_link_invite(device_pubkey_hex).unwrap();
         assert_eq!(invite.purpose.as_deref(), Some("link"));
@@ -358,7 +352,10 @@ mod tests {
         let device_invite = nostr_double_ratchet::Invite::deserialize(&device.serialized).unwrap();
         assert!(device_invite.purpose.is_none());
         let inviter_hex = device_invite.inviter.to_hex();
-        assert_eq!(device_invite.device_id.as_deref(), Some(inviter_hex.as_str()));
+        assert_eq!(
+            device_invite.device_id.as_deref(),
+            Some(inviter_hex.as_str())
+        );
         assert!(device_invite.inviter_ephemeral_private_key.is_some());
 
         let updated = Config::load(_temp.path()).unwrap();
@@ -392,10 +389,7 @@ mod tests {
         assert_eq!(updated.linked_owner, None);
         assert_eq!(updated.public_key().unwrap(), owner_pubkey_hex);
 
-        let app_keys = storage
-            .load_app_keys()
-            .unwrap()
-            .expect("expected app keys");
+        let app_keys = storage.load_app_keys().unwrap().expect("expected app keys");
         let devices = app_keys.get_all_devices();
         assert!(devices
             .iter()
@@ -424,10 +418,7 @@ mod tests {
         let owner_pk_hex = updated.public_key().unwrap();
         let owner_pk = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pk_hex).unwrap();
 
-        let app_keys = storage
-            .load_app_keys()
-            .unwrap()
-            .expect("expected app keys");
+        let app_keys = storage.load_app_keys().unwrap().expect("expected app keys");
         let devices = app_keys.get_all_devices();
         assert!(devices.iter().any(|d| d.identity_pubkey == owner_pk));
         assert!(devices

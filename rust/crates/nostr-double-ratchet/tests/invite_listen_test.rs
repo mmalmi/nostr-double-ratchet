@@ -35,7 +35,10 @@ fn test_invite_listen_and_accept() -> Result<()> {
     if let Some(response) = invite.process_invite_response(&acceptance_event, alice_sk)? {
         assert_eq!(response.invitee_identity.to_bytes(), bob_pk.to_bytes());
         assert_eq!(response.device_id, Some("bob-device".to_string()));
-        assert_eq!(response.owner_public_key.map(|pk| pk.to_bytes()), Some(owner_pk.to_bytes()));
+        assert_eq!(
+            response.owner_public_key.map(|pk| pk.to_bytes()),
+            Some(owner_pk.to_bytes())
+        );
         assert!(response.session.state.receiving_chain_key.is_none());
         assert!(response.session.state.sending_chain_key.is_none());
     } else {
