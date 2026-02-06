@@ -1653,6 +1653,10 @@ pub async fn listen(
                 if let Some((group_id, sender_identity_pubkey_hex)) =
                     group_sender_map.get(&sender_event_pubkey_hex).cloned()
                 {
+                    if event.verify().is_err() {
+                        continue;
+                    }
+
                     let Some((key_id, n, ciphertext)) = parse_group_sender_payload(&event.content)
                     else {
                         continue;
@@ -2076,6 +2080,10 @@ pub async fn listen(
                                             });
 
                                             for outer in pending {
+                                                if outer.verify().is_err() {
+                                                    continue;
+                                                }
+
                                                 let Some((key_id, n, ciphertext)) =
                                                     parse_group_sender_payload(&outer.content)
                                                 else {
