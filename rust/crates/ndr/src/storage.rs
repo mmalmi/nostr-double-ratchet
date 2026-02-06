@@ -3,6 +3,26 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn temp_path_for(path: &Path) -> PathBuf {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext.is_empty() {
+        return path.with_extension("tmp");
+    }
+    path.with_extension(format!("{ext}.tmp"))
+}
+
+fn write_string_atomic(path: &Path, content: &str) -> Result<()> {
+    let temp_path = temp_path_for(path);
+    fs::write(&temp_path, content)?;
+    fs::rename(&temp_path, path)?;
+    Ok(())
+}
+
+fn write_json_pretty_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let content = serde_json::to_string_pretty(value)?;
+    write_string_atomic(path, &content)
+}
+
 /// Stored invite data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredInvite {
@@ -156,26 +176,19 @@ impl Storage {
 
     pub fn save_app_keys(&self, keys: &nostr_double_ratchet::AppKeys) -> Result<()> {
         let path = self.app_keys_path();
-        let temp_path = self.base_dir.join("app_keys.json.tmp");
         let json = keys.serialize()?;
         let content = match serde_json::from_str::<serde_json::Value>(&json) {
             Ok(v) => serde_json::to_string_pretty(&v)?,
             Err(_) => json,
         };
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_string_atomic(&path, &content)
     }
 
     // === Invite operations ===
 
     pub fn save_invite(&self, invite: &StoredInvite) -> Result<()> {
         let path = self.invites_dir.join(format!("{}.json", invite.id));
-        let temp_path = self.invites_dir.join(format!("{}.json.tmp", invite.id));
-        let content = serde_json::to_string_pretty(invite)?;
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_json_pretty_atomic(&path, invite)
     }
 
     #[allow(dead_code)]
@@ -220,11 +233,7 @@ impl Storage {
 
     pub fn save_chat(&self, chat: &StoredChat) -> Result<()> {
         let path = self.chats_dir.join(format!("{}.json", chat.id));
-        let temp_path = self.chats_dir.join(format!("{}.json.tmp", chat.id));
-        let content = serde_json::to_string_pretty(chat)?;
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_json_pretty_atomic(&path, chat)
     }
 
     pub fn get_chat(&self, id: &str) -> Result<Option<StoredChat>> {
@@ -321,10 +330,7 @@ impl Storage {
         let content = serde_json::to_string_pretty(&day_messages)?;
 
         // Atomic write: write to temp file then rename to avoid corruption on crash
-        let temp_path = dir.join(format!("{}.json.tmp", date));
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_string_atomic(&path, &content)
     }
 
     pub fn get_messages(&self, chat_id: &str, limit: usize) -> Result<Vec<StoredMessage>> {
@@ -436,10 +442,7 @@ impl Storage {
         day_messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
         let content = serde_json::to_string_pretty(&day_messages)?;
-        let temp_path = dir.join(format!("{}.json.tmp", date));
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_string_atomic(&path, &content)
     }
 
     pub fn get_group_messages(
@@ -483,11 +486,7 @@ impl Storage {
 
     pub fn save_group(&self, group: &StoredGroup) -> Result<()> {
         let path = self.groups_dir.join(format!("{}.json", group.data.id));
-        let temp_path = self.groups_dir.join(format!("{}.json.tmp", group.data.id));
-        let content = serde_json::to_string_pretty(group)?;
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_json_pretty_atomic(&path, group)
     }
 
     pub fn get_group(&self, id: &str) -> Result<Option<StoredGroup>> {
@@ -606,11 +605,7 @@ impl Storage {
         fs::create_dir_all(&dir)?;
 
         let path = self.group_sender_path(&sender.group_id, &sender.identity_pubkey);
-        let temp_path = dir.join(format!("{}.json.tmp", sender.identity_pubkey));
-        let content = serde_json::to_string_pretty(sender)?;
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_json_pretty_atomic(&path, sender)
     }
 
     pub fn list_group_senders(&self, group_id: &str) -> Result<Vec<StoredGroupSender>> {
@@ -697,7 +692,6 @@ impl Storage {
         fs::create_dir_all(&dir)?;
 
         let path = self.group_sender_keys_path(group_id, sender_pubkey);
-        let temp_path = dir.join(format!("{}.json.tmp", sender_pubkey));
 
         let mut stored = if path.exists() {
             let content = fs::read_to_string(&path)?;
@@ -724,9 +718,7 @@ impl Storage {
         }
 
         let content = serde_json::to_string_pretty(&stored)?;
-        fs::write(&temp_path, &content)?;
-        fs::rename(&temp_path, &path)?;
-        Ok(())
+        write_string_atomic(&path, &content)
     }
 
     /// Find a chat by the peer's pubkey (hex). If multiple, returns the most recently active.
