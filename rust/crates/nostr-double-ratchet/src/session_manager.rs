@@ -125,7 +125,9 @@ impl SessionManager {
         } else {
             match self.storage.get(&device_invite_key)? {
                 Some(data) => Invite::deserialize(&data)?,
-                None => Invite::create_new(self.our_public_key, Some(self.device_id.clone()), None)?,
+                None => {
+                    Invite::create_new(self.our_public_key, Some(self.device_id.clone()), None)?
+                }
             }
         };
 
@@ -184,6 +186,25 @@ impl SessionManager {
         Ok(event_ids)
     }
 
+    pub fn send_text_with_expiration(
+        &self,
+        recipient: PublicKey,
+        text: String,
+        expires_at: u64,
+    ) -> Result<Vec<String>> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tag = Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
+
+        let event =
+            self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, vec![tag])?;
+
+        self.send_event(recipient, event)
+    }
+
     /// Send a chat message and return both its stable inner (rumor) id and the
     /// list of outer message event ids that were published.
     pub fn send_text_with_inner_id(
@@ -195,12 +216,8 @@ impl SessionManager {
             return Ok((String::new(), Vec::new()));
         }
 
-        let event = self.build_message_event(
-            recipient,
-            crate::CHAT_MESSAGE_KIND,
-            text,
-            Vec::new(),
-        )?;
+        let event =
+            self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, Vec::new())?;
 
         let inner_id = event
             .id
@@ -334,8 +351,7 @@ impl SessionManager {
                     }
                     output.push_str(&format!(
                         "  our_next:       {}\n",
-                        &hex::encode(session.state.our_next_nostr_key.public_key.to_bytes())
-                            [..16]
+                        &hex::encode(session.state.our_next_nostr_key.public_key.to_bytes())[..16]
                     ));
                     if let Some(their_current) = session.state.their_current_nostr_public_key {
                         output.push_str(&format!(
@@ -530,7 +546,10 @@ impl SessionManager {
 
         for identity_hex in new_identities.iter() {
             if let Ok(pk) = crate::utils::pubkey_from_hex(identity_hex) {
-                self.delegate_to_owner.lock().unwrap().insert(pk, owner_pubkey);
+                self.delegate_to_owner
+                    .lock()
+                    .unwrap()
+                    .insert(pk, owner_pubkey);
             }
         }
 
@@ -595,9 +614,7 @@ impl SessionManager {
             .kind(nostr::Kind::Custom(crate::APP_KEYS_EVENT_KIND as u16))
             .authors(vec![owner_pubkey])
             .custom_tag(
-                nostr::types::filter::SingleLetterTag::lowercase(
-                    nostr::types::filter::Alphabet::D,
-                ),
+                nostr::types::filter::SingleLetterTag::lowercase(nostr::types::filter::Alphabet::D),
                 ["double-ratchet/app-keys"],
             );
         if let Ok(filter_json) = serde_json::to_string(&filter) {
@@ -842,14 +859,18 @@ impl SessionManager {
                 };
 
                 if let Some(state) = device.active_session {
-                    let mut session = crate::Session::new(state, format!("session-{}", device.device_id));
+                    let mut session =
+                        crate::Session::new(state, format!("session-{}", device.device_id));
                     session.set_pubsub(self.pubsub.clone());
                     let _ = session.subscribe_to_messages();
                     device_record.active_session = Some(session);
                 }
 
                 for state in device.inactive_sessions {
-                    let mut session = crate::Session::new(state, format!("session-{}-inactive", device.device_id));
+                    let mut session = crate::Session::new(
+                        state,
+                        format!("session-{}-inactive", device.device_id),
+                    );
                     session.set_pubsub(self.pubsub.clone());
                     let _ = session.subscribe_to_messages();
                     device_record.inactive_sessions.push(session);
@@ -862,7 +883,10 @@ impl SessionManager {
 
             for identity_hex in stored.known_device_identities.iter() {
                 if let Ok(pk) = crate::utils::pubkey_from_hex(identity_hex) {
-                    self.delegate_to_owner.lock().unwrap().insert(pk, owner_pubkey);
+                    self.delegate_to_owner
+                        .lock()
+                        .unwrap()
+                        .insert(pk, owner_pubkey);
                 }
             }
 
@@ -872,7 +896,11 @@ impl SessionManager {
         Ok(())
     }
 
-    fn promote_session_to_active(user_record: &mut UserRecord, device_id: &str, session_index: usize) {
+    fn promote_session_to_active(
+        user_record: &mut UserRecord,
+        device_id: &str,
+        session_index: usize,
+    ) {
         let Some(device_record) = user_record.device_records.get_mut(device_id) else {
             return;
         };
@@ -912,8 +940,9 @@ impl SessionManager {
             }
 
             if let Some(state) = self.invite_state.lock().unwrap().as_ref() {
-                if let Ok(Some(response)) =
-                    state.invite.process_invite_response(&event, state.our_identity_key)
+                if let Ok(Some(response)) = state
+                    .invite
+                    .process_invite_response(&event, state.our_identity_key)
                 {
                     if response.invitee_identity == self.our_public_key {
                         return;
@@ -929,9 +958,9 @@ impl SessionManager {
 
                     self.record_known_device_identity(owner_pubkey, response.invitee_identity);
 
-                    let device_id = response.device_id.unwrap_or_else(|| {
-                        hex::encode(response.invitee_identity.to_bytes())
-                    });
+                    let device_id = response
+                        .device_id
+                        .unwrap_or_else(|| hex::encode(response.invitee_identity.to_bytes()));
 
                     let mut session = response.session;
                     session.set_pubsub(self.pubsub.clone());
@@ -939,11 +968,9 @@ impl SessionManager {
 
                     {
                         let mut records = self.user_records.lock().unwrap();
-                        let user_record = records
-                            .entry(owner_pubkey)
-                            .or_insert_with(|| {
-                                UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
-                            });
+                        let user_record = records.entry(owner_pubkey).or_insert_with(|| {
+                            UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
+                        });
                         self.upsert_device_record(user_record, &device_id);
                         user_record.upsert_session(Some(&device_id), session);
                     }
@@ -973,9 +1000,10 @@ impl SessionManager {
                     return;
                 }
 
-                let device_id = invite.device_id.clone().unwrap_or_else(|| {
-                    hex::encode(inviter_device.to_bytes())
-                });
+                let device_id = invite
+                    .device_id
+                    .clone()
+                    .unwrap_or_else(|| hex::encode(inviter_device.to_bytes()));
 
                 let already_has_session = {
                     let records = self.user_records.lock().unwrap();
@@ -1013,11 +1041,9 @@ impl SessionManager {
 
                         {
                             let mut records = self.user_records.lock().unwrap();
-                            let user_record = records
-                                .entry(owner_pubkey)
-                                .or_insert_with(|| {
-                                    UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
-                                });
+                            let user_record = records.entry(owner_pubkey).or_insert_with(|| {
+                                UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
+                            });
                             self.upsert_device_record(user_record, &device_id);
                             user_record.upsert_session(Some(&device_id), session);
                         }
@@ -1029,7 +1055,10 @@ impl SessionManager {
                     Err(_) => {}
                 }
 
-                self.pending_acceptances.lock().unwrap().remove(&inviter_device);
+                self.pending_acceptances
+                    .lock()
+                    .unwrap()
+                    .remove(&inviter_device);
             }
             return;
         }
@@ -1045,16 +1074,14 @@ impl SessionManager {
                         user_record.device_records.keys().cloned().collect();
 
                     for device_id in device_ids {
-                        let Some(device_record) =
-                            user_record.device_records.get_mut(&device_id)
+                        let Some(device_record) = user_record.device_records.get_mut(&device_id)
                         else {
                             continue;
                         };
 
                         if let Some(ref mut session) = device_record.active_session {
                             if let Ok(Some(plaintext)) = session.receive(&event) {
-                                decrypted =
-                                    Some((*owner_pubkey, plaintext, device_id.clone()));
+                                decrypted = Some((*owner_pubkey, plaintext, device_id.clone()));
                                 break 'outer;
                             }
                         }
@@ -1071,8 +1098,7 @@ impl SessionManager {
                                     &device_id,
                                     idx,
                                 );
-                                decrypted =
-                                    Some((*owner_pubkey, plaintext, device_id.clone()));
+                                decrypted = Some((*owner_pubkey, plaintext, device_id.clone()));
                                 break 'outer;
                             }
                         }

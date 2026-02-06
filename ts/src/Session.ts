@@ -12,8 +12,9 @@ import {
   REACTION_KIND,
   RECEIPT_KIND,
   TYPING_KIND,
+  ExpirationOptions,
 } from "./types";
-import { kdf, deepCopyState } from "./utils";
+import { kdf, deepCopyState, resolveExpirationSeconds, upsertExpirationTag } from "./utils";
 
 const MAX_SKIP = 1000;
 
@@ -106,79 +107,85 @@ export class Session {
    * Sends a text message through the encrypted session.
    * Sent in a Nostr event with the kind CHAT_MESSAGE_KIND.
    * @param text The plaintext message to send
+   * @param options Optional expiration options for disappearing messages
    * @returns A verified Nostr event containing the encrypted message. You need to publish this event to the Nostr network.
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  send(text: string): {event: VerifiedEvent, innerEvent: Rumor} {
+  send(text: string, options: ExpirationOptions = {}): {event: VerifiedEvent, innerEvent: Rumor} {
     return this.sendEvent({
       content: text,
       kind: CHAT_MESSAGE_KIND
-    });
+    }, options);
   }
 
   /**
    * Sends a reply to a specific message through the encrypted session.
    * @param text The reply text content
    * @param replyTo The ID of the message being replied to
+   * @param options Optional expiration options for disappearing messages
    * @returns A verified Nostr event containing the encrypted reply. You need to publish this event to the Nostr network.
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  sendReply(text: string, replyTo: string): {event: VerifiedEvent, innerEvent: Rumor} {
+  sendReply(text: string, replyTo: string, options: ExpirationOptions = {}): {event: VerifiedEvent, innerEvent: Rumor} {
     return this.sendEvent({
       content: text,
       kind: CHAT_MESSAGE_KIND,
       tags: [["e", replyTo]]
-    });
+    }, options);
   }
 
   /**
    * Sends a reaction to a message through the encrypted session.
    * @param messageId The ID of the message being reacted to
    * @param emoji The emoji or reaction content (e.g., "👍", "❤️", "+1")
+   * @param options Optional expiration options for disappearing messages
    * @returns A verified Nostr event containing the encrypted reaction. You need to publish this event to the Nostr network.
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  sendReaction(messageId: string, emoji: string): {event: VerifiedEvent, innerEvent: Rumor} {
+  sendReaction(messageId: string, emoji: string, options: ExpirationOptions = {}): {event: VerifiedEvent, innerEvent: Rumor} {
     return this.sendEvent({
       content: emoji,
       kind: REACTION_KIND,
       tags: [["e", messageId]]
-    });
+    }, options);
   }
 
   /**
    * Sends a typing indicator through the encrypted session.
+   * @param options Optional expiration options for disappearing messages
    * @returns A verified Nostr event containing the encrypted typing indicator. You need to publish this event to the Nostr network.
    */
-  sendTyping(): {event: VerifiedEvent, innerEvent: Rumor} {
+  sendTyping(options: ExpirationOptions = {}): {event: VerifiedEvent, innerEvent: Rumor} {
     return this.sendEvent({
       content: 'typing',
       kind: TYPING_KIND,
-    });
+    }, options);
   }
 
   /**
    * Sends a delivery/read receipt through the encrypted session.
    * @param receiptType Either "delivered" or "seen"
    * @param messageIds The IDs of the messages being acknowledged
+   * @param options Optional expiration options for disappearing messages
    * @returns A verified Nostr event containing the encrypted receipt. You need to publish this event to the Nostr network.
    */
-  sendReceipt(receiptType: 'delivered' | 'seen', messageIds: string[]): {event: VerifiedEvent, innerEvent: Rumor} {
+  sendReceipt(receiptType: 'delivered' | 'seen', messageIds: string[], options: ExpirationOptions = {}): {event: VerifiedEvent, innerEvent: Rumor} {
     return this.sendEvent({
       content: receiptType,
       kind: RECEIPT_KIND,
       tags: messageIds.map(id => ["e", id]),
-    });
+    }, options);
   }
 
   /**
    * Send a partial Nostr event through the encrypted session.
    * In addition to chat messages, it could be files, webrtc negotiation or many other types of messages.
    * @param event Partial Nostr event to send. Must be unsigned. Id and will be generated if not provided.
+   * @param options Optional expiration options for disappearing messages
    * @returns A verified Nostr event containing the encrypted message. You need to publish this event to the Nostr network.
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  sendEvent(event: Partial<UnsignedEvent>): {event: VerifiedEvent, innerEvent: Rumor} {
+  sendEvent(event: Partial<UnsignedEvent>, options: ExpirationOptions = {}): {event: VerifiedEvent, innerEvent: Rumor} {
     if (!this.state.theirNextNostrPublicKey || !this.state.ourCurrentNostrKey) {
       throw new Error("we are not the initiator, so we can't send the first message");
     }
@@ -198,8 +205,11 @@ export class Session {
       pubkey: event.pubkey || DUMMY_PUBKEY,
     }
 
-    if (!rumor.tags!.some(([k]) => k === "ms")) {
-      rumor.tags!.push(["ms", String(now)])
+    if (!rumor.tags!.some(([k]) => k === "ms")) rumor.tags!.push(["ms", String(now)])
+
+    const expiresAt = resolveExpirationSeconds(options, Math.floor(now / 1000))
+    if (expiresAt !== undefined) {
+      upsertExpirationTag(rumor.tags!, expiresAt)
     }
 
     rumor.id = getEventHash(rumor as Rumor);

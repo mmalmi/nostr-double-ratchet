@@ -9,16 +9,38 @@ import {
   RECEIPT_KIND,
   TYPING_KIND,
   ReceiptType,
+  ExpirationOptions,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { AppKeys, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
-import { serializeSessionState, deserializeSessionState } from "./utils"
+import {
+  deserializeSessionState,
+  isExpired,
+  resolveExpirationSeconds,
+  serializeSessionState,
+  upsertExpirationTag,
+} from "./utils"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
 import { getEventHash } from "nostr-tools"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
+
+export interface OnEventOptions {
+  /**
+   * If true, don't call the callback for rumors that have an `["expiration", ...]` tag
+   * that is <= "now".
+   *
+   * Default: false (always deliver; client decides).
+   */
+  ignoreExpired?: boolean
+  /**
+   * Supply your own time source if you care about accurate expiration.
+   * If omitted, `Date.now()` is used.
+   */
+  nowSeconds?: () => number
+}
 
 /**
  * Credentials for the invite handshake - used to listen for and decrypt invite responses
@@ -632,11 +654,21 @@ export class SessionManager {
     })
   }
 
-  onEvent(callback: OnEventCallback) {
-    this.internalSubscriptions.add(callback)
+  onEvent(callback: OnEventCallback, options: OnEventOptions = {}) {
+    const wrapped: OnEventCallback = (event, from) => {
+      if (options.ignoreExpired) {
+        const nowSeconds = options.nowSeconds
+          ? options.nowSeconds()
+          : Math.floor(Date.now() / 1000)
+        if (isExpired(event, nowSeconds)) return
+      }
+      callback(event, from)
+    }
+
+    this.internalSubscriptions.add(wrapped)
 
     return () => {
-      this.internalSubscriptions.delete(callback)
+      this.internalSubscriptions.delete(wrapped)
     }
   }
 
@@ -827,7 +859,7 @@ export class SessionManager {
   async sendMessage(
     recipientPublicKey: string,
     content: string,
-    options: { kind?: number; tags?: string[][] } = {}
+    options: { kind?: number; tags?: string[][] } & ExpirationOptions = {}
   ): Promise<Rumor> {
     const { kind = CHAT_MESSAGE_KIND, tags = [] } = options
 
@@ -846,6 +878,11 @@ export class SessionManager {
 
     if (!rumor.tags.some(([k]) => k === "ms")) {
       rumor.tags.push(["ms", String(now)])
+    }
+
+    const expiresAt = resolveExpirationSeconds(options, Math.floor(now / 1000))
+    if (expiresAt !== undefined) {
+      upsertExpirationTag(rumor.tags, expiresAt)
     }
 
     rumor.id = getEventHash(rumor)

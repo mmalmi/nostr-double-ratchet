@@ -33,6 +33,32 @@ sessionManager.onEvent((event, from) => console.log(`${from}: ${event.content}`)
 await sessionManager.sendMessage(recipientPubkey, "Hello!")
 ```
 
+## Disappearing Messages (Expiration)
+
+To send a disappearing message, include a NIP-40-style `["expiration", "<unix seconds>"]` tag in the *inner* rumor.
+This library can do that for you:
+
+```typescript
+// Expires 60 seconds from now (using local time)
+await sessionManager.sendMessage(recipientPubkey, "This will disappear", { ttlSeconds: 60 })
+
+// Or set an absolute expiration timestamp (unix seconds)
+await sessionManager.sendMessage(recipientPubkey, "Expires at a specific time", {
+  expiresAt: 1704067260,
+})
+```
+
+This library does **not** delete old messages from storage; that must be implemented by the client/storage layer.
+By default, decrypted expired rumors are still delivered to `onEvent`; clients can filter them (e.g. using `isExpired()`),
+or opt into filtering in `onEvent`:
+
+```typescript
+sessionManager.onEvent(
+  (event, from) => console.log(`${from}: ${event.content}`),
+  { ignoreExpired: true },
+)
+```
+
 ## Multi-Device
 
 - **Main device** (has nsec): Uses both `DelegateManager` and `AppKeysManager`

@@ -13,6 +13,14 @@ pub const TYPING_KIND: u32 = 25;
 pub const SHARED_CHANNEL_KIND: u32 = 4;
 pub const MAX_SKIP: usize = 1000;
 
+/// NIP-40-style expiration tag name.
+///
+/// For disappearing messages, include this tag in the *inner* rumor event:
+/// `["expiration", "<unix seconds>"]`.
+///
+/// Note: Purging/deleting expired messages is the responsibility of the client/storage.
+pub const EXPIRATION_TAG: &str = "expiration";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Header {

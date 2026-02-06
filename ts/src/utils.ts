@@ -8,6 +8,8 @@ import {
   ReceiptType,
   RECEIPT_KIND,
   TYPING_KIND,
+  EXPIRATION_TAG,
+  ExpirationOptions,
 } from "./types";
 import { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
@@ -203,6 +205,68 @@ export function getMillisecondTimestamp(event: Rumor) {
     return parseInt(msTag[1]);
   }
   return event.created_at * 1000;
+}
+
+function ensureSafeIntegerSeconds(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${name} must be a finite number (unix seconds)`)
+  }
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${name} must be an integer (unix seconds)`)
+  }
+  if (value < 0) {
+    throw new Error(`${name} must be >= 0`)
+  }
+  return value
+}
+
+export function resolveExpirationSeconds(
+  options: ExpirationOptions | undefined,
+  nowSeconds: number
+): number | undefined {
+  if (!options) return undefined
+
+  const hasExpiresAt = options.expiresAt !== undefined
+  const hasTtl = options.ttlSeconds !== undefined
+  if (hasExpiresAt && hasTtl) {
+    throw new Error("Provide either expiresAt or ttlSeconds, not both")
+  }
+
+  if (hasExpiresAt) {
+    return ensureSafeIntegerSeconds(options.expiresAt, "expiresAt")
+  }
+
+  if (hasTtl) {
+    const ttl = ensureSafeIntegerSeconds(options.ttlSeconds, "ttlSeconds")
+    return nowSeconds + ttl
+  }
+
+  return undefined
+}
+
+export function upsertExpirationTag(tags: string[][], expiresAtSeconds: number): void {
+  const exp = ensureSafeIntegerSeconds(expiresAtSeconds, "expiresAt")
+  for (let i = tags.length - 1; i >= 0; i--) {
+    if (tags[i]?.[0] === EXPIRATION_TAG) {
+      tags.splice(i, 1)
+    }
+  }
+  tags.push([EXPIRATION_TAG, String(exp)])
+}
+
+export function getExpirationTimestampSeconds(event: { tags?: string[][] }): number | undefined {
+  const expTag = event.tags?.find((tag) => tag[0] === EXPIRATION_TAG)
+  if (!expTag) return undefined
+  const value = Number(expTag[1])
+  if (!Number.isFinite(value)) return undefined
+  // NIP-40 is unix seconds; be strict about integers.
+  if (!Number.isSafeInteger(value) || value < 0) return undefined
+  return value
+}
+
+export function isExpired(event: { tags?: string[][] }, nowSeconds: number): boolean {
+  const exp = getExpirationTimestampSeconds(event)
+  return exp !== undefined && exp <= nowSeconds
 }
 
 /**

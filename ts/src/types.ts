@@ -152,3 +152,20 @@ export const TYPING_KIND = 25;
  * Uses the standard Nostr encrypted DM kind.
  */
 export const SHARED_CHANNEL_KIND = 4;
+
+/**
+ * NIP-40-style expiration tag.
+ *
+ * For disappearing messages, include this tag in the *inner* rumor event:
+ * `["expiration", "<unix seconds>"]`
+ *
+ * Note: Deleting / purging expired messages is the responsibility of the client/storage.
+ */
+export const EXPIRATION_TAG = "expiration";
+
+export interface ExpirationOptions {
+  /** UNIX timestamp in seconds when the message should expire */
+  expiresAt?: number;
+  /** Convenience option: seconds from "now" until expiration */
+  ttlSeconds?: number;
+}
