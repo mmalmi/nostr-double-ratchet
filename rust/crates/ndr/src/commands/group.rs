@@ -504,6 +504,78 @@ fn ensure_group_sender_event_keys(
     Ok((keys, true))
 }
 
+async fn ensure_group_sender_key(
+    group: &nostr_double_ratchet::group::GroupData,
+    group_id: &str,
+    my_pubkey: &str,
+    sender_event_pubkey_hex: &str,
+    sender_event_keys_changed: bool,
+    now_ms: u64,
+    now_s: u64,
+    config: &Config,
+    storage: &Storage,
+    client: &Client,
+) -> Result<SenderKeyState> {
+    // Ensure we have an active sender key; distribute it to members over 1:1 sessions if we just
+    // created one.
+    let mut created_sender_key = false;
+    let sender_key = match storage.get_latest_group_sender_key_state(group_id, my_pubkey)? {
+        Some(s) => s,
+        None => {
+            created_sender_key = true;
+
+            let key_id: u32 = rand::random();
+            let chain_key: [u8; 32] = rand::random();
+            let state = SenderKeyState::new(key_id, chain_key, 0);
+            storage.upsert_group_sender_key_state(group_id, my_pubkey, &state)?;
+
+            let mut dist = SenderKeyDistribution::new(group_id.to_string(), key_id, chain_key, 0);
+            dist.sender_event_pubkey = Some(sender_event_pubkey_hex.to_string());
+            let dist_json = serde_json::to_string(&dist)?;
+
+            let _ = fan_out_sender_key_distribution(
+                group,
+                &dist_json,
+                key_id,
+                now_ms,
+                now_s,
+                config,
+                storage,
+                client,
+            )
+            .await;
+
+            state
+        }
+    };
+
+    // If our sender-event pubkey changed (e.g. state loss), re-announce it to the group over
+    // forward-secure 1:1 sessions, even if our sender key already existed.
+    if sender_event_keys_changed && !created_sender_key {
+        let mut dist = SenderKeyDistribution::new(
+            group_id.to_string(),
+            sender_key.key_id,
+            sender_key.chain_key(),
+            sender_key.iteration(),
+        );
+        dist.sender_event_pubkey = Some(sender_event_pubkey_hex.to_string());
+        let dist_json = serde_json::to_string(&dist)?;
+        let _ = fan_out_sender_key_distribution(
+            group,
+            &dist_json,
+            sender_key.key_id,
+            now_ms,
+            now_s,
+            config,
+            storage,
+            client,
+        )
+        .await;
+    }
+
+    Ok(sender_key)
+}
+
 /// Send a group message (published once under our per-group sender-event pubkey, encrypted with our sender key).
 pub async fn send_message(
     id: &str,
@@ -542,60 +614,19 @@ pub async fn send_message(
     }
     client.connect().await;
 
-    // Ensure we have an active sender key; distribute it to members over 1:1 sessions if we just created one.
-    let mut created_sender_key = false;
-    let mut sender_key = match storage.get_latest_group_sender_key_state(id, &my_pubkey)? {
-        Some(s) => s,
-        None => {
-            created_sender_key = true;
-            let key_id: u32 = rand::random();
-            let chain_key: [u8; 32] = rand::random();
-            let state = SenderKeyState::new(key_id, chain_key, 0);
-            storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
-
-            let mut dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
-            dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
-            let dist_json = serde_json::to_string(&dist)?;
-
-            let _ = fan_out_sender_key_distribution(
-                &group.data,
-                &dist_json,
-                key_id,
-                now_ms,
-                now_s,
-                config,
-                storage,
-                &client,
-            )
-            .await;
-
-            state
-        }
-    };
-
-    // If our sender-event pubkey changed (e.g. state loss), re-announce it to the group over
-    // forward-secure 1:1 sessions, even if our sender key already existed.
-    if sender_event_keys_changed && !created_sender_key {
-        let mut dist = SenderKeyDistribution::new(
-            id.to_string(),
-            sender_key.key_id,
-            sender_key.chain_key(),
-            sender_key.iteration(),
-        );
-        dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
-        let dist_json = serde_json::to_string(&dist)?;
-        let _ = fan_out_sender_key_distribution(
-            &group.data,
-            &dist_json,
-            sender_key.key_id,
-            now_ms,
-            now_s,
-            config,
-            storage,
-            &client,
-        )
-        .await;
-    }
+    let mut sender_key = ensure_group_sender_key(
+        &group.data,
+        id,
+        &my_pubkey,
+        &sender_event_pubkey_hex,
+        sender_event_keys_changed,
+        now_ms,
+        now_s,
+        config,
+        storage,
+        &client,
+    )
+    .await?;
 
     // Build the plaintext group event (unsigned), then encrypt it with the sender key.
     let mut tags: Vec<Vec<String>> = Vec::new();
@@ -692,57 +723,19 @@ pub async fn react(
     }
     client.connect().await;
 
-    let mut created_sender_key = false;
-    let mut sender_key = match storage.get_latest_group_sender_key_state(id, &my_pubkey)? {
-        Some(s) => s,
-        None => {
-            created_sender_key = true;
-            let key_id: u32 = rand::random();
-            let chain_key: [u8; 32] = rand::random();
-            let state = SenderKeyState::new(key_id, chain_key, 0);
-            storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
-
-            let mut dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
-            dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
-            let dist_json = serde_json::to_string(&dist)?;
-
-            let _ = fan_out_sender_key_distribution(
-                &group.data,
-                &dist_json,
-                key_id,
-                now_ms,
-                now_s,
-                config,
-                storage,
-                &client,
-            )
-            .await;
-
-            state
-        }
-    };
-
-    if sender_event_keys_changed && !created_sender_key {
-        let mut dist = SenderKeyDistribution::new(
-            id.to_string(),
-            sender_key.key_id,
-            sender_key.chain_key(),
-            sender_key.iteration(),
-        );
-        dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
-        let dist_json = serde_json::to_string(&dist)?;
-        let _ = fan_out_sender_key_distribution(
-            &group.data,
-            &dist_json,
-            sender_key.key_id,
-            now_ms,
-            now_s,
-            config,
-            storage,
-            &client,
-        )
-        .await;
-    }
+    let mut sender_key = ensure_group_sender_key(
+        &group.data,
+        id,
+        &my_pubkey,
+        &sender_event_pubkey_hex,
+        sender_event_keys_changed,
+        now_ms,
+        now_s,
+        config,
+        storage,
+        &client,
+    )
+    .await?;
 
     let mut tags: Vec<Vec<String>> = Vec::new();
     tags.push(vec!["e".to_string(), message_id.to_string()]);
