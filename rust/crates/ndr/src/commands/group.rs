@@ -1,16 +1,16 @@
 use anyhow::Result;
+use base64::Engine;
 use nostr::ToBech32;
 use nostr_double_ratchet::{
-    SenderKeyDistribution, SenderKeyState, Session, SharedChannel, CHAT_MESSAGE_KIND,
-    GROUP_METADATA_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND, GROUP_SENDER_KEY_MESSAGE_KIND,
-    REACTION_KIND,
+    SenderKeyDistribution, SenderKeyState, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
+    GROUP_SENDER_KEY_DISTRIBUTION_KIND, MESSAGE_EVENT_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
 use crate::output::Output;
-use crate::storage::{Storage, StoredGroup, StoredGroupMessage};
+use crate::storage::{Storage, StoredGroup, StoredGroupMessage, StoredGroupSender};
 
 #[derive(Serialize)]
 struct GroupList {
@@ -192,7 +192,7 @@ async fn fan_out_metadata(
 /// Fan-out a sender-key distribution to group members over existing 1:1 Double Ratchet sessions.
 ///
 /// This is the Signal-style approach: sender keys are distributed pairwise with forward secrecy,
-/// while group messages are later published once via the SharedChannel.
+/// while group messages are later published once via a per-sender outer pubkey.
 async fn fan_out_sender_key_distribution(
     group: &nostr_double_ratchet::group::GroupData,
     dist_json: &str,
@@ -459,7 +459,53 @@ pub async fn remove_admin(
     Ok(())
 }
 
-/// Send a group message (published once on the SharedChannel, encrypted with our sender key).
+fn ensure_group_sender_event_keys(
+    group_id: &str,
+    identity_pubkey_hex: &str,
+    storage: &Storage,
+) -> Result<(nostr::Keys, bool)> {
+    if let Some(stored) = storage.get_group_sender(group_id, identity_pubkey_hex)? {
+        if let Some(sk_hex) = stored.sender_event_secret_key {
+            if let Ok(sk_bytes) = hex::decode(&sk_hex) {
+                if sk_bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&sk_bytes);
+                    let sk = nostr::SecretKey::from_slice(&arr)?;
+                    let keys = nostr::Keys::new(sk);
+
+                    // Keep stored pubkey consistent with the secret key.
+                    let derived_pk_hex = keys.public_key().to_hex();
+                    if derived_pk_hex != stored.sender_event_pubkey {
+                        let updated = StoredGroupSender {
+                            group_id: stored.group_id,
+                            identity_pubkey: stored.identity_pubkey,
+                            sender_event_pubkey: derived_pk_hex,
+                            sender_event_secret_key: Some(sk_hex),
+                        };
+                        storage.upsert_group_sender(&updated)?;
+                        return Ok((keys, true));
+                    }
+
+                    return Ok((keys, false));
+                }
+            }
+        }
+    }
+
+    // Missing/invalid secret key: rotate to a fresh sender-event keypair for this group.
+    let keys = nostr::Keys::generate();
+    let sk_bytes = keys.secret_key().to_secret_bytes();
+    let stored = StoredGroupSender {
+        group_id: group_id.to_string(),
+        identity_pubkey: identity_pubkey_hex.to_string(),
+        sender_event_pubkey: keys.public_key().to_hex(),
+        sender_event_secret_key: Some(hex::encode(sk_bytes)),
+    };
+    storage.upsert_group_sender(&stored)?;
+    Ok((keys, true))
+}
+
+/// Send a group message (published once under our per-group sender-event pubkey, encrypted with our sender key).
 pub async fn send_message(
     id: &str,
     message: &str,
@@ -480,20 +526,10 @@ pub async fn send_message(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let secret_hex = group
-        .data
-        .secret
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Group has no secret (shared channel disabled)"))?;
-    let secret_bytes = hex::decode(secret_hex)?;
-    if secret_bytes.len() != 32 {
-        anyhow::bail!("Invalid group secret length (expected 32 bytes)");
-    }
-    let mut secret_arr = [0u8; 32];
-    secret_arr.copy_from_slice(&secret_bytes);
-    let channel = SharedChannel::new(&secret_arr)?;
-
     let my_pubkey = config.public_key()?;
+    let (sender_event_keys, sender_event_keys_changed) =
+        ensure_group_sender_event_keys(id, &my_pubkey, storage)?;
+    let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let now_s = now.as_secs();
@@ -508,15 +544,18 @@ pub async fn send_message(
     client.connect().await;
 
     // Ensure we have an active sender key; distribute it to members over 1:1 sessions if we just created one.
+    let mut created_sender_key = false;
     let mut sender_key = match storage.get_latest_group_sender_key_state(id, &my_pubkey)? {
         Some(s) => s,
         None => {
+            created_sender_key = true;
             let key_id: u32 = rand::random();
             let chain_key: [u8; 32] = rand::random();
             let state = SenderKeyState::new(key_id, chain_key, 0);
             storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
 
-            let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+            let mut dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+            dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
             let dist_json = serde_json::to_string(&dist)?;
 
             let _ = fan_out_sender_key_distribution(
@@ -534,6 +573,30 @@ pub async fn send_message(
             state
         }
     };
+
+    // If our sender-event pubkey changed (e.g. state loss), re-announce it to the group over
+    // forward-secure 1:1 sessions, even if our sender key already existed.
+    if sender_event_keys_changed && !created_sender_key {
+        let mut dist = SenderKeyDistribution::new(
+            id.to_string(),
+            sender_key.key_id,
+            sender_key.chain_key(),
+            sender_key.iteration(),
+        );
+        dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
+        let dist_json = serde_json::to_string(&dist)?;
+        let _ = fan_out_sender_key_distribution(
+            &group.data,
+            &dist_json,
+            sender_key.key_id,
+            now_ms,
+            now_s,
+            config,
+            storage,
+            &client,
+        )
+        .await;
+    }
 
     // Build the plaintext group event (unsigned), then encrypt it with the sender key.
     let mut tags: Vec<Vec<String>> = Vec::new();
@@ -555,36 +618,29 @@ pub async fn send_message(
         .build(my_pk);
 
     let inner_json = serde_json::to_string(&inner)?;
-    let (n, ciphertext) = sender_key.encrypt(&inner_json)?;
+    let (n, ciphertext_bytes) = sender_key.encrypt_to_bytes(&inner_json)?;
     storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
 
-    // Wrap ciphertext in a signed sender envelope so others can't impersonate us (even though they learn the sender key).
-    let envelope = nostr::EventBuilder::new(
-        nostr::Kind::Custom(GROUP_SENDER_KEY_MESSAGE_KIND as u16),
-        &ciphertext,
-    )
-    .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
-    .tag(nostr::Tag::parse(&[
-        "key".to_string(),
-        sender_key.key_id.to_string(),
-    ])?)
-    .tag(nostr::Tag::parse(&["n".to_string(), n.to_string()])?)
-    .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
-    .custom_created_at(nostr::Timestamp::from(now_s))
-    .build(my_pk);
+    // Publish once, authored by our per-group sender-event pubkey.
+    //
+    // Outer content format: base64(key_id||n||nip44_ciphertext_bytes). No tags that reveal group id.
+    let mut payload: Vec<u8> = Vec::with_capacity(8 + ciphertext_bytes.len());
+    payload.extend_from_slice(&sender_key.key_id.to_be_bytes());
+    payload.extend_from_slice(&n.to_be_bytes());
+    payload.extend_from_slice(&ciphertext_bytes);
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload);
 
-    let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
-    let my_keys = nostr::Keys::new(my_sk);
-    let signed_envelope = envelope
-        .sign_with_keys(&my_keys)
-        .map_err(|e| anyhow::anyhow!("Failed to sign envelope: {}", e))?;
+    let outer_unsigned =
+        nostr::EventBuilder::new(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16), &payload_b64)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(sender_event_keys.public_key());
+    let outer = outer_unsigned
+        .sign_with_keys(&sender_event_keys)
+        .map_err(|e| anyhow::anyhow!("Failed to sign group outer event: {}", e))?;
+    client.send_event(outer.clone()).await?;
 
-    let signed_envelope_json = serde_json::to_string(&signed_envelope)?;
-    let outer = channel.create_event(&signed_envelope_json)?;
-    client.send_event(outer).await?;
-
-    // Store outgoing message using the signed envelope ID (stable across all recipients).
-    let msg_id = signed_envelope.id.to_hex();
+    // Store outgoing message using the outer event ID (stable across all recipients).
+    let msg_id = outer.id.to_hex();
     let stored_msg = StoredGroupMessage {
         id: msg_id.clone(),
         group_id: id.to_string(),
@@ -609,7 +665,7 @@ pub async fn send_message(
     Ok(())
 }
 
-/// React to a group message (published once on the SharedChannel, encrypted with our sender key).
+/// React to a group message (published once under our per-group sender-event pubkey, encrypted with our sender key).
 pub async fn react(
     id: &str,
     message_id: &str,
@@ -630,20 +686,10 @@ pub async fn react(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let secret_hex = group
-        .data
-        .secret
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Group has no secret (shared channel disabled)"))?;
-    let secret_bytes = hex::decode(secret_hex)?;
-    if secret_bytes.len() != 32 {
-        anyhow::bail!("Invalid group secret length (expected 32 bytes)");
-    }
-    let mut secret_arr = [0u8; 32];
-    secret_arr.copy_from_slice(&secret_bytes);
-    let channel = SharedChannel::new(&secret_arr)?;
-
     let my_pubkey = config.public_key()?;
+    let (sender_event_keys, sender_event_keys_changed) =
+        ensure_group_sender_event_keys(id, &my_pubkey, storage)?;
+    let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let now_s = now.as_secs();
@@ -656,15 +702,18 @@ pub async fn react(
     }
     client.connect().await;
 
+    let mut created_sender_key = false;
     let mut sender_key = match storage.get_latest_group_sender_key_state(id, &my_pubkey)? {
         Some(s) => s,
         None => {
+            created_sender_key = true;
             let key_id: u32 = rand::random();
             let chain_key: [u8; 32] = rand::random();
             let state = SenderKeyState::new(key_id, chain_key, 0);
             storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
 
-            let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+            let mut dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+            dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
             let dist_json = serde_json::to_string(&dist)?;
 
             let _ = fan_out_sender_key_distribution(
@@ -683,6 +732,28 @@ pub async fn react(
         }
     };
 
+    if sender_event_keys_changed && !created_sender_key {
+        let mut dist = SenderKeyDistribution::new(
+            id.to_string(),
+            sender_key.key_id,
+            sender_key.chain_key(),
+            sender_key.iteration(),
+        );
+        dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
+        let dist_json = serde_json::to_string(&dist)?;
+        let _ = fan_out_sender_key_distribution(
+            &group.data,
+            &dist_json,
+            sender_key.key_id,
+            now_ms,
+            now_s,
+            config,
+            storage,
+            &client,
+        )
+        .await;
+    }
+
     let mut tags: Vec<Vec<String>> = Vec::new();
     tags.push(vec!["e".to_string(), message_id.to_string()]);
     tags.push(vec!["l".to_string(), id.to_string()]);
@@ -699,31 +770,22 @@ pub async fn react(
         .build(my_pk);
 
     let inner_json = serde_json::to_string(&inner)?;
-    let (n, ciphertext) = sender_key.encrypt(&inner_json)?;
+    let (n, ciphertext_bytes) = sender_key.encrypt_to_bytes(&inner_json)?;
     storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
 
-    let envelope = nostr::EventBuilder::new(
-        nostr::Kind::Custom(GROUP_SENDER_KEY_MESSAGE_KIND as u16),
-        &ciphertext,
-    )
-    .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
-    .tag(nostr::Tag::parse(&[
-        "key".to_string(),
-        sender_key.key_id.to_string(),
-    ])?)
-    .tag(nostr::Tag::parse(&["n".to_string(), n.to_string()])?)
-    .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
-    .custom_created_at(nostr::Timestamp::from(now_s))
-    .build(my_pk);
+    let mut payload: Vec<u8> = Vec::with_capacity(8 + ciphertext_bytes.len());
+    payload.extend_from_slice(&sender_key.key_id.to_be_bytes());
+    payload.extend_from_slice(&n.to_be_bytes());
+    payload.extend_from_slice(&ciphertext_bytes);
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload);
 
-    let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
-    let my_keys = nostr::Keys::new(my_sk);
-    let signed_envelope = envelope
-        .sign_with_keys(&my_keys)
-        .map_err(|e| anyhow::anyhow!("Failed to sign envelope: {}", e))?;
-
-    let signed_envelope_json = serde_json::to_string(&signed_envelope)?;
-    let outer = channel.create_event(&signed_envelope_json)?;
+    let outer_unsigned =
+        nostr::EventBuilder::new(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16), &payload_b64)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(sender_event_keys.public_key());
+    let outer = outer_unsigned
+        .sign_with_keys(&sender_event_keys)
+        .map_err(|e| anyhow::anyhow!("Failed to sign group outer event: {}", e))?;
     client.send_event(outer).await?;
 
     output.success(
@@ -739,7 +801,7 @@ pub async fn react(
     Ok(())
 }
 
-/// Rotate our sender key for a group and publish a fresh distribution on the SharedChannel.
+/// Rotate our sender key for a group and fan-out a fresh distribution over 1:1 Double Ratchet sessions.
 pub async fn rotate_sender_key(
     id: &str,
     config: &Config,
@@ -758,21 +820,10 @@ pub async fn rotate_sender_key(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let secret_hex = group
-        .data
-        .secret
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Group has no secret (shared channel disabled)"))?;
-    let secret_bytes = hex::decode(secret_hex)?;
-    if secret_bytes.len() != 32 {
-        anyhow::bail!("Invalid group secret length (expected 32 bytes)");
-    }
-    let mut secret_arr = [0u8; 32];
-    secret_arr.copy_from_slice(&secret_bytes);
-    // Validate the secret is usable as a SharedChannel key.
-    let _ = SharedChannel::new(&secret_arr)?;
-
     let my_pubkey = config.public_key()?;
+    let (sender_event_keys, _sender_event_keys_changed) =
+        ensure_group_sender_event_keys(id, &my_pubkey, storage)?;
+    let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let now_s = now.as_secs();
@@ -793,7 +844,8 @@ pub async fn rotate_sender_key(
     storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
 
     // Distribute the sender key to the group via 1:1 Double Ratchet sessions (forward secrecy).
-    let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+    let mut dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+    dist.sender_event_pubkey = Some(sender_event_pubkey_hex);
     let dist_json = serde_json::to_string(&dist)?;
     let _ = fan_out_sender_key_distribution(
         &group.data,

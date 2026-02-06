@@ -72,6 +72,21 @@ pub struct StoredGroupSenderKeys {
     pub states: Vec<nostr_double_ratchet::SenderKeyState>,
 }
 
+/// Stored mapping from a group member's identity pubkey to their per-group outer "sender event" pubkey.
+///
+/// For our own identity, we also store the private key so we can publish events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredGroupSender {
+    pub group_id: String,
+    /// The member's long-term identity pubkey (hex).
+    pub identity_pubkey: String,
+    /// The per-group outer pubkey used to author group message events (hex).
+    pub sender_event_pubkey: String,
+    /// Only present for our own identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_event_secret_key: Option<String>,
+}
+
 /// File-based storage (agent-friendly - can read JSON directly)
 pub struct Storage {
     #[allow(dead_code)]
@@ -83,6 +98,7 @@ pub struct Storage {
     groups_dir: PathBuf,
     group_messages_dir: PathBuf,
     group_sender_keys_dir: PathBuf,
+    group_senders_dir: PathBuf,
 }
 
 impl Storage {
@@ -96,6 +112,7 @@ impl Storage {
         let groups_dir = base_dir.join("groups");
         let group_messages_dir = base_dir.join("group_messages");
         let group_sender_keys_dir = base_dir.join("group_sender_keys");
+        let group_senders_dir = base_dir.join("group_senders");
 
         fs::create_dir_all(&invites_dir)?;
         fs::create_dir_all(&chats_dir)?;
@@ -104,6 +121,7 @@ impl Storage {
         fs::create_dir_all(&groups_dir)?;
         fs::create_dir_all(&group_messages_dir)?;
         fs::create_dir_all(&group_sender_keys_dir)?;
+        fs::create_dir_all(&group_senders_dir)?;
 
         Ok(Self {
             base_dir,
@@ -114,6 +132,7 @@ impl Storage {
             groups_dir,
             group_messages_dir,
             group_sender_keys_dir,
+            group_senders_dir,
         })
     }
 
@@ -502,6 +521,7 @@ impl Storage {
         let path = self.groups_dir.join(format!("{}.json", id));
         let messages_path = self.group_messages_dir.join(id);
         let sender_keys_path = self.group_sender_keys_dir.join(id);
+        let senders_path = self.group_senders_dir.join(id);
         let existed = path.exists();
 
         if path.exists() {
@@ -512,6 +532,9 @@ impl Storage {
         }
         if sender_keys_path.exists() {
             fs::remove_dir_all(sender_keys_path)?;
+        }
+        if senders_path.exists() {
+            fs::remove_dir_all(senders_path)?;
         }
 
         Ok(existed)
@@ -540,6 +563,9 @@ impl Storage {
         if self.group_sender_keys_dir.exists() {
             fs::remove_dir_all(&self.group_sender_keys_dir)?;
         }
+        if self.group_senders_dir.exists() {
+            fs::remove_dir_all(&self.group_senders_dir)?;
+        }
 
         // Recreate dirs
         fs::create_dir_all(&self.invites_dir)?;
@@ -549,8 +575,66 @@ impl Storage {
         fs::create_dir_all(&self.groups_dir)?;
         fs::create_dir_all(&self.group_messages_dir)?;
         fs::create_dir_all(&self.group_sender_keys_dir)?;
+        fs::create_dir_all(&self.group_senders_dir)?;
 
         Ok(())
+    }
+
+    // === Group sender (outer pubkey) operations ===
+
+    fn group_sender_path(&self, group_id: &str, identity_pubkey: &str) -> PathBuf {
+        self.group_senders_dir
+            .join(group_id)
+            .join(format!("{}.json", identity_pubkey))
+    }
+
+    pub fn get_group_sender(
+        &self,
+        group_id: &str,
+        identity_pubkey: &str,
+    ) -> Result<Option<StoredGroupSender>> {
+        let path = self.group_sender_path(group_id, identity_pubkey);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&content)?))
+    }
+
+    pub fn upsert_group_sender(&self, sender: &StoredGroupSender) -> Result<()> {
+        let dir = self.group_senders_dir.join(&sender.group_id);
+        fs::create_dir_all(&dir)?;
+
+        let path = self.group_sender_path(&sender.group_id, &sender.identity_pubkey);
+        let temp_path = dir.join(format!("{}.json.tmp", sender.identity_pubkey));
+        let content = serde_json::to_string_pretty(sender)?;
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
+        Ok(())
+    }
+
+    pub fn list_group_senders(&self, group_id: &str) -> Result<Vec<StoredGroupSender>> {
+        let dir = self.group_senders_dir.join(group_id);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
+                let content = fs::read_to_string(entry.path())?;
+                if let Ok(sender) = serde_json::from_str::<StoredGroupSender>(&content) {
+                    out.push(sender);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.identity_pubkey.cmp(&b.identity_pubkey));
+        Ok(out)
     }
 
     // === Group sender key operations ===

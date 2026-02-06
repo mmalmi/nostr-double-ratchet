@@ -25,6 +25,11 @@ pub struct SenderKeyDistribution {
     pub chain_key: [u8; 32],
     pub iteration: u32,
     pub created_at: u64,
+    /// The per-sender outer Nostr pubkey used to publish group messages.
+    ///
+    /// This is intentionally optional for backwards compatibility with older distributions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_event_pubkey: Option<String>,
 }
 
 impl SenderKeyDistribution {
@@ -39,6 +44,7 @@ impl SenderKeyDistribution {
             chain_key,
             iteration,
             created_at,
+            sender_event_pubkey: None,
         }
     }
 
@@ -80,7 +86,7 @@ impl SenderKeyState {
         self.skipped_message_keys.len()
     }
 
-    pub fn encrypt(&mut self, plaintext: &str) -> Result<(u32, String)> {
+    pub fn encrypt_to_bytes(&mut self, plaintext: &str) -> Result<(u32, Vec<u8>)> {
         let message_number = self.iteration;
         let (next_chain_key, message_key) = derive_message_key(&self.chain_key);
 
@@ -89,12 +95,20 @@ impl SenderKeyState {
 
         let conversation_key = nip44::v2::ConversationKey::new(message_key);
         let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext)?;
-        let ciphertext = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
-
-        Ok((message_number, ciphertext))
+        Ok((message_number, encrypted_bytes))
     }
 
-    pub fn decrypt(&mut self, message_number: u32, ciphertext: &str) -> Result<String> {
+    pub fn encrypt(&mut self, plaintext: &str) -> Result<(u32, String)> {
+        let (n, bytes) = self.encrypt_to_bytes(plaintext)?;
+        let ciphertext = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok((n, ciphertext))
+    }
+
+    pub fn decrypt_from_bytes(
+        &mut self,
+        message_number: u32,
+        ciphertext_bytes: &[u8],
+    ) -> Result<String> {
         // Old message: try cached skipped key.
         if message_number < self.iteration {
             let message_key = self
@@ -104,7 +118,7 @@ impl SenderKeyState {
                     Error::Decryption("Missing skipped sender key message".to_string())
                 })?;
 
-            return decrypt_with_message_key(&message_key, ciphertext);
+            return decrypt_with_message_key_bytes(&message_key, ciphertext_bytes);
         }
 
         // Fast-fail if the sender is too far ahead.
@@ -130,17 +144,33 @@ impl SenderKeyState {
         // Prune skipped cache if it grows unbounded.
         prune_skipped(&mut self.skipped_message_keys);
 
-        decrypt_with_message_key(&message_key, ciphertext)
+        decrypt_with_message_key_bytes(&message_key, ciphertext_bytes)
+    }
+
+    pub fn decrypt(&mut self, message_number: u32, ciphertext: &str) -> Result<String> {
+        // Preserve historical behavior: reject far-ahead message numbers without requiring a
+        // well-formed ciphertext. This avoids turning a skip-limit error into a base64 error.
+        if message_number >= self.iteration {
+            let delta = (message_number - self.iteration) as usize;
+            if delta > SENDER_KEY_MAX_SKIP {
+                return Err(Error::TooManySkippedMessages);
+            }
+        }
+
+        let ciphertext_bytes = base64::engine::general_purpose::STANDARD
+            .decode(ciphertext)
+            .map_err(|e| Error::Decryption(e.to_string()))?;
+
+        self.decrypt_from_bytes(message_number, &ciphertext_bytes)
     }
 }
 
-fn decrypt_with_message_key(message_key: &[u8; 32], ciphertext: &str) -> Result<String> {
+fn decrypt_with_message_key_bytes(
+    message_key: &[u8; 32],
+    ciphertext_bytes: &[u8],
+) -> Result<String> {
     let conversation_key = nip44::v2::ConversationKey::new(*message_key);
-    let ciphertext_bytes = base64::engine::general_purpose::STANDARD
-        .decode(ciphertext)
-        .map_err(|e| Error::Decryption(e.to_string()))?;
-
-    let plaintext_bytes = nip44::v2::decrypt_to_bytes(&conversation_key, &ciphertext_bytes)?;
+    let plaintext_bytes = nip44::v2::decrypt_to_bytes(&conversation_key, ciphertext_bytes)?;
     String::from_utf8(plaintext_bytes).map_err(|e| Error::Decryption(e.to_string()))
 }
 

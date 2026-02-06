@@ -1,16 +1,12 @@
+use base64::Engine;
 use nostr_double_ratchet::{
-    group::{GROUP_SENDER_KEY_DISTRIBUTION_KIND, GROUP_SENDER_KEY_MESSAGE_KIND},
+    group::GROUP_SENDER_KEY_DISTRIBUTION_KIND,
     sender_key::{SenderKeyDistribution, SenderKeyState},
-    Invite, SharedChannel, CHAT_MESSAGE_KIND,
+    Invite, CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND,
 };
 
 #[test]
-fn session_sender_key_distribution_then_shared_channel_message_roundtrip() {
-    // Use a valid secp256k1 secret key for the shared channel.
-    let channel_keys = nostr::Keys::generate();
-    let secret_bytes = channel_keys.secret_key().to_secret_bytes();
-    let channel = SharedChannel::new(&secret_bytes).unwrap();
-
+fn session_sender_key_distribution_then_sender_event_message_roundtrip() {
     let group_id = "g1".to_string();
 
     // Set up a 1:1 session pair (Alice inviter, Bob acceptor).
@@ -32,9 +28,13 @@ fn session_sender_key_distribution_then_shared_channel_message_roundtrip() {
         .session;
 
     // === Distribution ===
+    let sender_event_keys = nostr::Keys::generate();
+    let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
+
     let key_id = 123u32;
     let chain_key = [7u8; 32];
-    let dist = SenderKeyDistribution::new(group_id.clone(), key_id, chain_key, 0);
+    let mut dist = SenderKeyDistribution::new(group_id.clone(), key_id, chain_key, 0);
+    dist.sender_event_pubkey = Some(sender_event_pubkey_hex.clone());
     let dist_json = serde_json::to_string(&dist).unwrap();
 
     let now = std::time::SystemTime::now()
@@ -62,6 +62,10 @@ fn session_sender_key_distribution_then_shared_channel_message_roundtrip() {
     assert_eq!(parsed_dist.group_id, group_id);
     assert_eq!(parsed_dist.key_id, key_id);
     assert_eq!(parsed_dist.chain_key, chain_key);
+    assert_eq!(
+        parsed_dist.sender_event_pubkey,
+        Some(sender_event_pubkey_hex.clone())
+    );
 
     let mut sender_state = SenderKeyState::new(key_id, chain_key, 0);
     let mut receiver_state = SenderKeyState::new(key_id, chain_key, 0);
@@ -77,45 +81,36 @@ fn session_sender_key_distribution_then_shared_channel_message_roundtrip() {
             .build(identity_pk);
     let inner_plaintext_json = serde_json::to_string(&inner_plaintext).unwrap();
 
-    let (n, ciphertext) = sender_state.encrypt(&inner_plaintext_json).unwrap();
-
-    let env_inner_unsigned = nostr::EventBuilder::new(
-        nostr::Kind::Custom(GROUP_SENDER_KEY_MESSAGE_KIND as u16),
-        &ciphertext,
-    )
-    .tag(nostr::Tag::parse(&["l".to_string(), group_id.clone()]).unwrap())
-    .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()]).unwrap())
-    .tag(nostr::Tag::parse(&["n".to_string(), n.to_string()]).unwrap())
-    .custom_created_at(nostr::Timestamp::from(now))
-    .build(identity_pk);
-
-    let env_inner_signed = env_inner_unsigned.sign_with_keys(&identity_keys).unwrap();
-    assert!(env_inner_signed.verify().is_ok());
-
-    let env_outer = channel
-        .create_event(&serde_json::to_string(&env_inner_signed).unwrap())
+    let (n, ciphertext_bytes) = sender_state
+        .encrypt_to_bytes(&inner_plaintext_json)
         .unwrap();
-    let env_decrypted = channel.decrypt_event(&env_outer).unwrap();
-    let parsed_env_inner: nostr::Event =
-        nostr::JsonUtil::from_json(env_decrypted.as_str()).unwrap();
-    assert!(parsed_env_inner.verify().is_ok());
 
-    let parsed_n = parsed_env_inner
-        .tags
-        .iter()
-        .find_map(|t| {
-            let v = t.clone().to_vec();
-            if v.first().map(|s| s.as_str()) == Some("n") {
-                v.get(1)?.parse::<u32>().ok()
-            } else {
-                None
-            }
-        })
+    // Outer content format: base64(key_id||n||nip44_ciphertext_bytes)
+    let mut payload: Vec<u8> = Vec::with_capacity(8 + ciphertext_bytes.len());
+    payload.extend_from_slice(&key_id.to_be_bytes());
+    payload.extend_from_slice(&n.to_be_bytes());
+    payload.extend_from_slice(&ciphertext_bytes);
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload);
+
+    let outer_unsigned =
+        nostr::EventBuilder::new(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16), &payload_b64)
+            .custom_created_at(nostr::Timestamp::from(now))
+            .build(sender_event_keys.public_key());
+    let outer = outer_unsigned.sign_with_keys(&sender_event_keys).unwrap();
+    assert!(outer.verify().is_ok());
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&outer.content)
         .unwrap();
+    assert!(bytes.len() >= 8);
+    let parsed_key_id = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+    let parsed_n = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
+    let parsed_ciphertext = bytes[8..].to_vec();
+    assert_eq!(parsed_key_id, key_id);
     assert_eq!(parsed_n, n);
 
     let decrypted_inner_json = receiver_state
-        .decrypt(parsed_n, &parsed_env_inner.content)
+        .decrypt_from_bytes(parsed_n, &parsed_ciphertext)
         .unwrap();
     let decrypted_inner: serde_json::Value = serde_json::from_str(&decrypted_inner_json).unwrap();
     assert_eq!(decrypted_inner["content"].as_str(), Some("hello"));
