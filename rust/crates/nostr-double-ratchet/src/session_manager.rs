@@ -268,6 +268,29 @@ impl SessionManager {
         self.send_event(recipient, event)
     }
 
+    /// Send an emoji reaction (kind 7) to a specific message id.
+    ///
+    /// `message_id` should typically be the *outer* Nostr event id of the target message
+    /// (this is what other Iris clients expect for reactions).
+    pub fn send_reaction(
+        &self,
+        recipient: PublicKey,
+        message_id: String,
+        emoji: String,
+    ) -> Result<Vec<String>> {
+        if message_id.trim().is_empty() || emoji.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tag = Tag::parse(&["e".to_string(), message_id])
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
+
+        let event =
+            self.build_message_event(recipient, crate::REACTION_KIND, emoji, vec![tag])?;
+
+        self.send_event(recipient, event)
+    }
+
     pub fn get_device_id(&self) -> &str {
         &self.device_id
     }

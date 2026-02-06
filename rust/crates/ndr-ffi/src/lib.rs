@@ -541,6 +541,18 @@ impl SessionManagerHandle {
         Ok(manager.send_typing(recipient)?)
     }
 
+    /// Send an emoji reaction (kind 7) to a specific message id.
+    pub fn send_reaction(
+        &self,
+        recipient_pubkey_hex: String,
+        message_id: String,
+        emoji: String,
+    ) -> Result<Vec<String>, NdrError> {
+        let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
+        let manager = self.inner.lock().unwrap();
+        Ok(manager.send_reaction(recipient, message_id, emoji)?)
+    }
+
     /// Import a session state for a peer.
     pub fn import_session_state(
         &self,
