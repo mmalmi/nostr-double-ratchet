@@ -2,6 +2,8 @@ import { bytesToHex } from "@noble/hashes/utils";
 
 export const GROUP_METADATA_KIND = 40
 export const GROUP_INVITE_RUMOR_KIND = 10445
+export const GROUP_SENDER_KEY_DISTRIBUTION_KIND = 10446
+export const GROUP_SENDER_KEY_MESSAGE_KIND = 10447
 
 export interface GroupData {
   id: string

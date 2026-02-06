@@ -1,6 +1,10 @@
 use anyhow::Result;
 use nostr::ToBech32;
-use nostr_double_ratchet::{Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND};
+use nostr_double_ratchet::{
+    SenderKeyDistribution, SenderKeyState, Session, SharedChannel, CHAT_MESSAGE_KIND,
+    GROUP_METADATA_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND, GROUP_SENDER_KEY_MESSAGE_KIND,
+    REACTION_KIND,
+};
 use nostr_sdk::Client;
 use serde::Serialize;
 
@@ -61,89 +65,6 @@ struct GroupMessageInfo {
 struct GroupMessageList {
     group_id: String,
     messages: Vec<GroupMessageInfo>,
-}
-
-/// Fan-out a rumor event to all group members via their 1:1 sessions.
-/// Returns the number of members the event was sent to.
-async fn fan_out(
-    group: &nostr_double_ratchet::group::GroupData,
-    rumor_kind: u32,
-    content: &str,
-    extra_tags: Vec<Vec<String>>,
-    config: &Config,
-    storage: &Storage,
-) -> Result<usize> {
-    let my_pubkey = config.public_key()?;
-
-    // Build tags: extra_tags + ["l", group_id] + ["ms", now_ms]
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis() as u64;
-
-    let mut tags: Vec<Vec<String>> = extra_tags;
-    tags.push(vec!["l".to_string(), group.id.clone()]);
-    tags.push(vec!["ms".to_string(), now_ms.to_string()]);
-
-    let nostr_tags: Vec<nostr::Tag> = tags
-        .iter()
-        .filter_map(|t| nostr::Tag::parse(t).ok())
-        .collect();
-
-    // Build the unsigned rumor event
-    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
-    let unsigned_event = nostr::EventBuilder::new(nostr::Kind::Custom(rumor_kind as u16), content)
-        .tags(nostr_tags)
-        .build(my_pk);
-
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-
-    let mut sent_count = 0;
-    let mut connected = false;
-
-    for member in &group.members {
-        if member == &my_pubkey {
-            continue;
-        }
-
-        // Find 1:1 chat with this member
-        let chat = match storage.get_chat_by_pubkey(member)? {
-            Some(c) => c,
-            None => continue, // No session with this member yet
-        };
-
-        let session_state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-        let mut session = Session::new(session_state, chat.id.clone());
-
-        // Encrypt the rumor via the 1:1 session
-        let encrypted_event = match session.send_event(unsigned_event.clone()) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        // Save updated session state
-        let mut updated_chat = chat;
-        updated_chat.session_state = serde_json::to_string(&session.state)?;
-        storage.save_chat(&updated_chat)?;
-
-        // Publish
-        if !connected {
-            client.connect().await;
-            connected = true;
-        }
-        client.send_event(encrypted_event).await?;
-        sent_count += 1;
-    }
-
-    Ok(sent_count)
 }
 
 /// Fan-out group metadata to members after a mutation.
@@ -358,11 +279,19 @@ pub async fn add_member(
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
     let my_pubkey = config.public_key()?;
+    let old_secret = group.data.secret.clone();
     let updated = nostr_double_ratchet::group::add_group_member(&group.data, pubkey, &my_pubkey)
         .ok_or_else(|| anyhow::anyhow!("Cannot add member: not admin or already a member"))?;
+    let secret_rotated = updated.secret != old_secret;
 
     let stored = StoredGroup { data: updated };
     storage.save_group(&stored)?;
+
+    // If membership changes rotated the shared-channel secret, force our sender key to rotate as well
+    // so new members can decrypt future messages.
+    if secret_rotated {
+        let _ = storage.delete_group_sender_keys(id, &my_pubkey)?;
+    }
 
     // Fan-out metadata to all members including new one
     let _ = fan_out_metadata(&stored.data, None, config, storage).await;
@@ -383,15 +312,21 @@ pub async fn remove_member(
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
     let my_pubkey = config.public_key()?;
+    let old_secret = group.data.secret.clone();
     let updated = nostr_double_ratchet::group::remove_group_member(&group.data, pubkey, &my_pubkey)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "Cannot remove member: not admin, not a member, or trying to remove self"
             )
         })?;
+    let secret_rotated = updated.secret != old_secret;
 
     let stored = StoredGroup { data: updated };
     storage.save_group(&stored)?;
+
+    if secret_rotated {
+        let _ = storage.delete_group_sender_keys(id, &my_pubkey)?;
+    }
 
     // Fan-out with secret to remaining, without secret to removed
     let _ = fan_out_metadata(&stored.data, Some(pubkey), config, storage).await;
@@ -473,35 +408,131 @@ pub async fn send_message(
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
+    if group.data.accepted != Some(true) {
+        anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
+    }
+
+    let secret_hex = group
+        .data
+        .secret
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Group has no secret (shared channel disabled)"))?;
+    let secret_bytes = hex::decode(secret_hex)?;
+    if secret_bytes.len() != 32 {
+        anyhow::bail!("Invalid group secret length (expected 32 bytes)");
+    }
+    let mut secret_arr = [0u8; 32];
+    secret_arr.copy_from_slice(&secret_bytes);
+    let channel = SharedChannel::new(&secret_arr)?;
+
     let my_pubkey = config.public_key()?;
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
 
-    let msg_id = uuid::Uuid::new_v4().to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let now_s = now.as_secs();
+    let now_ms = now.as_millis() as u64;
 
-    let tags = match reply_to {
-        Some(reply_id) => vec![vec!["e".to_string(), reply_id.to_string()]],
-        None => vec![],
+    // Prepare relay client once.
+    let client = Client::default();
+    let relays = config.resolved_relays();
+    for relay in &relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+
+    // Ensure we have an active sender key; publish distribution if we just created one.
+    let mut sender_key = match storage.get_latest_group_sender_key_state(id, &my_pubkey)? {
+        Some(s) => s,
+        None => {
+            let key_id: u32 = rand::random();
+            let chain_key: [u8; 32] = rand::random();
+            let state = SenderKeyState::new(key_id, chain_key, 0);
+            storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
+
+            // Broadcast the sender key to the group via the SharedChannel.
+            let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+            let dist_json = serde_json::to_string(&dist)?;
+
+            let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+            let dist_event = nostr::EventBuilder::new(
+                nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+                &dist_json,
+            )
+            .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
+            .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()])?)
+            .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(my_pk);
+
+            let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
+            let my_keys = nostr::Keys::new(my_sk);
+            let signed_dist = dist_event
+                .sign_with_keys(&my_keys)
+                .map_err(|e| anyhow::anyhow!("Failed to sign distribution: {}", e))?;
+
+            let signed_dist_json = serde_json::to_string(&signed_dist)?;
+            let outer = channel.create_event(&signed_dist_json)?;
+            client.send_event(outer).await?;
+
+            state
+        }
     };
 
-    let sent_count = fan_out(
-        &group.data,
-        CHAT_MESSAGE_KIND,
-        message,
-        tags,
-        config,
-        storage,
-    )
-    .await?;
+    // Build the plaintext group event (unsigned), then encrypt it with the sender key.
+    let mut tags: Vec<Vec<String>> = Vec::new();
+    if let Some(reply_id) = reply_to {
+        tags.push(vec!["e".to_string(), reply_id.to_string()]);
+    }
+    tags.push(vec!["l".to_string(), id.to_string()]);
+    tags.push(vec!["ms".to_string(), now_ms.to_string()]);
 
-    // Store outgoing message
+    let nostr_tags: Vec<nostr::Tag> = tags
+        .iter()
+        .filter_map(|t| nostr::Tag::parse(t).ok())
+        .collect();
+
+    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+    let inner = nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), message)
+        .tags(nostr_tags)
+        .custom_created_at(nostr::Timestamp::from(now_s))
+        .build(my_pk);
+
+    let inner_json = serde_json::to_string(&inner)?;
+    let (n, ciphertext) = sender_key.encrypt(&inner_json)?;
+    storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
+
+    // Wrap ciphertext in a signed sender envelope so others can't impersonate us (even though they learn the sender key).
+    let envelope = nostr::EventBuilder::new(
+        nostr::Kind::Custom(GROUP_SENDER_KEY_MESSAGE_KIND as u16),
+        &ciphertext,
+    )
+    .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
+    .tag(nostr::Tag::parse(&[
+        "key".to_string(),
+        sender_key.key_id.to_string(),
+    ])?)
+    .tag(nostr::Tag::parse(&["n".to_string(), n.to_string()])?)
+    .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
+    .custom_created_at(nostr::Timestamp::from(now_s))
+    .build(my_pk);
+
+    let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
+    let my_keys = nostr::Keys::new(my_sk);
+    let signed_envelope = envelope
+        .sign_with_keys(&my_keys)
+        .map_err(|e| anyhow::anyhow!("Failed to sign envelope: {}", e))?;
+
+    let signed_envelope_json = serde_json::to_string(&signed_envelope)?;
+    let outer = channel.create_event(&signed_envelope_json)?;
+    client.send_event(outer).await?;
+
+    // Store outgoing message using the signed envelope ID (stable across all recipients).
+    let msg_id = signed_envelope.id.to_hex();
     let stored_msg = StoredGroupMessage {
         id: msg_id.clone(),
         group_id: id.to_string(),
-        sender_pubkey: my_pubkey,
+        sender_pubkey: my_pubkey.clone(),
         content: message.to_string(),
-        timestamp,
+        timestamp: now_s,
         is_outgoing: true,
     };
     storage.save_group_message(&stored_msg)?;
@@ -512,8 +543,8 @@ pub async fn send_message(
             "id": msg_id,
             "group_id": id,
             "content": message,
-            "timestamp": timestamp,
-            "sent_to": sent_count,
+            "timestamp": now_s,
+            "published": true,
         }),
     );
 
@@ -537,17 +568,114 @@ pub async fn react(
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
-    let extra_tags = vec![vec!["e".to_string(), message_id.to_string()]];
+    if group.data.accepted != Some(true) {
+        anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
+    }
 
-    let sent_count = fan_out(
-        &group.data,
-        REACTION_KIND,
-        emoji,
-        extra_tags,
-        config,
-        storage,
+    let secret_hex = group
+        .data
+        .secret
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Group has no secret (shared channel disabled)"))?;
+    let secret_bytes = hex::decode(secret_hex)?;
+    if secret_bytes.len() != 32 {
+        anyhow::bail!("Invalid group secret length (expected 32 bytes)");
+    }
+    let mut secret_arr = [0u8; 32];
+    secret_arr.copy_from_slice(&secret_bytes);
+    let channel = SharedChannel::new(&secret_arr)?;
+
+    let my_pubkey = config.public_key()?;
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let now_s = now.as_secs();
+    let now_ms = now.as_millis() as u64;
+
+    let client = Client::default();
+    let relays = config.resolved_relays();
+    for relay in &relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+
+    let mut sender_key = match storage.get_latest_group_sender_key_state(id, &my_pubkey)? {
+        Some(s) => s,
+        None => {
+            let key_id: u32 = rand::random();
+            let chain_key: [u8; 32] = rand::random();
+            let state = SenderKeyState::new(key_id, chain_key, 0);
+            storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
+
+            let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+            let dist_json = serde_json::to_string(&dist)?;
+
+            let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+            let dist_event = nostr::EventBuilder::new(
+                nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+                &dist_json,
+            )
+            .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
+            .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()])?)
+            .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(my_pk);
+
+            let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
+            let my_keys = nostr::Keys::new(my_sk);
+            let signed_dist = dist_event
+                .sign_with_keys(&my_keys)
+                .map_err(|e| anyhow::anyhow!("Failed to sign distribution: {}", e))?;
+
+            let signed_dist_json = serde_json::to_string(&signed_dist)?;
+            let outer = channel.create_event(&signed_dist_json)?;
+            client.send_event(outer).await?;
+
+            state
+        }
+    };
+
+    let mut tags: Vec<Vec<String>> = Vec::new();
+    tags.push(vec!["e".to_string(), message_id.to_string()]);
+    tags.push(vec!["l".to_string(), id.to_string()]);
+    tags.push(vec!["ms".to_string(), now_ms.to_string()]);
+    let nostr_tags: Vec<nostr::Tag> = tags
+        .iter()
+        .filter_map(|t| nostr::Tag::parse(t).ok())
+        .collect();
+
+    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+    let inner = nostr::EventBuilder::new(nostr::Kind::Custom(REACTION_KIND as u16), emoji)
+        .tags(nostr_tags)
+        .custom_created_at(nostr::Timestamp::from(now_s))
+        .build(my_pk);
+
+    let inner_json = serde_json::to_string(&inner)?;
+    let (n, ciphertext) = sender_key.encrypt(&inner_json)?;
+    storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
+
+    let envelope = nostr::EventBuilder::new(
+        nostr::Kind::Custom(GROUP_SENDER_KEY_MESSAGE_KIND as u16),
+        &ciphertext,
     )
-    .await?;
+    .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
+    .tag(nostr::Tag::parse(&[
+        "key".to_string(),
+        sender_key.key_id.to_string(),
+    ])?)
+    .tag(nostr::Tag::parse(&["n".to_string(), n.to_string()])?)
+    .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
+    .custom_created_at(nostr::Timestamp::from(now_s))
+    .build(my_pk);
+
+    let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
+    let my_keys = nostr::Keys::new(my_sk);
+    let signed_envelope = envelope
+        .sign_with_keys(&my_keys)
+        .map_err(|e| anyhow::anyhow!("Failed to sign envelope: {}", e))?;
+
+    let signed_envelope_json = serde_json::to_string(&signed_envelope)?;
+    let outer = channel.create_event(&signed_envelope_json)?;
+    client.send_event(outer).await?;
 
     output.success(
         "group.react",
@@ -555,7 +683,96 @@ pub async fn react(
             "group_id": id,
             "message_id": message_id,
             "emoji": emoji,
-            "sent_to": sent_count,
+            "published": true,
+        }),
+    );
+
+    Ok(())
+}
+
+/// Rotate our sender key for a group and publish a fresh distribution on the SharedChannel.
+pub async fn rotate_sender_key(
+    id: &str,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    let group = storage
+        .get_group(id)?
+        .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
+
+    if group.data.accepted != Some(true) {
+        anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
+    }
+
+    let secret_hex = group
+        .data
+        .secret
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Group has no secret (shared channel disabled)"))?;
+    let secret_bytes = hex::decode(secret_hex)?;
+    if secret_bytes.len() != 32 {
+        anyhow::bail!("Invalid group secret length (expected 32 bytes)");
+    }
+    let mut secret_arr = [0u8; 32];
+    secret_arr.copy_from_slice(&secret_bytes);
+    let channel = SharedChannel::new(&secret_arr)?;
+
+    let my_pubkey = config.public_key()?;
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let now_s = now.as_secs();
+    let now_ms = now.as_millis() as u64;
+
+    // Prepare relay client once.
+    let client = Client::default();
+    let relays = config.resolved_relays();
+    for relay in &relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+
+    // Create and store a new sender key state.
+    let key_id: u32 = rand::random();
+    let chain_key: [u8; 32] = rand::random();
+    let state = SenderKeyState::new(key_id, chain_key, 0);
+    storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
+
+    // Broadcast the sender key to the group via the SharedChannel.
+    let dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
+    let dist_json = serde_json::to_string(&dist)?;
+
+    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+    let dist_event = nostr::EventBuilder::new(
+        nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+        &dist_json,
+    )
+    .tag(nostr::Tag::parse(&["l".to_string(), id.to_string()])?)
+    .tag(nostr::Tag::parse(&["key".to_string(), key_id.to_string()])?)
+    .tag(nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])?)
+    .custom_created_at(nostr::Timestamp::from(now_s))
+    .build(my_pk);
+
+    let my_sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
+    let my_keys = nostr::Keys::new(my_sk);
+    let signed_dist = dist_event
+        .sign_with_keys(&my_keys)
+        .map_err(|e| anyhow::anyhow!("Failed to sign distribution: {}", e))?;
+
+    let signed_dist_json = serde_json::to_string(&signed_dist)?;
+    let outer = channel.create_event(&signed_dist_json)?;
+    client.send_event(outer).await?;
+
+    output.success(
+        "group.rotate-sender-key",
+        serde_json::json!({
+            "group_id": id,
+            "key_id": key_id,
+            "published": true,
         }),
     );
 

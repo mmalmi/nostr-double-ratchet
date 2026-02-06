@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 
 pub const GROUP_METADATA_KIND: u32 = 40;
 pub const GROUP_INVITE_RUMOR_KIND: u32 = 10445;
+/// SharedChannel rumor kind for distributing a Signal-style sender key to the group.
+pub const GROUP_SENDER_KEY_DISTRIBUTION_KIND: u32 = 10446;
+/// SharedChannel rumor kind for group messages encrypted with a per-sender sender key.
+pub const GROUP_SENDER_KEY_MESSAGE_KIND: u32 = 10447;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -341,6 +345,16 @@ mod tests {
     #[test]
     fn group_invite_rumor_kind_is_10445() {
         assert_eq!(GROUP_INVITE_RUMOR_KIND, 10445);
+    }
+
+    #[test]
+    fn group_sender_key_distribution_kind_is_10446() {
+        assert_eq!(GROUP_SENDER_KEY_DISTRIBUTION_KIND, 10446);
+    }
+
+    #[test]
+    fn group_sender_key_message_kind_is_10447() {
+        assert_eq!(GROUP_SENDER_KEY_MESSAGE_KIND, 10447);
     }
 
     // === isGroupAdmin ===

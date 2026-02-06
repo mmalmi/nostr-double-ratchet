@@ -64,6 +64,14 @@ pub struct StoredGroupMessage {
     pub is_outgoing: bool,
 }
 
+/// Stored Signal-style sender keys per group/sender.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredGroupSenderKeys {
+    pub group_id: String,
+    pub sender_pubkey: String,
+    pub states: Vec<nostr_double_ratchet::SenderKeyState>,
+}
+
 /// File-based storage (agent-friendly - can read JSON directly)
 pub struct Storage {
     #[allow(dead_code)]
@@ -74,6 +82,7 @@ pub struct Storage {
     reactions_dir: PathBuf,
     groups_dir: PathBuf,
     group_messages_dir: PathBuf,
+    group_sender_keys_dir: PathBuf,
 }
 
 impl Storage {
@@ -86,6 +95,7 @@ impl Storage {
         let reactions_dir = base_dir.join("reactions");
         let groups_dir = base_dir.join("groups");
         let group_messages_dir = base_dir.join("group_messages");
+        let group_sender_keys_dir = base_dir.join("group_sender_keys");
 
         fs::create_dir_all(&invites_dir)?;
         fs::create_dir_all(&chats_dir)?;
@@ -93,6 +103,7 @@ impl Storage {
         fs::create_dir_all(&reactions_dir)?;
         fs::create_dir_all(&groups_dir)?;
         fs::create_dir_all(&group_messages_dir)?;
+        fs::create_dir_all(&group_sender_keys_dir)?;
 
         Ok(Self {
             base_dir,
@@ -102,6 +113,7 @@ impl Storage {
             reactions_dir,
             groups_dir,
             group_messages_dir,
+            group_sender_keys_dir,
         })
     }
 
@@ -489,6 +501,7 @@ impl Storage {
     pub fn delete_group(&self, id: &str) -> Result<bool> {
         let path = self.groups_dir.join(format!("{}.json", id));
         let messages_path = self.group_messages_dir.join(id);
+        let sender_keys_path = self.group_sender_keys_dir.join(id);
         let existed = path.exists();
 
         if path.exists() {
@@ -496,6 +509,9 @@ impl Storage {
         }
         if messages_path.exists() {
             fs::remove_dir_all(messages_path)?;
+        }
+        if sender_keys_path.exists() {
+            fs::remove_dir_all(sender_keys_path)?;
         }
 
         Ok(existed)
@@ -521,6 +537,9 @@ impl Storage {
         if self.group_messages_dir.exists() {
             fs::remove_dir_all(&self.group_messages_dir)?;
         }
+        if self.group_sender_keys_dir.exists() {
+            fs::remove_dir_all(&self.group_sender_keys_dir)?;
+        }
 
         // Recreate dirs
         fs::create_dir_all(&self.invites_dir)?;
@@ -529,7 +548,100 @@ impl Storage {
         fs::create_dir_all(&self.reactions_dir)?;
         fs::create_dir_all(&self.groups_dir)?;
         fs::create_dir_all(&self.group_messages_dir)?;
+        fs::create_dir_all(&self.group_sender_keys_dir)?;
 
+        Ok(())
+    }
+
+    // === Group sender key operations ===
+
+    fn group_sender_keys_path(&self, group_id: &str, sender_pubkey: &str) -> PathBuf {
+        self.group_sender_keys_dir
+            .join(group_id)
+            .join(format!("{}.json", sender_pubkey))
+    }
+
+    pub fn delete_group_sender_keys(&self, group_id: &str, sender_pubkey: &str) -> Result<bool> {
+        let path = self.group_sender_keys_path(group_id, sender_pubkey);
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(path)?;
+        Ok(true)
+    }
+
+    pub fn get_group_sender_keys(
+        &self,
+        group_id: &str,
+        sender_pubkey: &str,
+    ) -> Result<Vec<nostr_double_ratchet::SenderKeyState>> {
+        let path = self.group_sender_keys_path(group_id, sender_pubkey);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(path)?;
+        let stored: StoredGroupSenderKeys = serde_json::from_str(&content)?;
+        Ok(stored.states)
+    }
+
+    pub fn get_group_sender_key_state(
+        &self,
+        group_id: &str,
+        sender_pubkey: &str,
+        key_id: u32,
+    ) -> Result<Option<nostr_double_ratchet::SenderKeyState>> {
+        let states = self.get_group_sender_keys(group_id, sender_pubkey)?;
+        Ok(states.into_iter().find(|s| s.key_id == key_id))
+    }
+
+    pub fn get_latest_group_sender_key_state(
+        &self,
+        group_id: &str,
+        sender_pubkey: &str,
+    ) -> Result<Option<nostr_double_ratchet::SenderKeyState>> {
+        let states = self.get_group_sender_keys(group_id, sender_pubkey)?;
+        Ok(states.into_iter().last())
+    }
+
+    pub fn upsert_group_sender_key_state(
+        &self,
+        group_id: &str,
+        sender_pubkey: &str,
+        state: &nostr_double_ratchet::SenderKeyState,
+    ) -> Result<()> {
+        let dir = self.group_sender_keys_dir.join(group_id);
+        fs::create_dir_all(&dir)?;
+
+        let path = self.group_sender_keys_path(group_id, sender_pubkey);
+        let temp_path = dir.join(format!("{}.json.tmp", sender_pubkey));
+
+        let mut stored = if path.exists() {
+            let content = fs::read_to_string(&path)?;
+            serde_json::from_str::<StoredGroupSenderKeys>(&content)?
+        } else {
+            StoredGroupSenderKeys {
+                group_id: group_id.to_string(),
+                sender_pubkey: sender_pubkey.to_string(),
+                states: Vec::new(),
+            }
+        };
+
+        if let Some(idx) = stored.states.iter().position(|s| s.key_id == state.key_id) {
+            stored.states[idx] = state.clone();
+        } else {
+            stored.states.push(state.clone());
+        }
+
+        // Keep only a small number of old sender keys per sender (rotation history).
+        const MAX_KEYS_PER_SENDER: usize = 5;
+        if stored.states.len() > MAX_KEYS_PER_SENDER {
+            let drain = stored.states.len() - MAX_KEYS_PER_SENDER;
+            stored.states.drain(0..drain);
+        }
+
+        let content = serde_json::to_string_pretty(&stored)?;
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 

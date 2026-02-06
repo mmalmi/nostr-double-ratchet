@@ -285,6 +285,12 @@ enum GroupCommands {
         emoji: String,
     },
 
+    /// Rotate your group sender key (Signal-style) and publish a fresh distribution on the shared channel
+    RotateSenderKey {
+        /// Group ID
+        id: String,
+    },
+
     /// Accept a group invitation (enable shared channel)
     Accept {
         /// Group ID
@@ -369,6 +375,7 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             | Commands::Group(GroupCommands::RemoveAdmin { .. })
             | Commands::Group(GroupCommands::Send { .. })
             | Commands::Group(GroupCommands::React { .. })
+            | Commands::Group(GroupCommands::RotateSenderKey { .. })
             | Commands::Group(GroupCommands::Accept { .. })
     );
 
@@ -509,6 +516,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
                 message_id,
                 emoji,
             } => commands::group::react(&id, &message_id, &emoji, &config, &storage, output).await,
+            GroupCommands::RotateSenderKey { id } => {
+                commands::group::rotate_sender_key(&id, &config, &storage, output).await
+            }
             GroupCommands::Accept { id } => {
                 commands::group::accept(&id, &config, &storage, output).await
             }
