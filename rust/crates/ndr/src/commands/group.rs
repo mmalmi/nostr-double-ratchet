@@ -1,9 +1,8 @@
 use anyhow::Result;
-use base64::Engine;
 use nostr::ToBech32;
 use nostr_double_ratchet::{
     SenderKeyDistribution, SenderKeyState, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
-    GROUP_SENDER_KEY_DISTRIBUTION_KIND, MESSAGE_EVENT_KIND, REACTION_KIND,
+    GROUP_SENDER_KEY_DISTRIBUTION_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -618,25 +617,16 @@ pub async fn send_message(
         .build(my_pk);
 
     let inner_json = serde_json::to_string(&inner)?;
-    let (n, ciphertext_bytes) = sender_key.encrypt_to_bytes(&inner_json)?;
+    let channel = nostr_double_ratchet::OneToManyChannel::default();
+    let outer = channel
+        .encrypt_to_outer_event(
+            &sender_event_keys,
+            &mut sender_key,
+            &inner_json,
+            nostr::Timestamp::from(now_s),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create group outer event: {}", e))?;
     storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
-
-    // Publish once, authored by our per-group sender-event pubkey.
-    //
-    // Outer content format: base64(key_id||n||nip44_ciphertext_bytes). No tags that reveal group id.
-    let mut payload: Vec<u8> = Vec::with_capacity(8 + ciphertext_bytes.len());
-    payload.extend_from_slice(&sender_key.key_id.to_be_bytes());
-    payload.extend_from_slice(&n.to_be_bytes());
-    payload.extend_from_slice(&ciphertext_bytes);
-    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload);
-
-    let outer_unsigned =
-        nostr::EventBuilder::new(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16), &payload_b64)
-            .custom_created_at(nostr::Timestamp::from(now_s))
-            .build(sender_event_keys.public_key());
-    let outer = outer_unsigned
-        .sign_with_keys(&sender_event_keys)
-        .map_err(|e| anyhow::anyhow!("Failed to sign group outer event: {}", e))?;
     client.send_event(outer.clone()).await?;
 
     // Store outgoing message using the outer event ID (stable across all recipients).
@@ -770,22 +760,16 @@ pub async fn react(
         .build(my_pk);
 
     let inner_json = serde_json::to_string(&inner)?;
-    let (n, ciphertext_bytes) = sender_key.encrypt_to_bytes(&inner_json)?;
+    let channel = nostr_double_ratchet::OneToManyChannel::default();
+    let outer = channel
+        .encrypt_to_outer_event(
+            &sender_event_keys,
+            &mut sender_key,
+            &inner_json,
+            nostr::Timestamp::from(now_s),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create group outer event: {}", e))?;
     storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
-
-    let mut payload: Vec<u8> = Vec::with_capacity(8 + ciphertext_bytes.len());
-    payload.extend_from_slice(&sender_key.key_id.to_be_bytes());
-    payload.extend_from_slice(&n.to_be_bytes());
-    payload.extend_from_slice(&ciphertext_bytes);
-    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload);
-
-    let outer_unsigned =
-        nostr::EventBuilder::new(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16), &payload_b64)
-            .custom_created_at(nostr::Timestamp::from(now_s))
-            .build(sender_event_keys.public_key());
-    let outer = outer_unsigned
-        .sign_with_keys(&sender_event_keys)
-        .map_err(|e| anyhow::anyhow!("Failed to sign group outer event: {}", e))?;
     client.send_event(outer).await?;
 
     output.success(

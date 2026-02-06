@@ -1,8 +1,7 @@
 use anyhow::Result;
-use base64::Engine;
 use nostr_double_ratchet::{
-    Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, INVITE_EVENT_KIND, REACTION_KIND,
-    RECEIPT_KIND, TYPING_KIND,
+    OneToManyChannel, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, INVITE_EVENT_KIND,
+    REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -13,21 +12,6 @@ use crate::storage::{
     Storage, StoredChat, StoredGroup, StoredGroupMessage, StoredGroupSender, StoredMessage,
     StoredReaction,
 };
-
-/// Outer content format for per-sender published group messages:
-/// `base64(key_id_be||message_number_be||nip44_ciphertext_bytes)`.
-fn parse_group_sender_payload(content: &str) -> Option<(u32, u32, Vec<u8>)> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(content)
-        .ok()?;
-    if bytes.len() < 8 {
-        return None;
-    }
-    let key_id = u32::from_be_bytes(bytes[0..4].try_into().ok()?);
-    let n = u32::from_be_bytes(bytes[4..8].try_into().ok()?);
-    let ciphertext = bytes[8..].to_vec();
-    Some((key_id, n, ciphertext))
-}
 
 /// Resolve a target (chat_id, npub, hex pubkey, or petname) to a StoredChat.
 pub fn resolve_target(target: &str, storage: &Storage) -> Result<StoredChat> {
@@ -949,6 +933,7 @@ pub async fn listen(
     let my_pubkey_key = nostr::PublicKey::from_hex(&my_pubkey)?;
     let owner_pubkey_hex = config.owner_public_key_hex()?;
     let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
+    let one_to_many = OneToManyChannel::default();
     let mut channel_map = build_channel_map(storage)?;
     let mut group_sender_map = build_group_sender_map(storage)?;
     let (
@@ -1657,8 +1642,15 @@ pub async fn listen(
                         continue;
                     }
 
-                    let Some((key_id, n, ciphertext)) = parse_group_sender_payload(&event.content)
-                    else {
+                    let parsed = match one_to_many.parse_outer_content(&event.content) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    let key_id = parsed.key_id;
+                    let n = parsed.message_number;
+                    let ciphertext = parsed.ciphertext;
+
+                    if ciphertext.is_empty() {
                         continue;
                     };
 
@@ -2074,8 +2066,9 @@ pub async fn listen(
                                         {
                                             // Best-effort: process in message-number order.
                                             pending.sort_by_key(|e| {
-                                                parse_group_sender_payload(&e.content)
-                                                    .map(|(_, n, _)| n as u64)
+                                                one_to_many
+                                                    .parse_outer_content(&e.content)
+                                                    .map(|p| p.message_number as u64)
                                                     .unwrap_or(0)
                                             });
 
@@ -2084,11 +2077,19 @@ pub async fn listen(
                                                     continue;
                                                 }
 
-                                                let Some((key_id, n, ciphertext)) =
-                                                    parse_group_sender_payload(&outer.content)
-                                                else {
-                                                    continue;
+                                                let parsed = match one_to_many
+                                                    .parse_outer_content(&outer.content)
+                                                {
+                                                    Ok(p) => p,
+                                                    Err(_) => continue,
                                                 };
+                                                let key_id = parsed.key_id;
+                                                let n = parsed.message_number;
+                                                let ciphertext = parsed.ciphertext;
+
+                                                if ciphertext.is_empty() {
+                                                    continue;
+                                                }
                                                 if key_id != dist.key_id {
                                                     continue;
                                                 }
