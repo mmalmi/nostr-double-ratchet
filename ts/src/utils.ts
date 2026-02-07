@@ -11,7 +11,7 @@ import {
   EXPIRATION_TAG,
   ExpirationOptions,
 } from "./types";
-import { Session } from "./Session.ts";
+import type { Session } from "./Session.ts";
 import { extract as hkdf_extract, expand as hkdf_expand } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
 
