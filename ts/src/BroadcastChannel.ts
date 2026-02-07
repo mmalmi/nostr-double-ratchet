@@ -109,6 +109,16 @@ export class BroadcastChannel {
     this.versionPrefix = `v${this.storageVersion}/broadcast-channel`;
   }
 
+  async listSenderEventPubkeys(): Promise<string[]> {
+    await this.init();
+    return Array.from(new Set(this.senderDeviceToEvent.values()));
+  }
+
+  async getSenderEventPubkeyForDevice(senderDevicePubkey: string): Promise<string | undefined> {
+    await this.init();
+    return this.senderDeviceToEvent.get(senderDevicePubkey);
+  }
+
   setMembers(memberOwnerPubkeys: string[]): void {
     this.memberOwnerPubkeys = [...memberOwnerPubkeys];
   }
