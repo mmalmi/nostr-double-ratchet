@@ -110,6 +110,9 @@ export class SessionManager {
   // Cached AppKeys for authorization checks
   private cachedAppKeys: Map<string, AppKeys> = new Map()
 
+  // Persist user records in-order per key so older async writes can't overwrite newer state.
+  private userRecordWriteChain: Map<string, Promise<void>> = new Map()
+
   // Subscriptions
   private ourInviteResponseSubscription: Unsubscribe | null = null
   private inviteSubscriptions: Map<string, Unsubscribe> = new Map()
@@ -822,35 +825,37 @@ export class SessionManager {
     }
     const devices = Array.from(deviceMap.values())
 
-    // Send to all devices and await completion before returning
-    // This ensures session state is ratcheted and persisted before function returns
-    await Promise.allSettled(
-      devices.map(async (device) => {
-        const { activeSession } = device
-        if (!activeSession) {
-          return
-        }
+    // Ratchet all sessions synchronously first, then persist state BEFORE network I/O.
+    //
+    // This is important for apps that "fire and forget" sendEvent() (e.g. UI click handlers):
+    // if the page reloads/crashes while publishes are still in-flight, we still want the
+    // updated session keys to be on disk so the next incoming message can be decrypted.
+    const toPublish: Parameters<NostrPublish>[0][] = []
+    for (const device of devices) {
+      const { activeSession } = device
+      if (!activeSession) continue
 
-        // Check if device is still authorized
-        const deviceOwner = this.resolveToOwner(device.deviceId)
-        if (deviceOwner !== device.deviceId && !this.isDeviceAuthorized(deviceOwner, device.deviceId)) {
-          return
-        }
+      // Check if device is still authorized
+      const deviceOwner = this.resolveToOwner(device.deviceId)
+      if (deviceOwner !== device.deviceId && !this.isDeviceAuthorized(deviceOwner, device.deviceId)) {
+        continue
+      }
 
+      try {
         const { event: verifiedEvent } = activeSession.sendEvent(event)
-        await this.nostrPublish(verifiedEvent).catch(() => {})
-      })
-    )
-
-    // Store recipient's user record after all messages sent
-    await this.storeUserRecord(recipientIdentityKey)
-    // Also store owner's record if different (for sibling device sessions)
-    // This ensures session state is persisted after ratcheting for both:
-    // - recipientDevices stored under recipientIdentityKey
-    // - Own sibling devices stored under ownerPublicKey
-    if (this.ownerPublicKey !== recipientIdentityKey) {
-      await this.storeUserRecord(this.ownerPublicKey)
+        toPublish.push(verifiedEvent)
+      } catch {
+        // Ignore send errors for a single device.
+      }
     }
+
+    // Persist recipient + owner records before publishing (best-effort).
+    await this.storeUserRecord(recipientIdentityKey).catch(() => {})
+    if (this.ownerPublicKey !== recipientIdentityKey) {
+      await this.storeUserRecord(this.ownerPublicKey).catch(() => {})
+    }
+
+    await Promise.allSettled(toPublish.map((evt) => this.nostrPublish(evt).catch(() => {})))
 
     // Return the event with computed ID (same as library would compute)
     return completeEvent
@@ -970,7 +975,13 @@ export class SessionManager {
       ),
       knownDeviceIdentities: userRecord?.knownDeviceIdentities || [],
     }
-    return this.storage.put(this.userRecordKey(publicKey), data)
+    const key = this.userRecordKey(publicKey)
+    const prev = this.userRecordWriteChain.get(key) || Promise.resolve()
+    const next = prev
+      .catch(() => {})
+      .then(() => this.storage.put(key, data))
+    this.userRecordWriteChain.set(key, next)
+    return next
   }
 
   private loadUserRecord(publicKey: string) {
