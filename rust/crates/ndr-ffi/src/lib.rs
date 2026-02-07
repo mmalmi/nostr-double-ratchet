@@ -4,6 +4,7 @@
 //! library for use in iOS and Android applications via UniFFI.
 
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::Receiver;
 use nostr_double_ratchet::{
@@ -500,10 +501,14 @@ impl SessionManagerHandle {
         &self,
         recipient_pubkey_hex: String,
         text: String,
+        expires_at_seconds: Option<u64>,
     ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
-        Ok(manager.send_text(recipient, text)?)
+        let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
+            expires_at: Some(expires_at),
+        });
+        Ok(manager.send_text(recipient, text, options)?)
     }
 
     /// Send a text message and return both the stable inner (rumor) id and the
@@ -512,10 +517,107 @@ impl SessionManagerHandle {
         &self,
         recipient_pubkey_hex: String,
         text: String,
+        expires_at_seconds: Option<u64>,
     ) -> Result<SendTextResult, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
-        let (inner_id, outer_event_ids) = manager.send_text_with_inner_id(recipient, text)?;
+        let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
+            expires_at: Some(expires_at),
+        });
+        let (inner_id, outer_event_ids) = manager.send_text_with_inner_id(recipient, text, options)?;
+        Ok(SendTextResult {
+            inner_id,
+            outer_event_ids,
+        })
+    }
+
+    /// Send an arbitrary inner rumor event to a recipient, returning stable inner id + outer ids.
+    ///
+    /// This is used for group chats where we need custom kinds/tags (e.g. group metadata kind 40,
+    /// group-tagged chat messages kind 14, reactions kind 7, typing kind 25).
+    ///
+    /// The caller controls the inner rumor tags via `tags_json` (JSON array of string arrays).
+    /// For group fan-out, do NOT include recipient-specific tags like `["p", <recipient>]` so
+    /// the inner rumor id stays stable across all recipients.
+    pub fn send_event_with_inner_id(
+        &self,
+        recipient_pubkey_hex: String,
+        kind: u32,
+        content: String,
+        tags_json: String,
+        created_at_seconds: Option<u64>,
+    ) -> Result<SendTextResult, NdrError> {
+        let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
+
+        // Parse tags from JSON (array of string arrays).
+        let tags_vec: Vec<Vec<String>> = if tags_json.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&tags_json)?
+        };
+
+        // Try to reuse an explicit ms tag as the created_at source when the caller didn't
+        // provide created_at_seconds (helps keep ids stable across repeated fan-out calls).
+        let mut ms_value: Option<u64> = None;
+        for t in tags_vec.iter() {
+            if t.first().map(|s| s.as_str()) != Some("ms") {
+                continue;
+            }
+            if let Some(v) = t.get(1) {
+                ms_value = v.parse::<u64>().ok();
+                break;
+            }
+        }
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now_s = now.as_secs();
+        let now_ms = now.as_millis() as u64;
+
+        let created_at_s = created_at_seconds
+            .or_else(|| ms_value.map(|ms| ms / 1000))
+            .unwrap_or(now_s);
+
+        let mut tags: Vec<nostr::Tag> = Vec::with_capacity(tags_vec.len() + 1);
+        let mut has_ms = false;
+
+        for t in tags_vec {
+            if t.first().map(|s| s.as_str()) == Some("ms") {
+                has_ms = true;
+            }
+            tags.push(
+                nostr::Tag::parse(&t)
+                    .map_err(|e| NdrError::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        if !has_ms {
+            tags.push(
+                nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])
+                    .map_err(|e| NdrError::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        let kind_u16: u16 = kind
+            .try_into()
+            .map_err(|_| NdrError::InvalidEvent("kind out of range".into()))?;
+
+        let manager = self.inner.lock().unwrap();
+        let owner_pubkey = manager.get_owner_pubkey();
+
+        let mut event = nostr::EventBuilder::new(nostr::Kind::from(kind_u16), &content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at_s))
+            .build(owner_pubkey);
+
+        event.ensure_id();
+        let inner_id = event
+            .id
+            .as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
+        let outer_event_ids = manager.send_event(recipient, event)?;
+
         Ok(SendTextResult {
             inner_id,
             outer_event_ids,
@@ -528,17 +630,28 @@ impl SessionManagerHandle {
         recipient_pubkey_hex: String,
         receipt_type: String,
         message_ids: Vec<String>,
+        expires_at_seconds: Option<u64>,
     ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
-        Ok(manager.send_receipt(recipient, &receipt_type, message_ids)?)
+        let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
+            expires_at: Some(expires_at),
+        });
+        Ok(manager.send_receipt(recipient, &receipt_type, message_ids, options)?)
     }
 
     /// Send a typing indicator.
-    pub fn send_typing(&self, recipient_pubkey_hex: String) -> Result<Vec<String>, NdrError> {
+    pub fn send_typing(
+        &self,
+        recipient_pubkey_hex: String,
+        expires_at_seconds: Option<u64>,
+    ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
-        Ok(manager.send_typing(recipient)?)
+        let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
+            expires_at: Some(expires_at),
+        });
+        Ok(manager.send_typing(recipient, options)?)
     }
 
     /// Send an emoji reaction (kind 7) to a specific message id.
@@ -547,10 +660,14 @@ impl SessionManagerHandle {
         recipient_pubkey_hex: String,
         message_id: String,
         emoji: String,
+        expires_at_seconds: Option<u64>,
     ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
-        Ok(manager.send_reaction(recipient, message_id, emoji)?)
+        let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
+            expires_at: Some(expires_at),
+        });
+        Ok(manager.send_reaction(recipient, message_id, emoji, options)?)
     }
 
     /// Import a session state for a peer.

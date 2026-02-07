@@ -17,7 +17,6 @@ import { Invite } from "./Invite"
 import { Session } from "./Session"
 import {
   deserializeSessionState,
-  isExpired,
   resolveExpirationSeconds,
   serializeSessionState,
   upsertExpirationTag,
@@ -26,21 +25,6 @@ import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
 import { getEventHash } from "nostr-tools"
 
 export type OnEventCallback = (event: Rumor, from: string) => void
-
-export interface OnEventOptions {
-  /**
-   * If true, don't call the callback for rumors that have an `["expiration", ...]` tag
-   * that is <= "now".
-   *
-   * Default: false (always deliver; client decides).
-   */
-  ignoreExpired?: boolean
-  /**
-   * Supply your own time source if you care about accurate expiration.
-   * If omitted, `Date.now()` is used.
-   */
-  nowSeconds?: () => number
-}
 
 /**
  * Credentials for the invite handshake - used to listen for and decrypt invite responses
@@ -657,21 +641,11 @@ export class SessionManager {
     })
   }
 
-  onEvent(callback: OnEventCallback, options: OnEventOptions = {}) {
-    const wrapped: OnEventCallback = (event, from) => {
-      if (options.ignoreExpired) {
-        const nowSeconds = options.nowSeconds
-          ? options.nowSeconds()
-          : Math.floor(Date.now() / 1000)
-        if (isExpired(event, nowSeconds)) return
-      }
-      callback(event, from)
-    }
-
-    this.internalSubscriptions.add(wrapped)
+  onEvent(callback: OnEventCallback) {
+    this.internalSubscriptions.add(callback)
 
     return () => {
-      this.internalSubscriptions.delete(wrapped)
+      this.internalSubscriptions.delete(callback)
     }
   }
 

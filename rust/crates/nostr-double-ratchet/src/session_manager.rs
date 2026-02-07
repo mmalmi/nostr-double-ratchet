@@ -177,32 +177,34 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn send_text(&self, recipient: PublicKey, text: String) -> Result<Vec<String>> {
+    pub fn send_text(
+        &self,
+        recipient: PublicKey,
+        text: String,
+        options: Option<crate::SendOptions>,
+    ) -> Result<Vec<String>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
 
-        let (_, event_ids) = self.send_text_with_inner_id(recipient, text)?;
+        let (_, event_ids) = self.send_text_with_inner_id(recipient, text, options)?;
         Ok(event_ids)
     }
 
+    #[deprecated(note = "use send_text(recipient, text, Some(SendOptions{ expires_at: Some(...) }))")]
     pub fn send_text_with_expiration(
         &self,
         recipient: PublicKey,
         text: String,
         expires_at: u64,
     ) -> Result<Vec<String>> {
-        if text.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let tag = Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
-
-        let event =
-            self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, vec![tag])?;
-
-        self.send_event(recipient, event)
+        self.send_text(
+            recipient,
+            text,
+            Some(crate::SendOptions {
+                expires_at: Some(expires_at),
+            }),
+        )
     }
 
     /// Send a chat message and return both its stable inner (rumor) id and the
@@ -211,13 +213,23 @@ impl SessionManager {
         &self,
         recipient: PublicKey,
         text: String,
+        options: Option<crate::SendOptions>,
     ) -> Result<(String, Vec<String>)> {
         if text.trim().is_empty() {
             return Ok((String::new(), Vec::new()));
         }
 
+        let options = options.unwrap_or_default();
+        let mut tags: Vec<Tag> = Vec::new();
+        if let Some(expires_at) = options.expires_at {
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
+        }
+
         let event =
-            self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, Vec::new())?;
+            self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, tags)?;
 
         let inner_id = event
             .id
@@ -234,6 +246,7 @@ impl SessionManager {
         recipient: PublicKey,
         receipt_type: &str,
         message_ids: Vec<String>,
+        options: Option<crate::SendOptions>,
     ) -> Result<Vec<String>> {
         if message_ids.is_empty() {
             return Ok(Vec::new());
@@ -243,6 +256,14 @@ impl SessionManager {
         for id in message_ids {
             tags.push(
                 Tag::parse(&["e".to_string(), id])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        let options = options.unwrap_or_default();
+        if let Some(expires_at) = options.expires_at {
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
                     .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
             );
         }
@@ -257,13 +278,22 @@ impl SessionManager {
         self.send_event(recipient, event)
     }
 
-    pub fn send_typing(&self, recipient: PublicKey) -> Result<Vec<String>> {
-        let event = self.build_message_event(
-            recipient,
-            crate::TYPING_KIND,
-            "typing".to_string(),
-            Vec::new(),
-        )?;
+    pub fn send_typing(
+        &self,
+        recipient: PublicKey,
+        options: Option<crate::SendOptions>,
+    ) -> Result<Vec<String>> {
+        let options = options.unwrap_or_default();
+        let mut tags: Vec<Tag> = Vec::new();
+        if let Some(expires_at) = options.expires_at {
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        let event =
+            self.build_message_event(recipient, crate::TYPING_KIND, "typing".to_string(), tags)?;
 
         self.send_event(recipient, event)
     }
@@ -277,15 +307,27 @@ impl SessionManager {
         recipient: PublicKey,
         message_id: String,
         emoji: String,
+        options: Option<crate::SendOptions>,
     ) -> Result<Vec<String>> {
         if message_id.trim().is_empty() || emoji.trim().is_empty() {
             return Ok(Vec::new());
         }
 
-        let tag = Tag::parse(&["e".to_string(), message_id])
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
+        let mut tags: Vec<Tag> = Vec::new();
+        tags.push(
+            Tag::parse(&["e".to_string(), message_id])
+                .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+        );
 
-        let event = self.build_message_event(recipient, crate::REACTION_KIND, emoji, vec![tag])?;
+        let options = options.unwrap_or_default();
+        if let Some(expires_at) = options.expires_at {
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
+        }
+
+        let event = self.build_message_event(recipient, crate::REACTION_KIND, emoji, tags)?;
 
         self.send_event(recipient, event)
     }
@@ -1186,7 +1228,7 @@ mod tests {
         let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
 
         let recipient = Keys::generate().public_key();
-        let result = manager.send_text(recipient, "test".to_string());
+        let result = manager.send_text(recipient, "test".to_string(), None);
 
         assert!(result.is_ok());
     }

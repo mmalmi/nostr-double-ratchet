@@ -49,15 +49,7 @@ await sessionManager.sendMessage(recipientPubkey, "Expires at a specific time", 
 ```
 
 This library does **not** delete old messages from storage; that must be implemented by the client/storage layer.
-By default, decrypted expired rumors are still delivered to `onEvent`; clients can filter them (e.g. using `isExpired()`),
-or opt into filtering in `onEvent`:
-
-```typescript
-sessionManager.onEvent(
-  (event, from) => console.log(`${from}: ${event.content}`),
-  { ignoreExpired: true },
-)
-```
+Decrypted expired rumors are still delivered to `onEvent`; clients can filter them (e.g. using `isExpired()`).
 
 ## Multi-Device
 

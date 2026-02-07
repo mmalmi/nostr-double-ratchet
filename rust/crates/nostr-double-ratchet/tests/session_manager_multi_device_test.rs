@@ -5,7 +5,7 @@ use crossbeam_channel::Receiver;
 use nostr::{JsonUtil, Keys, UnsignedEvent};
 use nostr_double_ratchet::{
     AppKeys, DeviceEntry, InMemoryStorage, Invite, Result, SessionManager, SessionManagerEvent,
-    MESSAGE_EVENT_KIND,
+    SendOptions, MESSAGE_EVENT_KIND,
 };
 
 fn recv_signed_event(rx: &Receiver<SessionManagerEvent>) -> nostr::Event {
@@ -95,7 +95,7 @@ fn test_multi_device_self_fanout() -> Result<()> {
     manager1.process_received_event(response_event);
 
     // Device2 sends first to establish ratchet for device1
-    manager2.send_text(owner_pubkey, "ping".to_string())?;
+    manager2.send_text(owner_pubkey, "ping".to_string(), None)?;
     let ping_event = loop {
         let signed = recv_signed_event(&rx2);
         if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
@@ -105,7 +105,7 @@ fn test_multi_device_self_fanout() -> Result<()> {
     manager1.process_received_event(ping_event);
 
     // Send a message to self (owner) from device1; should fan out to device2
-    manager1.send_text(owner_pubkey, "hello".to_string())?;
+    manager1.send_text(owner_pubkey, "hello".to_string(), None)?;
 
     // Deliver encrypted message to device2
     let message_event = loop {
@@ -135,7 +135,7 @@ fn test_multi_device_self_fanout() -> Result<()> {
 }
 
 #[test]
-fn test_send_text_with_expiration_propagates_to_receiver() -> Result<()> {
+fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
     let owner_keys = Keys::generate();
     let owner_pubkey = owner_keys.public_key();
 
@@ -203,7 +203,7 @@ fn test_send_text_with_expiration_propagates_to_receiver() -> Result<()> {
     manager1.process_received_event(response_event);
 
     // Device2 sends first to establish ratchet for device1
-    manager2.send_text(owner_pubkey, "ping".to_string())?;
+    manager2.send_text(owner_pubkey, "ping".to_string(), None)?;
     let ping_event = loop {
         let signed = recv_signed_event(&rx2);
         if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
@@ -214,7 +214,13 @@ fn test_send_text_with_expiration_propagates_to_receiver() -> Result<()> {
 
     // Send a message to self (owner) from device1 with an expiration tag.
     let expires_at = 1_700_000_000u64;
-    manager1.send_text_with_expiration(owner_pubkey, "hello".to_string(), expires_at)?;
+    manager1.send_text(
+        owner_pubkey,
+        "hello".to_string(),
+        Some(SendOptions {
+            expires_at: Some(expires_at),
+        }),
+    )?;
 
     // Deliver encrypted message to device2
     let message_event = loop {
