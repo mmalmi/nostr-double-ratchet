@@ -4,9 +4,16 @@
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "description": "Nostr double ratchet library",
-  "main": "dist/nostr-double-ratchet.umd.js",
+  "main": "dist/nostr-double-ratchet.es.js",
   "module": "dist/nostr-double-ratchet.es.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/nostr-double-ratchet.es.js",
+      "default": "./dist/nostr-double-ratchet.es.js"
+    }
+  },
   "scripts": {
     "test": "vitest --exclude '**/*.integration.test.ts'",
     "test:once": "vitest run --exclude '**/*.integration.test.ts'",
