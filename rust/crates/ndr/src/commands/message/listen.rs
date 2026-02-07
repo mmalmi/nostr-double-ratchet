@@ -829,7 +829,7 @@ pub async fn listen(
                                             if let Ok(invite) =
                                                 nostr_double_ratchet::Invite::from_url(invite_url)
                                             {
-                                                if let Ok((accept_session, response_event)) = invite
+                                                if let Ok((mut accept_session, response_event)) = invite
                                                     .accept_with_owner(
                                                         my_pubkey_key.clone(),
                                                         our_private_key,
@@ -841,11 +841,10 @@ pub async fn listen(
                                                     let new_chat_id = uuid::Uuid::new_v4()
                                                         .to_string()[..8]
                                                         .to_string();
-                                                    let session_state_str = serde_json::to_string(
-                                                        &accept_session.state,
-                                                    )?;
+                                                    let mut session_state_str =
+                                                        serde_json::to_string(&accept_session.state)?;
 
-                                                    let chat = crate::storage::StoredChat {
+                                                    let mut chat = crate::storage::StoredChat {
                                                         id: new_chat_id.clone(),
                                                         their_pubkey: rumor_pubkey.clone(),
                                                         created_at: std::time::SystemTime::now()
@@ -858,6 +857,25 @@ pub async fn listen(
 
                                                     // Publish the response event
                                                     client.send_event(response_event).await?;
+
+                                                    // Kick off the session by sending a lightweight typing event.
+                                                    //
+                                                    // The inviter is a non-initiator (see Invite::process_invite_response),
+                                                    // so they must receive at least one message before they can send. In
+                                                    // group chats, this prevents sender-key fan-out from working reliably
+                                                    // unless we initialize the session right away.
+                                                    if let Ok(typing_event) =
+                                                        accept_session.send_typing()
+                                                    {
+                                                        // Persist ratcheted state before network I/O.
+                                                        session_state_str =
+                                                            serde_json::to_string(&accept_session.state)?;
+                                                        chat.session_state = session_state_str.clone();
+                                                        storage.save_chat(&chat)?;
+
+                                                        // Best-effort; group functionality still works if this fails.
+                                                        let _ = client.send_event(typing_event).await;
+                                                    }
 
                                                     output.event(
                                                         "group_invite_accepted",
