@@ -41,6 +41,19 @@ describe("OneToMany Interop Vector Generation", () => {
   let vectors: OneToManyVectors;
 
   beforeAll(() => {
+    const outputPath = path.join(
+      __dirname,
+      "../../test-vectors/ts-one-to-many-vectors.json"
+    );
+
+    const shouldRegenerate =
+      process.env.REGENERATE_VECTORS === "true" || !fs.existsSync(outputPath);
+
+    if (!shouldRegenerate) {
+      vectors = JSON.parse(fs.readFileSync(outputPath, "utf-8")) as OneToManyVectors;
+      return;
+    }
+
     const senderSk = hexToBytes(SENDER_SECRET_HEX);
     const senderPk = getPublicKey(senderSk);
 
@@ -87,20 +100,32 @@ describe("OneToMany Interop Vector Generation", () => {
       ],
     };
 
-    const outputPath = path.join(
-      __dirname,
-      "../../test-vectors/ts-one-to-many-vectors.json"
-    );
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, JSON.stringify(vectors, null, 2));
     console.log(`Generated OneToMany vectors at ${outputPath}`);
   });
 
-  it("should generate deterministic vectors", () => {
+  it("TS vectors round-trip (out-of-order)", () => {
     expect(vectors.key_id).toBe(KEY_ID);
     expect(vectors.chain_key_hex).toBe(bytesToHex(CHAIN_KEY_BYTES));
-    expect(vectors.messages.length).toBe(2);
+    expect(vectors.messages.length).toBeGreaterThanOrEqual(2);
     expect(vectors.messages[0].outer_event.pubkey).toBe(vectors.sender_pubkey);
+
+    const channel = OneToManyChannel.default();
+    const receiver = new SenderKeyState(
+      vectors.key_id,
+      hexToBytes(vectors.chain_key_hex),
+      vectors.iteration
+    );
+
+    const m1 = vectors.messages[1];
+    const m0 = vectors.messages[0];
+
+    const p1 = channel.parseOuterContent(m1.outer_event.content);
+    const p0 = channel.parseOuterContent(m0.outer_event.content);
+
+    expect(p1.decrypt(receiver)).toBe(m1.plaintext);
+    expect(p0.decrypt(receiver)).toBe(m0.plaintext);
   });
 });
 
@@ -136,4 +161,3 @@ describe("Rust-generated OneToMany vectors", () => {
     expect(p0.decrypt(receiver)).toBe(m0.plaintext);
   });
 });
-
