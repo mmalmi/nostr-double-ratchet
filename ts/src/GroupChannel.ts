@@ -1,7 +1,16 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
-import { generateSecretKey, getEventHash, getPublicKey, verifyEvent, type VerifiedEvent } from "nostr-tools";
+import {
+  generateSecretKey,
+  getEventHash,
+  getPublicKey,
+  verifyEvent,
+  type VerifiedEvent,
+} from "nostr-tools";
 
-import { GROUP_SENDER_KEY_DISTRIBUTION_KIND } from "./Group";
+import {
+  GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+  type GroupData,
+} from "./GroupMeta";
 import { OneToManyChannel } from "./OneToManyChannel";
 import type { SenderKeyDistribution, SenderKeyStateSerialized } from "./SenderKey";
 import { SenderKeyState } from "./SenderKey";
@@ -11,18 +20,17 @@ import { CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND, type Rumor } from "./types";
 export type PairwiseSend = (recipientOwnerPubkey: string, rumor: Rumor) => Promise<void>;
 export type PublishOuter = (outer: VerifiedEvent) => Promise<unknown>;
 
-export interface BroadcastChannelOptions {
-  groupId: string;
+export interface GroupOptions {
+  data: GroupData;
   /** Owner pubkey for *this* device (group membership is expressed in owner pubkeys). */
   ourOwnerPubkey: string;
   /** Device identity pubkey for *this* device (used inside encrypted payloads). */
   ourDevicePubkey: string;
-  memberOwnerPubkeys: string[];
   storage?: StorageAdapter;
   oneToMany?: OneToManyChannel;
 }
 
-export interface BroadcastDecryptedEvent {
+export interface GroupDecryptedEvent {
   groupId: string;
   senderEventPubkey: string;
   senderDevicePubkey: string;
@@ -34,7 +42,10 @@ export interface BroadcastDecryptedEvent {
   inner: Rumor;
 }
 
-function getFirstTagValue(tags: string[][] | undefined, key: string): string | undefined {
+function getFirstTagValue(
+  tags: string[][] | undefined,
+  key: string
+): string | undefined {
   const t = tags?.find((tag) => tag[0] === key);
   return t?.[1];
 }
@@ -66,20 +77,21 @@ function parseSenderKeyDistribution(content: string): SenderKeyDistribution | nu
 }
 
 /**
- * Signal-style efficient group broadcast:
+ * Signal-style efficient group messaging:
  *
  * - Each *device* has a per-group "sender event" pubkey (outer Nostr author).
  * - Each device uses a symmetric SenderKeyState chain for forward secrecy within that sender.
  * - Sender keys are distributed pairwise over 1:1 Double Ratchet sessions (forward secure).
  * - Group messages are published once using OneToManyChannel.
  *
- * This class is intentionally transport-agnostic:
+ * This class is transport-agnostic:
  * - You provide `sendPairwise` for distributing keys over 1:1 sessions.
  * - You provide `publishOuter` for publishing the one-to-many outer events.
  * - You feed it incoming session rumors + outer events via the `handle…` methods.
  */
-export class BroadcastChannel {
-  private readonly groupId: string;
+export class Group {
+  public data: GroupData;
+
   private readonly ourOwnerPubkey: string;
   private readonly ourDevicePubkey: string;
   private memberOwnerPubkeys: string[];
@@ -99,14 +111,28 @@ export class BroadcastChannel {
   // Outer events we couldn't decrypt yet (waiting for mapping/state).
   private pendingOuter: Map<string, VerifiedEvent[]> = new Map(); // key: `${senderEventPubkey}:${keyId}`
 
-  constructor(opts: BroadcastChannelOptions) {
-    this.groupId = opts.groupId;
+  constructor(opts: GroupOptions) {
+    this.data = opts.data;
     this.ourOwnerPubkey = opts.ourOwnerPubkey;
     this.ourDevicePubkey = opts.ourDevicePubkey;
-    this.memberOwnerPubkeys = [...opts.memberOwnerPubkeys];
+    this.memberOwnerPubkeys = [...opts.data.members];
     this.storage = opts.storage || new InMemoryStorageAdapter();
     this.oneToMany = opts.oneToMany || OneToManyChannel.default();
+    // Storage namespace shared with the earlier BroadcastChannel prototype for compatibility.
     this.versionPrefix = `v${this.storageVersion}/broadcast-channel`;
+  }
+
+  groupId(): string {
+    return this.data.id;
+  }
+
+  setData(data: GroupData): void {
+    this.data = data;
+    this.memberOwnerPubkeys = [...data.members];
+  }
+
+  setMembers(memberOwnerPubkeys: string[]): void {
+    this.memberOwnerPubkeys = [...memberOwnerPubkeys];
   }
 
   async listSenderEventPubkeys(): Promise<string[]> {
@@ -114,13 +140,11 @@ export class BroadcastChannel {
     return Array.from(new Set(this.senderDeviceToEvent.values()));
   }
 
-  async getSenderEventPubkeyForDevice(senderDevicePubkey: string): Promise<string | undefined> {
+  async getSenderEventPubkeyForDevice(
+    senderDevicePubkey: string
+  ): Promise<string | undefined> {
     await this.init();
     return this.senderDeviceToEvent.get(senderDevicePubkey);
-  }
-
-  setMembers(memberOwnerPubkeys: string[]): void {
-    this.memberOwnerPubkeys = [...memberOwnerPubkeys];
   }
 
   private async init(): Promise<void> {
@@ -128,22 +152,22 @@ export class BroadcastChannel {
     this.initialized = true;
 
     // Load (device -> owner) and (device -> senderEventPubkey) mappings.
-    const groupPrefix = `${this.versionPrefix}/group/${this.groupId}/sender/`;
+    const groupPrefix = `${this.versionPrefix}/group/${this.groupId()}/sender/`;
     const keys = await this.storage.list(groupPrefix);
 
     for (const key of keys) {
       if (key.endsWith("/sender-event-pubkey")) {
-        const senderDevicePubkey = key
-          .slice(groupPrefix.length)
-          .split("/")[0];
+        const senderDevicePubkey = key.slice(groupPrefix.length).split("/")[0];
         const senderEventPubkey = await this.storage.get<string>(key);
-        if (typeof senderEventPubkey === "string" && isHex32(senderEventPubkey) && isHex32(senderDevicePubkey)) {
+        if (
+          typeof senderEventPubkey === "string" &&
+          isHex32(senderEventPubkey) &&
+          isHex32(senderDevicePubkey)
+        ) {
           this.setSenderEventMapping(senderDevicePubkey, senderEventPubkey);
         }
       } else if (key.endsWith("/sender-owner-pubkey")) {
-        const senderDevicePubkey = key
-          .slice(groupPrefix.length)
-          .split("/")[0];
+        const senderDevicePubkey = key.slice(groupPrefix.length).split("/")[0];
         const owner = await this.storage.get<string>(key);
         if (typeof owner === "string" && isHex32(senderDevicePubkey)) {
           this.senderDeviceToOwner.set(senderDevicePubkey, owner);
@@ -153,7 +177,7 @@ export class BroadcastChannel {
   }
 
   private groupSenderPrefix(senderDevicePubkey: string): string {
-    return `${this.versionPrefix}/group/${this.groupId}/sender/${senderDevicePubkey}`;
+    return `${this.versionPrefix}/group/${this.groupId()}/sender/${senderDevicePubkey}`;
   }
 
   private senderEventSecretKeyKey(senderDevicePubkey: string): string {
@@ -196,7 +220,7 @@ export class BroadcastChannel {
     this.pendingOuter.set(k, existing);
   }
 
-  private async drainPending(senderEventPubkey: string, keyId: number): Promise<BroadcastDecryptedEvent[]> {
+  private async drainPending(senderEventPubkey: string, keyId: number): Promise<GroupDecryptedEvent[]> {
     const k = this.pendingKey(senderEventPubkey, keyId);
     const pending = this.pendingOuter.get(k);
     if (!pending || pending.length === 0) return [];
@@ -214,7 +238,7 @@ export class BroadcastChannel {
       })
       .sort((a, b) => a.n - b.n);
 
-    const results: BroadcastDecryptedEvent[] = [];
+    const results: GroupDecryptedEvent[] = [];
     for (const { outer } of withN) {
       const dec = await this.handleOuterEvent(outer);
       if (dec) results.push(dec);
@@ -297,7 +321,7 @@ export class BroadcastChannel {
 
   private buildDistribution(nowSeconds: number, senderEventPubkey: string, senderKey: SenderKeyState): SenderKeyDistribution {
     return {
-      groupId: this.groupId,
+      groupId: this.groupId(),
       keyId: senderKey.keyId,
       chainKey: bytesToHex(senderKey.chainKeyBytes()),
       iteration: senderKey.iterationNumber(),
@@ -312,7 +336,7 @@ export class BroadcastChannel {
       content: JSON.stringify(dist),
       created_at: nowSeconds,
       tags: [
-        ["l", this.groupId],
+        ["l", this.groupId()],
         ["key", String(dist.keyId >>> 0)],
         ["ms", String(nowMs)],
       ],
@@ -329,7 +353,7 @@ export class BroadcastChannel {
       content: message,
       created_at: nowSeconds,
       tags: [
-        ["l", this.groupId],
+        ["l", this.groupId()],
         ["ms", String(nowMs)],
       ],
       pubkey: this.ourDevicePubkey,
@@ -356,9 +380,7 @@ export class BroadcastChannel {
 
     // Best-effort fanout (skip ourselves).
     await Promise.allSettled(
-      this.memberOwnerPubkeys
-        .filter((pk) => pk !== this.ourOwnerPubkey)
-        .map((pk) => opts.sendPairwise(pk, rumor))
+      this.memberOwnerPubkeys.filter((pk) => pk !== this.ourOwnerPubkey).map((pk) => opts.sendPairwise(pk, rumor))
     );
 
     return dist;
@@ -388,9 +410,7 @@ export class BroadcastChannel {
       const dist = this.buildDistribution(nowSeconds, senderEventPubkey, senderKey);
       const rumor = this.buildDistributionRumor(nowSeconds, nowMs, dist);
       await Promise.allSettled(
-        this.memberOwnerPubkeys
-          .filter((pk) => pk !== this.ourOwnerPubkey)
-          .map((pk) => opts.sendPairwise(pk, rumor))
+        this.memberOwnerPubkeys.filter((pk) => pk !== this.ourOwnerPubkey).map((pk) => opts.sendPairwise(pk, rumor))
       );
     }
 
@@ -410,7 +430,7 @@ export class BroadcastChannel {
    * Currently this only consumes sender-key distribution rumors (kind 10446) for this group.
    * It may return decrypted outer group events that were pending until the distribution arrived.
    */
-  async handleIncomingSessionEvent(event: Rumor, fromOwnerPubkey: string): Promise<BroadcastDecryptedEvent[]> {
+  async handleIncomingSessionEvent(event: Rumor, fromOwnerPubkey: string): Promise<GroupDecryptedEvent[]> {
     await this.init();
 
     if (!this.memberOwnerPubkeys.includes(fromOwnerPubkey)) {
@@ -418,13 +438,13 @@ export class BroadcastChannel {
     }
 
     const gid = getFirstTagValue(event.tags, "l");
-    if (gid !== this.groupId) return [];
+    if (gid !== this.groupId()) return [];
 
     if (event.kind !== GROUP_SENDER_KEY_DISTRIBUTION_KIND) return [];
 
     const dist = parseSenderKeyDistribution(event.content);
     if (!dist) return [];
-    if (dist.groupId !== this.groupId) return [];
+    if (dist.groupId !== this.groupId()) return [];
 
     const senderDevicePubkey = event.pubkey;
     if (!isHex32(senderDevicePubkey)) return [];
@@ -459,7 +479,7 @@ export class BroadcastChannel {
    *
    * Returns a decrypted inner rumor if possible, or null if we're missing mapping/state and queued it.
    */
-  async handleOuterEvent(outer: VerifiedEvent): Promise<BroadcastDecryptedEvent | null> {
+  async handleOuterEvent(outer: VerifiedEvent): Promise<GroupDecryptedEvent | null> {
     await this.init();
 
     if (outer.kind !== MESSAGE_EVENT_KIND) return null;
@@ -504,7 +524,7 @@ export class BroadcastChannel {
         kind: CHAT_MESSAGE_KIND,
         content: plaintext,
         created_at: outer.created_at,
-        tags: [["l", this.groupId]],
+        tags: [["l", this.groupId()]],
         pubkey: senderDevicePubkey,
         id: "",
       };
@@ -513,7 +533,7 @@ export class BroadcastChannel {
 
     // Best-effort sanity: ensure this is the right group (encrypted, so shouldn't leak).
     const innerGid = getFirstTagValue(inner.tags, "l");
-    if (innerGid && innerGid !== this.groupId) {
+    if (innerGid && innerGid !== this.groupId()) {
       return null;
     }
 
@@ -523,7 +543,7 @@ export class BroadcastChannel {
       undefined;
 
     return {
-      groupId: this.groupId,
+      groupId: this.groupId(),
       senderEventPubkey,
       senderDevicePubkey,
       senderOwnerPubkey,
@@ -535,3 +555,4 @@ export class BroadcastChannel {
     };
   }
 }
+

@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { getPublicKey, generateSecretKey } from "nostr-tools";
+import { generateSecretKey, getPublicKey } from "nostr-tools";
 
-import { BroadcastChannel } from "../src/BroadcastChannel";
+import { Group, type GroupData } from "../src/Group";
 import { InMemoryStorageAdapter } from "../src/StorageAdapter";
 import type { Rumor } from "../src/types";
 
-describe("BroadcastChannel (OneToMany + sender keys)", () => {
+function makeGroup(groupId: string, members: string[], admins: string[]): GroupData {
+  return {
+    id: groupId,
+    name: "Test",
+    members,
+    admins,
+    createdAt: Date.now(),
+    accepted: true,
+  };
+}
+
+describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
   it("publishes one outer event and fan-outs one sender-key distribution per member", async () => {
     const groupId = "group-1";
 
@@ -15,18 +26,17 @@ describe("BroadcastChannel (OneToMany + sender keys)", () => {
 
     const aliceDevicePk = getPublicKey(generateSecretKey());
 
-    const alice = new BroadcastChannel({
-      groupId,
+    const g = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk, carolOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: aliceOwnerPk,
       ourDevicePubkey: aliceDevicePk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk, carolOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
     const sent: Array<{ to: string; rumor: Rumor }> = [];
     const published: unknown[] = [];
 
-    await alice.sendMessage("hello", {
+    await g.sendMessage("hello", {
       sendPairwise: async (to, rumor) => {
         sent.push({ to, rumor });
       },
@@ -35,7 +45,7 @@ describe("BroadcastChannel (OneToMany + sender keys)", () => {
       },
     });
 
-    // One distribution per *other* member owner.
+    // One distribution per *other* member.
     expect(sent.map((s) => s.to).sort()).toEqual([bobOwnerPk, carolOwnerPk].sort());
     expect(published).toHaveLength(1);
   });
@@ -49,19 +59,17 @@ describe("BroadcastChannel (OneToMany + sender keys)", () => {
     const aliceDevicePk = getPublicKey(generateSecretKey());
     const bobDevicePk = getPublicKey(generateSecretKey());
 
-    const alice = new BroadcastChannel({
-      groupId,
+    const alice = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: aliceOwnerPk,
       ourDevicePubkey: aliceDevicePk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
-    const bob = new BroadcastChannel({
-      groupId,
+    const bob = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: bobOwnerPk,
       ourDevicePubkey: bobDevicePk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
@@ -102,19 +110,17 @@ describe("BroadcastChannel (OneToMany + sender keys)", () => {
     const aliceDevicePk = getPublicKey(generateSecretKey());
     const bobDevicePk = getPublicKey(generateSecretKey());
 
-    const alice = new BroadcastChannel({
-      groupId,
+    const alice = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: aliceOwnerPk,
       ourDevicePubkey: aliceDevicePk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
-    const bob = new BroadcastChannel({
-      groupId,
+    const bob = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: bobOwnerPk,
       ourDevicePubkey: bobDevicePk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
@@ -164,27 +170,24 @@ describe("BroadcastChannel (OneToMany + sender keys)", () => {
     const bobDevice1Pk = getPublicKey(generateSecretKey());
     const bobDevice2Pk = getPublicKey(generateSecretKey());
 
-    const alice = new BroadcastChannel({
-      groupId,
+    const alice = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: aliceOwnerPk,
       ourDevicePubkey: aliceDevicePk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
-    const bob1 = new BroadcastChannel({
-      groupId,
+    const bob1 = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: bobOwnerPk,
       ourDevicePubkey: bobDevice1Pk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
-    const bob2 = new BroadcastChannel({
-      groupId,
+    const bob2 = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
       ourOwnerPubkey: bobOwnerPk,
       ourDevicePubkey: bobDevice2Pk,
-      memberOwnerPubkeys: [aliceOwnerPk, bobOwnerPk],
       storage: new InMemoryStorageAdapter(),
     });
 
