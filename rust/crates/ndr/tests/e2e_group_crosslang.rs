@@ -175,27 +175,48 @@ async fn read_until_ndr_event(
     None
 }
 
-async fn read_until_ndr_group_message(
+async fn read_until_ndr_group_messages(
     reader: &mut BufReader<tokio::process::ChildStdout>,
     group_id: &str,
-    content: &str,
+    expected_contents: &[&str],
     timeout: Duration,
-) -> Option<serde_json::Value> {
+) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let expected: std::collections::HashSet<&str> = expected_contents.iter().copied().collect();
+
     let start = Instant::now();
-    while start.elapsed() < timeout {
-        let ev = read_until_ndr_event(reader, "group_message", Duration::from_millis(200)).await;
-        let Some(ev) = ev else {
-            continue;
-        };
-        if ev.get("group_id").and_then(|v| v.as_str()) != Some(group_id) {
-            continue;
+    while start.elapsed() < timeout && seen.len() < expected.len() {
+        let mut line = String::new();
+        match tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => break, // EOF
+            Ok(Ok(_)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                    continue;
+                };
+                if json.get("event").and_then(|v| v.as_str()) != Some("group_message") {
+                    continue;
+                }
+                if json.get("group_id").and_then(|v| v.as_str()) != Some(group_id) {
+                    continue;
+                }
+                let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if expected.contains(content) {
+                    seen.insert(content.to_string());
+                }
+            }
+            _ => {}
         }
-        if ev.get("content").and_then(|v| v.as_str()) != Some(content) {
-            continue;
-        }
-        return Some(ev);
     }
-    None
+
+    let mut out: Vec<String> = seen.into_iter().collect();
+    out.sort();
+    out
 }
 
 async fn stop_child(mut child: Child) {
@@ -296,11 +317,18 @@ async fn test_ts_rust_group_sender_keys_e2e() {
     // Accept group so ndr subscribes to group shared channel and per-sender published messages.
     let _ = run_ndr(bob_dir.path(), &["group", "accept", &group_id]).await;
 
-    // TS should publish a one-to-many message to the group; Bob should receive it as group_message.
-    let ts_msg = "hello from ts group";
-    read_until_ndr_group_message(&mut bob_stdout, &group_id, ts_msg, Duration::from_secs(45))
-        .await
-        .expect("Expected group_message from TS");
+    // TS should publish multiple sender-key one-to-many messages to the group (multi-device same owner).
+    let expected_ts = [
+        "hello from ts device1 first",
+        "hello from ts device1 second",
+        "hello from ts device2",
+    ];
+    let got = read_until_ndr_group_messages(&mut bob_stdout, &group_id, &expected_ts, Duration::from_secs(60)).await;
+    assert_eq!(
+        got.len(),
+        expected_ts.len(),
+        "Expected all TS messages to be decrypted. Got: {got:?}"
+    );
 
     // Now Bob sends a one-to-many group message; TS should decrypt it.
     let rust_msg = "hello from rust group";

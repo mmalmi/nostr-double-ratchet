@@ -98,8 +98,11 @@ pub struct StoredGroupSenderKeys {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredGroupSender {
     pub group_id: String,
-    /// The member's long-term identity pubkey (hex).
+    /// The member's device identity pubkey (hex). (Stable per device.)
     pub identity_pubkey: String,
+    /// The member's owner pubkey (hex). When missing, assume `identity_pubkey` (single-device).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pubkey: Option<String>,
     /// The per-group outer pubkey used to author group message events (hex).
     pub sender_event_pubkey: String,
     /// Only present for our own identity.

@@ -89,9 +89,18 @@ function hasTag(event: { tags?: string[][] }, key: string): boolean {
 
 async function main() {
   // Alice (TypeScript side) identity key.
-  const aliceSecretKey = generateSecretKey();
-  const alicePubkey = getPublicKey(aliceSecretKey);
-  log(`E2E_ALICE_PUBKEY:${alicePubkey}`);
+  const aliceOwnerSecretKey = generateSecretKey();
+  const aliceOwnerPubkey = getPublicKey(aliceOwnerSecretKey);
+  log(`E2E_ALICE_PUBKEY:${aliceOwnerPubkey}`);
+
+  // Simulate multi-device: two separate device identity pubkeys for the same owner.
+  // (Inner session rumors are not signed; the 1:1 session binds authenticity.)
+  const aliceDevice1SecretKey = generateSecretKey();
+  const aliceDevice2SecretKey = generateSecretKey();
+  const aliceDevice1Pubkey = getPublicKey(aliceDevice1SecretKey);
+  const aliceDevice2Pubkey = getPublicKey(aliceDevice2SecretKey);
+  log(`E2E_ALICE_DEVICE1_PUBKEY:${aliceDevice1Pubkey}`);
+  log(`E2E_ALICE_DEVICE2_PUBKEY:${aliceDevice2Pubkey}`);
 
   const relay = new SimpleRelay(RELAY_URL);
   await relay.waitReady();
@@ -103,7 +112,7 @@ async function main() {
   };
 
   // Create invite (Alice inviter).
-  const invite = Invite.createNew(alicePubkey);
+  const invite = Invite.createNew(aliceOwnerPubkey);
   const inviteUrl = invite.getUrl("https://example.com");
   log(`E2E_INVITE_URL:${inviteUrl}`);
 
@@ -115,9 +124,10 @@ async function main() {
   let gotRustGroupMessage = false;
 
   const storage = new InMemoryStorageAdapter();
+  const storage2 = new InMemoryStorageAdapter();
 
   // Listen for invite responses using Invite.listen().
-  invite.listen(aliceSecretKey, subscribe, (session, identity) => {
+  invite.listen(aliceOwnerSecretKey, subscribe, (session, identity) => {
     bobPubkey = identity;
     log(`E2E_SESSION_CREATED:${identity}`);
 
@@ -126,19 +136,27 @@ async function main() {
     groupData = {
       id: groupId,
       name: "E2E Group",
-      members: [alicePubkey, identity],
-      admins: [alicePubkey],
+      members: [aliceOwnerPubkey, identity],
+      admins: [aliceOwnerPubkey],
       createdAt: Date.now(),
       secret: generateGroupSecret(),
       accepted: true,
     };
 
-    group = new Group({
+    const group1 = new Group({
       data: groupData,
-      ourOwnerPubkey: alicePubkey,
-      ourDevicePubkey: alicePubkey,
+      ourOwnerPubkey: aliceOwnerPubkey,
+      ourDevicePubkey: aliceDevice1Pubkey,
       storage,
     });
+    const group2 = new Group({
+      data: groupData,
+      ourOwnerPubkey: aliceOwnerPubkey,
+      ourDevicePubkey: aliceDevice2Pubkey,
+      storage: storage2,
+    });
+
+    group = group1;
 
     // Handle decrypted 1:1 session rumors.
     //
@@ -148,14 +166,14 @@ async function main() {
       void (async () => {
         // Sender-key distribution from Bob (over 1:1 session) so we can decrypt Bob's one-to-many.
         if (
-          group &&
           groupId &&
           bobPubkey &&
           rumor.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND &&
           rumor.tags?.some((t) => t[0] === "l" && t[1] === groupId)
         ) {
-          const drained = await group.handleIncomingSessionEvent(rumor as Rumor, bobPubkey);
-          for (const d of drained) {
+          const drained1 = await group1.handleIncomingSessionEvent(rumor as Rumor, bobPubkey);
+          const drained2 = await group2.handleIncomingSessionEvent(rumor as Rumor, bobPubkey);
+          for (const d of [...drained1, ...drained2]) {
             if (d.inner.content === "hello from rust group" && !gotRustGroupMessage) {
               gotRustGroupMessage = true;
               log(`E2E_GROUP_MESSAGE_RECEIVED:${d.inner.content}`);
@@ -166,7 +184,7 @@ async function main() {
         }
 
         // First DM from Bob: now we can send group metadata + sender-keys bootstrap.
-        if (!sentGroupBootstrap && group && groupId && groupData && bobPubkey) {
+        if (!sentGroupBootstrap && groupId && groupData && bobPubkey) {
           sentGroupBootstrap = true;
           log(`E2E_HANDSHAKE_RECEIVED:${rumor.content}`);
 
@@ -185,7 +203,7 @@ async function main() {
             kind: GROUP_METADATA_KIND,
             content: metadataContent,
             tags: [["l", groupId]],
-            pubkey: alicePubkey,
+            pubkey: aliceOwnerPubkey,
           });
           await relay.publish(meta.event);
           log(`E2E_GROUP_METADATA_SENT:${groupId}`);
@@ -206,8 +224,17 @@ async function main() {
             await relay.publish(outer);
           };
 
-          await group.sendMessage("hello from ts group", { sendPairwise, publishOuter });
-          log(`E2E_TS_GROUP_MESSAGE_SENT:${groupId}`);
+          // Device1 sends a message (bootstraps sender key + sender-event pubkey for device1).
+          await group1.sendMessage("hello from ts device1 first", { sendPairwise, publishOuter });
+
+          // Device2 sends a message (bootstraps sender key + sender-event pubkey for device2).
+          await group2.sendMessage("hello from ts device2", { sendPairwise, publishOuter });
+
+          // After device2 has announced its sender-event pubkey, device1 sends again.
+          // If the receiver only stores a single sender-event pubkey per owner, this will break.
+          await new Promise((r) => setTimeout(r, 2000));
+          await group1.sendMessage("hello from ts device1 second", { sendPairwise, publishOuter });
+          log(`E2E_TS_GROUP_MESSAGES_SENT:${groupId}`);
         }
       })().catch((e) => {
         log(`E2E_ERROR:${e?.message || e}`);
@@ -223,7 +250,9 @@ async function main() {
       if (!group || !groupId) return;
       if (hasTag(event, "header")) return; // 1:1 session messages
 
-      const dec = await group.handleOuterEvent(event as any);
+      // Try decrypt with any of our devices' group states.
+      const dec1 = await group.handleOuterEvent(event as any);
+      const dec = dec1;
       if (!dec) return;
 
       // Success condition: decrypt Bob's message.

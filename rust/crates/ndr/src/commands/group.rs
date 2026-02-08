@@ -73,7 +73,7 @@ async fn fan_out_metadata(
     config: &Config,
     storage: &Storage,
 ) -> Result<()> {
-    let my_pubkey = config.public_key()?;
+    let my_owner_pubkey = config.owner_public_key_hex()?;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -87,7 +87,7 @@ async fn fan_out_metadata(
     let mut connected = false;
 
     for member in &group.members {
-        if member == &my_pubkey {
+        if member == &my_owner_pubkey {
             continue;
         }
 
@@ -119,7 +119,7 @@ async fn fan_out_metadata(
             .filter_map(|t| nostr::Tag::parse(t).ok())
             .collect();
 
-        let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+        let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
         let unsigned = nostr::EventBuilder::new(
             nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
             &metadata_content,
@@ -163,7 +163,7 @@ async fn fan_out_metadata(
                     .filter_map(|t| nostr::Tag::parse(t).ok())
                     .collect();
 
-                let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+                let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
                 let unsigned = nostr::EventBuilder::new(
                     nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
                     &metadata_content,
@@ -202,10 +202,11 @@ async fn fan_out_sender_key_distribution(
     storage: &Storage,
     client: &Client,
 ) -> Result<()> {
-    let my_pubkey = config.public_key()?;
+    let my_device_pubkey = config.public_key()?;
+    let my_owner_pubkey = config.owner_public_key_hex()?;
 
     for member in &group.members {
-        if member == &my_pubkey {
+        if member == &my_owner_pubkey {
             continue;
         }
 
@@ -232,7 +233,7 @@ async fn fan_out_sender_key_distribution(
             .filter_map(|t| nostr::Tag::parse(t).ok())
             .collect();
 
-        let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+        let my_pk = nostr::PublicKey::from_hex(&my_device_pubkey)?;
         let unsigned = nostr::EventBuilder::new(
             nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
             dist_json,
@@ -263,7 +264,8 @@ pub async fn create(
     storage: &Storage,
     output: &Output,
 ) -> Result<()> {
-    let my_pubkey = config.public_key()?;
+    // Group membership is expressed in *owner pubkeys* so it works with linked-device mode.
+    let my_pubkey = config.owner_public_key_hex()?;
     let member_refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
     let group_data = nostr_double_ratchet::group::create_group_data(name, &my_pubkey, &member_refs);
 
@@ -314,7 +316,7 @@ pub async fn update(
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
-    let my_pubkey = config.public_key()?;
+    let my_pubkey = config.owner_public_key_hex()?;
     let updates = nostr_double_ratchet::group::GroupUpdate {
         name: name.map(|s| s.to_string()),
         description: description.map(|s| s.to_string()),
@@ -345,7 +347,7 @@ pub async fn add_member(
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
-    let my_pubkey = config.public_key()?;
+    let my_pubkey = config.owner_public_key_hex()?;
     let old_secret = group.data.secret.clone();
     let updated = nostr_double_ratchet::group::add_group_member(&group.data, pubkey, &my_pubkey)
         .ok_or_else(|| anyhow::anyhow!("Cannot add member: not admin or already a member"))?;
@@ -357,7 +359,8 @@ pub async fn add_member(
     // If membership changes rotated the shared-channel secret, force our sender key to rotate as well
     // so new members can decrypt future messages.
     if secret_rotated {
-        let _ = storage.delete_group_sender_keys(id, &my_pubkey)?;
+        let my_device_pubkey = config.public_key()?;
+        let _ = storage.delete_group_sender_keys(id, &my_device_pubkey)?;
     }
 
     // Fan-out metadata to all members including new one
@@ -378,7 +381,7 @@ pub async fn remove_member(
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
-    let my_pubkey = config.public_key()?;
+    let my_pubkey = config.owner_public_key_hex()?;
     let old_secret = group.data.secret.clone();
     let updated = nostr_double_ratchet::group::remove_group_member(&group.data, pubkey, &my_pubkey)
         .ok_or_else(|| {
@@ -392,7 +395,8 @@ pub async fn remove_member(
     storage.save_group(&stored)?;
 
     if secret_rotated {
-        let _ = storage.delete_group_sender_keys(id, &my_pubkey)?;
+        let my_device_pubkey = config.public_key()?;
+        let _ = storage.delete_group_sender_keys(id, &my_device_pubkey)?;
     }
 
     // Fan-out with secret to remaining, without secret to removed
@@ -413,7 +417,7 @@ pub async fn add_admin(
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
-    let my_pubkey = config.public_key()?;
+    let my_pubkey = config.owner_public_key_hex()?;
     let updated = nostr_double_ratchet::group::add_group_admin(&group.data, pubkey, &my_pubkey)
         .ok_or_else(|| {
             anyhow::anyhow!("Cannot add admin: not admin, not a member, or already an admin")
@@ -440,7 +444,7 @@ pub async fn remove_admin(
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
 
-    let my_pubkey = config.public_key()?;
+    let my_pubkey = config.owner_public_key_hex()?;
     let updated = nostr_double_ratchet::group::remove_group_admin(&group.data, pubkey, &my_pubkey)
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -460,10 +464,11 @@ pub async fn remove_admin(
 
 fn ensure_group_sender_event_keys(
     group_id: &str,
-    identity_pubkey_hex: &str,
+    device_pubkey_hex: &str,
+    owner_pubkey_hex: &str,
     storage: &Storage,
 ) -> Result<(nostr::Keys, bool)> {
-    if let Some(stored) = storage.get_group_sender(group_id, identity_pubkey_hex)? {
+    if let Some(stored) = storage.get_group_sender(group_id, device_pubkey_hex)? {
         if let Some(sk_hex) = stored.sender_event_secret_key {
             if let Ok(sk_bytes) = hex::decode(&sk_hex) {
                 if sk_bytes.len() == 32 {
@@ -478,11 +483,24 @@ fn ensure_group_sender_event_keys(
                         let updated = StoredGroupSender {
                             group_id: stored.group_id,
                             identity_pubkey: stored.identity_pubkey,
+                            owner_pubkey: Some(owner_pubkey_hex.to_string()),
                             sender_event_pubkey: derived_pk_hex,
                             sender_event_secret_key: Some(sk_hex),
                         };
                         storage.upsert_group_sender(&updated)?;
                         return Ok((keys, true));
+                    }
+
+                    // Backfill/migrate owner pubkey if missing.
+                    if stored.owner_pubkey.as_deref() != Some(owner_pubkey_hex) {
+                        let updated = StoredGroupSender {
+                            group_id: stored.group_id,
+                            identity_pubkey: stored.identity_pubkey,
+                            owner_pubkey: Some(owner_pubkey_hex.to_string()),
+                            sender_event_pubkey: stored.sender_event_pubkey,
+                            sender_event_secret_key: Some(sk_hex),
+                        };
+                        storage.upsert_group_sender(&updated)?;
                     }
 
                     return Ok((keys, false));
@@ -496,7 +514,8 @@ fn ensure_group_sender_event_keys(
     let sk_bytes = keys.secret_key().to_secret_bytes();
     let stored = StoredGroupSender {
         group_id: group_id.to_string(),
-        identity_pubkey: identity_pubkey_hex.to_string(),
+        identity_pubkey: device_pubkey_hex.to_string(),
+        owner_pubkey: Some(owner_pubkey_hex.to_string()),
         sender_event_pubkey: keys.public_key().to_hex(),
         sender_event_secret_key: Some(hex::encode(sk_bytes)),
     };
@@ -590,9 +609,10 @@ pub async fn send_message(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let my_pubkey = config.public_key()?;
+    let my_device_pubkey = config.public_key()?;
+    let my_owner_pubkey = config.owner_public_key_hex()?;
     let (sender_event_keys, sender_event_keys_changed) =
-        ensure_group_sender_event_keys(id, &my_pubkey, storage)?;
+        ensure_group_sender_event_keys(id, &my_device_pubkey, &my_owner_pubkey, storage)?;
     let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
@@ -610,7 +630,7 @@ pub async fn send_message(
     let mut sender_key = ensure_group_sender_key(
         &group.data,
         id,
-        &my_pubkey,
+        &my_device_pubkey,
         &sender_event_pubkey_hex,
         sender_event_keys_changed,
         now_ms,
@@ -634,7 +654,7 @@ pub async fn send_message(
         .filter_map(|t| nostr::Tag::parse(t).ok())
         .collect();
 
-    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+    let my_pk = nostr::PublicKey::from_hex(&my_device_pubkey)?;
     let inner = nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), message)
         .tags(nostr_tags)
         .custom_created_at(nostr::Timestamp::from(now_s))
@@ -650,7 +670,7 @@ pub async fn send_message(
             nostr::Timestamp::from(now_s),
         )
         .map_err(|e| anyhow::anyhow!("Failed to create group outer event: {}", e))?;
-    storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
+    storage.upsert_group_sender_key_state(id, &my_device_pubkey, &sender_key)?;
     client.send_event(outer.clone()).await?;
 
     // Store outgoing message using the outer event ID (stable across all recipients).
@@ -658,7 +678,7 @@ pub async fn send_message(
     let stored_msg = StoredGroupMessage {
         id: msg_id.clone(),
         group_id: id.to_string(),
-        sender_pubkey: my_pubkey.clone(),
+        sender_pubkey: my_owner_pubkey.clone(),
         content: message.to_string(),
         timestamp: now_s,
         is_outgoing: true,
@@ -700,9 +720,10 @@ pub async fn react(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let my_pubkey = config.public_key()?;
+    let my_device_pubkey = config.public_key()?;
+    let my_owner_pubkey = config.owner_public_key_hex()?;
     let (sender_event_keys, sender_event_keys_changed) =
-        ensure_group_sender_event_keys(id, &my_pubkey, storage)?;
+        ensure_group_sender_event_keys(id, &my_device_pubkey, &my_owner_pubkey, storage)?;
     let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
@@ -719,7 +740,7 @@ pub async fn react(
     let mut sender_key = ensure_group_sender_key(
         &group.data,
         id,
-        &my_pubkey,
+        &my_device_pubkey,
         &sender_event_pubkey_hex,
         sender_event_keys_changed,
         now_ms,
@@ -739,7 +760,7 @@ pub async fn react(
         .filter_map(|t| nostr::Tag::parse(t).ok())
         .collect();
 
-    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
+    let my_pk = nostr::PublicKey::from_hex(&my_device_pubkey)?;
     let inner = nostr::EventBuilder::new(nostr::Kind::Custom(REACTION_KIND as u16), emoji)
         .tags(nostr_tags)
         .custom_created_at(nostr::Timestamp::from(now_s))
@@ -755,7 +776,7 @@ pub async fn react(
             nostr::Timestamp::from(now_s),
         )
         .map_err(|e| anyhow::anyhow!("Failed to create group outer event: {}", e))?;
-    storage.upsert_group_sender_key_state(id, &my_pubkey, &sender_key)?;
+    storage.upsert_group_sender_key_state(id, &my_device_pubkey, &sender_key)?;
     client.send_event(outer).await?;
 
     output.success(
@@ -790,9 +811,10 @@ pub async fn rotate_sender_key(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let my_pubkey = config.public_key()?;
+    let my_device_pubkey = config.public_key()?;
+    let my_owner_pubkey = config.owner_public_key_hex()?;
     let (sender_event_keys, _sender_event_keys_changed) =
-        ensure_group_sender_event_keys(id, &my_pubkey, storage)?;
+        ensure_group_sender_event_keys(id, &my_device_pubkey, &my_owner_pubkey, storage)?;
     let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
@@ -811,7 +833,7 @@ pub async fn rotate_sender_key(
     let key_id: u32 = rand::random();
     let chain_key: [u8; 32] = rand::random();
     let state = SenderKeyState::new(key_id, chain_key, 0);
-    storage.upsert_group_sender_key_state(id, &my_pubkey, &state)?;
+    storage.upsert_group_sender_key_state(id, &my_device_pubkey, &state)?;
 
     // Distribute the sender key to the group via 1:1 Double Ratchet sessions (forward secrecy).
     let mut dist = SenderKeyDistribution::new(id.to_string(), key_id, chain_key, 0);
@@ -865,16 +887,21 @@ pub async fn accept(id: &str, config: &Config, storage: &Storage, output: &Outpu
                 arr.copy_from_slice(&secret_bytes);
 
                 if let Ok(channel) = nostr_double_ratchet::SharedChannel::new(&arr) {
-                    let my_pubkey = config.public_key()?;
+                    let my_device_pubkey = config.public_key()?;
+                    let my_owner_pubkey_hex = config.owner_public_key_hex()?;
+                    let my_owner_pubkey = nostr::PublicKey::from_hex(&my_owner_pubkey_hex)?;
 
                     // Create an invite for group members to establish 1:1 sessions
-                    let my_pk = nostr::PublicKey::from_hex(&my_pubkey)?;
-                    let invite = nostr_double_ratchet::Invite::create_new(my_pk, None, None)?;
+                    let my_device_pk = nostr::PublicKey::from_hex(&my_device_pubkey)?;
+                    let mut invite =
+                        nostr_double_ratchet::Invite::create_new(my_device_pk, None, None)?;
+                    // Help invitees attribute this device to an owner identity.
+                    invite.owner_public_key = Some(my_owner_pubkey);
                     let invite_url = invite.get_url("https://chat.iris.to")?;
 
                     let rumor_json = serde_json::json!({
                         "id": uuid::Uuid::new_v4().to_string(),
-                        "pubkey": my_pubkey,
+                        "pubkey": my_owner_pubkey_hex,
                         "created_at": std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()

@@ -86,7 +86,8 @@ pub async fn listen(
         Ok(channels)
     };
 
-    type GroupSenderMap = HashMap<String, (String, String)>;
+    // sender_event_pubkey -> (group_id, sender_owner_pubkey, sender_device_pubkey)
+    type GroupSenderMap = HashMap<String, (String, String, String)>;
 
     // Helper to build per-sender outer pubkey map from groups
     let build_group_sender_map = |storage: &Storage| -> Result<GroupSenderMap> {
@@ -102,7 +103,11 @@ pub async fn listen(
                 if sender.group_id != group.data.id {
                     continue;
                 }
-                if !members.contains(&sender.identity_pubkey) {
+                let owner_pubkey_hex = sender
+                    .owner_pubkey
+                    .as_deref()
+                    .unwrap_or(sender.identity_pubkey.as_str());
+                if !members.contains(&owner_pubkey_hex.to_string()) {
                     continue;
                 }
                 if nostr::PublicKey::from_hex(&sender.sender_event_pubkey).is_err() {
@@ -110,7 +115,11 @@ pub async fn listen(
                 }
                 map.insert(
                     sender.sender_event_pubkey.clone(),
-                    (group.data.id.clone(), sender.identity_pubkey.clone()),
+                    (
+                        group.data.id.clone(),
+                        owner_pubkey_hex.to_string(),
+                        sender.identity_pubkey.clone(),
+                    ),
                 );
             }
         }
@@ -800,7 +809,7 @@ pub async fn listen(
                             let rumor_pubkey = rumor["pubkey"].as_str().unwrap_or("").to_string();
 
                             // Skip if it's our own event
-                            if rumor_pubkey == my_pubkey {
+                            if rumor_pubkey == owner_pubkey_hex {
                                 continue;
                             }
 
@@ -921,7 +930,7 @@ pub async fn listen(
             if event_kind == MESSAGE_EVENT_KIND {
                 // === Per-sender published group message ===
                 let sender_event_pubkey_hex = event.pubkey.to_hex();
-                if let Some((group_id, sender_identity_pubkey_hex)) =
+                if let Some((group_id, sender_owner_pubkey_hex, sender_device_pubkey_hex)) =
                     group_sender_map.get(&sender_event_pubkey_hex).cloned()
                 {
                     if event.verify().is_err() {
@@ -946,13 +955,13 @@ pub async fn listen(
                     if group.data.accepted != Some(true) {
                         continue;
                     }
-                    if !group.data.members.contains(&sender_identity_pubkey_hex) {
+                    if !group.data.members.contains(&sender_owner_pubkey_hex) {
                         continue;
                     }
 
                     let Some(mut st) = storage.get_group_sender_key_state(
                         &group_id,
-                        &sender_identity_pubkey_hex,
+                        &sender_device_pubkey_hex,
                         key_id,
                     )?
                     else {
@@ -969,7 +978,7 @@ pub async fn listen(
                     };
                     storage.upsert_group_sender_key_state(
                         &group_id,
-                        &sender_identity_pubkey_hex,
+                        &sender_device_pubkey_hex,
                         &st,
                     )?;
 
@@ -995,7 +1004,7 @@ pub async fn listen(
                         let stored = StoredGroupMessage {
                             id: msg_id.clone(),
                             group_id: group_id.clone(),
-                            sender_pubkey: sender_identity_pubkey_hex.clone(),
+                            sender_pubkey: sender_owner_pubkey_hex.clone(),
                             content: content.clone(),
                             timestamp,
                             is_outgoing: false,
@@ -1007,7 +1016,8 @@ pub async fn listen(
                             serde_json::json!({
                                 "group_id": group_id,
                                 "message_id": msg_id,
-                                "sender_pubkey": sender_identity_pubkey_hex,
+                                "sender_pubkey": sender_owner_pubkey_hex,
+                                "sender_device_pubkey": sender_device_pubkey_hex,
                                 "content": content,
                                 "timestamp": timestamp,
                             }),
@@ -1018,7 +1028,8 @@ pub async fn listen(
                             "group_reaction",
                             serde_json::json!({
                                 "group_id": group_id,
-                                "sender_pubkey": sender_identity_pubkey_hex,
+                                "sender_pubkey": sender_owner_pubkey_hex,
+                                "sender_device_pubkey": sender_device_pubkey_hex,
                                 "message_id": message_id,
                                 "emoji": content,
                                 "timestamp": timestamp,
@@ -1029,7 +1040,8 @@ pub async fn listen(
                             "group_typing",
                             serde_json::json!({
                                 "group_id": group_id,
-                                "sender_pubkey": sender_identity_pubkey_hex,
+                                "sender_pubkey": sender_owner_pubkey_hex,
+                                "sender_device_pubkey": sender_device_pubkey_hex,
                                 "timestamp": timestamp,
                             }),
                         );
@@ -1086,7 +1098,8 @@ pub async fn listen(
                                     if let Some(metadata) =
                                         nostr_double_ratchet::group::parse_group_metadata(&content)
                                     {
-                                        let my_pubkey = config.public_key()?;
+                                        let my_device_pubkey = config.public_key()?;
+                                        let my_owner_pubkey = config.owner_public_key_hex()?;
                                         let existing = storage.get_group(gid)?;
 
                                         match existing {
@@ -1095,7 +1108,7 @@ pub async fn listen(
                                                     &existing_group.data,
                                                     &metadata,
                                                     &from_pubkey_hex,
-                                                    &my_pubkey,
+                                                    &my_owner_pubkey,
                                                 );
                                                 match validation {
                                                     nostr_double_ratchet::group::MetadataValidation::Accept => {
@@ -1109,7 +1122,7 @@ pub async fn listen(
                                                         // If the group's shared-channel secret rotated (e.g. membership changed),
                                                         // force *our* sender key to rotate too so newly-added members can decrypt.
                                                         if updated.secret != old_secret {
-                                                            let _ = storage.delete_group_sender_keys(gid, &my_pubkey)?;
+                                                            let _ = storage.delete_group_sender_keys(gid, &my_device_pubkey)?;
                                                         }
 
                                                         storage.save_chat(&updated_chat)?;
@@ -1139,7 +1152,7 @@ pub async fn listen(
                                                 if nostr_double_ratchet::group::validate_metadata_creation(
                                                     &metadata,
                                                     &from_pubkey_hex,
-                                                    &my_pubkey,
+                                                    &my_owner_pubkey,
                                                 ) {
                                                     let group_data = nostr_double_ratchet::group::GroupData {
                                                         id: metadata.id.clone(),
@@ -1187,13 +1200,30 @@ pub async fn listen(
                                         continue;
                                     }
 
+                                    // Per-device sender keys: the inner event's `pubkey` is the sender device.
+                                    // Fallback to owner pubkey for older clients that didn't set it.
+                                    let sender_device_pubkey_hex = decrypted_event
+                                        .get("pubkey")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let sender_device_pubkey_hex = if nostr::PublicKey::from_hex(
+                                        sender_device_pubkey_hex,
+                                    )
+                                    .is_ok()
+                                    {
+                                        sender_device_pubkey_hex.to_string()
+                                    } else {
+                                        from_pubkey_hex.clone()
+                                    };
+
                                     // Learn/update the sender's per-group outer pubkey mapping.
                                     if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey
                                     {
                                         if nostr::PublicKey::from_hex(sender_event_pubkey).is_ok() {
                                             storage.upsert_group_sender(&StoredGroupSender {
                                                 group_id: gid.clone(),
-                                                identity_pubkey: from_pubkey_hex.clone(),
+                                                identity_pubkey: sender_device_pubkey_hex.clone(),
+                                                owner_pubkey: Some(from_pubkey_hex.clone()),
                                                 sender_event_pubkey: sender_event_pubkey.clone(),
                                                 sender_event_secret_key: None,
                                             })?;
@@ -1204,7 +1234,7 @@ pub async fn listen(
                                     if storage
                                         .get_group_sender_key_state(
                                             gid,
-                                            &from_pubkey_hex,
+                                            &sender_device_pubkey_hex,
                                             dist.key_id,
                                         )?
                                         .is_none()
@@ -1216,14 +1246,14 @@ pub async fn listen(
                                         );
                                         storage.upsert_group_sender_key_state(
                                             gid,
-                                            &from_pubkey_hex,
+                                            &sender_device_pubkey_hex,
                                             &state,
                                         )?;
                                     }
 
                                     // Retry any pending SharedChannel messages for this (group,sender,key_id).
                                     let pending_key =
-                                        (gid.clone(), from_pubkey_hex.clone(), dist.key_id);
+                                        (gid.clone(), sender_device_pubkey_hex.clone(), dist.key_id);
                                     if let Some(mut pending) =
                                         pending_sender_key_messages.remove(&pending_key)
                                     {
@@ -1260,7 +1290,7 @@ pub async fn listen(
                                             if let Some(mut st) = storage
                                                 .get_group_sender_key_state(
                                                     gid,
-                                                    &from_pubkey_hex,
+                                                    &sender_device_pubkey_hex,
                                                     key_id,
                                                 )?
                                             {
@@ -1269,7 +1299,7 @@ pub async fn listen(
                                                 {
                                                     storage.upsert_group_sender_key_state(
                                                         gid,
-                                                        &from_pubkey_hex,
+                                                        &sender_device_pubkey_hex,
                                                         &st,
                                                     )?;
 
@@ -1309,6 +1339,7 @@ pub async fn listen(
                                                                     "group_id": gid,
                                                                     "message_id": msg_id,
                                                                     "sender_pubkey": from_pubkey_hex,
+                                                                    "sender_device_pubkey": sender_device_pubkey_hex,
                                                                     "content": content,
                                                                     "timestamp": timestamp,
                                                                 }),
@@ -1321,6 +1352,7 @@ pub async fn listen(
                                                                 serde_json::json!({
                                                                     "group_id": gid,
                                                                     "sender_pubkey": from_pubkey_hex,
+                                                                    "sender_device_pubkey": sender_device_pubkey_hex,
                                                                     "message_id": message_id,
                                                                     "emoji": content,
                                                                     "timestamp": timestamp,
@@ -1332,6 +1364,7 @@ pub async fn listen(
                                                                 serde_json::json!({
                                                                     "group_id": gid,
                                                                     "sender_pubkey": from_pubkey_hex,
+                                                                    "sender_device_pubkey": sender_device_pubkey_hex,
                                                                     "timestamp": timestamp,
                                                                 }),
                                                             );
@@ -1383,7 +1416,7 @@ pub async fn listen(
                                                 if let Some(mut st) = storage
                                                     .get_group_sender_key_state(
                                                         gid,
-                                                        &from_pubkey_hex,
+                                                        &sender_device_pubkey_hex,
                                                         key_id,
                                                     )?
                                                 {
@@ -1392,7 +1425,7 @@ pub async fn listen(
                                                     {
                                                         storage.upsert_group_sender_key_state(
                                                             gid,
-                                                            &from_pubkey_hex,
+                                                            &sender_device_pubkey_hex,
                                                             &st,
                                                         )?;
 
@@ -1435,6 +1468,7 @@ pub async fn listen(
                                                                         "group_id": gid,
                                                                         "message_id": msg_id,
                                                                         "sender_pubkey": from_pubkey_hex,
+                                                                        "sender_device_pubkey": sender_device_pubkey_hex,
                                                                         "content": content,
                                                                         "timestamp": timestamp,
                                                                     }),
@@ -1447,6 +1481,7 @@ pub async fn listen(
                                                                     serde_json::json!({
                                                                         "group_id": gid,
                                                                         "sender_pubkey": from_pubkey_hex,
+                                                                        "sender_device_pubkey": sender_device_pubkey_hex,
                                                                         "message_id": message_id,
                                                                         "emoji": content,
                                                                         "timestamp": timestamp,
@@ -1458,6 +1493,7 @@ pub async fn listen(
                                                                     serde_json::json!({
                                                                         "group_id": gid,
                                                                         "sender_pubkey": from_pubkey_hex,
+                                                                        "sender_device_pubkey": sender_device_pubkey_hex,
                                                                         "timestamp": timestamp,
                                                                     }),
                                                                 );
@@ -1475,6 +1511,7 @@ pub async fn listen(
                                         serde_json::json!({
                                             "group_id": gid,
                                             "sender_pubkey": from_pubkey_hex,
+                                            "sender_device_pubkey": sender_device_pubkey_hex,
                                             "key_id": dist.key_id,
                                             "iteration": dist.iteration,
                                             "sender_event_pubkey": dist.sender_event_pubkey,
