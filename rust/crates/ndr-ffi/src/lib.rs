@@ -526,7 +526,8 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        let (inner_id, outer_event_ids) = manager.send_text_with_inner_id(recipient, text, options)?;
+        let (inner_id, outer_event_ids) =
+            manager.send_text_with_inner_id(recipient, text, options)?;
         Ok(SendTextResult {
             inner_id,
             outer_event_ids,
@@ -586,10 +587,7 @@ impl SessionManagerHandle {
             if t.first().map(|s| s.as_str()) == Some("ms") {
                 has_ms = true;
             }
-            tags.push(
-                nostr::Tag::parse(&t)
-                    .map_err(|e| NdrError::InvalidEvent(e.to_string()))?,
-            );
+            tags.push(nostr::Tag::parse(&t).map_err(|e| NdrError::InvalidEvent(e.to_string()))?);
         }
 
         if !has_ms {

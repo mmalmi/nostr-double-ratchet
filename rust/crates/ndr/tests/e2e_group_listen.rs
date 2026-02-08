@@ -982,8 +982,11 @@ async fn test_group_chat_two_strangers_can_exchange_messages() {
 
     let result = async {
         // Alice creates invite for Bob, Bob joins, Alice accepts response.
-        let invite_bob =
-            run_ndr(alice_dir.path(), &["invite", "create", "-l", "strangers-bob"]).await;
+        let invite_bob = run_ndr(
+            alice_dir.path(),
+            &["invite", "create", "-l", "strangers-bob"],
+        )
+        .await;
         let invite_bob_id = invite_bob["data"]["id"]
             .as_str()
             .expect("invite id")
@@ -1005,8 +1008,11 @@ async fn test_group_chat_two_strangers_can_exchange_messages() {
         .await;
 
         // Alice creates invite for Carol, Carol joins, Alice accepts response.
-        let invite_carol =
-            run_ndr(alice_dir.path(), &["invite", "create", "-l", "strangers-carol"]).await;
+        let invite_carol = run_ndr(
+            alice_dir.path(),
+            &["invite", "create", "-l", "strangers-carol"],
+        )
+        .await;
         let invite_carol_id = invite_carol["data"]["id"]
             .as_str()
             .expect("invite id")
@@ -1068,7 +1074,10 @@ async fn test_group_chat_two_strangers_can_exchange_messages() {
             .unwrap_or(&Vec::new())
             .iter()
             .any(|c| c.get("their_pubkey").and_then(|v| v.as_str()) == Some(carol_pubkey.as_str()));
-        assert!(!bob_has_carol, "Bob should not have a direct chat with Carol");
+        assert!(
+            !bob_has_carol,
+            "Bob should not have a direct chat with Carol"
+        );
 
         let carol_chats = run_ndr(carol_dir.path(), &["chat", "list"]).await;
         let carol_has_bob = carol_chats["data"]["chats"]
@@ -1127,15 +1136,21 @@ async fn test_group_chat_two_strangers_can_exchange_messages() {
             .as_array()
             .expect("group_metadata members should be an array");
         assert!(
-            bob_members.iter().any(|m| m.as_str() == Some(alice_pubkey.as_str())),
+            bob_members
+                .iter()
+                .any(|m| m.as_str() == Some(alice_pubkey.as_str())),
             "Bob should see Alice as a member"
         );
         assert!(
-            bob_members.iter().any(|m| m.as_str() == Some(bob_pubkey.as_str())),
+            bob_members
+                .iter()
+                .any(|m| m.as_str() == Some(bob_pubkey.as_str())),
             "Bob should see himself as a member"
         );
         assert!(
-            bob_members.iter().any(|m| m.as_str() == Some(carol_pubkey.as_str())),
+            bob_members
+                .iter()
+                .any(|m| m.as_str() == Some(carol_pubkey.as_str())),
             "Bob should see Carol as a member"
         );
 
@@ -1216,11 +1231,7 @@ async fn test_group_chat_two_strangers_can_exchange_messages() {
 
         // Carol sends a group message; Bob should receive it.
         let carol_msg = "hello from carol (group)";
-        let _ = run_ndr(
-            carol_dir.path(),
-            &["group", "send", &group_id, carol_msg],
-        )
-        .await;
+        let _ = run_ndr(carol_dir.path(), &["group", "send", &group_id, carol_msg]).await;
         let _ = read_until_event_with_content(
             &mut alice_stdout,
             "group_message",

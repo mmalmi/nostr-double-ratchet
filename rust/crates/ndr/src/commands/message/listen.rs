@@ -838,8 +838,8 @@ pub async fn listen(
                                             if let Ok(invite) =
                                                 nostr_double_ratchet::Invite::from_url(invite_url)
                                             {
-                                                if let Ok((mut accept_session, response_event)) = invite
-                                                    .accept_with_owner(
+                                                if let Ok((mut accept_session, response_event)) =
+                                                    invite.accept_with_owner(
                                                         my_pubkey_key.clone(),
                                                         our_private_key,
                                                         None,
@@ -851,7 +851,9 @@ pub async fn listen(
                                                         .to_string()[..8]
                                                         .to_string();
                                                     let mut session_state_str =
-                                                        serde_json::to_string(&accept_session.state)?;
+                                                        serde_json::to_string(
+                                                            &accept_session.state,
+                                                        )?;
 
                                                     let mut chat = crate::storage::StoredChat {
                                                         id: new_chat_id.clone(),
@@ -877,13 +879,16 @@ pub async fn listen(
                                                         accept_session.send_typing()
                                                     {
                                                         // Persist ratcheted state before network I/O.
-                                                        session_state_str =
-                                                            serde_json::to_string(&accept_session.state)?;
-                                                        chat.session_state = session_state_str.clone();
+                                                        session_state_str = serde_json::to_string(
+                                                            &accept_session.state,
+                                                        )?;
+                                                        chat.session_state =
+                                                            session_state_str.clone();
                                                         storage.save_chat(&chat)?;
 
                                                         // Best-effort; group functionality still works if this fails.
-                                                        let _ = client.send_event(typing_event).await;
+                                                        let _ =
+                                                            client.send_event(typing_event).await;
                                                     }
 
                                                     output.event(
@@ -1206,15 +1211,14 @@ pub async fn listen(
                                         .get("pubkey")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("");
-                                    let sender_device_pubkey_hex = if nostr::PublicKey::from_hex(
-                                        sender_device_pubkey_hex,
-                                    )
-                                    .is_ok()
-                                    {
-                                        sender_device_pubkey_hex.to_string()
-                                    } else {
-                                        from_pubkey_hex.clone()
-                                    };
+                                    let sender_device_pubkey_hex =
+                                        if nostr::PublicKey::from_hex(sender_device_pubkey_hex)
+                                            .is_ok()
+                                        {
+                                            sender_device_pubkey_hex.to_string()
+                                        } else {
+                                            from_pubkey_hex.clone()
+                                        };
 
                                     // Learn/update the sender's per-group outer pubkey mapping.
                                     if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey
@@ -1252,8 +1256,11 @@ pub async fn listen(
                                     }
 
                                     // Retry any pending SharedChannel messages for this (group,sender,key_id).
-                                    let pending_key =
-                                        (gid.clone(), sender_device_pubkey_hex.clone(), dist.key_id);
+                                    let pending_key = (
+                                        gid.clone(),
+                                        sender_device_pubkey_hex.clone(),
+                                        dist.key_id,
+                                    );
                                     if let Some(mut pending) =
                                         pending_sender_key_messages.remove(&pending_key)
                                     {

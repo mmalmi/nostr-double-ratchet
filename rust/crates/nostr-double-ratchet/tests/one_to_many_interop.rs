@@ -131,8 +131,8 @@ fn test_generate_rust_one_to_many_vectors() -> Result<()> {
     )?;
 
     let output_path = get_test_vectors_path().join("rust-one-to-many-vectors.json");
-    let should_regenerate = env::var("REGENERATE_VECTORS").ok().as_deref() == Some("true")
-        || !output_path.exists();
+    let should_regenerate =
+        env::var("REGENERATE_VECTORS").ok().as_deref() == Some("true") || !output_path.exists();
 
     if should_regenerate {
         let vectors = OneToManyVectors {
@@ -169,7 +169,8 @@ fn test_generate_rust_one_to_many_vectors() -> Result<()> {
     // Always verify the vectors file is parseable and decryptable (so tests stay meaningful even
     // when we don't regenerate).
     let content = fs::read_to_string(&output_path).expect("Failed to read vectors");
-    let vectors: OneToManyVectors = serde_json::from_str(&content).expect("Failed to parse vectors");
+    let vectors: OneToManyVectors =
+        serde_json::from_str(&content).expect("Failed to parse vectors");
     assert_eq!(vectors.messages.len(), 2);
 
     let chain_key = hex_to_bytes32(&vectors.chain_key_hex);

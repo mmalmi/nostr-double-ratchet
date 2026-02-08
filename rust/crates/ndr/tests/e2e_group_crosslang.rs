@@ -251,21 +251,15 @@ async fn test_ts_rust_group_sender_keys_e2e() {
     let (ts_child, mut ts_reader) = start_ts_group_script(&relay_url).await;
 
     // Wait for invite URL.
-    let _alice_pubkey = read_until_ts_marker(
-        &mut ts_reader,
-        "E2E_ALICE_PUBKEY:",
-        Duration::from_secs(20),
-    )
-    .await
-    .expect("Failed to get Alice pubkey");
+    let _alice_pubkey =
+        read_until_ts_marker(&mut ts_reader, "E2E_ALICE_PUBKEY:", Duration::from_secs(20))
+            .await
+            .expect("Failed to get Alice pubkey");
 
-    let invite_url = read_until_ts_marker(
-        &mut ts_reader,
-        "E2E_INVITE_URL:",
-        Duration::from_secs(20),
-    )
-    .await
-    .expect("Failed to get invite URL");
+    let invite_url =
+        read_until_ts_marker(&mut ts_reader, "E2E_INVITE_URL:", Duration::from_secs(20))
+            .await
+            .expect("Failed to get invite URL");
 
     // Setup ndr (Bob).
     let bob_dir = setup_ndr_dir(&relay_url);
@@ -323,7 +317,13 @@ async fn test_ts_rust_group_sender_keys_e2e() {
         "hello from ts device1 second",
         "hello from ts device2",
     ];
-    let got = read_until_ndr_group_messages(&mut bob_stdout, &group_id, &expected_ts, Duration::from_secs(60)).await;
+    let got = read_until_ndr_group_messages(
+        &mut bob_stdout,
+        &group_id,
+        &expected_ts,
+        Duration::from_secs(60),
+    )
+    .await;
     assert_eq!(
         got.len(),
         expected_ts.len(),

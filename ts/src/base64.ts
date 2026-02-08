@@ -4,7 +4,6 @@
 export function base64Encode(bytes: Uint8Array): string {
   // Prefer built-ins when available.
   if (typeof Buffer !== "undefined") {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     return Buffer.from(bytes).toString("base64");
   }
 
@@ -24,7 +23,6 @@ export function base64Encode(bytes: Uint8Array): string {
 
 export function base64Decode(b64: string): Uint8Array {
   if (typeof Buffer !== "undefined") {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     return new Uint8Array(Buffer.from(b64, "base64"));
   }
 
@@ -39,4 +37,3 @@ export function base64Decode(b64: string): Uint8Array {
   }
   return out;
 }
-

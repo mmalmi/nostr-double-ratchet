@@ -29,6 +29,7 @@ test-vectors/
 
 # Rust
 target/
+target_macos_11/
 Cargo.lock
 .pnpm-store
 test-vectors/*.json

@@ -4,8 +4,8 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 use nostr::{JsonUtil, Keys, UnsignedEvent};
 use nostr_double_ratchet::{
-    AppKeys, DeviceEntry, InMemoryStorage, Invite, Result, SessionManager, SessionManagerEvent,
-    SendOptions, MESSAGE_EVENT_KIND,
+    AppKeys, DeviceEntry, InMemoryStorage, Invite, Result, SendOptions, SessionManager,
+    SessionManagerEvent, MESSAGE_EVENT_KIND,
 };
 
 fn recv_signed_event(rx: &Receiver<SessionManagerEvent>) -> nostr::Event {
