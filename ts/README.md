@@ -63,6 +63,27 @@ await sessionManager.sendMessage(recipientPubkey, "persist", { expiration: null 
 This library does **not** delete old messages from storage; that must be implemented by the client/storage layer.
 Decrypted expired rumors are still delivered to `onEvent`; clients can filter them (e.g. using `isExpired()`).
 
+## Disappearing Message Signaling (1:1 Chat Settings)
+
+To coordinate disappearing messages in a 1:1 chat, Iris uses an encrypted settings rumor:
+
+- Kind: `CHAT_SETTINGS_KIND = 10448`
+- Content JSON: `{ "type": "chat-settings", "v": 1, "messageTtlSeconds": <seconds|null> }`
+- Settings events themselves do **not** expire.
+
+The receiver auto-adopts the setting by default and updates their per-peer outgoing expiration.
+
+```ts
+// Set TTL for this peer and notify them (receiver auto-adopts)
+await sessionManager.setChatSettingsForPeer(recipientPubkey, 60)
+
+// Disable per-peer expiration even if you have a global default
+await sessionManager.setChatSettingsForPeer(recipientPubkey, 0)
+
+// Turn off auto-adopt if you want to require user confirmation
+sessionManager.setAutoAdoptChatSettings(false)
+```
+
 ## Multi-Device
 
 - **Main device** (has nsec): Uses both `DelegateManager` and `AppKeysManager`

@@ -7,6 +7,13 @@ pub const INVITE_EVENT_KIND: u32 = 30078;
 pub const APP_KEYS_EVENT_KIND: u32 = 30078;
 pub const INVITE_RESPONSE_KIND: u32 = 1059;
 pub const CHAT_MESSAGE_KIND: u32 = 14;
+/// Encrypted 1:1 chat settings (inner rumor kind).
+///
+/// Payload is JSON in `content`:
+/// `{ "type": "chat-settings", "v": 1, "messageTtlSeconds": <number> }`
+///
+/// Settings events themselves should not expire (no NIP-40 expiration tag).
+pub const CHAT_SETTINGS_KIND: u32 = 10448;
 pub const REACTION_KIND: u32 = 7;
 pub const RECEIPT_KIND: u32 = 15;
 pub const TYPING_KIND: u32 = 25;
@@ -28,6 +35,17 @@ pub struct SendOptions {
     pub expires_at: Option<u64>,
     /// Convenience option: seconds from "now" until expiration.
     pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSettingsPayloadV1 {
+    #[serde(rename = "type")]
+    pub typ: String,
+    pub v: u32,
+    /// Default TTL (seconds) to apply to outgoing messages for this chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -78,6 +78,29 @@ manager.send_text(bob_pubkey, "hi".to_string(), None)?;
 manager.send_text(bob_pubkey, "persist".to_string(), Some(SendOptions::default()))?;
 ```
 
+## Disappearing Message Signaling (1:1 Chat Settings)
+
+To coordinate disappearing messages in a 1:1 chat, Iris uses an encrypted settings rumor:
+
+- Kind: `CHAT_SETTINGS_KIND = 10448`
+- Content JSON: `{ "type": "chat-settings", "v": 1, "messageTtlSeconds": <seconds> }`
+- Settings events themselves do **not** expire.
+
+The receiver auto-adopts the setting by default and updates their per-peer outgoing SendOptions.
+
+```rust
+use nostr_double_ratchet::SessionManager;
+
+// Set TTL for this peer and notify them (receiver auto-adopts)
+manager.set_chat_settings_for_peer(bob_pubkey, 60)?;
+
+// Disable per-peer expiration even if you have a global default
+manager.set_chat_settings_for_peer(bob_pubkey, 0)?;
+
+// Turn off auto-adopt if you want to require user confirmation
+manager.set_auto_adopt_chat_settings(false);
+```
+
 ## Tests
 
 Run the test suite:

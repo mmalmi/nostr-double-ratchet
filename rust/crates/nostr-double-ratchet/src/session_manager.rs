@@ -49,6 +49,7 @@ pub struct SessionManager {
     default_send_options: Arc<Mutex<Option<crate::SendOptions>>>,
     peer_send_options: Arc<Mutex<HashMap<PublicKey, crate::SendOptions>>>,
     group_send_options: Arc<Mutex<HashMap<String, crate::SendOptions>>>,
+    auto_adopt_chat_settings: Arc<Mutex<bool>>,
 }
 
 impl SessionManager {
@@ -74,7 +75,10 @@ impl SessionManager {
         let key = self.send_options_peer_key(&owner);
 
         if let Some(o) = options.clone() {
-            self.peer_send_options.lock().unwrap().insert(owner, o.clone());
+            self.peer_send_options
+                .lock()
+                .unwrap()
+                .insert(owner, o.clone());
             self.storage.put(&key, serde_json::to_string(&o)?)?;
         } else {
             self.peer_send_options.lock().unwrap().remove(&owner);
@@ -101,6 +105,13 @@ impl SessionManager {
             let _ = self.storage.del(&key);
         }
         Ok(())
+    }
+
+    /// Enable/disable automatically adopting incoming `chat-settings` events (kind 10448).
+    ///
+    /// When enabled, receiving a valid settings payload updates per-peer SendOptions.
+    pub fn set_auto_adopt_chat_settings(&self, enabled: bool) {
+        *self.auto_adopt_chat_settings.lock().unwrap() = enabled;
     }
 
     pub fn new(
@@ -154,6 +165,7 @@ impl SessionManager {
             default_send_options: Arc::new(Mutex::new(None)),
             peer_send_options: Arc::new(Mutex::new(HashMap::new())),
             group_send_options: Arc::new(Mutex::new(HashMap::new())),
+            auto_adopt_chat_settings: Arc::new(Mutex::new(true)),
         }
     }
 
@@ -249,7 +261,9 @@ impl SessionManager {
         Ok(event_ids)
     }
 
-    #[deprecated(note = "use send_text(recipient, text, Some(SendOptions{ expires_at: Some(...) }))")]
+    #[deprecated(
+        note = "use send_text(recipient, text, Some(SendOptions{ expires_at: Some(...) }))"
+    )]
     pub fn send_text_with_expiration(
         &self,
         recipient: PublicKey,
@@ -280,18 +294,19 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let mut tags: Vec<Tag> = Vec::new();
         if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(Tag::parse(&[
-                crate::EXPIRATION_TAG.to_string(),
-                expires_at.to_string(),
-            ])
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
         }
 
-        let event =
-            self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, tags)?;
+        let event = self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, tags)?;
 
         let inner_id = event
             .id
@@ -301,6 +316,48 @@ impl SessionManager {
 
         let event_ids = self.send_event(recipient, event)?;
         Ok((inner_id, event_ids))
+    }
+
+    /// Send an encrypted 1:1 chat settings event (inner kind 10448).
+    ///
+    /// Settings events themselves should never expire; they are sent without a NIP-40 expiration tag.
+    pub fn send_chat_settings(
+        &self,
+        recipient: PublicKey,
+        message_ttl_seconds: u64,
+    ) -> Result<Vec<String>> {
+        let payload = crate::ChatSettingsPayloadV1 {
+            typ: "chat-settings".to_string(),
+            v: 1,
+            message_ttl_seconds: Some(message_ttl_seconds),
+        };
+
+        let content = serde_json::to_string(&payload)?;
+        let event =
+            self.build_message_event(recipient, crate::CHAT_SETTINGS_KIND, content, vec![])?;
+        self.send_event(recipient, event)
+    }
+
+    /// Convenience: set per-peer disappearing-message TTL and notify the peer via a settings event.
+    ///
+    /// `message_ttl_seconds`:
+    /// - `> 0`: set per-peer `ttl_seconds`
+    /// - `== 0`: disable per-peer expiration even if a global default exists
+    pub fn set_chat_settings_for_peer(
+        &self,
+        peer_pubkey: PublicKey,
+        message_ttl_seconds: u64,
+    ) -> Result<Vec<String>> {
+        let opts = if message_ttl_seconds == 0 {
+            crate::SendOptions::default()
+        } else {
+            crate::SendOptions {
+                ttl_seconds: Some(message_ttl_seconds),
+                expires_at: None,
+            }
+        };
+        self.set_peer_send_options(peer_pubkey, Some(opts))?;
+        self.send_chat_settings(peer_pubkey, message_ttl_seconds)
     }
 
     pub fn send_receipt(
@@ -324,13 +381,15 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(Tag::parse(&[
-                crate::EXPIRATION_TAG.to_string(),
-                expires_at.to_string(),
-            ])
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
         }
 
         let event = self.build_message_event(
@@ -350,14 +409,16 @@ impl SessionManager {
     ) -> Result<Vec<String>> {
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let mut tags: Vec<Tag> = Vec::new();
         if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(Tag::parse(&[
-                crate::EXPIRATION_TAG.to_string(),
-                expires_at.to_string(),
-            ])
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
         }
 
         let event =
@@ -389,13 +450,15 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(Tag::parse(&[
-                crate::EXPIRATION_TAG.to_string(),
-                expires_at.to_string(),
-            ])
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
+            tags.push(
+                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
+                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
+            );
         }
 
         let event = self.build_message_event(recipient, crate::REACTION_KIND, emoji, tags)?;
@@ -673,7 +736,9 @@ impl SessionManager {
         // Per-peer
         let peer_keys = self.storage.list(&self.send_options_peer_prefix())?;
         for k in peer_keys {
-            let hex_pk = k.strip_prefix(&self.send_options_peer_prefix()).unwrap_or("");
+            let hex_pk = k
+                .strip_prefix(&self.send_options_peer_prefix())
+                .unwrap_or("");
             if hex_pk.is_empty() {
                 continue;
             }
@@ -741,6 +806,90 @@ impl SessionManager {
         }
 
         crate::SendOptions::default()
+    }
+
+    fn chat_settings_peer_pubkey(
+        &self,
+        from_owner_pubkey: PublicKey,
+        rumor: &UnsignedEvent,
+    ) -> Option<PublicKey> {
+        let us = self.owner_public_key;
+
+        // Determine which peer this applies to:
+        // - for incoming messages, `from_owner_pubkey` is the peer
+        // - for sender-copy sync across our own devices, `["p", <peer>]` indicates the peer
+        let recipient_p = rumor.tags.iter().find_map(|t| {
+            let v = t.clone().to_vec();
+            if v.first().map(|s| s.as_str()) != Some("p") {
+                return None;
+            }
+            let pk_hex = v.get(1)?;
+            crate::utils::pubkey_from_hex(pk_hex).ok()
+        });
+
+        if let Some(p) = recipient_p {
+            if p != us {
+                return Some(p);
+            }
+        }
+
+        if from_owner_pubkey != us {
+            return Some(from_owner_pubkey);
+        }
+
+        None
+    }
+
+    fn maybe_auto_adopt_chat_settings(&self, from_owner_pubkey: PublicKey, rumor: &UnsignedEvent) {
+        if !*self.auto_adopt_chat_settings.lock().unwrap() {
+            return;
+        }
+
+        if rumor.kind.as_u16() != crate::CHAT_SETTINGS_KIND as u16 {
+            return;
+        }
+
+        let payload = match serde_json::from_str::<serde_json::Value>(&rumor.content) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let typ = payload.get("type").and_then(|v| v.as_str());
+        let v = payload.get("v").and_then(|v| v.as_u64());
+        if typ != Some("chat-settings") || v != Some(1) {
+            return;
+        }
+
+        let Some(peer_pubkey) = self.chat_settings_peer_pubkey(from_owner_pubkey, rumor) else {
+            return;
+        };
+
+        match payload.get("messageTtlSeconds") {
+            // Missing: clear per-peer override (fall back to global default).
+            None => {
+                let _ = self.set_peer_send_options(peer_pubkey, None);
+            }
+            // Null: disable per-peer expiration (even if a global default exists).
+            Some(serde_json::Value::Null) => {
+                let _ =
+                    self.set_peer_send_options(peer_pubkey, Some(crate::SendOptions::default()));
+            }
+            Some(serde_json::Value::Number(n)) => {
+                let Some(ttl) = n.as_u64() else {
+                    return;
+                };
+                let opts = if ttl == 0 {
+                    crate::SendOptions::default()
+                } else {
+                    crate::SendOptions {
+                        ttl_seconds: Some(ttl),
+                        expires_at: None,
+                    }
+                };
+                let _ = self.set_peer_send_options(peer_pubkey, Some(opts));
+            }
+            _ => {}
+        }
     }
 
     fn user_record_key(&self, pubkey: &PublicKey) -> String {
@@ -1356,6 +1505,10 @@ impl SessionManager {
                     }
                 }
 
+                if let Ok(rumor) = serde_json::from_str::<UnsignedEvent>(&plaintext) {
+                    self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor);
+                }
+
                 let _ = self
                     .pubsub
                     .decrypted_message(owner_pubkey, plaintext, event_id);
@@ -1407,5 +1560,80 @@ mod tests {
         let result = manager.send_text(recipient, "test".to_string(), None);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_auto_adopt_chat_settings_sender_copy_uses_p_tag_peer() {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key();
+        let identity_key = keys.secret_key().to_secret_bytes();
+        let device_id = "test-device".to_string();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+
+        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
+
+        let peer = Keys::generate().public_key();
+        let peer_hex = hex::encode(peer.to_bytes());
+
+        // Sender-copy: from_owner_pubkey == us, so peer must be taken from the ["p", ...] tag.
+        let payload = serde_json::json!({
+            "type": "chat-settings",
+            "v": 1,
+            "messageTtlSeconds": 90,
+        })
+        .to_string();
+
+        let rumor = nostr::EventBuilder::new(
+            nostr::Kind::from(crate::CHAT_SETTINGS_KIND as u16),
+            &payload,
+        )
+        .tag(
+            Tag::parse(&["p".to_string(), peer_hex])
+                .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
+                .unwrap(),
+        )
+        .build(pubkey);
+
+        manager.maybe_auto_adopt_chat_settings(pubkey, &rumor);
+
+        let opts = manager
+            .peer_send_options
+            .lock()
+            .unwrap()
+            .get(&peer)
+            .cloned()
+            .unwrap();
+        assert_eq!(opts.ttl_seconds, Some(90));
+        assert_eq!(opts.expires_at, None);
+
+        // Null disables per-peer expiration (stores an empty SendOptions override).
+        let payload_disable = serde_json::json!({
+            "type": "chat-settings",
+            "v": 1,
+            "messageTtlSeconds": null,
+        })
+        .to_string();
+
+        let rumor_disable = nostr::EventBuilder::new(
+            nostr::Kind::from(crate::CHAT_SETTINGS_KIND as u16),
+            &payload_disable,
+        )
+        .tag(
+            Tag::parse(&["p".to_string(), hex::encode(peer.to_bytes())])
+                .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
+                .unwrap(),
+        )
+        .build(pubkey);
+
+        manager.maybe_auto_adopt_chat_settings(pubkey, &rumor_disable);
+        let opts_disable = manager
+            .peer_send_options
+            .lock()
+            .unwrap()
+            .get(&peer)
+            .cloned()
+            .unwrap();
+        assert_eq!(opts_disable.ttl_seconds, None);
+        assert_eq!(opts_disable.expires_at, None);
     }
 }

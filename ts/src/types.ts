@@ -102,6 +102,28 @@ export const APP_KEYS_EVENT_KIND = 30078;
 
 export const CHAT_MESSAGE_KIND = 14;
 
+/**
+ * Encrypted 1:1 chat settings (inner rumor kind).
+ *
+ * Payload is JSON in `content`:
+ * `{ "type": "chat-settings", "v": 1, "messageTtlSeconds": <number|null|undefined> }`
+ *
+ * These settings events themselves should not expire (no NIP-40 expiration tag).
+ */
+export const CHAT_SETTINGS_KIND = 10448;
+
+/**
+ * @deprecated Use CHAT_SETTINGS_KIND.
+ */
+export const KIND_CHAT_SETTINGS = CHAT_SETTINGS_KIND;
+
+export interface ChatSettingsPayloadV1 {
+  type: "chat-settings";
+  v: 1;
+  /** Default TTL (seconds) to apply to outgoing messages for this chat. */
+  messageTtlSeconds?: number | null;
+}
+
 
 export type NostrEvent = {
   id: string;

@@ -6,10 +6,12 @@ import {
   Unsubscribe,
   APP_KEYS_EVENT_KIND,
   CHAT_MESSAGE_KIND,
+  CHAT_SETTINGS_KIND,
   RECEIPT_KIND,
   TYPING_KIND,
   ReceiptType,
   ExpirationOptions,
+  ChatSettingsPayloadV1,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { AppKeys, DeviceEntry } from "./AppKeys"
@@ -99,6 +101,7 @@ export class SessionManager {
   private defaultExpiration: ExpirationOptions | undefined
   private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
   private groupExpiration: Map<string, ExpirationOptions | null> = new Map()
+  private autoAdoptChatSettings: boolean = true
 
   // Persist user records in-order per key so older async writes can't overwrite newer state.
   private userRecordWriteChain: Map<string, Promise<void>> = new Map()
@@ -586,6 +589,8 @@ export class SessionManager {
         return
       }
 
+      this.maybeAutoAdoptChatSettings(event, userPubkey)
+
       for (const cb of this.internalSubscriptions) cb(event, userPubkey)
       promoteToActive(session)
       this.storeUserRecord(userPubkey).catch(() => {})
@@ -740,6 +745,14 @@ export class SessionManager {
     return () => {
       this.internalSubscriptions.delete(callback)
     }
+  }
+
+  /**
+   * Enable/disable automatically adopting incoming `chat-settings` events (kind 10448).
+   * When enabled, receiving a valid settings payload updates per-peer expiration defaults.
+   */
+  setAutoAdoptChatSettings(enabled: boolean) {
+    this.autoAdoptChatSettings = enabled
   }
 
   getDeviceId(): string {
@@ -1002,8 +1015,8 @@ export class SessionManager {
       rumor.tags.push(["ms", String(now)])
     }
 
-    // Expiration defaults can be configured per peer/group, but group metadata must never expire.
-    if (kind !== GROUP_METADATA_KIND) {
+    // Expiration defaults can be configured per peer/group, but some inner rumor kinds must never expire.
+    if (kind !== GROUP_METADATA_KIND && kind !== CHAT_SETTINGS_KIND) {
       const nowSeconds = Math.floor(now / 1000)
 
       const groupId = builtTags.find(t => t[0] === "l")?.[1]
@@ -1057,6 +1070,49 @@ export class SessionManager {
     return rumor
   }
 
+  /**
+   * Send an encrypted 1:1 chat settings event (inner kind 10448).
+   *
+   * Settings events themselves should never expire; they are sent without a NIP-40 expiration tag.
+   */
+  async sendChatSettings(
+    recipientPublicKey: string,
+    messageTtlSeconds: ChatSettingsPayloadV1["messageTtlSeconds"]
+  ): Promise<Rumor> {
+    const payload: ChatSettingsPayloadV1 = {
+      type: "chat-settings",
+      v: 1,
+      messageTtlSeconds,
+    }
+    return this.sendMessage(recipientPublicKey, JSON.stringify(payload), {
+      kind: CHAT_SETTINGS_KIND,
+      expiration: null,
+    })
+  }
+
+  /**
+   * Convenience: set per-peer disappearing-message TTL and notify the peer via a settings event.
+   *
+   * `messageTtlSeconds`:
+   * - `> 0`: set per-peer ttlSeconds
+   * - `0` or `null`: disable per-peer expiration even if a global default exists
+   * - `undefined`: clear per-peer override (fall back to global default)
+   */
+  async setChatSettingsForPeer(
+    peerPubkey: string,
+    messageTtlSeconds: ChatSettingsPayloadV1["messageTtlSeconds"]
+  ): Promise<Rumor> {
+    if (messageTtlSeconds === undefined) {
+      await this.setExpirationForPeer(peerPubkey, undefined)
+    } else if (messageTtlSeconds === null || messageTtlSeconds === 0) {
+      await this.setExpirationForPeer(peerPubkey, null)
+    } else {
+      await this.setExpirationForPeer(peerPubkey, { ttlSeconds: messageTtlSeconds })
+    }
+
+    return this.sendChatSettings(peerPubkey, messageTtlSeconds)
+  }
+
   async sendReceipt(
     recipientPublicKey: string,
     receiptType: ReceiptType,
@@ -1073,6 +1129,67 @@ export class SessionManager {
     return this.sendMessage(recipientPublicKey, "typing", {
       kind: TYPING_KIND,
     })
+  }
+
+  private maybeAutoAdoptChatSettings(event: Rumor, fromOwnerPubkey: string): void {
+    if (!this.autoAdoptChatSettings) return
+    if (event.kind !== CHAT_SETTINGS_KIND) return
+
+    let payload: unknown
+    try {
+      payload = JSON.parse(event.content)
+    } catch {
+      return
+    }
+
+    const p = payload as Partial<ChatSettingsPayloadV1>
+    if (p?.type !== "chat-settings" || p?.v !== 1) return
+
+    const recipientP = event.tags?.find((t) => t[0] === "p")?.[1]
+
+    // Determine which peer this setting applies to:
+    // - for incoming messages, `fromOwnerPubkey` is the peer
+    // - for sender-copy sync across our own devices, `["p", <peer>]` indicates the peer
+    const us = this.ownerPublicKey
+    const peer =
+      recipientP && recipientP !== us
+        ? recipientP
+        : fromOwnerPubkey && fromOwnerPubkey !== us
+          ? fromOwnerPubkey
+          : undefined
+    if (!peer || peer === us) return
+
+    const ttl = (p as ChatSettingsPayloadV1).messageTtlSeconds
+
+    // Adopt:
+    // - number > 0: set per-peer ttlSeconds
+    // - 0 or null: disable per-peer expiration (even if a global default exists)
+    // - undefined: clear per-peer override (fall back to global default)
+    if (ttl === undefined) {
+      this.setExpirationForPeer(peer, undefined).catch(() => {})
+      return
+    }
+
+    if (ttl === null) {
+      this.setExpirationForPeer(peer, null).catch(() => {})
+      return
+    }
+
+    if (
+      typeof ttl !== "number" ||
+      !Number.isFinite(ttl) ||
+      !Number.isSafeInteger(ttl) ||
+      ttl < 0
+    ) {
+      return
+    }
+
+    if (ttl === 0) {
+      this.setExpirationForPeer(peer, null).catch(() => {})
+      return
+    }
+
+    this.setExpirationForPeer(peer, { ttlSeconds: ttl }).catch(() => {})
   }
 
   private async cleanupDevice(publicKey: string, deviceId: string): Promise<void> {
