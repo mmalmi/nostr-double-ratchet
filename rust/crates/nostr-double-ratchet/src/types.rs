@@ -21,10 +21,13 @@ pub const MAX_SKIP: usize = 1000;
 /// Note: Purging/deleting expired messages is the responsibility of the client/storage.
 pub const EXPIRATION_TAG: &str = "expiration";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SendOptions {
     /// UNIX timestamp in seconds when the message should expire.
     pub expires_at: Option<u64>,
+    /// Convenience option: seconds from "now" until expiration.
+    pub ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

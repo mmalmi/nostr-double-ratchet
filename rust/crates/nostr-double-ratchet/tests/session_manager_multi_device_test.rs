@@ -214,13 +214,14 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
 
     // Send a message to self (owner) from device1 with an expiration tag.
     let expires_at = 1_700_000_000u64;
-    manager1.send_text(
+    manager1.set_peer_send_options(
         owner_pubkey,
-        "hello".to_string(),
         Some(SendOptions {
             expires_at: Some(expires_at),
+            ttl_seconds: None,
         }),
     )?;
+    manager1.send_text(owner_pubkey, "hello".to_string(), None)?;
 
     // Deliver encrypted message to device2
     let message_event = loop {

@@ -15,6 +15,7 @@ import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { AppKeys, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
+import { GROUP_METADATA_KIND } from "./GroupMeta"
 import {
   deserializeSessionState,
   resolveExpirationSeconds,
@@ -94,6 +95,11 @@ export class SessionManager {
   // Cached AppKeys for authorization checks
   private cachedAppKeys: Map<string, AppKeys> = new Map()
 
+  // Expiration defaults (persisted)
+  private defaultExpiration: ExpirationOptions | undefined
+  private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
+  private groupExpiration: Map<string, ExpirationOptions | null> = new Map()
+
   // Persist user records in-order per key so older async writes can't overwrite newer state.
   private userRecordWriteChain: Map<string, Promise<void>> = new Map()
 
@@ -107,6 +113,89 @@ export class SessionManager {
 
   // Initialization flag
   private initialized: boolean = false
+
+  private expirationDefaultKey(): string {
+    return `${this.versionPrefix}/expiration/default`
+  }
+
+  private expirationPeerPrefix(): string {
+    return `${this.versionPrefix}/expiration/peer/`
+  }
+
+  private expirationPeerKey(peerPubkey: string): string {
+    return `${this.expirationPeerPrefix()}${peerPubkey}`
+  }
+
+  private expirationGroupPrefix(): string {
+    return `${this.versionPrefix}/expiration/group/`
+  }
+
+  private expirationGroupKey(groupId: string): string {
+    return `${this.expirationGroupPrefix()}${encodeURIComponent(groupId)}`
+  }
+
+  private validateExpirationOptions(options: ExpirationOptions | undefined): void {
+    if (!options) return
+    // Validates mutual exclusivity + integer seconds.
+    resolveExpirationSeconds(options, 0)
+  }
+
+  private async loadExpirationSettings(): Promise<void> {
+    // Default
+    const def = await this.storage.get<ExpirationOptions>(this.expirationDefaultKey())
+    if (def) {
+      try {
+        this.validateExpirationOptions(def)
+        this.defaultExpiration = def
+      } catch {
+        // Ignore invalid stored values
+      }
+    }
+
+    // Per-peer
+    const peerKeys = await this.storage.list(this.expirationPeerPrefix())
+    for (const k of peerKeys) {
+      const peer = k.slice(this.expirationPeerPrefix().length)
+      if (!peer) continue
+      const v = await this.storage.get<ExpirationOptions | null>(k)
+      if (v === undefined) continue
+      if (v === null) {
+        this.peerExpiration.set(peer, null)
+        continue
+      }
+      try {
+        this.validateExpirationOptions(v)
+        this.peerExpiration.set(peer, v)
+      } catch {
+        // Ignore invalid stored values
+      }
+    }
+
+    // Per-group
+    const groupKeys = await this.storage.list(this.expirationGroupPrefix())
+    for (const k of groupKeys) {
+      const enc = k.slice(this.expirationGroupPrefix().length)
+      if (!enc) continue
+      let groupId: string
+      try {
+        groupId = decodeURIComponent(enc)
+      } catch {
+        continue
+      }
+      const v = await this.storage.get<ExpirationOptions | null>(k)
+      if (v === undefined) continue
+      if (v === null) {
+        this.groupExpiration.set(groupId, null)
+        continue
+      }
+      try {
+        this.validateExpirationOptions(v)
+        this.groupExpiration.set(groupId, v)
+      } catch {
+        // Ignore invalid stored values
+      }
+    }
+  }
 
   constructor(
     ourPublicKey: string,
@@ -140,6 +229,10 @@ export class SessionManager {
 
     await this.loadAllUserRecords().catch(() => {
       // Failed to load user records
+    })
+
+    await this.loadExpirationSettings().catch(() => {
+      // Failed to load expiration settings
     })
 
     // Add our own device to user record to prevent accepting our own invite
@@ -657,6 +750,56 @@ export class SessionManager {
     return this.userRecords
   }
 
+  /**
+   * Set a global default expiration for outgoing rumors sent via this SessionManager.
+   * Pass `undefined` to clear.
+   */
+  async setDefaultExpiration(options: ExpirationOptions | undefined): Promise<void> {
+    this.validateExpirationOptions(options)
+    this.defaultExpiration = options
+    const key = this.expirationDefaultKey()
+    if (!options) {
+      await this.storage.del(key).catch(() => {})
+      return
+    }
+    await this.storage.put(key, options).catch(() => {})
+  }
+
+  /**
+   * Set a per-peer default expiration for outgoing rumors. Pass `undefined` to clear.
+   */
+  async setExpirationForPeer(
+    peerPubkey: string,
+    options: ExpirationOptions | null | undefined
+  ): Promise<void> {
+    this.validateExpirationOptions(options || undefined)
+    if (options === undefined) {
+      this.peerExpiration.delete(peerPubkey)
+      await this.storage.del(this.expirationPeerKey(peerPubkey)).catch(() => {})
+      return
+    }
+    this.peerExpiration.set(peerPubkey, options)
+    await this.storage.put(this.expirationPeerKey(peerPubkey), options).catch(() => {})
+  }
+
+  /**
+   * Set a per-group default expiration, keyed by groupId (typically carried via `["l", groupId]`).
+   * Pass `undefined` to clear.
+   */
+  async setExpirationForGroup(
+    groupId: string,
+    options: ExpirationOptions | null | undefined
+  ): Promise<void> {
+    this.validateExpirationOptions(options || undefined)
+    if (options === undefined) {
+      this.groupExpiration.delete(groupId)
+      await this.storage.del(this.expirationGroupKey(groupId)).catch(() => {})
+      return
+    }
+    this.groupExpiration.set(groupId, options)
+    await this.storage.put(this.expirationGroupKey(groupId), options).catch(() => {})
+  }
+
   close() {
     for (const unsubscribe of this.inviteSubscriptions.values()) {
       unsubscribe()
@@ -838,7 +981,7 @@ export class SessionManager {
   async sendMessage(
     recipientPublicKey: string,
     content: string,
-    options: { kind?: number; tags?: string[][] } & ExpirationOptions = {}
+    options: { kind?: number; tags?: string[][]; expiration?: ExpirationOptions | null } & ExpirationOptions = {}
   ): Promise<Rumor> {
     const { kind = CHAT_MESSAGE_KIND, tags = [] } = options
 
@@ -859,9 +1002,49 @@ export class SessionManager {
       rumor.tags.push(["ms", String(now)])
     }
 
-    const expiresAt = resolveExpirationSeconds(options, Math.floor(now / 1000))
-    if (expiresAt !== undefined) {
-      upsertExpirationTag(rumor.tags, expiresAt)
+    // Expiration defaults can be configured per peer/group, but group metadata must never expire.
+    if (kind !== GROUP_METADATA_KIND) {
+      const nowSeconds = Math.floor(now / 1000)
+
+      const groupId = builtTags.find(t => t[0] === "l")?.[1]
+
+      // Determine per-send expiration override:
+      // - `expiration: null` disables expiration entirely (even if defaults exist)
+      // - `expiration: {…}` overrides defaults
+      // - legacy `expiresAt` / `ttlSeconds` on the options object are treated as an override when provided
+      let expirationOverride: ExpirationOptions | null | undefined = options.expiration
+      const legacyOverride =
+        options.expiresAt !== undefined || options.ttlSeconds !== undefined
+
+      if (expirationOverride === undefined && legacyOverride) {
+        expirationOverride = { expiresAt: options.expiresAt, ttlSeconds: options.ttlSeconds }
+      }
+
+      if (expirationOverride !== null) {
+        let disabledByPolicy = false
+        let effective: ExpirationOptions | undefined
+
+        if (expirationOverride !== undefined) {
+          effective = expirationOverride
+        } else if (groupId && this.groupExpiration.has(groupId)) {
+          const v = this.groupExpiration.get(groupId)
+          if (v === null) disabledByPolicy = true
+          else effective = v
+        } else if (this.peerExpiration.has(recipientPublicKey)) {
+          const v = this.peerExpiration.get(recipientPublicKey)
+          if (v === null) disabledByPolicy = true
+          else effective = v
+        } else {
+          effective = this.defaultExpiration
+        }
+
+        if (!disabledByPolicy && effective) {
+          const expiresAt = resolveExpirationSeconds(effective, nowSeconds)
+          if (expiresAt !== undefined) {
+            upsertExpirationTag(rumor.tags, expiresAt)
+          }
+        }
+      }
     }
 
     rumor.id = getEventHash(rumor)

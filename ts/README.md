@@ -46,6 +46,18 @@ await sessionManager.sendMessage(recipientPubkey, "This will disappear", { ttlSe
 await sessionManager.sendMessage(recipientPubkey, "Expires at a specific time", {
   expiresAt: 1704067260,
 })
+
+// Set defaults so you don't have to pass expiration on every send
+await sessionManager.setDefaultExpiration({ ttlSeconds: 60 })
+await sessionManager.setExpirationForPeer(recipientPubkey, { ttlSeconds: 120 })
+await sessionManager.setExpirationForGroup(groupId, { ttlSeconds: 30 }) // applies when tags include ["l", groupId]
+
+// Disable expiration for a peer/group even when a global default is set
+await sessionManager.setExpirationForPeer(recipientPubkey, null)
+await sessionManager.setExpirationForGroup(groupId, null)
+
+// Disable expiration for a single send (even if defaults exist)
+await sessionManager.sendMessage(recipientPubkey, "persist", { expiration: null })
 ```
 
 This library does **not** delete old messages from storage; that must be implemented by the client/storage layer.

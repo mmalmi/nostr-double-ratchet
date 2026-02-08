@@ -49,6 +49,35 @@ let event = alice.send("Hello Bob!".to_string())?;
 let plaintext = bob.receive(&event)?;
 ```
 
+## Disappearing Messages (Expiration)
+
+For disappearing messages, include a NIP-40-style `["expiration", "<unix seconds>"]` tag in the *inner* rumor event.
+When sending via `SessionManager`, you can set per-send overrides or configure defaults:
+
+```rust
+use nostr_double_ratchet::{SendOptions, SessionManager};
+
+// Assuming you already have a SessionManager named `manager`.
+
+// Apply a global default (e.g. 60s from now)
+manager.set_default_send_options(Some(SendOptions {
+    ttl_seconds: Some(60),
+    expires_at: None,
+}))?;
+
+// Per-peer default (overrides global default)
+manager.set_peer_send_options(bob_pubkey, Some(SendOptions {
+    ttl_seconds: Some(120),
+    expires_at: None,
+}))?;
+
+// Use defaults (no per-send options)
+manager.send_text(bob_pubkey, "hi".to_string(), None)?;
+
+// Disable expiration for a single send even if defaults exist
+manager.send_text(bob_pubkey, "persist".to_string(), Some(SendOptions::default()))?;
+```
+
 ## Tests
 
 Run the test suite:

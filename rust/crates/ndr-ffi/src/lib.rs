@@ -507,6 +507,7 @@ impl SessionManagerHandle {
         let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
+            ttl_seconds: None,
         });
         Ok(manager.send_text(recipient, text, options)?)
     }
@@ -523,6 +524,7 @@ impl SessionManagerHandle {
         let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
+            ttl_seconds: None,
         });
         let (inner_id, outer_event_ids) = manager.send_text_with_inner_id(recipient, text, options)?;
         Ok(SendTextResult {
@@ -636,6 +638,7 @@ impl SessionManagerHandle {
         let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
+            ttl_seconds: None,
         });
         Ok(manager.send_receipt(recipient, &receipt_type, message_ids, options)?)
     }
@@ -650,6 +653,7 @@ impl SessionManagerHandle {
         let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
+            ttl_seconds: None,
         });
         Ok(manager.send_typing(recipient, options)?)
     }
@@ -666,6 +670,7 @@ impl SessionManagerHandle {
         let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
+            ttl_seconds: None,
         });
         Ok(manager.send_reaction(recipient, message_id, emoji, options)?)
     }

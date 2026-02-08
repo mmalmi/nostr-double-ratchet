@@ -46,9 +46,63 @@ pub struct SessionManager {
     invite_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
     app_keys_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
     pending_acceptances: Arc<Mutex<HashSet<PublicKey>>>,
+    default_send_options: Arc<Mutex<Option<crate::SendOptions>>>,
+    peer_send_options: Arc<Mutex<HashMap<PublicKey, crate::SendOptions>>>,
+    group_send_options: Arc<Mutex<HashMap<String, crate::SendOptions>>>,
 }
 
 impl SessionManager {
+    pub fn set_default_send_options(&self, options: Option<crate::SendOptions>) -> Result<()> {
+        *self.default_send_options.lock().unwrap() = options.clone();
+
+        let key = self.send_options_default_key();
+        match options {
+            Some(o) => self.storage.put(&key, serde_json::to_string(&o)?)?,
+            None => {
+                let _ = self.storage.del(&key);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_peer_send_options(
+        &self,
+        peer_pubkey: PublicKey,
+        options: Option<crate::SendOptions>,
+    ) -> Result<()> {
+        let owner = self.resolve_to_owner(&peer_pubkey);
+        let key = self.send_options_peer_key(&owner);
+
+        if let Some(o) = options.clone() {
+            self.peer_send_options.lock().unwrap().insert(owner, o.clone());
+            self.storage.put(&key, serde_json::to_string(&o)?)?;
+        } else {
+            self.peer_send_options.lock().unwrap().remove(&owner);
+            let _ = self.storage.del(&key);
+        }
+        Ok(())
+    }
+
+    pub fn set_group_send_options(
+        &self,
+        group_id: String,
+        options: Option<crate::SendOptions>,
+    ) -> Result<()> {
+        let key = self.send_options_group_key(&group_id);
+
+        if let Some(o) = options.clone() {
+            self.group_send_options
+                .lock()
+                .unwrap()
+                .insert(group_id.clone(), o.clone());
+            self.storage.put(&key, serde_json::to_string(&o)?)?;
+        } else {
+            self.group_send_options.lock().unwrap().remove(&group_id);
+            let _ = self.storage.del(&key);
+        }
+        Ok(())
+    }
+
     pub fn new(
         our_public_key: PublicKey,
         our_identity_key: [u8; 32],
@@ -97,6 +151,9 @@ impl SessionManager {
             invite_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             app_keys_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             pending_acceptances: Arc::new(Mutex::new(HashSet::new())),
+            default_send_options: Arc::new(Mutex::new(None)),
+            peer_send_options: Arc::new(Mutex::new(HashMap::new())),
+            group_send_options: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -109,6 +166,7 @@ impl SessionManager {
         drop(initialized);
 
         self.load_all_user_records()?;
+        let _ = self.load_send_options();
 
         // Ensure our own device is present in our owner's record
         {
@@ -203,6 +261,7 @@ impl SessionManager {
             text,
             Some(crate::SendOptions {
                 expires_at: Some(expires_at),
+                ttl_seconds: None,
             }),
         )
     }
@@ -219,13 +278,16 @@ impl SessionManager {
             return Ok((String::new(), Vec::new()));
         }
 
-        let options = options.unwrap_or_default();
+        let owner = self.resolve_to_owner(&recipient);
+        let options = self.effective_send_options(owner, None, options);
+        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut tags: Vec<Tag> = Vec::new();
-        if let Some(expires_at) = options.expires_at {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
+        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
+            tags.push(Tag::parse(&[
+                crate::EXPIRATION_TAG.to_string(),
+                expires_at.to_string(),
+            ])
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
         }
 
         let event =
@@ -260,12 +322,15 @@ impl SessionManager {
             );
         }
 
-        let options = options.unwrap_or_default();
-        if let Some(expires_at) = options.expires_at {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
+        let owner = self.resolve_to_owner(&recipient);
+        let options = self.effective_send_options(owner, None, options);
+        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
+            tags.push(Tag::parse(&[
+                crate::EXPIRATION_TAG.to_string(),
+                expires_at.to_string(),
+            ])
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
         }
 
         let event = self.build_message_event(
@@ -283,13 +348,16 @@ impl SessionManager {
         recipient: PublicKey,
         options: Option<crate::SendOptions>,
     ) -> Result<Vec<String>> {
-        let options = options.unwrap_or_default();
+        let owner = self.resolve_to_owner(&recipient);
+        let options = self.effective_send_options(owner, None, options);
+        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut tags: Vec<Tag> = Vec::new();
-        if let Some(expires_at) = options.expires_at {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
+        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
+            tags.push(Tag::parse(&[
+                crate::EXPIRATION_TAG.to_string(),
+                expires_at.to_string(),
+            ])
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
         }
 
         let event =
@@ -319,12 +387,15 @@ impl SessionManager {
                 .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
         );
 
-        let options = options.unwrap_or_default();
-        if let Some(expires_at) = options.expires_at {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
+        let owner = self.resolve_to_owner(&recipient);
+        let options = self.effective_send_options(owner, None, options);
+        let now_s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
+            tags.push(Tag::parse(&[
+                crate::EXPIRATION_TAG.to_string(),
+                expires_at.to_string(),
+            ])
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?);
         }
 
         let event = self.build_message_event(recipient, crate::REACTION_KIND, emoji, tags)?;
@@ -565,6 +636,111 @@ impl SessionManager {
 
     fn device_invite_key(&self, device_id: &str) -> String {
         format!("device-invite/{}", device_id)
+    }
+
+    fn send_options_default_key(&self) -> String {
+        "send-options/default".to_string()
+    }
+
+    fn send_options_peer_prefix(&self) -> String {
+        "send-options/peer/".to_string()
+    }
+
+    fn send_options_peer_key(&self, owner_pubkey: &PublicKey) -> String {
+        format!(
+            "{}{}",
+            self.send_options_peer_prefix(),
+            hex::encode(owner_pubkey.to_bytes())
+        )
+    }
+
+    fn send_options_group_prefix(&self) -> String {
+        "send-options/group/".to_string()
+    }
+
+    fn send_options_group_key(&self, group_id: &str) -> String {
+        format!("{}{}", self.send_options_group_prefix(), group_id)
+    }
+
+    fn load_send_options(&self) -> Result<()> {
+        // Default
+        if let Some(data) = self.storage.get(&self.send_options_default_key())? {
+            if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(&data) {
+                *self.default_send_options.lock().unwrap() = Some(opts);
+            }
+        }
+
+        // Per-peer
+        let peer_keys = self.storage.list(&self.send_options_peer_prefix())?;
+        for k in peer_keys {
+            let hex_pk = k.strip_prefix(&self.send_options_peer_prefix()).unwrap_or("");
+            if hex_pk.is_empty() {
+                continue;
+            }
+            let Ok(pk) = crate::utils::pubkey_from_hex(hex_pk) else {
+                continue;
+            };
+            if let Some(data) = self.storage.get(&k)? {
+                if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(&data) {
+                    self.peer_send_options.lock().unwrap().insert(pk, opts);
+                }
+            }
+        }
+
+        // Per-group
+        let group_keys = self.storage.list(&self.send_options_group_prefix())?;
+        for k in group_keys {
+            let group_id = k
+                .strip_prefix(&self.send_options_group_prefix())
+                .unwrap_or("")
+                .to_string();
+            if group_id.is_empty() {
+                continue;
+            }
+            if let Some(data) = self.storage.get(&k)? {
+                if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(&data) {
+                    self.group_send_options
+                        .lock()
+                        .unwrap()
+                        .insert(group_id, opts);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn effective_send_options(
+        &self,
+        recipient_owner: PublicKey,
+        group_id: Option<&str>,
+        override_options: Option<crate::SendOptions>,
+    ) -> crate::SendOptions {
+        if let Some(o) = override_options {
+            return o;
+        }
+
+        if let Some(gid) = group_id {
+            if let Some(o) = self.group_send_options.lock().unwrap().get(gid).cloned() {
+                return o;
+            }
+        }
+
+        if let Some(o) = self
+            .peer_send_options
+            .lock()
+            .unwrap()
+            .get(&recipient_owner)
+            .cloned()
+        {
+            return o;
+        }
+
+        if let Some(o) = self.default_send_options.lock().unwrap().clone() {
+            return o;
+        }
+
+        crate::SendOptions::default()
     }
 
     fn user_record_key(&self, pubkey: &PublicKey) -> String {
