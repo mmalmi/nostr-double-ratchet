@@ -116,10 +116,10 @@ fn create_session_pair(
     bob_sk: &[u8; 32],
 ) -> (Session, Session, nostr::Event) {
     let invite = Invite::create_new(*alice_pk, None, None).unwrap();
-    let (bob_session, response_event) = invite.accept(*bob_pk, bob_sk.clone(), None).unwrap();
+    let (bob_session, response_event) = invite.accept(*bob_pk, *bob_sk, None).unwrap();
 
     let alice_session = invite
-        .process_invite_response(&response_event, alice_sk.clone())
+        .process_invite_response(&response_event, *alice_sk)
         .unwrap()
         .unwrap()
         .session;

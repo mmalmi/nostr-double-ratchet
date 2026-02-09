@@ -866,10 +866,10 @@ pub async fn listen(
                                             {
                                                 if let Ok((mut accept_session, response_event)) =
                                                     invite.accept_with_owner(
-                                                        my_pubkey_key.clone(),
+                                                        my_pubkey_key,
                                                         our_private_key,
                                                         None,
-                                                        Some(owner_pubkey.clone()),
+                                                        Some(owner_pubkey),
                                                     )
                                                 {
                                                     // Save the new chat

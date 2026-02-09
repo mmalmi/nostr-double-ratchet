@@ -100,8 +100,8 @@ async fn read_until_marker(
                 Ok(_) => {
                     let trimmed = line.trim();
                     println!("[TS] {}", trimmed);
-                    if trimmed.starts_with(prefix) {
-                        return Some(trimmed[prefix.len()..].to_string());
+                    if let Some(rest) = trimmed.strip_prefix(prefix) {
+                        return Some(rest.to_string());
                     }
                 }
                 Err(_) => return None,
@@ -226,8 +226,7 @@ async fn test_ts_rust_e2e() {
             if n > 0 {
                 let trimmed = line.trim();
                 println!("[TS] {}", trimmed);
-                if trimmed.starts_with("E2E_MESSAGE_RECEIVED:") {
-                    let content = &trimmed["E2E_MESSAGE_RECEIVED:".len()..];
+                if let Some(content) = trimmed.strip_prefix("E2E_MESSAGE_RECEIVED:") {
                     assert_eq!(content, "Hello from ndr!");
                     ndr_to_ts_success = true;
                 }

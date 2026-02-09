@@ -102,8 +102,8 @@ async fn read_until_marker(
                 Ok(_) => {
                     let trimmed = line.trim();
                     println!("[output] {}", trimmed);
-                    if trimmed.starts_with(prefix) {
-                        return Some(trimmed[prefix.len()..].to_string());
+                    if let Some(rest) = trimmed.strip_prefix(prefix) {
+                        return Some(rest.to_string());
                     }
                 }
                 Err(_) => return None,

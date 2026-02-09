@@ -193,6 +193,7 @@ async fn fan_out_metadata(
 ///
 /// This is the Signal-style approach: sender keys are distributed pairwise with forward secrecy,
 /// while group messages are later published once via a per-sender outer pubkey.
+#[allow(clippy::too_many_arguments)]
 async fn fan_out_sender_key_distribution(
     group: &nostr_double_ratchet::group::GroupData,
     dist_json: &str,
@@ -524,6 +525,7 @@ fn ensure_group_sender_event_keys(
     Ok((keys, true))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_group_sender_key(
     group: &nostr_double_ratchet::group::GroupData,
     group_id: &str,
@@ -753,10 +755,11 @@ pub async fn react(
     )
     .await?;
 
-    let mut tags: Vec<Vec<String>> = Vec::new();
-    tags.push(vec!["e".to_string(), message_id.to_string()]);
-    tags.push(vec!["l".to_string(), id.to_string()]);
-    tags.push(vec!["ms".to_string(), now_ms.to_string()]);
+    let tags: Vec<Vec<String>> = vec![
+        vec!["e".to_string(), message_id.to_string()],
+        vec!["l".to_string(), id.to_string()],
+        vec!["ms".to_string(), now_ms.to_string()],
+    ];
     let nostr_tags: Vec<nostr::Tag> = tags
         .iter()
         .filter_map(|t| nostr::Tag::parse(t).ok())

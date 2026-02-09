@@ -396,7 +396,7 @@ impl Storage {
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map(|ext| ext == "json").unwrap_or(false) == false {
+            if !path.extension().map(|ext| ext == "json").unwrap_or(false) {
                 continue;
             }
 
@@ -554,7 +554,7 @@ impl Storage {
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map(|ext| ext == "json").unwrap_or(false) == false {
+            if !path.extension().map(|ext| ext == "json").unwrap_or(false) {
                 continue;
             }
 

@@ -647,8 +647,7 @@ async fn test_group_chat_six_participants_everyone_receives() {
             .to_string();
 
         // Everyone else should receive the group metadata.
-        for idx in 1..participants.len() {
-            let listener = listeners.get_mut(idx).expect("listener should exist");
+        for listener in listeners.iter_mut().skip(1) {
             let event = read_until_event(
                 &mut listener.stdout,
                 "group_metadata",
@@ -661,8 +660,7 @@ async fn test_group_chat_six_participants_everyone_receives() {
         }
 
         // Everyone must accept the group to subscribe to the SharedChannel.
-        for idx in 1..participants.len() {
-            let p = &participants[idx];
+        for p in participants.iter().skip(1) {
             let _ = run_ndr(p.dir.path(), &["group", "accept", &group_id]).await;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

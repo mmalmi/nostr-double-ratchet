@@ -275,9 +275,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
                             let sub_id = parsed[1].as_str().unwrap_or("").to_string();
                             let mut filters = Vec::new();
 
-                            for i in 2..parsed.len() {
-                                if let Ok(filter) =
-                                    serde_json::from_value::<NostrFilter>(parsed[i].clone())
+                            for v in parsed.iter().skip(2) {
+                                if let Ok(filter) = serde_json::from_value::<NostrFilter>(v.clone())
                                 {
                                     filters.push(filter);
                                 }

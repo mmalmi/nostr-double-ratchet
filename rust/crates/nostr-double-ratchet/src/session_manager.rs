@@ -1422,26 +1422,23 @@ impl SessionManager {
                     Some(self.owner_public_key),
                 );
 
-                match accept_result {
-                    Ok((mut session, response_event)) => {
-                        let _ = self.pubsub.publish_signed(response_event);
-                        session.set_pubsub(self.pubsub.clone());
-                        let _ = session.subscribe_to_messages();
+                if let Ok((mut session, response_event)) = accept_result {
+                    let _ = self.pubsub.publish_signed(response_event);
+                    session.set_pubsub(self.pubsub.clone());
+                    let _ = session.subscribe_to_messages();
 
-                        {
-                            let mut records = self.user_records.lock().unwrap();
-                            let user_record = records.entry(owner_pubkey).or_insert_with(|| {
-                                UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
-                            });
-                            self.upsert_device_record(user_record, &device_id);
-                            user_record.upsert_session(Some(&device_id), session);
-                        }
-
-                        self.record_known_device_identity(owner_pubkey, inviter_device);
-                        let _ = self.store_user_record(&owner_pubkey);
-                        self.send_message_history(owner_pubkey, &device_id);
+                    {
+                        let mut records = self.user_records.lock().unwrap();
+                        let user_record = records.entry(owner_pubkey).or_insert_with(|| {
+                            UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
+                        });
+                        self.upsert_device_record(user_record, &device_id);
+                        user_record.upsert_session(Some(&device_id), session);
                     }
-                    Err(_) => {}
+
+                    self.record_known_device_identity(owner_pubkey, inviter_device);
+                    let _ = self.store_user_record(&owner_pubkey);
+                    self.send_message_history(owner_pubkey, &device_id);
                 }
 
                 self.pending_acceptances
