@@ -5,3 +5,6 @@ pub mod identity;
 pub mod invite;
 pub mod link;
 pub mod message;
+
+mod nip19;
+mod public_invite;

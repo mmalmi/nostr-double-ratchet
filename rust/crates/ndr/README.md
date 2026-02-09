@@ -96,7 +96,7 @@ ndr listen                  # Wait for the response and finalize linking
 
 ```bash
 ndr chat list               # List all chats
-ndr chat join <url>         # Join via invite URL
+ndr chat join <url>         # Join via invite URL, or Iris-style chat link: https://chat.iris.to/#npub1...
 ndr chat show <id>          # Show chat details
 ndr chat delete <id>        # Delete a chat
 ```
@@ -106,6 +106,7 @@ ndr chat delete <id>        # Delete a chat
 ```bash
 ndr send <chat_id> <msg>    # Send encrypted message
 ndr send <npub> <msg>       # Auto-accept their public invite if no chat exists
+ndr send <chat_link> <msg>  # Same, but with https://chat.iris.to/#npub1... style links
 ndr react <chat_id> <msg_id> <emoji>  # React to a message
 ndr read <chat_id>          # Read message history
 ndr listen                  # Listen for incoming messages

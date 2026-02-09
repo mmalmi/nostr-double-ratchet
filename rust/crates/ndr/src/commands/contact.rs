@@ -4,14 +4,17 @@ use crate::output::Output;
 use crate::storage::Storage;
 
 pub async fn add(npub_or_hex: &str, name: &str, storage: &Storage, output: &Output) -> Result<()> {
-    // Accept hex pubkey and convert to npub
-    let npub = if npub_or_hex.starts_with("npub1") {
-        npub_or_hex.to_string()
+    // Accept:
+    // - npub / nprofile
+    // - Iris-style chat links like `https://chat.iris.to/#npub...`
+    // - 64-char hex pubkey
+    let npub = if let Some(pk) = crate::commands::nip19::parse_pubkey(npub_or_hex) {
+        nostr::ToBech32::to_bech32(&pk)?
     } else if npub_or_hex.len() == 64 && npub_or_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         let pk = nostr::PublicKey::from_hex(npub_or_hex)?;
         nostr::ToBech32::to_bech32(&pk)?
     } else {
-        anyhow::bail!("Invalid pubkey: must be npub or 64-char hex");
+        anyhow::bail!("Invalid pubkey: must be npub/nprofile, chat link, or 64-char hex");
     };
 
     storage.add_contact(&npub, name)?;

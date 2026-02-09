@@ -25,7 +25,8 @@ struct ChatInfo {
 struct ChatJoinedWithEvent {
     id: String,
     their_pubkey: String,
-    response_event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_event: Option<String>,
 }
 
 /// List all chats
@@ -52,8 +53,48 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
-    // Parse the invite URL
-    let invite = nostr_double_ratchet::Invite::from_url(url)?;
+    // 1) Legacy invite URL format (JSON in hash).
+    // 2) Iris-style chat links: https://chat.iris.to/#npub1... (or #/npub1...)
+    let invite = match nostr_double_ratchet::Invite::from_url(url) {
+        Ok(invite) => invite,
+        Err(invite_err) => {
+            if let Some(pk) = crate::commands::nip19::parse_pubkey(url) {
+                let their_pubkey_hex = pk.to_hex();
+
+                // If a chat already exists, just "open" it (no new session handshake).
+                if let Ok(Some(existing)) = storage.get_chat_by_pubkey(&their_pubkey_hex) {
+                    output.success(
+                        "chat.join",
+                        ChatJoinedWithEvent {
+                            id: existing.id,
+                            their_pubkey: existing.their_pubkey,
+                            response_event: None,
+                        },
+                    );
+                    return Ok(());
+                }
+
+                let joined = crate::commands::public_invite::join_via_public_invite(
+                    &their_pubkey_hex,
+                    config,
+                    storage,
+                )
+                .await?;
+
+                output.success(
+                    "chat.join",
+                    ChatJoinedWithEvent {
+                        id: joined.chat.id,
+                        their_pubkey: joined.chat.their_pubkey,
+                        response_event: Some(nostr::JsonUtil::as_json(&joined.response_event)),
+                    },
+                );
+                return Ok(());
+            }
+
+            return Err(invite_err.into());
+        }
+    };
     if invite.purpose.as_deref() == Some("link") {
         anyhow::bail!("Link invite detected. Use 'ndr link accept <url>' instead.");
     }
@@ -97,7 +138,7 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
         ChatJoinedWithEvent {
             id,
             their_pubkey,
-            response_event: nostr::JsonUtil::as_json(&response_event),
+            response_event: Some(nostr::JsonUtil::as_json(&response_event)),
         },
     );
 

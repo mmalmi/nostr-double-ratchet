@@ -8,14 +8,11 @@ pub fn resolve_target(target: &str, storage: &Storage) -> Result<StoredChat> {
         return Ok(chat);
     }
 
-    // 2. Try as npub -> decode to hex pubkey -> find chat
-    if target.starts_with("npub1") {
-        use nostr::FromBech32;
-        if let Ok(pk) = nostr::PublicKey::from_bech32(target) {
-            let hex = pk.to_hex();
-            if let Ok(Some(chat)) = storage.get_chat_by_pubkey(&hex) {
-                return Ok(chat);
-            }
+    // 2. Try as npub/nprofile (or Iris-style chat link containing one) -> decode to hex pubkey -> find chat
+    if let Some(pk) = crate::commands::nip19::parse_pubkey(target) {
+        let hex = pk.to_hex();
+        if let Ok(Some(chat)) = storage.get_chat_by_pubkey(&hex) {
+            return Ok(chat);
         }
         anyhow::bail!("No chat found for {}", target);
     }
@@ -41,10 +38,7 @@ pub fn resolve_target(target: &str, storage: &Storage) -> Result<StoredChat> {
 
 /// Resolve a target to a hex pubkey (npub, hex pubkey, or petname).
 pub(super) fn resolve_target_pubkey(target: &str, storage: &Storage) -> Result<String> {
-    if target.starts_with("npub1") {
-        use nostr::FromBech32;
-        let pk = nostr::PublicKey::from_bech32(target)
-            .map_err(|_| anyhow::anyhow!("Invalid npub: {}", target))?;
+    if let Some(pk) = crate::commands::nip19::parse_pubkey(target) {
         return Ok(pk.to_hex());
     }
 

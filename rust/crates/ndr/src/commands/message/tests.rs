@@ -369,6 +369,51 @@ fn test_resolve_target_by_npub() {
 }
 
 #[test]
+fn test_resolve_target_by_chat_link_hash_npub() {
+    let (_temp, _config, storage, _) = setup();
+    let keys = nostr::Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+    let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
+
+    let session = create_test_session();
+    let session_state = serde_json::to_string(&session.state).unwrap();
+    storage
+        .save_chat(&StoredChat {
+            id: "link-chat".to_string(),
+            their_pubkey: pubkey_hex.clone(),
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state,
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+
+    let link = format!("https://chat.iris.to/#{}", npub);
+    let chat = resolve_target(&link, &storage).unwrap();
+    assert_eq!(chat.id, "link-chat");
+
+    let link_slash = format!("https://chat.iris.to/#/{}", npub);
+    let chat = resolve_target(&link_slash, &storage).unwrap();
+    assert_eq!(chat.id, "link-chat");
+}
+
+#[test]
+fn test_resolve_target_pubkey_accepts_chat_link_hash_npub() {
+    let (_temp, _config, storage, _) = setup();
+    let keys = nostr::Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+    let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
+
+    let link = format!("https://chat.iris.to/#{}", npub);
+    let resolved = super::common::resolve_target_pubkey(&link, &storage).unwrap();
+    assert_eq!(resolved, pubkey_hex);
+
+    let nostr_uri = format!("nostr:{}", npub);
+    let resolved = super::common::resolve_target_pubkey(&nostr_uri, &storage).unwrap();
+    assert_eq!(resolved, pubkey_hex);
+}
+
+#[test]
 fn test_resolve_target_not_found() {
     let (_temp, _config, storage, _) = setup();
     assert!(resolve_target("nonexistent", &storage).is_err());
