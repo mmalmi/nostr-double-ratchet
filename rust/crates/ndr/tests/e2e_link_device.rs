@@ -75,7 +75,7 @@ async fn test_link_flow_publishes_app_keys_and_links_device() {
 
     // Device to be linked: create link invite (auto-generates identity)
     let device_dir = setup_ndr_dir(&relay_url);
-    let created = run_ndr(device_dir.path(), &["link", "create"]).await;
+    let created = run_ndr(device_dir.path(), &["link", "create", "--publish"]).await;
     assert_eq!(created["status"], "ok");
     let link_url = created["data"]["url"]
         .as_str()

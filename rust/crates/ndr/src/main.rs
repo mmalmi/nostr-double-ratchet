@@ -168,7 +168,13 @@ enum InviteCommands {
 #[derive(Subcommand)]
 enum LinkCommands {
     /// Create a private link invite for a new device
-    Create,
+    Create {
+        /// Publish this device's public invite event to configured relays (optional).
+        ///
+        /// This can help multi-device AppKeys fanout, but is intentionally not done by default.
+        #[arg(long)]
+        publish: bool,
+    },
 
     /// Accept a link invite URL
     Accept {
@@ -419,7 +425,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             }
         },
         Commands::Link(cmd) => match cmd {
-            LinkCommands::Create => commands::link::create(&config, &storage, output).await,
+            LinkCommands::Create { publish } => {
+                commands::link::create(&config, &storage, output, publish).await
+            }
             LinkCommands::Accept { url } => {
                 commands::link::accept(&url, &config, &storage, output).await
             }

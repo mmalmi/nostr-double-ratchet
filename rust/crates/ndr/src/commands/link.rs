@@ -94,7 +94,12 @@ fn render_qr(url: &str) -> Result<String> {
 }
 
 /// Create a private link invite for a new device.
-pub async fn create(config: &Config, storage: &Storage, output: &Output) -> Result<()> {
+pub async fn create(
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+    publish: bool,
+) -> Result<()> {
     let mut config = config.clone();
     let (device_pubkey_hex, generated_identity) = config.ensure_identity()?;
     let invite = build_link_invite(&device_pubkey_hex)?;
@@ -117,26 +122,28 @@ pub async fn create(config: &Config, storage: &Storage, output: &Output) -> Resu
     let mut device_invite_published = false;
     let mut device_invite_publish_error = None::<String>;
 
-    let relays = config.resolved_relays();
-    if !relays.is_empty() {
-        if let Ok(unsigned) = device_invite.get_event() {
-            let sk_bytes = config.private_key_bytes()?;
-            let sk = nostr::SecretKey::from_slice(&sk_bytes)?;
-            let keys = nostr::Keys::new(sk);
-            let event = unsigned
-                .sign_with_keys(&keys)
-                .map_err(|e| anyhow::anyhow!("Failed to sign device invite event: {}", e))?;
+    if publish {
+        let relays = config.resolved_relays();
+        if !relays.is_empty() {
+            if let Ok(unsigned) = device_invite.get_event() {
+                let sk_bytes = config.private_key_bytes()?;
+                let sk = nostr::SecretKey::from_slice(&sk_bytes)?;
+                let keys = nostr::Keys::new(sk);
+                let event = unsigned
+                    .sign_with_keys(&keys)
+                    .map_err(|e| anyhow::anyhow!("Failed to sign device invite event: {}", e))?;
 
-            let client = Client::default();
-            for relay in &relays {
-                client.add_relay(relay).await?;
-            }
-            client.connect().await;
+                let client = Client::default();
+                for relay in &relays {
+                    client.add_relay(relay).await?;
+                }
+                client.connect().await;
 
-            match client.send_event(event).await {
-                Ok(_) => device_invite_published = true,
-                Err(err) => {
-                    device_invite_publish_error = Some(err.to_string());
+                match client.send_event(event).await {
+                    Ok(_) => device_invite_published = true,
+                    Err(err) => {
+                        device_invite_publish_error = Some(err.to_string());
+                    }
                 }
             }
         }
@@ -315,7 +322,7 @@ mod tests {
         let (_temp, config, storage) = setup();
         let output = Output::new(true);
 
-        create(&config, &storage, &output).await.unwrap();
+        create(&config, &storage, &output, false).await.unwrap();
 
         let invites = storage.list_invites().unwrap();
         assert_eq!(invites.len(), 2);
@@ -343,6 +350,19 @@ mod tests {
 
         let updated = Config::load(_temp.path()).unwrap();
         assert!(updated.is_logged_in());
+    }
+
+    #[tokio::test]
+    async fn test_create_does_not_publish_device_invite_without_flag() {
+        let (temp, mut config, storage) = setup();
+        let output = Output::new(true);
+
+        // If `link create` were to auto-publish, this invalid relay would cause an error.
+        config.relays = vec!["not-a-url".to_string()];
+        config.save().unwrap();
+        let config = Config::load(temp.path()).unwrap();
+
+        create(&config, &storage, &output, false).await.unwrap();
     }
 
     #[tokio::test]
