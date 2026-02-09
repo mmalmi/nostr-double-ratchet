@@ -63,6 +63,12 @@ enum Commands {
         /// Reply to a specific message ID
         #[arg(long)]
         reply: Option<String>,
+        /// Disappearing messages: expire N seconds from now (adds inner rumor ["expiration", ...] tag)
+        #[arg(long)]
+        ttl: Option<u64>,
+        /// Disappearing messages: absolute expiration UNIX timestamp (seconds)
+        #[arg(long, value_name = "UNIX_SECONDS")]
+        expires_at: Option<u64>,
     },
 
     /// React to a message
@@ -330,6 +336,17 @@ enum ChatCommands {
         /// Chat ID
         id: String,
     },
+
+    /// Set per-chat disappearing-message TTL (seconds) and optionally notify the peer (kind 10448)
+    Ttl {
+        /// Chat ID, npub, hex pubkey, or contact name
+        target: String,
+        /// TTL in seconds, or "off"
+        ttl: String,
+        /// Only update local settings, do not send an encrypted chat-settings event
+        #[arg(long)]
+        local_only: bool,
+    },
 }
 
 #[tokio::main]
@@ -414,16 +431,25 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             }
             ChatCommands::Show { id } => commands::chat::show(&id, &storage, output).await,
             ChatCommands::Delete { id } => commands::chat::delete(&id, &storage, output).await,
+            ChatCommands::Ttl {
+                target,
+                ttl,
+                local_only,
+            } => commands::chat::ttl(&target, &ttl, local_only, &config, &storage, output).await,
         },
         Commands::Send {
             target,
             message,
             reply,
+            ttl,
+            expires_at,
         } => {
             commands::message::send(
                 &target,
                 &message,
                 reply.as_deref(),
+                ttl,
+                expires_at,
                 &config,
                 &storage,
                 output,

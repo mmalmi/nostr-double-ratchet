@@ -1,8 +1,10 @@
 use anyhow::Result;
-use nostr_sdk::Client;
+use nostr::Tag;
+use nostr_double_ratchet::{Session, CHAT_SETTINGS_KIND};
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
 use crate::storage::{Storage, StoredChat};
 
@@ -81,18 +83,14 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
             .as_secs(),
         last_message_at: None,
         session_state,
+        message_ttl_seconds: None,
     };
 
     storage.save_chat(&chat)?;
 
-    // Publish response event to relays
-    let client = Client::default();
-    let relays = config.resolved_relays();
-    for relay in &relays {
-        client.add_relay(relay).await?;
-    }
-    client.connect().await;
-    client.send_event(response_event.clone()).await?;
+    // Publish response event to relays (best-effort when publish errors are ignored).
+    let client = connect_client(config).await?;
+    send_event_or_ignore(&client, response_event.clone()).await?;
 
     output.success(
         "chat.join",
@@ -133,6 +131,118 @@ pub async fn delete(id: &str, storage: &Storage, output: &Output) -> Result<()> 
     Ok(())
 }
 
+/// Set per-chat disappearing-message TTL (seconds) and optionally notify the peer via an encrypted
+/// chat-settings rumor (kind 10448).
+pub async fn ttl(
+    target: &str,
+    ttl: &str,
+    local_only: bool,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    if !config.is_logged_in() {
+        anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    let mut chat = crate::commands::message::resolve_target(target, storage)?;
+
+    let ttl_trimmed = ttl.trim();
+    let ttl_seconds: Option<u64> = if ttl_trimmed.eq_ignore_ascii_case("off")
+        || ttl_trimmed.eq_ignore_ascii_case("null")
+        || ttl_trimmed == "0"
+    {
+        None
+    } else {
+        let parsed = ttl_trimmed.parse::<u64>().map_err(|_| {
+            anyhow::anyhow!("Invalid ttl (expected integer seconds or 'off'): {}", ttl)
+        })?;
+        if parsed == 0 {
+            None
+        } else {
+            Some(parsed)
+        }
+    };
+
+    chat.message_ttl_seconds = ttl_seconds;
+    storage.save_chat(&chat)?;
+
+    if local_only {
+        output.success(
+            "chat.ttl",
+            serde_json::json!({
+                "chat_id": chat.id,
+                "their_pubkey": chat.their_pubkey,
+                "message_ttl_seconds": ttl_seconds,
+                "local_only": true,
+            }),
+        );
+        return Ok(());
+    }
+
+    // Send an encrypted settings rumor so the peer can auto-adopt.
+    let session_state: nostr_double_ratchet::SessionState =
+        serde_json::from_str(&chat.session_state).map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid session state: {}. Chat may not be properly initialized.",
+                e
+            )
+        })?;
+    let mut session = Session::new(session_state, chat.id.clone());
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let now_s = now.as_secs();
+    let now_ms = now.as_millis() as u64;
+
+    let recipient = nostr::PublicKey::from_hex(&chat.their_pubkey)
+        .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
+
+    let payload = serde_json::json!({
+        "type": "chat-settings",
+        "v": 1,
+        "messageTtlSeconds": ttl_seconds,
+    })
+    .to_string();
+
+    let tags = vec![
+        Tag::parse(&["p".to_string(), recipient.to_hex()])
+            .map_err(|e| anyhow::anyhow!("Invalid tag: {}", e))?,
+        Tag::parse(&["ms".to_string(), now_ms.to_string()])
+            .map_err(|e| anyhow::anyhow!("Invalid tag: {}", e))?,
+    ];
+
+    let owner_pk = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
+    let unsigned =
+        nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_SETTINGS_KIND as u16), &payload)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(owner_pk);
+
+    let encrypted_event = session
+        .send_event(unsigned)
+        .map_err(|e| anyhow::anyhow!("Failed to encrypt settings: {}", e))?;
+
+    // Persist ratcheted state before network I/O.
+    chat.session_state = serde_json::to_string(&session.state)?;
+    storage.save_chat(&chat)?;
+
+    let client = connect_client(config).await?;
+    send_event_or_ignore(&client, encrypted_event.clone()).await?;
+
+    output.success(
+        "chat.ttl",
+        serde_json::json!({
+            "chat_id": chat.id,
+            "their_pubkey": chat.their_pubkey,
+            "message_ttl_seconds": ttl_seconds,
+            "local_only": false,
+            "event": nostr::JsonUtil::as_json(&encrypted_event),
+        }),
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +280,7 @@ mod tests {
                 created_at: 1234567890,
                 last_message_at: None,
                 session_state: "{}".to_string(),
+                message_ttl_seconds: None,
             })
             .unwrap();
 

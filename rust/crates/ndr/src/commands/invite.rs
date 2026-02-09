@@ -266,6 +266,7 @@ pub async fn accept(
             .as_secs(),
         last_message_at: None,
         session_state,
+        message_ttl_seconds: None,
     };
 
     storage.save_chat(&chat)?;

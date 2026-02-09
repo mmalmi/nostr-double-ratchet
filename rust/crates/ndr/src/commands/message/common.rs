@@ -95,6 +95,60 @@ pub(super) fn extract_e_tags(event: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Extract the NIP-40-style `["expiration", "<unix seconds>"]` tag from a decrypted rumor JSON.
+///
+/// Returns the last valid expiration timestamp (seconds) if multiple are present.
+pub(super) fn extract_expiration_tag_seconds(event: &serde_json::Value) -> Option<u64> {
+    let tags = event["tags"].as_array()?;
+    let mut out: Option<u64> = None;
+    for t in tags {
+        let arr = t.as_array()?;
+        if arr.first()?.as_str()? != nostr_double_ratchet::EXPIRATION_TAG {
+            continue;
+        }
+        let Some(v) = arr.get(1).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Ok(ts) = v.parse::<u64>() {
+            out = Some(ts);
+        }
+    }
+    out
+}
+
+pub(super) fn is_expired(expires_at: Option<u64>, now_seconds: u64) -> bool {
+    expires_at.is_some_and(|ts| ts <= now_seconds)
+}
+
+/// Parse an Iris-compatible `chat-settings` payload and return the requested TTL.
+///
+/// Returns:
+/// - `Some(Some(ttl))` when `messageTtlSeconds > 0`
+/// - `Some(None)` when `messageTtlSeconds` is `0`, `null`, or missing (treated as "off")
+/// - `None` when the payload is invalid or not a supported version
+pub(super) fn parse_chat_settings_ttl_seconds(content: &str) -> Option<Option<u64>> {
+    let payload: serde_json::Value = serde_json::from_str(content).ok()?;
+    let typ = payload.get("type").and_then(|v| v.as_str());
+    let v = payload.get("v").and_then(|v| v.as_u64());
+    if typ != Some("chat-settings") || v != Some(1) {
+        return None;
+    }
+
+    match payload.get("messageTtlSeconds") {
+        None => Some(None),
+        Some(serde_json::Value::Null) => Some(None),
+        Some(serde_json::Value::Number(n)) => {
+            let ttl = n.as_u64()?;
+            if ttl == 0 {
+                Some(None)
+            } else {
+                Some(Some(ttl))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Helper to collect ephemeral pubkeys from chats for subscription
 pub(super) fn collect_chat_pubkeys(
     storage: &Storage,

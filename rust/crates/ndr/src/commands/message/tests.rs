@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::output::Output;
 use crate::storage::Storage;
 use crate::storage::StoredChat;
+use nostr::JsonUtil;
 use std::sync::Once;
 use tempfile::TempDir;
 
@@ -28,6 +29,40 @@ fn create_test_session() -> nostr_double_ratchet::Session {
     bob_session
 }
 
+fn create_test_session_pair() -> (
+    nostr::Keys,
+    nostr::Keys,
+    nostr_double_ratchet::Session,
+    nostr_double_ratchet::Session,
+) {
+    // Create an invite
+    let alice_keys = nostr::Keys::generate();
+    let bob_keys = nostr::Keys::generate();
+
+    let invite =
+        nostr_double_ratchet::Invite::create_new(alice_keys.public_key(), None, None).unwrap();
+
+    // Bob accepts: Bob becomes the initiator (can send first).
+    let bob_pk = bob_keys.public_key();
+    let (bob_session, response) = invite
+        .accept_with_owner(
+            bob_pk,
+            bob_keys.secret_key().to_secret_bytes(),
+            None,
+            Some(bob_pk),
+        )
+        .unwrap();
+
+    // Alice processes response: Alice must receive first.
+    let alice_session = invite
+        .process_invite_response(&response, alice_keys.secret_key().to_secret_bytes())
+        .unwrap()
+        .unwrap()
+        .session;
+
+    (alice_keys, bob_keys, bob_session, alice_session)
+}
+
 fn init_test_env() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -51,13 +86,15 @@ fn setup() -> (TempDir, Config, Storage, String) {
     let session_state = serde_json::to_string(&session.state).unwrap();
 
     // Create a test chat with valid session
+    let their_pubkey = nostr::Keys::generate().public_key().to_hex();
     storage
         .save_chat(&StoredChat {
             id: "test-chat".to_string(),
-            their_pubkey: "abc123".to_string(),
+            their_pubkey,
             created_at: 1234567890,
             last_message_at: None,
             session_state: session_state.clone(),
+            message_ttl_seconds: None,
         })
         .unwrap();
 
@@ -69,9 +106,18 @@ async fn test_send_message() {
     let (_temp, config, storage, _) = setup();
     let output = Output::new(true);
 
-    send("test-chat", "Hello!", None, &config, &storage, &output)
-        .await
-        .unwrap();
+    send(
+        "test-chat",
+        "Hello!",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+        &output,
+    )
+    .await
+    .unwrap();
 
     let messages = storage.get_messages("test-chat", 10).unwrap();
     assert_eq!(messages.len(), 1);
@@ -80,16 +126,164 @@ async fn test_send_message() {
 }
 
 #[tokio::test]
+async fn test_send_message_with_ttl_adds_expiration_tag() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let (alice_keys, bob_keys, bob_session, mut alice_session) = create_test_session_pair();
+
+    // Configure CLI identity to match Bob (sender).
+    let mut config = Config::load(temp.path()).unwrap();
+    config
+        .set_private_key(&bob_keys.secret_key().to_secret_hex())
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
+
+    let chat_id = "test-chat".to_string();
+    let session_state = serde_json::to_string(&bob_session.state).unwrap();
+    storage
+        .save_chat(&StoredChat {
+            id: chat_id.clone(),
+            their_pubkey: alice_keys.public_key().to_hex(),
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state,
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+
+    let ttl_seconds = 60u64;
+
+    // Encrypt without touching the network so we can assert on the decrypted rumor.
+    let prepared = super::send::prepare_send_message(
+        &chat_id,
+        "Hello expiring",
+        None,
+        Some(ttl_seconds),
+        None,
+        &config,
+        &storage,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        prepared.stored_message.expires_at,
+        Some(prepared.timestamp + ttl_seconds)
+    );
+
+    let plaintext = alice_session
+        .receive(&prepared.encrypted_event)
+        .unwrap()
+        .unwrap();
+    let rumor = nostr::UnsignedEvent::from_json(&plaintext).unwrap();
+
+    let mut exp: Option<String> = None;
+    for t in rumor.tags.iter() {
+        let v = t.clone().to_vec();
+        if v.first().map(|s| s.as_str()) == Some(nostr_double_ratchet::EXPIRATION_TAG) {
+            exp = v.get(1).cloned();
+        }
+    }
+    let expected = prepared.stored_message.expires_at.unwrap().to_string();
+    assert_eq!(exp.as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn test_chat_default_ttl_is_applied_when_sending_without_overrides() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let (alice_keys, bob_keys, bob_session, mut alice_session) = create_test_session_pair();
+
+    // Configure CLI identity to match Bob (sender).
+    let mut config = Config::load(temp.path()).unwrap();
+    config
+        .set_private_key(&bob_keys.secret_key().to_secret_hex())
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
+
+    let chat_id = "test-chat".to_string();
+    let session_state = serde_json::to_string(&bob_session.state).unwrap();
+    let ttl_seconds = 90u64;
+    storage
+        .save_chat(&StoredChat {
+            id: chat_id.clone(),
+            their_pubkey: alice_keys.public_key().to_hex(),
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state,
+            message_ttl_seconds: Some(ttl_seconds),
+        })
+        .unwrap();
+
+    let prepared = super::send::prepare_send_message(
+        &chat_id,
+        "Hello default expiring",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        prepared.stored_message.expires_at,
+        Some(prepared.timestamp + ttl_seconds)
+    );
+
+    let plaintext = alice_session
+        .receive(&prepared.encrypted_event)
+        .unwrap()
+        .unwrap();
+    let rumor = nostr::UnsignedEvent::from_json(&plaintext).unwrap();
+
+    let mut exp: Option<String> = None;
+    for t in rumor.tags.iter() {
+        let v = t.clone().to_vec();
+        if v.first().map(|s| s.as_str()) == Some(nostr_double_ratchet::EXPIRATION_TAG) {
+            exp = v.get(1).cloned();
+        }
+    }
+    let expected = prepared.stored_message.expires_at.unwrap().to_string();
+    assert_eq!(exp.as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
 async fn test_read_messages() {
     let (_temp, config, storage, _) = setup();
     let output = Output::new(true);
 
-    send("test-chat", "One", None, &config, &storage, &output)
-        .await
-        .unwrap();
-    send("test-chat", "Two", None, &config, &storage, &output)
-        .await
-        .unwrap();
+    send(
+        "test-chat",
+        "One",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+        &output,
+    )
+    .await
+    .unwrap();
+    send(
+        "test-chat",
+        "Two",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+        &output,
+    )
+    .await
+    .unwrap();
 
     read("test-chat", 10, &storage, &output).await.unwrap();
 }
@@ -102,9 +296,18 @@ async fn test_send_updates_last_message_at() {
     let before = storage.get_chat("test-chat").unwrap().unwrap();
     assert!(before.last_message_at.is_none());
 
-    send("test-chat", "Hello!", None, &config, &storage, &output)
-        .await
-        .unwrap();
+    send(
+        "test-chat",
+        "Hello!",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+        &output,
+    )
+    .await
+    .unwrap();
 
     let after = storage.get_chat("test-chat").unwrap().unwrap();
     assert!(after.last_message_at.is_some());
@@ -133,6 +336,7 @@ fn test_resolve_target_by_hex_pubkey() {
             created_at: 1234567890,
             last_message_at: None,
             session_state,
+            message_ttl_seconds: None,
         })
         .unwrap();
 
@@ -156,6 +360,7 @@ fn test_resolve_target_by_npub() {
             created_at: 1234567890,
             last_message_at: None,
             session_state,
+            message_ttl_seconds: None,
         })
         .unwrap();
 
@@ -184,6 +389,7 @@ fn test_resolve_target_prefers_recent() {
             created_at: 1000,
             last_message_at: Some(2000),
             session_state: serde_json::to_string(&session1.state).unwrap(),
+            message_ttl_seconds: None,
         })
         .unwrap();
     storage
@@ -193,6 +399,7 @@ fn test_resolve_target_prefers_recent() {
             created_at: 1000,
             last_message_at: Some(5000),
             session_state: serde_json::to_string(&session2.state).unwrap(),
+            message_ttl_seconds: None,
         })
         .unwrap();
 
@@ -216,6 +423,7 @@ fn test_resolve_target_by_petname() {
             created_at: 1234567890,
             last_message_at: None,
             session_state,
+            message_ttl_seconds: None,
         })
         .unwrap();
 

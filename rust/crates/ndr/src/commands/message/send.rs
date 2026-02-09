@@ -1,6 +1,7 @@
 use anyhow::Result;
 
-use nostr_double_ratchet::{Session, INVITE_EVENT_KIND};
+use nostr::Tag;
+use nostr_double_ratchet::{Session, CHAT_MESSAGE_KIND, EXPIRATION_TAG, INVITE_EVENT_KIND};
 
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
@@ -11,17 +12,28 @@ use super::common::resolve_target_pubkey;
 use super::resolve_target;
 use super::types::{MessageInfo, MessageList, MessageSent, ReactionInfo};
 
-/// Send a message
-pub async fn send(
+pub(super) struct PreparedSendMessage {
+    pub(super) encrypted_event: nostr::Event,
+    pub(super) timestamp: u64,
+    pub(super) stored_message: StoredMessage,
+    pub(super) updated_chat: StoredChat,
+}
+
+pub(super) async fn prepare_send_message(
     target: &str,
     message: &str,
     reply_to: Option<&str>,
+    ttl_seconds: Option<u64>,
+    expires_at_seconds: Option<u64>,
     config: &Config,
     storage: &Storage,
-    output: &Output,
-) -> Result<()> {
+) -> Result<PreparedSendMessage> {
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
+    }
+
+    if ttl_seconds.is_some() && expires_at_seconds.is_some() {
+        anyhow::bail!("Provide either --ttl or --expires-at (not both)");
     }
 
     let chat = match resolve_target(target, storage) {
@@ -32,6 +44,8 @@ pub async fn send(
                 Err(_) => return Err(resolve_err),
             };
 
+            // If the user passed a pubkey/name and we don't have a chat yet, try to
+            // auto-accept their public invite so we can send immediately.
             match create_chat_from_public_invite(&target_pubkey, config, storage).await {
                 Ok(chat) => chat,
                 Err(err) => {
@@ -44,6 +58,7 @@ pub async fn send(
             }
         }
     };
+
     let chat_id = chat.id.clone();
 
     // Load session state
@@ -57,53 +72,116 @@ pub async fn send(
 
     let mut session = Session::new(session_state, chat_id.to_string());
 
-    // Encrypt the message (with optional reply reference)
-    let encrypted_event = match reply_to {
-        Some(reply_id) => session
-            .send_reply(message.to_string(), reply_id)
-            .map_err(|e| anyhow::anyhow!("Failed to encrypt reply: {}", e))?,
-        None => session
-            .send(message.to_string())
-            .map_err(|e| anyhow::anyhow!("Failed to encrypt message: {}", e))?,
-    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let now_s = now.as_secs();
+    let now_ms = now.as_millis() as u64;
 
-    let pubkey = config.public_key()?;
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
+    let effective_ttl = ttl_seconds
+        .or(chat.message_ttl_seconds)
+        .filter(|ttl| *ttl > 0);
+
+    let expires_at =
+        expires_at_seconds.or_else(|| effective_ttl.and_then(|ttl| now_s.checked_add(ttl)));
+
+    let recipient_pk = nostr::PublicKey::from_hex(&chat.their_pubkey)
+        .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
+
+    // Build the inner rumor as an unsigned event. This matches Iris expectations:
+    // - kind 14
+    // - includes "p" tag
+    // - includes "ms" tag for stable ids
+    // - expiration tag is on the inner rumor (encrypted)
+    let mut tag_vec: Vec<Vec<String>> = Vec::new();
+    tag_vec.push(vec!["p".to_string(), recipient_pk.to_hex()]);
+    if let Some(reply_id) = reply_to {
+        tag_vec.push(vec!["e".to_string(), reply_id.to_string()]);
+    }
+    tag_vec.push(vec!["ms".to_string(), now_ms.to_string()]);
+    if let Some(exp) = expires_at {
+        tag_vec.push(vec![EXPIRATION_TAG.to_string(), exp.to_string()]);
+    }
+
+    let mut nostr_tags: Vec<Tag> = Vec::with_capacity(tag_vec.len());
+    for t in tag_vec {
+        nostr_tags.push(Tag::parse(&t).map_err(|e| anyhow::anyhow!("Invalid tag: {}", e))?);
+    }
+
+    let owner_pk = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
+    let unsigned = nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), message)
+        .tags(nostr_tags)
+        .custom_created_at(nostr::Timestamp::from(now_s))
+        .build(owner_pk);
+
+    // Encrypt the message as a kind-1060 outer event.
+    let encrypted_event = session
+        .send_event(unsigned)
+        .map_err(|e| anyhow::anyhow!("Failed to encrypt message: {}", e))?;
 
     // Use the outer event ID as message ID (for reaction compatibility with iris-chat)
     let msg_id = encrypted_event.id.to_hex();
 
-    let stored = StoredMessage {
+    let from_pubkey = config.public_key()?;
+
+    let stored_message = StoredMessage {
         id: msg_id.clone(),
         chat_id: chat_id.to_string(),
-        from_pubkey: pubkey,
+        from_pubkey,
         content: message.to_string(),
-        timestamp,
+        timestamp: now_s,
         is_outgoing: true,
+        expires_at,
     };
-
-    storage.save_message(&stored)?;
 
     // Update chat with new session state and last_message_at
     let mut updated_chat = chat;
-    updated_chat.last_message_at = Some(timestamp);
+    updated_chat.last_message_at = Some(now_s);
     updated_chat.session_state = serde_json::to_string(&session.state)?;
-    storage.save_chat(&updated_chat)?;
+
+    Ok(PreparedSendMessage {
+        encrypted_event,
+        timestamp: now_s,
+        stored_message,
+        updated_chat,
+    })
+}
+
+/// Send a message
+pub async fn send(
+    target: &str,
+    message: &str,
+    reply_to: Option<&str>,
+    ttl_seconds: Option<u64>,
+    expires_at_seconds: Option<u64>,
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    let prepared = prepare_send_message(
+        target,
+        message,
+        reply_to,
+        ttl_seconds,
+        expires_at_seconds,
+        config,
+        storage,
+    )
+    .await?;
+
+    storage.save_message(&prepared.stored_message)?;
+    storage.save_chat(&prepared.updated_chat)?;
 
     // Publish to relays
     let client = connect_client(config).await?;
-    send_event_or_ignore(&client, encrypted_event.clone()).await?;
+    send_event_or_ignore(&client, prepared.encrypted_event.clone()).await?;
 
     output.success(
         "send",
         MessageSent {
-            id: msg_id,
-            chat_id: chat_id.to_string(),
+            id: prepared.stored_message.id.clone(),
+            chat_id: prepared.stored_message.chat_id.clone(),
             content: message.to_string(),
-            timestamp,
-            event: nostr::JsonUtil::as_json(&encrypted_event),
+            timestamp: prepared.timestamp,
+            event: nostr::JsonUtil::as_json(&prepared.encrypted_event),
         },
     );
 
@@ -173,6 +251,7 @@ async fn create_chat_from_public_invite(
             .as_secs(),
         last_message_at: None,
         session_state,
+        message_ttl_seconds: None,
     };
 
     storage.save_chat(&chat)?;
@@ -366,6 +445,12 @@ pub async fn typing(
 pub async fn read(target: &str, limit: usize, storage: &Storage, output: &Output) -> Result<()> {
     let chat = resolve_target(target, storage)?;
     let chat_id = chat.id.clone();
+
+    // Best-effort purge so disappearing messages actually disappear from local history.
+    let now_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let _ = storage.purge_expired_messages(&chat_id, now_seconds);
 
     let messages = storage.get_messages(&chat_id, limit)?;
     let reactions = storage.get_reactions(&chat_id, limit)?;

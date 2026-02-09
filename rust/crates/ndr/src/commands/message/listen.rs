@@ -1,11 +1,12 @@
 use anyhow::Result;
 
 use nostr_double_ratchet::{
-    OneToManyChannel, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND,
-    TYPING_KIND,
+    OneToManyChannel, Session, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, GROUP_METADATA_KIND,
+    REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 
 use crate::config::Config;
+use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
 use crate::storage::{
     Storage, StoredGroup, StoredGroupMessage, StoredGroupSender, StoredMessage, StoredReaction,
@@ -13,6 +14,7 @@ use crate::storage::{
 
 use super::common::{
     allow_insecure_shared_channel_sender_keys, collect_chat_pubkeys, extract_e_tag, extract_e_tags,
+    extract_expiration_tag_seconds, is_expired, parse_chat_settings_ttl_seconds,
 };
 use super::types::{IncomingMessage, IncomingReaction};
 
@@ -423,6 +425,7 @@ pub async fn listen(
                                     .as_secs(),
                                 last_message_at: None,
                                 session_state,
+                                message_ttl_seconds: None,
                             };
 
                             storage.save_chat(&chat)?;
@@ -602,10 +605,23 @@ pub async fn listen(
                                                             .to_string();
 
                                                         let timestamp = env.created_at.as_u64();
+                                                        let now_seconds =
+                                                            std::time::SystemTime::now()
+                                                                .duration_since(
+                                                                    std::time::UNIX_EPOCH,
+                                                                )?
+                                                                .as_secs();
+                                                        let expires_at =
+                                                            extract_expiration_tag_seconds(
+                                                                &decrypted_event,
+                                                            );
 
                                                         if rumor_kind == CHAT_MESSAGE_KIND
                                                             || rumor_kind == 14
                                                         {
+                                                            if is_expired(expires_at, now_seconds) {
+                                                                continue;
+                                                            }
                                                             let msg_id = env.id.to_hex();
                                                             let stored = StoredGroupMessage {
                                                                 id: msg_id.clone(),
@@ -615,6 +631,7 @@ pub async fn listen(
                                                                 content: content.clone(),
                                                                 timestamp,
                                                                 is_outgoing: false,
+                                                                expires_at,
                                                             };
                                                             storage.save_group_message(&stored)?;
                                                             output.event(
@@ -751,8 +768,16 @@ pub async fn listen(
                                         .to_string();
 
                                     let timestamp = inner_event.created_at.as_u64();
+                                    let now_seconds = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)?
+                                        .as_secs();
+                                    let expires_at =
+                                        extract_expiration_tag_seconds(&decrypted_event);
 
                                     if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
+                                        if is_expired(expires_at, now_seconds) {
+                                            continue;
+                                        }
                                         let msg_id = inner_event.id.to_hex();
                                         let stored = StoredGroupMessage {
                                             id: msg_id.clone(),
@@ -761,6 +786,7 @@ pub async fn listen(
                                             content: content.clone(),
                                             timestamp,
                                             is_outgoing: false,
+                                            expires_at,
                                         };
                                         storage.save_group_message(&stored)?;
 
@@ -863,11 +889,13 @@ pub async fn listen(
                                                             .as_secs(),
                                                         last_message_at: None,
                                                         session_state: session_state_str,
+                                                        message_ttl_seconds: None,
                                                     };
                                                     storage.save_chat(&chat)?;
 
                                                     // Publish the response event
-                                                    client.send_event(response_event).await?;
+                                                    send_event_or_ignore(&client, response_event)
+                                                        .await?;
 
                                                     // Kick off the session by sending a lightweight typing event.
                                                     //
@@ -1003,8 +1031,15 @@ pub async fn listen(
                         .to_string();
 
                     let timestamp = event.created_at.as_u64();
+                    let now_seconds = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_secs();
+                    let expires_at = extract_expiration_tag_seconds(&decrypted_event);
 
                     if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
+                        if is_expired(expires_at, now_seconds) {
+                            continue;
+                        }
                         let msg_id = event.id.to_hex();
                         let stored = StoredGroupMessage {
                             id: msg_id.clone(),
@@ -1013,6 +1048,7 @@ pub async fn listen(
                             content: content.clone(),
                             timestamp,
                             is_outgoing: false,
+                            expires_at,
                         };
                         storage.save_group_message(&stored)?;
 
@@ -1325,10 +1361,23 @@ pub async fn listen(
                                                             .to_string();
 
                                                         let timestamp = env.created_at.as_u64();
+                                                        let now_seconds =
+                                                            std::time::SystemTime::now()
+                                                                .duration_since(
+                                                                    std::time::UNIX_EPOCH,
+                                                                )?
+                                                                .as_secs();
+                                                        let expires_at =
+                                                            extract_expiration_tag_seconds(
+                                                                &decrypted_event,
+                                                            );
 
                                                         if rumor_kind == CHAT_MESSAGE_KIND
                                                             || rumor_kind == 14
                                                         {
+                                                            if is_expired(expires_at, now_seconds) {
+                                                                continue;
+                                                            }
                                                             let msg_id = env.id.to_hex();
                                                             let stored = StoredGroupMessage {
                                                                 id: msg_id.clone(),
@@ -1338,6 +1387,7 @@ pub async fn listen(
                                                                 content: content.clone(),
                                                                 timestamp,
                                                                 is_outgoing: false,
+                                                                expires_at,
                                                             };
                                                             storage.save_group_message(&stored)?;
                                                             output.event(
@@ -1453,10 +1503,26 @@ pub async fn listen(
 
                                                             let timestamp =
                                                                 outer.created_at.as_u64();
+                                                            let now_seconds =
+                                                                std::time::SystemTime::now()
+                                                                    .duration_since(
+                                                                        std::time::UNIX_EPOCH,
+                                                                    )?
+                                                                    .as_secs();
+                                                            let expires_at =
+                                                                extract_expiration_tag_seconds(
+                                                                    &decrypted_event,
+                                                                );
 
                                                             if rumor_kind == CHAT_MESSAGE_KIND
                                                                 || rumor_kind == 14
                                                             {
+                                                                if is_expired(
+                                                                    expires_at,
+                                                                    now_seconds,
+                                                                ) {
+                                                                    continue;
+                                                                }
                                                                 let msg_id = outer.id.to_hex();
                                                                 let stored = StoredGroupMessage {
                                                                     id: msg_id.clone(),
@@ -1466,6 +1532,7 @@ pub async fn listen(
                                                                     content: content.clone(),
                                                                     timestamp,
                                                                     is_outgoing: false,
+                                                                    expires_at,
                                                                 };
                                                                 storage
                                                                     .save_group_message(&stored)?;
@@ -1527,28 +1594,38 @@ pub async fn listen(
                                     );
                                 } else if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
                                     // Group chat message
-                                    let msg_id = event.id.to_hex();
-                                    let stored = StoredGroupMessage {
-                                        id: msg_id.clone(),
-                                        group_id: gid.clone(),
-                                        sender_pubkey: from_pubkey_hex.clone(),
-                                        content: content.clone(),
-                                        timestamp,
-                                        is_outgoing: false,
-                                    };
-                                    storage.save_group_message(&stored)?;
-                                    storage.save_chat(&updated_chat)?;
+                                    let now_seconds = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)?
+                                        .as_secs();
+                                    let expires_at =
+                                        extract_expiration_tag_seconds(&decrypted_event);
 
-                                    output.event(
-                                        "group_message",
-                                        serde_json::json!({
-                                            "group_id": gid,
-                                            "message_id": msg_id,
-                                            "sender_pubkey": from_pubkey_hex,
-                                            "content": content,
-                                            "timestamp": timestamp,
-                                        }),
-                                    );
+                                    let msg_id = event.id.to_hex();
+                                    if !is_expired(expires_at, now_seconds) {
+                                        let stored = StoredGroupMessage {
+                                            id: msg_id.clone(),
+                                            group_id: gid.clone(),
+                                            sender_pubkey: from_pubkey_hex.clone(),
+                                            content: content.clone(),
+                                            timestamp,
+                                            is_outgoing: false,
+                                            expires_at,
+                                        };
+                                        storage.save_group_message(&stored)?;
+
+                                        output.event(
+                                            "group_message",
+                                            serde_json::json!({
+                                                "group_id": gid,
+                                                "message_id": msg_id,
+                                                "sender_pubkey": from_pubkey_hex,
+                                                "content": content,
+                                                "timestamp": timestamp,
+                                            }),
+                                        );
+                                    }
+
+                                    storage.save_chat(&updated_chat)?;
                                 } else if rumor_kind == REACTION_KIND {
                                     let message_id = extract_e_tag(&decrypted_event);
                                     storage.save_chat(&updated_chat)?;
@@ -1575,7 +1652,21 @@ pub async fn listen(
                                 }
                             } else {
                                 // === 1:1 event (no group tag) ===
-                                if rumor_kind == RECEIPT_KIND {
+                                if rumor_kind == CHAT_SETTINGS_KIND {
+                                    if let Some(ttl) = parse_chat_settings_ttl_seconds(&content) {
+                                        updated_chat.message_ttl_seconds = ttl;
+                                        storage.save_chat(&updated_chat)?;
+                                        output.event(
+                                            "chat_settings",
+                                            serde_json::json!({
+                                                "chat_id": updated_chat.id,
+                                                "from_pubkey": from_pubkey_hex,
+                                                "message_ttl_seconds": ttl,
+                                                "timestamp": timestamp,
+                                            }),
+                                        );
+                                    }
+                                } else if rumor_kind == RECEIPT_KIND {
                                     let receipt_type = content.clone();
                                     let message_ids: Vec<String> = extract_e_tags(&decrypted_event);
 
@@ -1627,29 +1718,38 @@ pub async fn listen(
                                     );
                                 } else {
                                     // Chat message (kind 14 or default)
-                                    let msg_id = event.id.to_hex();
-                                    let stored = StoredMessage {
-                                        id: msg_id.clone(),
-                                        chat_id: chat.id.clone(),
-                                        from_pubkey: from_pubkey_hex.clone(),
-                                        content: content.clone(),
-                                        timestamp,
-                                        is_outgoing: false,
-                                    };
-                                    storage.save_message(&stored)?;
-                                    updated_chat.last_message_at = Some(timestamp);
+                                    let now_seconds = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)?
+                                        .as_secs();
+                                    let expires_at =
+                                        extract_expiration_tag_seconds(&decrypted_event);
 
-                                    storage.save_chat(&updated_chat)?;
-                                    output.event(
-                                        "message",
-                                        IncomingMessage {
-                                            chat_id: updated_chat.id.clone(),
-                                            message_id: msg_id,
-                                            from_pubkey: from_pubkey_hex,
-                                            content,
+                                    let msg_id = event.id.to_hex();
+                                    if !is_expired(expires_at, now_seconds) {
+                                        let stored = StoredMessage {
+                                            id: msg_id.clone(),
+                                            chat_id: chat.id.clone(),
+                                            from_pubkey: from_pubkey_hex.clone(),
+                                            content: content.clone(),
                                             timestamp,
-                                        },
-                                    );
+                                            is_outgoing: false,
+                                            expires_at,
+                                        };
+                                        storage.save_message(&stored)?;
+                                        updated_chat.last_message_at = Some(timestamp);
+
+                                        storage.save_chat(&updated_chat)?;
+                                        output.event(
+                                            "message",
+                                            IncomingMessage {
+                                                chat_id: updated_chat.id.clone(),
+                                                message_id: msg_id,
+                                                from_pubkey: from_pubkey_hex,
+                                                content,
+                                                timestamp,
+                                            },
+                                        );
+                                    }
                                 }
                             }
 

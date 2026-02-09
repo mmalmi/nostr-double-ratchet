@@ -41,6 +41,9 @@ pub struct StoredChat {
     pub created_at: u64,
     pub last_message_at: Option<u64>,
     pub session_state: String,
+    /// Default disappearing-message TTL for this chat (seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_ttl_seconds: Option<u64>,
 }
 
 /// Stored message data
@@ -52,6 +55,9 @@ pub struct StoredMessage {
     pub content: String,
     pub timestamp: u64,
     pub is_outgoing: bool,
+    /// UNIX timestamp (seconds) when the message should be considered expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 /// Stored reaction data
@@ -82,6 +88,9 @@ pub struct StoredGroupMessage {
     pub content: String,
     pub timestamp: u64,
     pub is_outgoing: bool,
+    /// UNIX timestamp (seconds) when the message should be considered expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 /// Stored Signal-style sender keys per group/sender.
@@ -374,6 +383,53 @@ impl Storage {
         Ok(messages)
     }
 
+    /// Remove expired messages (based on `expires_at`) from on-disk storage.
+    ///
+    /// Returns the number of messages removed.
+    pub fn purge_expired_messages(&self, chat_id: &str, now_seconds: u64) -> Result<usize> {
+        let dir = self.chat_messages_dir(chat_id);
+        if !dir.exists() {
+            return Ok(0);
+        }
+
+        let mut removed = 0usize;
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map(|ext| ext == "json").unwrap_or(false) == false {
+                continue;
+            }
+
+            let content = fs::read_to_string(&path)?;
+            let day_messages: Vec<StoredMessage> = serde_json::from_str(&content)?;
+
+            let mut kept: Vec<StoredMessage> = Vec::with_capacity(day_messages.len());
+            for m in day_messages {
+                if m.expires_at.is_some_and(|ts| ts <= now_seconds) {
+                    removed += 1;
+                    continue;
+                }
+                kept.push(m);
+            }
+
+            if kept.is_empty() {
+                // Remove empty day file.
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+
+            // Rewrite only when we removed something.
+            if kept.len() < kept.capacity() {
+                // Keep sort order stable.
+                kept.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                let updated = serde_json::to_string_pretty(&kept)?;
+                write_string_atomic(&path, &updated)?;
+            }
+        }
+
+        Ok(removed)
+    }
+
     // === Reaction operations ===
     // Reactions are stored per chat: reactions/<chat_id>.json
 
@@ -483,6 +539,50 @@ impl Storage {
         messages.truncate(limit);
         messages.reverse();
         Ok(messages)
+    }
+
+    /// Remove expired group messages (based on `expires_at`) from on-disk storage.
+    ///
+    /// Returns the number of messages removed.
+    pub fn purge_expired_group_messages(&self, group_id: &str, now_seconds: u64) -> Result<usize> {
+        let dir = self.group_messages_path(group_id);
+        if !dir.exists() {
+            return Ok(0);
+        }
+
+        let mut removed = 0usize;
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map(|ext| ext == "json").unwrap_or(false) == false {
+                continue;
+            }
+
+            let content = fs::read_to_string(&path)?;
+            let day_messages: Vec<StoredGroupMessage> = serde_json::from_str(&content)?;
+
+            let mut kept: Vec<StoredGroupMessage> = Vec::with_capacity(day_messages.len());
+            for m in day_messages {
+                if m.expires_at.is_some_and(|ts| ts <= now_seconds) {
+                    removed += 1;
+                    continue;
+                }
+                kept.push(m);
+            }
+
+            if kept.is_empty() {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+
+            if kept.len() < kept.capacity() {
+                kept.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                let updated = serde_json::to_string_pretty(&kept)?;
+                write_string_atomic(&path, &updated)?;
+            }
+        }
+
+        Ok(removed)
     }
 
     // === Group operations ===
@@ -951,6 +1051,7 @@ mod tests {
             created_at: 1234567890,
             last_message_at: None,
             session_state: "{}".to_string(),
+            message_ttl_seconds: None,
         };
 
         storage.save_chat(&chat).unwrap();
@@ -976,6 +1077,7 @@ mod tests {
                 content: format!("Message {}", i),
                 timestamp: base_ts + i as u64 * 60, // Each message 1 minute apart
                 is_outgoing: i % 2 == 0,
+                expires_at: None,
             };
             storage.save_message(&msg).unwrap();
         }
@@ -999,6 +1101,7 @@ mod tests {
             created_at: 0,
             last_message_at: None,
             session_state: "{}".to_string(),
+            message_ttl_seconds: None,
         };
         storage.save_chat(&chat).unwrap();
 
@@ -1009,6 +1112,7 @@ mod tests {
             content: "Hello".to_string(),
             timestamp: 1704067200, // 2024-01-01 00:00:00 UTC
             is_outgoing: false,
+            expires_at: None,
         };
         storage.save_message(&msg).unwrap();
 
@@ -1110,6 +1214,7 @@ mod tests {
                 created_at: 1000,
                 last_message_at: Some(2000),
                 session_state: "{}".to_string(),
+                message_ttl_seconds: None,
             })
             .unwrap();
 
@@ -1120,6 +1225,7 @@ mod tests {
                 created_at: 1000,
                 last_message_at: Some(5000),
                 session_state: "{}".to_string(),
+                message_ttl_seconds: None,
             })
             .unwrap();
 
@@ -1164,6 +1270,7 @@ mod tests {
                 content: format!("Group message {}", i),
                 timestamp: base_ts + i as u64 * 60,
                 is_outgoing: i % 2 == 0,
+                expires_at: None,
             };
             storage.save_group_message(&msg).unwrap();
         }
@@ -1207,6 +1314,7 @@ mod tests {
             content: "Hello".to_string(),
             timestamp: 1704067200,
             is_outgoing: true,
+            expires_at: None,
         };
         storage.save_group_message(&msg).unwrap();
 
@@ -1225,6 +1333,7 @@ mod tests {
             content: "v1".to_string(),
             timestamp: 1704067200,
             is_outgoing: true,
+            expires_at: None,
         };
         storage.save_group_message(&msg).unwrap();
 
@@ -1253,6 +1362,7 @@ mod tests {
                 content: format!("Message {}", i),
                 timestamp: base_ts + i as u64 * 60,
                 is_outgoing: true,
+                expires_at: None,
             };
             storage.save_message(&msg).unwrap();
         }

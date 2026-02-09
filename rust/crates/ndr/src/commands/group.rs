@@ -8,6 +8,7 @@ use nostr_sdk::Client;
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
 use crate::storage::{Storage, StoredGroup, StoredGroupMessage, StoredGroupSender};
 
@@ -140,7 +141,7 @@ async fn fan_out_metadata(
             client.connect().await;
             connected = true;
         }
-        client.send_event(encrypted).await?;
+        send_event_or_ignore(&client, encrypted).await?;
     }
 
     // Also fan-out without secret to the removed member
@@ -671,7 +672,7 @@ pub async fn send_message(
         )
         .map_err(|e| anyhow::anyhow!("Failed to create group outer event: {}", e))?;
     storage.upsert_group_sender_key_state(id, &my_device_pubkey, &sender_key)?;
-    client.send_event(outer.clone()).await?;
+    send_event_or_ignore(&client, outer.clone()).await?;
 
     // Store outgoing message using the outer event ID (stable across all recipients).
     let msg_id = outer.id.to_hex();
@@ -682,6 +683,7 @@ pub async fn send_message(
         content: message.to_string(),
         timestamp: now_s,
         is_outgoing: true,
+        expires_at: None,
     };
     storage.save_group_message(&stored_msg)?;
 
@@ -777,7 +779,7 @@ pub async fn react(
         )
         .map_err(|e| anyhow::anyhow!("Failed to create group outer event: {}", e))?;
     storage.upsert_group_sender_key_state(id, &my_device_pubkey, &sender_key)?;
-    client.send_event(outer).await?;
+    send_event_or_ignore(&client, outer).await?;
 
     output.success(
         "group.react",
@@ -951,6 +953,11 @@ pub async fn messages(id: &str, limit: usize, storage: &Storage, output: &Output
     storage
         .get_group(id)?
         .ok_or_else(|| anyhow::anyhow!("Group not found: {}", id))?;
+
+    let now_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let _ = storage.purge_expired_group_messages(id, now_seconds);
 
     let msgs = storage.get_group_messages(id, limit)?;
 
