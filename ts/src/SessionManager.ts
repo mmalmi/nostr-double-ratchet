@@ -47,8 +47,8 @@ export interface DeviceRecord {
 export interface UserRecord {
   publicKey: string
   devices: Map<string, DeviceRecord>
-  /** Device identity pubkeys from AppKeys - used to rebuild delegateToOwner on load */
-  knownDeviceIdentities: string[]
+  /** Full AppKeys for this user - single source of truth for device list */
+  appKeys?: AppKeys
 }
 
 interface StoredSessionEntry {
@@ -66,7 +66,7 @@ interface StoredDeviceRecord {
 interface StoredUserRecord {
   publicKey: string
   devices: StoredDeviceRecord[]
-  knownDeviceIdentities?: string[]
+  appKeys?: string
 }
 
 export class SessionManager {
@@ -94,9 +94,6 @@ export class SessionManager {
   private delegateToOwner: Map<string, string> = new Map()
   // Track processed InviteResponse event IDs to prevent replay
   private processedInviteResponses: Set<string> = new Set()
-  // Cached AppKeys for authorization checks
-  private cachedAppKeys: Map<string, AppKeys> = new Map()
-
   // Expiration defaults (persisted)
   private defaultExpiration: ExpirationOptions | undefined
   private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
@@ -305,9 +302,11 @@ export class SessionManager {
             }
             this.updateDelegateMapping(claimedOwner, appKeys)
           } else {
-            // No AppKeys - check cached identities or single-device case
-            const cachedIdentities = this.userRecords.get(claimedOwner)?.knownDeviceIdentities || []
-            const isCached = cachedIdentities.includes(decrypted.inviteeIdentity)
+            // No AppKeys from relay - check persisted AppKeys or single-device case
+            const persistedAppKeys = this.userRecords.get(claimedOwner)?.appKeys
+            const isCached = persistedAppKeys?.getAllDevices().some(
+              d => d.identityPubkey === decrypted.inviteeIdentity
+            ) ?? false
             const isSingleDevice = decrypted.inviteeIdentity === claimedOwner
             if (!isCached && !isSingleDevice) {
               return
@@ -388,7 +387,7 @@ export class SessionManager {
   private getOrCreateUserRecord(userPubkey: string): UserRecord {
     let rec = this.userRecords.get(userPubkey)
     if (!rec) {
-      rec = { publicKey: userPubkey, devices: new Map(), knownDeviceIdentities: [] }
+      rec = { publicKey: userPubkey, devices: new Map() }
       this.userRecords.set(userPubkey, rec)
     }
     return rec
@@ -453,23 +452,22 @@ export class SessionManager {
     )
 
     // Remove stale mappings for devices no longer in AppKeys
-    const oldIdentities = userRecord.knownDeviceIdentities || []
+    const oldIdentities = (userRecord.appKeys?.getAllDevices() || [])
+      .map(d => d.identityPubkey)
+      .filter(Boolean) as string[]
     for (const identity of oldIdentities) {
       if (!newDeviceIdentities.has(identity)) {
         this.delegateToOwner.delete(identity)
       }
     }
 
-    // Update user record with current device identities
-    userRecord.knownDeviceIdentities = Array.from(newDeviceIdentities)
+    // Store AppKeys in user record (single source of truth)
+    userRecord.appKeys = appKeys
 
     // Update in-memory mapping for current devices
     for (const identity of newDeviceIdentities) {
       this.delegateToOwner.set(identity, ownerPubkey)
     }
-
-    // Cache AppKeys for authorization checks
-    this.cachedAppKeys.set(ownerPubkey, appKeys)
 
     // Persist
     this.storeUserRecord(ownerPubkey).catch(() => {})
@@ -480,12 +478,8 @@ export class SessionManager {
    * Returns true if the device is in the owner's current AppKeys.
    */
   private isDeviceAuthorized(ownerPubkey: string, deviceId: string): boolean {
-    const appKeys = this.cachedAppKeys.get(ownerPubkey)
-    if (!appKeys) {
-      // Fall back to cached identities if AppKeys not yet loaded
-      const userRecord = this.userRecords.get(ownerPubkey)
-      return userRecord?.knownDeviceIdentities.includes(deviceId) ?? false
-    }
+    const appKeys = this.userRecords.get(ownerPubkey)?.appKeys
+    if (!appKeys) return false
     return appKeys.getAllDevices().some(d => d.identityPubkey === deviceId)
   }
 
@@ -1247,7 +1241,7 @@ export class SessionManager {
           createdAt: device.createdAt,
         })
       ),
-      knownDeviceIdentities: userRecord?.knownDeviceIdentities || [],
+      appKeys: userRecord?.appKeys?.serialize(),
     }
     const key = this.userRecordKey(publicKey)
     const prev = this.userRecordWriteChain.get(key) || Promise.resolve()
@@ -1299,17 +1293,28 @@ export class SessionManager {
           }
         }
 
-        const knownDeviceIdentities = data.knownDeviceIdentities || []
+        let appKeys: AppKeys | undefined
+        if (data.appKeys) {
+          try {
+            appKeys = AppKeys.deserialize(data.appKeys)
+          } catch {
+            // Failed to deserialize AppKeys
+          }
+        }
 
         this.userRecords.set(publicKey, {
           publicKey: data.publicKey,
           devices,
-          knownDeviceIdentities,
+          appKeys,
         })
 
-        // Rebuild delegateToOwner mapping from stored device identities
-        for (const identity of knownDeviceIdentities) {
-          this.delegateToOwner.set(identity, publicKey)
+        // Rebuild delegateToOwner mapping from persisted AppKeys
+        if (appKeys) {
+          for (const device of appKeys.getAllDevices()) {
+            if (device.identityPubkey) {
+              this.delegateToOwner.set(device.identityPubkey, publicKey)
+            }
+          }
         }
 
         for (const device of devices.values()) {
