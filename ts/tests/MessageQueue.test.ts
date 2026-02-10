@@ -28,11 +28,19 @@ describe("MessageQueue", () => {
       expect(typeof id).toBe("string")
     })
 
-    it("should generate different ids for each add", async () => {
+    it("should generate deterministic id from event.id + targetKey", async () => {
       const { queue } = createQueue()
       const event = makeRumor("evt1")
       const id1 = await queue.add("device-a", event)
       const id2 = await queue.add("device-a", event)
+      expect(id1).toBe(id2)
+      expect(id1).toBe("evt1/device-a")
+    })
+
+    it("should generate different ids for different events", async () => {
+      const { queue } = createQueue()
+      const id1 = await queue.add("device-a", makeRumor("evt1"))
+      const id2 = await queue.add("device-a", makeRumor("evt2"))
       expect(id1).not.toBe(id2)
     })
   })
@@ -127,24 +135,18 @@ describe("MessageQueue", () => {
       expect(await queue.getForTarget("device-a")).toHaveLength(1)
     })
 
-    it("should remove duplicate storage entries for same event id", async () => {
+    it("should deduplicate at add time — same event+target produces one storage entry", async () => {
       const { queue, storage } = createQueue()
       const event = makeRumor("dup-evt")
       await queue.add("device-a", event)
       await queue.add("device-a", event)
 
-      // getForTarget deduplicates, but storage has 2 entries
+      // Only one storage entry should exist (dedup at add time)
       const keysBefore = await storage.list("v1/test-queue/")
-      const deviceAKeysBefore: string[] = []
-      for (const k of keysBefore) {
-        const entry = await storage.get<{ targetKey: string }>(k)
-        if (entry?.targetKey === "device-a") deviceAKeysBefore.push(k)
-      }
-      expect(deviceAKeysBefore).toHaveLength(2)
+      expect(keysBefore).toHaveLength(1)
 
       await queue.removeForTarget("device-a")
 
-      // Both storage entries should be gone
       const keysAfter = await storage.list("v1/test-queue/")
       expect(keysAfter).toHaveLength(0)
     })
@@ -167,6 +169,27 @@ describe("MessageQueue", () => {
       const { queue } = createQueue()
       await queue.add("device-a", makeRumor("evt1"))
       await queue.remove("nonexistent-id")
+      expect(await queue.getForTarget("device-a")).toHaveLength(1)
+    })
+  })
+
+  describe("removeByTargetAndEventId", () => {
+    it("should remove the entry matching event id + target", async () => {
+      const { queue } = createQueue()
+      await queue.add("device-a", makeRumor("evt1", "first"))
+      await queue.add("device-a", makeRumor("evt2", "second"))
+
+      await queue.removeByTargetAndEventId("device-a", "evt1")
+
+      const entries = await queue.getForTarget("device-a")
+      expect(entries).toHaveLength(1)
+      expect(entries[0].event.content).toBe("second")
+    })
+
+    it("should be a no-op for nonexistent event+target combo", async () => {
+      const { queue } = createQueue()
+      await queue.add("device-a", makeRumor("evt1"))
+      await queue.removeByTargetAndEventId("device-b", "evt1")
       expect(await queue.getForTarget("device-a")).toHaveLength(1)
     })
   })

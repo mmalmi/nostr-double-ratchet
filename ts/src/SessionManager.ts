@@ -254,10 +254,10 @@ export class SessionManager {
     // Resume discovery for all known users so queued messages from a prior
     // session get delivered after restart (discoveryQueue survives in storage
     // but setupUser must run to trigger invite acceptance → queue flush).
-    for (const [pubkey] of this.userRecords) {
-      if (pubkey !== this.ownerPublicKey) {
-        this.setupUser(pubkey)
-      }
+    const otherUsers = [...this.userRecords.keys()].filter(k => k !== this.ownerPublicKey)
+    console.log(`[SM] init — resuming discovery for ${otherUsers.length} known users: [${otherUsers.map(k => k.slice(0,8)).join(', ')}]`)
+    for (const pubkey of otherUsers) {
+      this.setupUser(pubkey)
     }
   }
 
@@ -741,15 +741,25 @@ export class SessionManager {
 
       // Expand DiscoveryQueue → MessageQueue BEFORE subscribing to invites
       // (invite acceptance triggers flushMessageQueue, so entries must be ready).
-      // Entries are kept in discoveryQueue so late-joining devices can receive them.
-      // Duplicates are deduplicated by event ID in MessageQueue.getForTarget.
+      // After expansion, remove the discovery entry to prevent unbounded growth.
+      // Any duplicates that may be introduced are deduplicated by event ID during reads,
+      // and we remove all duplicates for a given eventId on successful publish.
       const discoveryEntries = await this.discoveryQueue.getForTarget(userPubkey)
+      console.log(`[SM] setupUser ${userPubkey.slice(0,8)} — discoveryQueue has ${discoveryEntries.length} entries, ${devices.length} devices`)
       if (discoveryEntries.length > 0) {
         for (const entry of discoveryEntries) {
-          for (const device of devices) {
-            if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
-              await this.messageQueue.add(device.identityPubkey, entry.event)
+          try {
+            for (const device of devices) {
+              if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+                console.log(
+                  `[SM] setupUser — expanding discovery→mq: "${entry.event.content?.slice(0,30)}" → device=${device.identityPubkey.slice(0,8)}`
+                )
+                await this.messageQueue.add(device.identityPubkey, entry.event)
+              }
             }
+          } finally {
+            // Remove the discovery entry after expansion regardless of per-device add outcomes
+            await this.discoveryQueue.remove(entry.id).catch(() => {})
           }
         }
       }
@@ -935,22 +945,32 @@ export class SessionManager {
 
   private async flushMessageQueue(deviceIdentity: string): Promise<void> {
     const entries = await this.messageQueue.getForTarget(deviceIdentity)
-    if (entries.length === 0) return
+    if (entries.length === 0) {
+      console.log(`[SM] flushMessageQueue device=${deviceIdentity.slice(0,8)} — empty`)
+      return
+    }
 
     const ownerPubkey = this.resolveToOwner(deviceIdentity)
     const userRecord = this.userRecords.get(ownerPubkey)
     const device = userRecord?.devices.get(deviceIdentity)
-    if (!device?.activeSession) return
+    if (!device?.activeSession) {
+      console.log(`[SM] flushMessageQueue device=${deviceIdentity.slice(0,8)} — no active session, skipping ${entries.length} entries`)
+      return
+    }
 
+    console.log(`[SM] flushMessageQueue device=${deviceIdentity.slice(0,8)} — flushing ${entries.length} entries`)
     for (const entry of entries) {
       try {
         const { event: verifiedEvent } = device.activeSession.sendEvent(entry.event)
         await this.nostrPublish(verifiedEvent)
-      } catch {
-        // skip failed
+        console.log(`[SM] flushMessageQueue — published "${entry.event.content?.slice(0,30)}"`)
+        // Remove all queue entries for this device/event.id pair (handle potential duplicates)
+        await this.messageQueue.removeByTargetAndEventId(deviceIdentity, entry.event.id)
+      } catch (e) {
+        console.log(`[SM] flushMessageQueue — failed to publish "${entry.event.content?.slice(0,30)}":`, e)
+        // Keep entry for future retry
       }
     }
-    await this.messageQueue.removeForTarget(deviceIdentity)
     await this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
@@ -962,19 +982,22 @@ export class SessionManager {
 
     // Queue event for devices that don't have sessions yet
     const completeEvent = event as Rumor
+    console.log(`[SM] sendEvent to=${recipientIdentityKey.slice(0,8)} content="${completeEvent.content?.slice(0,30)}"`)
     const targets = new Set([recipientIdentityKey, this.ownerPublicKey])
     for (const target of targets) {
-      // Always add to discoveryQueue so late-joining devices can receive it
-      await this.discoveryQueue.add(target, completeEvent)
-
-      // Also add per-device entries for known devices (for immediate flush)
       const userRecord = this.userRecords.get(target)
-      if (userRecord?.appKeys) {
-        for (const device of userRecord.appKeys.getAllDevices()) {
+      const devices = userRecord?.appKeys?.getAllDevices() ?? []
+
+      if (devices.length > 0) {
+        // AppKeys known: queue per-device, skip discovery to avoid growth
+        for (const device of devices) {
           if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
             await this.messageQueue.add(device.identityPubkey, completeEvent)
           }
         }
+      } else {
+        // Unknown device list: queue a discovery entry (expanded later when AppKeys arrive)
+        await this.discoveryQueue.add(target, completeEvent)
       }
     }
 
@@ -1031,11 +1054,25 @@ export class SessionManager {
       await this.storeUserRecord(this.ownerPublicKey).catch(() => {})
     }
 
-    await Promise.allSettled(toPublish.map((evt) => this.nostrPublish(evt).catch(() => {})))
+    const publishResults = await Promise.allSettled(
+      toPublish.map((evt) => this.nostrPublish(evt))
+    )
 
-    // Remove queue entries for devices we just sent to (prevent duplicates on flush)
-    for (const deviceId of sentDeviceIds) {
-      await this.messageQueue.removeForTarget(deviceId)
+    // Remove only the specific event entries we just published successfully (by target + event.id)
+    // Then opportunistically flush any remaining queued messages for these devices.
+    for (let i = 0; i < publishResults.length; i++) {
+      const result = publishResults[i]
+      const deviceId = sentDeviceIds[i]
+      if (!deviceId) continue
+      if (result.status === "fulfilled") {
+        try {
+          await this.messageQueue.removeByTargetAndEventId(deviceId, (event as Rumor).id)
+        } catch {
+          // best-effort cleanup
+        }
+        // Try to flush older pending entries now that we have connectivity
+        this.flushMessageQueue(deviceId).catch(() => {})
+      }
     }
 
     // Return the event with computed ID (same as library would compute)
