@@ -15,8 +15,12 @@ impl FileStorageAdapter {
         Ok(Self { base_path })
     }
 
+    fn sanitize_key(key: &str) -> String {
+        key.replace(['/', '\\', ':'], "_")
+    }
+
     fn key_to_path(&self, key: &str) -> PathBuf {
-        let sanitized = key.replace(['/', '\\', ':'], "_");
+        let sanitized = Self::sanitize_key(key);
         self.base_path.join(format!("{}.json", sanitized))
     }
 }
@@ -67,6 +71,11 @@ impl StorageAdapter for FileStorageAdapter {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let mut keys = Vec::new();
 
+        // Prefix matching must use the same sanitization we apply to keys when we store them on
+        // disk; otherwise a logical key prefix like `user/` would never match a stored file name
+        // like `user_<hex>.json`.
+        let sanitized_prefix = FileStorageAdapter::sanitize_key(prefix);
+
         let entries = fs::read_dir(&self.base_path)
             .map_err(|e| crate::Error::Storage(format!("Failed to read directory: {}", e)))?;
 
@@ -86,8 +95,17 @@ impl StorageAdapter for FileStorageAdapter {
                 .unwrap_or(&file_name_str)
                 .to_string();
 
-            if key.starts_with(prefix) || prefix.is_empty() {
+            if prefix.is_empty() {
                 keys.push(key);
+                continue;
+            }
+
+            if key.starts_with(&sanitized_prefix) {
+                // Best-effort reconstruction of the original logical key by swapping the
+                // sanitized prefix for the caller-supplied prefix. This is correct for our current
+                // key scheme (the remainder does not contain path separators).
+                let remainder = key.strip_prefix(&sanitized_prefix).unwrap_or("");
+                keys.push(format!("{}{}", prefix, remainder));
             }
         }
 
@@ -197,14 +215,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let adapter = FileStorageAdapter::new(temp_dir.path().to_path_buf()).unwrap();
 
-        adapter.put("user_alice", "data1".to_string()).unwrap();
-        adapter.put("user_bob", "data2".to_string()).unwrap();
-        adapter.put("invite_charlie", "data3".to_string()).unwrap();
+        adapter.put("user/alice", "data1".to_string()).unwrap();
+        adapter.put("user/bob", "data2".to_string()).unwrap();
+        adapter.put("invite/charlie", "data3".to_string()).unwrap();
 
-        let user_keys = adapter.list("user_").unwrap();
+        let user_keys = adapter.list("user/").unwrap();
         assert_eq!(user_keys.len(), 2);
-        assert!(user_keys.contains(&"user_alice".to_string()));
-        assert!(user_keys.contains(&"user_bob".to_string()));
+        assert!(user_keys.contains(&"user/alice".to_string()));
+        assert!(user_keys.contains(&"user/bob".to_string()));
 
         let all_keys = adapter.list("").unwrap();
         assert_eq!(all_keys.len(), 3);
