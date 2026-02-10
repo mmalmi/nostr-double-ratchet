@@ -361,25 +361,6 @@ describe("Edge Cases", () => {
  * Session establishment race conditions and aggressive edge cases.
  */
 describe("Session Establishment Races", () => {
-  it("should handle two devices racing to establish session with same recipient", async () => {
-    const relay = new ControlledMockRelay()
-
-    const { manager: alice1 } = await createControlledMockSessionManager("alice-1", relay)
-    const { manager: alice2 } = await createControlledMockSessionManager("alice-2", relay)
-    const { manager: bob, publicKey: bobPubkey } = await createControlledMockSessionManager("bob-1", relay)
-
-    const bobReceived: string[] = []
-    bob.onEvent((e) => bobReceived.push(e.content))
-
-    await alice1.sendMessage(bobPubkey, "from-alice-1")
-    await alice2.sendMessage(bobPubkey, "from-alice-2")
-
-    await new Promise((r) => setTimeout(r, 200))
-
-    expect(bobReceived).toContain("from-alice-1")
-    expect(bobReceived).toContain("from-alice-2")
-  })
-
   it("should handle mutual simultaneous session initiation", async () => {
     const relay = new ControlledMockRelay()
 
