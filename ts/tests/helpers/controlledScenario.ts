@@ -40,6 +40,7 @@ interface DeviceState {
   deviceId: string
   manager: SessionManager
   storage: InMemoryStorageAdapter
+  delegateStorage?: InMemoryStorageAdapter
   events: Rumor[]
   messageCounts: Map<string, number>
   waiters: MessageWaiter[]
@@ -465,17 +466,21 @@ async function restartDevice(context: ControlledScenarioContext, ref: ActorDevic
     // Restart delegate device
     await restartDelegateDevice(context, ref, actor, device)
   } else {
-    // Restart main device
-    const { manager: newManager, delegateManager: newDelegateManager } = await createControlledMockSessionManager(
+    // Restart main device — skip session init so we can attach listener before replay
+    const { manager: newManager, delegateManager: newDelegateManager, delegateStorage: newDelegateStorage } = await createControlledMockSessionManager(
       device.deviceId,
       context.relay,
       actor.secretKey,
-      device.storage
+      device.storage,
+      device.delegateStorage,
+      { skipSessionInit: true }
     )
 
     device.manager = newManager
     device.delegateManager = newDelegateManager
+    device.delegateStorage = newDelegateStorage
     device.unsub = attachManagerListener(actor, device)
+    await newManager.init()
   }
 
   // Update subscription ID for the new manager
@@ -672,7 +677,7 @@ async function addDevice(
   }
 
   // First device - create new AppKeysManager and DelegateManager
-  const { manager, mockStorage, appKeysManager, delegateManager } = await createControlledMockSessionManager(
+  const { manager, mockStorage, delegateStorage, appKeysManager, delegateManager } = await createControlledMockSessionManager(
     deviceId,
     context.relay,
     actor.secretKey
@@ -682,6 +687,7 @@ async function addDevice(
   actor.mainAppKeysManager = appKeysManager
 
   const deviceState = createDeviceState(actor, deviceId, manager, mockStorage, delegateManager)
+  deviceState.delegateStorage = delegateStorage
 
   // Track subscription ID for delivery control
   const subs = context.relay.getSubscriptions()

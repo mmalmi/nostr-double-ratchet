@@ -396,12 +396,14 @@ describe("SessionManager (Controlled Relay)", () => {
         sharedRelay,
         undefined,
         undefined,
+        undefined,
         { autoDeliver: true }
       )
 
       const { publicKey: bobPubkey } = await createControlledMockSessionManager(
         "bob-device-1",
         sharedRelay,
+        undefined,
         undefined,
         undefined,
         { autoDeliver: true }
