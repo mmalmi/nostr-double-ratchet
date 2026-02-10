@@ -1035,26 +1035,15 @@ export class SessionManager {
       await this.storeUserRecord(this.ownerPublicKey).catch(() => {})
     }
 
-    const publishResults = await Promise.allSettled(
-      toPublish.map((evt) => this.nostrPublish(evt))
+    await Promise.allSettled(
+      toPublish.map((evt, i) =>
+        this.nostrPublish(evt).then(() => {
+          const deviceId = sentDeviceIds[i]
+          this.messageQueue.removeByTargetAndEventId(deviceId, (event as Rumor).id).catch(() => {})
+          this.flushMessageQueue(deviceId).catch(() => {})
+        })
+      )
     )
-
-    // Remove only the specific event entries we just published successfully (by target + event.id)
-    // Then opportunistically flush any remaining queued messages for these devices.
-    for (let i = 0; i < publishResults.length; i++) {
-      const result = publishResults[i]
-      const deviceId = sentDeviceIds[i]
-      if (!deviceId) continue
-      if (result.status === "fulfilled") {
-        try {
-          await this.messageQueue.removeByTargetAndEventId(deviceId, (event as Rumor).id)
-        } catch {
-          // best-effort cleanup
-        }
-        // Try to flush older pending entries now that we have connectivity
-        this.flushMessageQueue(deviceId).catch(() => {})
-      }
-    }
 
     // Return the event with computed ID (same as library would compute)
     return completeEvent
