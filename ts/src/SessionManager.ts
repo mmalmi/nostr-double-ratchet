@@ -247,17 +247,9 @@ export class SessionManager {
     // Start invite response listener BEFORE setting up users
     // This ensures we're listening when other devices respond to our invites
     this.startInviteResponseListener()
-    // Setup sessions with our own other devices
-    // Use ownerPublicKey to find sibling devices (important for delegates)
-    this.setupUser(this.ownerPublicKey)
 
-    // Resume discovery for all known users so queued messages from a prior
-    // session get delivered after restart (discoveryQueue survives in storage
-    // but setupUser must run to trigger invite acceptance → queue flush).
-    const otherUsers = [...this.userRecords.keys()].filter(k => k !== this.ownerPublicKey)
-    for (const pubkey of otherUsers) {
-      this.setupUser(pubkey)
-    }
+    // Setup sessions with our own devices and resume discovery for all known users
+    Array.from(this.userRecords.keys()).forEach(pubkey => this.setupUser(pubkey))
   }
 
   /**
