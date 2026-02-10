@@ -39,12 +39,10 @@ export class MessageQueue {
 
   async removeForTarget(targetKey: string): Promise<void> {
     const keys = await this.storage.list(this.prefix)
-    let removed = 0
     for (const key of keys) {
       const entry = await this.storage.get<QueueEntry>(key)
       if (entry && entry.targetKey === targetKey) {
         await this.storage.del(key)
-        removed++
       }
     }
   }
