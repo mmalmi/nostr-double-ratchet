@@ -14,6 +14,7 @@ import {
   ChatSettingsPayloadV1,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
+import { MessageQueue } from "./MessageQueue"
 import { AppKeys, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
@@ -47,8 +48,8 @@ export interface DeviceRecord {
 export interface UserRecord {
   publicKey: string
   devices: Map<string, DeviceRecord>
-  /** Device identity pubkeys from AppKeys - used to rebuild delegateToOwner on load */
-  knownDeviceIdentities: string[]
+  /** Full AppKeys for this user - single source of truth for device list */
+  appKeys?: AppKeys
 }
 
 interface StoredSessionEntry {
@@ -66,7 +67,7 @@ interface StoredDeviceRecord {
 interface StoredUserRecord {
   publicKey: string
   devices: StoredDeviceRecord[]
-  knownDeviceIdentities?: string[]
+  appKeys?: string
 }
 
 export class SessionManager {
@@ -89,14 +90,12 @@ export class SessionManager {
 
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
-  private messageHistory: Map<string, Rumor[]> = new Map()
+  private messageQueue!: MessageQueue
+  private discoveryQueue!: MessageQueue
   // Map delegate device pubkeys to their owner's pubkey
   private delegateToOwner: Map<string, string> = new Map()
   // Track processed InviteResponse event IDs to prevent replay
   private processedInviteResponses: Set<string> = new Set()
-  // Cached AppKeys for authorization checks
-  private cachedAppKeys: Map<string, AppKeys> = new Map()
-
   // Expiration defaults (persisted)
   private defaultExpiration: ExpirationOptions | undefined
   private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
@@ -220,6 +219,8 @@ export class SessionManager {
     this.inviteKeys = inviteKeys
     this.storage = storage || new InMemoryStorageAdapter()
     this.versionPrefix = `v${this.storageVersion}`
+    this.messageQueue = new MessageQueue(this.storage, "v1/message-queue/")
+    this.discoveryQueue = new MessageQueue(this.storage, "v1/discovery-queue/")
   }
 
   async init() {
@@ -246,9 +247,9 @@ export class SessionManager {
     // Start invite response listener BEFORE setting up users
     // This ensures we're listening when other devices respond to our invites
     this.startInviteResponseListener()
-    // Setup sessions with our own other devices
-    // Use ownerPublicKey to find sibling devices (important for delegates)
-    this.setupUser(this.ownerPublicKey)
+
+    // Setup sessions with our own devices and resume discovery for all known users
+    Array.from(this.userRecords.keys()).forEach(pubkey => this.setupUser(pubkey))
   }
 
   /**
@@ -305,9 +306,11 @@ export class SessionManager {
             }
             this.updateDelegateMapping(claimedOwner, appKeys)
           } else {
-            // No AppKeys - check cached identities or single-device case
-            const cachedIdentities = this.userRecords.get(claimedOwner)?.knownDeviceIdentities || []
-            const isCached = cachedIdentities.includes(decrypted.inviteeIdentity)
+            // No AppKeys from relay - check persisted AppKeys or single-device case
+            const persistedAppKeys = this.userRecords.get(claimedOwner)?.appKeys
+            const isCached = persistedAppKeys?.getAllDevices().some(
+              d => d.identityPubkey === decrypted.inviteeIdentity
+            ) ?? false
             const isSingleDevice = decrypted.inviteeIdentity === claimedOwner
             if (!isCached && !isSingleDevice) {
               return
@@ -388,7 +391,7 @@ export class SessionManager {
   private getOrCreateUserRecord(userPubkey: string): UserRecord {
     let rec = this.userRecords.get(userPubkey)
     if (!rec) {
-      rec = { publicKey: userPubkey, devices: new Map(), knownDeviceIdentities: [] }
+      rec = { publicKey: userPubkey, devices: new Map() }
       this.userRecords.set(userPubkey, rec)
     }
     return rec
@@ -453,23 +456,22 @@ export class SessionManager {
     )
 
     // Remove stale mappings for devices no longer in AppKeys
-    const oldIdentities = userRecord.knownDeviceIdentities || []
+    const oldIdentities = (userRecord.appKeys?.getAllDevices() || [])
+      .map(d => d.identityPubkey)
+      .filter(Boolean) as string[]
     for (const identity of oldIdentities) {
       if (!newDeviceIdentities.has(identity)) {
         this.delegateToOwner.delete(identity)
       }
     }
 
-    // Update user record with current device identities
-    userRecord.knownDeviceIdentities = Array.from(newDeviceIdentities)
+    // Store AppKeys in user record (single source of truth)
+    userRecord.appKeys = appKeys
 
     // Update in-memory mapping for current devices
     for (const identity of newDeviceIdentities) {
       this.delegateToOwner.set(identity, ownerPubkey)
     }
-
-    // Cache AppKeys for authorization checks
-    this.cachedAppKeys.set(ownerPubkey, appKeys)
 
     // Persist
     this.storeUserRecord(ownerPubkey).catch(() => {})
@@ -480,12 +482,8 @@ export class SessionManager {
    * Returns true if the device is in the owner's current AppKeys.
    */
   private isDeviceAuthorized(ownerPubkey: string, deviceId: string): boolean {
-    const appKeys = this.cachedAppKeys.get(ownerPubkey)
-    if (!appKeys) {
-      // Fall back to cached identities if AppKeys not yet loaded
-      const userRecord = this.userRecords.get(ownerPubkey)
-      return userRecord?.knownDeviceIdentities.includes(deviceId) ?? false
-    }
+    const appKeys = this.userRecords.get(ownerPubkey)?.appKeys
+    if (!appKeys) return false
     return appKeys.getAllDevices().some(d => d.identityPubkey === deviceId)
   }
 
@@ -655,7 +653,7 @@ export class SessionManager {
         .then(() => {
           this.attachSessionSubscription(userPubkey, deviceRecord, session)
         })
-        .then(() => this.sendMessageHistory(userPubkey, device.identityPubkey))
+        .then(() => this.flushMessageQueue(device.identityPubkey))
         .catch(() => {})
     }
 
@@ -732,9 +730,40 @@ export class SessionManager {
         }
       }
 
+      // Expand DiscoveryQueue → MessageQueue BEFORE subscribing to invites
+      // (invite acceptance triggers flushMessageQueue, so entries must be ready).
+      // After expansion, remove the discovery entry to prevent unbounded growth.
+      // Any duplicates that may be introduced are deduplicated by event ID during reads,
+      // and we remove all duplicates for a given eventId on successful publish.
+      const discoveryEntries = await this.discoveryQueue.getForTarget(userPubkey)
+      if (discoveryEntries.length > 0) {
+        for (const entry of discoveryEntries) {
+          try {
+            for (const device of devices) {
+              if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+                await this.messageQueue.add(device.identityPubkey, entry.event)
+              }
+            }
+          } finally {
+            // Remove the discovery entry after expansion regardless of per-device add outcomes
+            await this.discoveryQueue.remove(entry.id).catch(() => {})
+          }
+        }
+      }
+
       // For each device in AppKeys, subscribe to their Invite event
       for (const device of devices) {
         subscribeToDeviceInvite(device)
+      }
+
+      // Flush MessageQueue for devices that already have active sessions
+      for (const device of devices) {
+        if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+          const deviceRecord = this.userRecords.get(userPubkey)?.devices.get(device.identityPubkey)
+          if (deviceRecord?.activeSession) {
+            this.flushMessageQueue(device.identityPubkey).catch(() => {})
+          }
+        }
       }
     })
   }
@@ -867,7 +896,14 @@ export class SessionManager {
       this.inviteSubscriptions.delete(appKeysKey)
     }
 
-    this.messageHistory.delete(userPubkey)
+    // Remove discovery queue entries for this owner
+    await this.discoveryQueue.removeForTarget(userPubkey)
+    // Remove message queue entries for all known devices
+    if (userRecord) {
+      for (const [deviceId] of userRecord.devices) {
+        await this.messageQueue.removeForTarget(deviceId)
+      }
+    }
 
     await Promise.allSettled([
       this.deleteUserSessionsFromStorage(userPubkey),
@@ -894,29 +930,30 @@ export class SessionManager {
     await Promise.all(keys.map((key) => this.storage.del(key)))
   }
 
-  private async sendMessageHistory(
-    recipientPublicKey: string,
-    deviceId: string
-  ): Promise<void> {
-    const history = this.messageHistory.get(recipientPublicKey) || []
-    const userRecord = this.userRecords.get(recipientPublicKey)
-    if (!userRecord) {
+  private async flushMessageQueue(deviceIdentity: string): Promise<void> {
+    const entries = await this.messageQueue.getForTarget(deviceIdentity)
+    if (entries.length === 0) {
       return
     }
-    const device = userRecord.devices.get(deviceId)
-    if (!device) {
-      return
-    }
-    for (const event of history) {
-      const { activeSession } = device
 
-      if (!activeSession) {
-        continue
-      }
-      const { event: verifiedEvent } = activeSession.sendEvent(event)
-      await this.nostrPublish(verifiedEvent)
-      await this.storeUserRecord(recipientPublicKey)
+    const ownerPubkey = this.resolveToOwner(deviceIdentity)
+    const userRecord = this.userRecords.get(ownerPubkey)
+    const device = userRecord?.devices.get(deviceIdentity)
+    if (!device?.activeSession) {
+      return
     }
+
+    for (const entry of entries) {
+      try {
+        const { event: verifiedEvent } = device.activeSession.sendEvent(entry.event)
+        await this.nostrPublish(verifiedEvent)
+        // Remove all queue entries for this device/event.id pair (handle potential duplicates)
+        await this.messageQueue.removeByTargetAndEventId(deviceIdentity, entry.event.id)
+      } catch (e) {
+        // Keep entry for future retry
+      }
+    }
+    await this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
   async sendEvent(
@@ -925,13 +962,24 @@ export class SessionManager {
   ): Promise<Rumor | undefined> {
     await this.init()
 
-    // Add to message history queue (will be sent when session is established)
+    // Queue event for devices that don't have sessions yet
     const completeEvent = event as Rumor
-    // Use ownerPublicKey for history targets so delegates share history with owner
-    const historyTargets = new Set([recipientIdentityKey, this.ownerPublicKey])
-    for (const key of historyTargets) {
-      const existing = this.messageHistory.get(key) || []
-      this.messageHistory.set(key, [...existing, completeEvent])
+    const targets = new Set([recipientIdentityKey, this.ownerPublicKey])
+    for (const target of targets) {
+      const userRecord = this.userRecords.get(target)
+      const devices = userRecord?.appKeys?.getAllDevices() ?? []
+
+      if (devices.length > 0) {
+        // AppKeys known: queue per-device, skip discovery to avoid growth
+        for (const device of devices) {
+          if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+            await this.messageQueue.add(device.identityPubkey, completeEvent)
+          }
+        }
+      } else {
+        // Unknown device list: queue a discovery entry (expanded later when AppKeys arrive)
+        await this.discoveryQueue.add(target, completeEvent)
+      }
     }
 
     const userRecord = this.getOrCreateUserRecord(recipientIdentityKey)
@@ -961,6 +1009,7 @@ export class SessionManager {
     // if the page reloads/crashes while publishes are still in-flight, we still want the
     // updated session keys to be on disk so the next incoming message can be decrypted.
     const toPublish: Parameters<NostrPublish>[0][] = []
+    const sentDeviceIds: string[] = []
     for (const device of devices) {
       const { activeSession } = device
       if (!activeSession) continue
@@ -974,6 +1023,7 @@ export class SessionManager {
       try {
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         toPublish.push(verifiedEvent)
+        sentDeviceIds.push(device.deviceId)
       } catch {
         // Ignore send errors for a single device.
       }
@@ -985,7 +1035,15 @@ export class SessionManager {
       await this.storeUserRecord(this.ownerPublicKey).catch(() => {})
     }
 
-    await Promise.allSettled(toPublish.map((evt) => this.nostrPublish(evt).catch(() => {})))
+    await Promise.allSettled(
+      toPublish.map((evt, i) =>
+        this.nostrPublish(evt).then(() => {
+          const deviceId = sentDeviceIds[i]
+          this.messageQueue.removeByTargetAndEventId(deviceId, (event as Rumor).id).catch(() => {})
+          this.flushMessageQueue(deviceId).catch(() => {})
+        })
+      )
+    )
 
     // Return the event with computed ID (same as library would compute)
     return completeEvent
@@ -1247,7 +1305,7 @@ export class SessionManager {
           createdAt: device.createdAt,
         })
       ),
-      knownDeviceIdentities: userRecord?.knownDeviceIdentities || [],
+      appKeys: userRecord?.appKeys?.serialize(),
     }
     const key = this.userRecordKey(publicKey)
     const prev = this.userRecordWriteChain.get(key) || Promise.resolve()
@@ -1299,17 +1357,28 @@ export class SessionManager {
           }
         }
 
-        const knownDeviceIdentities = data.knownDeviceIdentities || []
+        let appKeys: AppKeys | undefined
+        if (data.appKeys) {
+          try {
+            appKeys = AppKeys.deserialize(data.appKeys)
+          } catch {
+            // Failed to deserialize AppKeys
+          }
+        }
 
         this.userRecords.set(publicKey, {
           publicKey: data.publicKey,
           devices,
-          knownDeviceIdentities,
+          appKeys,
         })
 
-        // Rebuild delegateToOwner mapping from stored device identities
-        for (const identity of knownDeviceIdentities) {
-          this.delegateToOwner.set(identity, publicKey)
+        // Rebuild delegateToOwner mapping from persisted AppKeys
+        if (appKeys) {
+          for (const device of appKeys.getAllDevices()) {
+            if (device.identityPubkey) {
+              this.delegateToOwner.set(device.identityPubkey, publicKey)
+            }
+          }
         }
 
         for (const device of devices.values()) {

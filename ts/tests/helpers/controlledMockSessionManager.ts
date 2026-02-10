@@ -14,6 +14,8 @@ import { ControlledMockRelay } from "./ControlledMockRelay"
 export interface ControlledMockSessionManagerOptions {
   /** If true, auto-deliver events during publish (useful for session setup) */
   autoDeliver?: boolean
+  /** If true, skip calling SessionManager.init() — caller must call it manually */
+  skipSessionInit?: boolean
 }
 
 export const createControlledMockSessionManager = async (
@@ -21,16 +23,17 @@ export const createControlledMockSessionManager = async (
   sharedMockRelay?: ControlledMockRelay,
   existingSecretKey?: Uint8Array,
   existingStorage?: InMemoryStorageAdapter,
+  existingDelegateStorage?: InMemoryStorageAdapter,
   options: ControlledMockSessionManagerOptions = {}
 ) => {
-  const { autoDeliver = true } = options // Default to auto-deliver for easier setup
+  const { autoDeliver = true, skipSessionInit = false } = options
   void deviceId // unused but kept for API compatibility
 
   const secretKey = existingSecretKey || generateSecretKey()
   const publicKey = getPublicKey(secretKey)
 
   const mockStorage = existingStorage || new InMemoryStorageAdapter()
-  const delegateStorage = new InMemoryStorageAdapter()
+  const delegateStorage = existingDelegateStorage || new InMemoryStorageAdapter()
   const storageSpy = {
     get: vi.spyOn(mockStorage, "get"),
     del: vi.spyOn(mockStorage, "del"),
@@ -117,7 +120,9 @@ export const createControlledMockSessionManager = async (
 
   // Create SessionManager using DelegateManager
   const manager = delegateManager.createSessionManager()
-  await manager.init()
+  if (!skipSessionInit) {
+    await manager.init()
+  }
 
   const onEvent = vi.fn()
   manager.onEvent(onEvent)
@@ -130,6 +135,7 @@ export const createControlledMockSessionManager = async (
     publish: appKeysManagerPublish,
     onEvent,
     mockStorage,
+    delegateStorage,
     storageSpy,
     secretKey,
     publicKey,
