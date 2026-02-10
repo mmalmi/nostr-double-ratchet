@@ -14,6 +14,7 @@ import {
   ChatSettingsPayloadV1,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
+import { MessageQueue } from "./MessageQueue"
 import { AppKeys, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
@@ -89,7 +90,8 @@ export class SessionManager {
 
   // Data
   private userRecords: Map<string, UserRecord> = new Map()
-  private messageHistory: Map<string, Rumor[]> = new Map()
+  private messageQueue!: MessageQueue
+  private discoveryQueue!: MessageQueue
   // Map delegate device pubkeys to their owner's pubkey
   private delegateToOwner: Map<string, string> = new Map()
   // Track processed InviteResponse event IDs to prevent replay
@@ -217,6 +219,8 @@ export class SessionManager {
     this.inviteKeys = inviteKeys
     this.storage = storage || new InMemoryStorageAdapter()
     this.versionPrefix = `v${this.storageVersion}`
+    this.messageQueue = new MessageQueue(this.storage, "v1/message-queue/")
+    this.discoveryQueue = new MessageQueue(this.storage, "v1/discovery-queue/")
   }
 
   async init() {
@@ -649,7 +653,7 @@ export class SessionManager {
         .then(() => {
           this.attachSessionSubscription(userPubkey, deviceRecord, session)
         })
-        .then(() => this.sendMessageHistory(userPubkey, device.identityPubkey))
+        .then(() => this.flushMessageQueue(device.identityPubkey))
         .catch(() => {})
     }
 
@@ -726,9 +730,34 @@ export class SessionManager {
         }
       }
 
+      // Expand DiscoveryQueue → MessageQueue BEFORE subscribing to invites
+      // (invite acceptance triggers flushMessageQueue, so entries must be ready).
+      // Entries are kept in discoveryQueue so late-joining devices can receive them.
+      // Duplicates are deduplicated by event ID in MessageQueue.getForTarget.
+      const discoveryEntries = await this.discoveryQueue.getForTarget(userPubkey)
+      if (discoveryEntries.length > 0) {
+        for (const entry of discoveryEntries) {
+          for (const device of devices) {
+            if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+              await this.messageQueue.add(device.identityPubkey, entry.event)
+            }
+          }
+        }
+      }
+
       // For each device in AppKeys, subscribe to their Invite event
       for (const device of devices) {
         subscribeToDeviceInvite(device)
+      }
+
+      // Flush MessageQueue for devices that already have active sessions
+      for (const device of devices) {
+        if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+          const deviceRecord = this.userRecords.get(userPubkey)?.devices.get(device.identityPubkey)
+          if (deviceRecord?.activeSession) {
+            this.flushMessageQueue(device.identityPubkey).catch(() => {})
+          }
+        }
       }
     })
   }
@@ -861,7 +890,14 @@ export class SessionManager {
       this.inviteSubscriptions.delete(appKeysKey)
     }
 
-    this.messageHistory.delete(userPubkey)
+    // Remove discovery queue entries for this owner
+    await this.discoveryQueue.removeForTarget(userPubkey)
+    // Remove message queue entries for all known devices
+    if (userRecord) {
+      for (const [deviceId] of userRecord.devices) {
+        await this.messageQueue.removeForTarget(deviceId)
+      }
+    }
 
     await Promise.allSettled([
       this.deleteUserSessionsFromStorage(userPubkey),
@@ -888,29 +924,25 @@ export class SessionManager {
     await Promise.all(keys.map((key) => this.storage.del(key)))
   }
 
-  private async sendMessageHistory(
-    recipientPublicKey: string,
-    deviceId: string
-  ): Promise<void> {
-    const history = this.messageHistory.get(recipientPublicKey) || []
-    const userRecord = this.userRecords.get(recipientPublicKey)
-    if (!userRecord) {
-      return
-    }
-    const device = userRecord.devices.get(deviceId)
-    if (!device) {
-      return
-    }
-    for (const event of history) {
-      const { activeSession } = device
+  private async flushMessageQueue(deviceIdentity: string): Promise<void> {
+    const entries = await this.messageQueue.getForTarget(deviceIdentity)
+    if (entries.length === 0) return
 
-      if (!activeSession) {
-        continue
+    const ownerPubkey = this.resolveToOwner(deviceIdentity)
+    const userRecord = this.userRecords.get(ownerPubkey)
+    const device = userRecord?.devices.get(deviceIdentity)
+    if (!device?.activeSession) return
+
+    for (const entry of entries) {
+      try {
+        const { event: verifiedEvent } = device.activeSession.sendEvent(entry.event)
+        await this.nostrPublish(verifiedEvent)
+      } catch {
+        // skip failed
       }
-      const { event: verifiedEvent } = activeSession.sendEvent(event)
-      await this.nostrPublish(verifiedEvent)
-      await this.storeUserRecord(recipientPublicKey)
     }
+    await this.messageQueue.removeForTarget(deviceIdentity)
+    await this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
   async sendEvent(
@@ -919,13 +951,22 @@ export class SessionManager {
   ): Promise<Rumor | undefined> {
     await this.init()
 
-    // Add to message history queue (will be sent when session is established)
+    // Queue event for devices that don't have sessions yet
     const completeEvent = event as Rumor
-    // Use ownerPublicKey for history targets so delegates share history with owner
-    const historyTargets = new Set([recipientIdentityKey, this.ownerPublicKey])
-    for (const key of historyTargets) {
-      const existing = this.messageHistory.get(key) || []
-      this.messageHistory.set(key, [...existing, completeEvent])
+    const targets = new Set([recipientIdentityKey, this.ownerPublicKey])
+    for (const target of targets) {
+      // Always add to discoveryQueue so late-joining devices can receive it
+      await this.discoveryQueue.add(target, completeEvent)
+
+      // Also add per-device entries for known devices (for immediate flush)
+      const userRecord = this.userRecords.get(target)
+      if (userRecord?.appKeys) {
+        for (const device of userRecord.appKeys.getAllDevices()) {
+          if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+            await this.messageQueue.add(device.identityPubkey, completeEvent)
+          }
+        }
+      }
     }
 
     const userRecord = this.getOrCreateUserRecord(recipientIdentityKey)
@@ -955,6 +996,7 @@ export class SessionManager {
     // if the page reloads/crashes while publishes are still in-flight, we still want the
     // updated session keys to be on disk so the next incoming message can be decrypted.
     const toPublish: Parameters<NostrPublish>[0][] = []
+    const sentDeviceIds: string[] = []
     for (const device of devices) {
       const { activeSession } = device
       if (!activeSession) continue
@@ -968,6 +1010,7 @@ export class SessionManager {
       try {
         const { event: verifiedEvent } = activeSession.sendEvent(event)
         toPublish.push(verifiedEvent)
+        sentDeviceIds.push(device.deviceId)
       } catch {
         // Ignore send errors for a single device.
       }
@@ -980,6 +1023,11 @@ export class SessionManager {
     }
 
     await Promise.allSettled(toPublish.map((evt) => this.nostrPublish(evt).catch(() => {})))
+
+    // Remove queue entries for devices we just sent to (prevent duplicates on flush)
+    for (const deviceId of sentDeviceIds) {
+      await this.messageQueue.removeForTarget(deviceId)
+    }
 
     // Return the event with computed ID (same as library would compute)
     return completeEvent
