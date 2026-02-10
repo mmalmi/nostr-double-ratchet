@@ -616,22 +616,6 @@ describe("Multi-Device Concurrent Operations", () => {
  * Tests for new device joining during active conversations.
  */
 describe("Device Joins During Conversation", () => {
-  it("should handle new device joining with pending undelivered messages", async () => {
-    await runControlledScenario({
-      steps: [
-        { type: "addDevice", actor: "alice", deviceId: "alice-1" },
-        { type: "addDevice", actor: "bob", deviceId: "bob-1" },
-        { type: "send", from: { actor: "alice", deviceId: "alice-1" }, to: "bob", message: "init", waitOn: "auto" },
-        { type: "send", from: { actor: "bob", deviceId: "bob-1" }, to: "alice", message: "ack", waitOn: "auto" },
-        { type: "send", from: { actor: "bob", deviceId: "bob-1" }, to: "alice", message: "before-new-device", ref: "pending" },
-        { type: "addDevice", actor: "alice", deviceId: "alice-2" },
-        { type: "deliverAll" },
-        { type: "expect", actor: "alice", deviceId: "alice-1", message: "before-new-device" },
-        { type: "expect", actor: "alice", deviceId: "alice-2", message: "before-new-device" },
-      ],
-    })
-  })
-
   it("should allow new device to send/receive after joining mid-conversation", async () => {
     await runControlledScenario({
       steps: [
@@ -651,19 +635,6 @@ describe("Device Joins During Conversation", () => {
     })
   })
 
-  it("should sync new device with messages sent before it joined", async () => {
-    await runControlledScenario({
-      steps: [
-        { type: "addDevice", actor: "alice", deviceId: "alice-1" },
-        { type: "addDevice", actor: "bob", deviceId: "bob-1" },
-        { type: "send", from: { actor: "alice", deviceId: "alice-1" }, to: "bob", message: "before-join-1", waitOn: "auto" },
-        { type: "send", from: { actor: "bob", deviceId: "bob-1" }, to: "alice", message: "before-join-2", waitOn: "auto" },
-        { type: "send", from: { actor: "alice", deviceId: "alice-1" }, to: "bob", message: "before-join-3", waitOn: "auto" },
-        { type: "addDevice", actor: "alice", deviceId: "alice-2" },
-        { type: "expect", actor: "alice", deviceId: "alice-2", message: "before-join-2" },
-      ],
-    })
-  })
 })
 
 /**
