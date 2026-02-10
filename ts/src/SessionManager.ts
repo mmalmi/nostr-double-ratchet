@@ -250,6 +250,15 @@ export class SessionManager {
     // Setup sessions with our own other devices
     // Use ownerPublicKey to find sibling devices (important for delegates)
     this.setupUser(this.ownerPublicKey)
+
+    // Resume discovery for all known users so queued messages from a prior
+    // session get delivered after restart (discoveryQueue survives in storage
+    // but setupUser must run to trigger invite acceptance → queue flush).
+    for (const [pubkey] of this.userRecords) {
+      if (pubkey !== this.ownerPublicKey) {
+        this.setupUser(pubkey)
+      }
+    }
   }
 
   /**

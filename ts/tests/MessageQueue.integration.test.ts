@@ -97,10 +97,11 @@ describe("MessageQueue crash recovery", () => {
   it("message queued before any session survives sender restart", async () => {
     await runControlledScenario({
       steps: [
+        // Only add alice — bob doesn't exist yet so discovery can't find anything
         { type: "addDevice", actor: "alice", deviceId: "alice-main" },
-        { type: "addDevice", actor: "bob", deviceId: "bob-main" },
 
-        // Send when NO session exists yet — goes straight to queue
+        // Send when bob has no device — message goes to discoveryQueue with no
+        // possibility of session establishment (bob's AppKeys aren't on the relay)
         {
           type: "send",
           from: { actor: "alice", deviceId: "alice-main" },
@@ -108,14 +109,17 @@ describe("MessageQueue crash recovery", () => {
           message: "no-session-yet",
         },
 
-        // Crash & restart alice
+        // Crash & restart alice (queue must survive via storage)
         { type: "close", actor: "alice", deviceId: "alice-main" },
         { type: "restart", actor: "alice", deviceId: "alice-main" },
 
-        // Flush everything — session discovery + queued message delivery
+        // NOW bob comes online — his AppKeys + Invite appear on the relay
+        { type: "addDevice", actor: "bob", deviceId: "bob-main" },
+
+        // Flush everything — alice discovers bob, establishes session, drains queue
         { type: "deliverAll" },
 
-        // Bob should eventually receive the pre-session message
+        // Bob should receive the pre-session message
         { type: "expect", actor: "bob", deviceId: "bob-main", message: "no-session-yet" },
       ],
     })
