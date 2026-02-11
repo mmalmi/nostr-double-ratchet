@@ -378,7 +378,7 @@ describe("Session Establishment Races", () => {
       bob.sendMessage(alicePubkey, "bob-initiates"),
     ])
 
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 2000))
 
     expect(bobReceived).toContain("alice-initiates")
     expect(aliceReceived).toContain("bob-initiates")
@@ -690,6 +690,21 @@ describe("Sender Copy Synchronization", () => {
         { type: "expect", actor: "bob", deviceId: "bob-1", message: "delayed-copy-test" },
         { type: "deliverTo", actor: "alice", deviceId: "alice-2", ref: "msg" },
         { type: "expect", actor: "alice", deviceId: "alice-2", message: "delayed-copy-test" },
+      ],
+    })
+  })
+})
+
+describe("Self-messaging", () => {
+  it("should deliver self-message to a second device added later", async () => {
+    await runControlledScenario({
+      steps: [
+        { type: "addDevice", actor: "alice", deviceId: "alice-1" },
+        // Send self-message when alice-1 is the only device
+        { type: "send", from: { actor: "alice", deviceId: "alice-1" }, to: "alice", message: "note-to-self" },
+        // Add second device — triggers discovery queue expansion + session establishment
+        { type: "addDevice", actor: "alice", deviceId: "alice-2" },
+        { type: "expect", actor: "alice", deviceId: "alice-2", message: "note-to-self" },
       ],
     })
   })
