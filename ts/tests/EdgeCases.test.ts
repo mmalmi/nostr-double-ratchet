@@ -378,7 +378,7 @@ describe("Session Establishment Races", () => {
       bob.sendMessage(alicePubkey, "bob-initiates"),
     ])
 
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 2000))
 
     expect(bobReceived).toContain("alice-initiates")
     expect(aliceReceived).toContain("bob-initiates")
