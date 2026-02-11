@@ -1,6 +1,51 @@
 import { Filter, VerifiedEvent } from "nostr-tools"
 import { matchFilter } from "nostr-tools"
 
+/**
+ * Check if a Nostr event kind is replaceable (only the latest event per key should be kept).
+ * - Kind 0, 3: regular replaceable
+ * - Kind 10000-19999: regular replaceable
+ * - Kind 30000-39999: parameterized replaceable (keyed by d-tag)
+ */
+function isReplaceableKind(kind: number): boolean {
+  return kind === 0 || kind === 3 || (kind >= 10000 && kind < 20000) || (kind >= 30000 && kind < 40000)
+}
+
+/**
+ * Get the replaceable event key for deduplication.
+ * For parameterized replaceable events (30000-39999), includes the d-tag.
+ */
+function getReplaceableKey(event: VerifiedEvent): string {
+  if (event.kind >= 30000 && event.kind < 40000) {
+    const dTag = event.tags?.find((t: string[]) => t[0] === "d")?.[1] || ""
+    return `${event.kind}:${event.pubkey}:${dTag}`
+  }
+  return `${event.kind}:${event.pubkey}`
+}
+
+/**
+ * Filter a list of events so that only the latest replaceable event per key is included.
+ * Non-replaceable events are always included.
+ */
+function deduplicateReplaceable(events: VerifiedEvent[]): VerifiedEvent[] {
+  const latestByKey = new Map<string, VerifiedEvent>()
+  const nonReplaceable: VerifiedEvent[] = []
+
+  for (const event of events) {
+    if (isReplaceableKind(event.kind)) {
+      const key = getReplaceableKey(event)
+      const existing = latestByKey.get(key)
+      if (!existing || event.created_at >= existing.created_at) {
+        latestByKey.set(key, event)
+      }
+    } else {
+      nonReplaceable.push(event)
+    }
+  }
+
+  return [...nonReplaceable, ...latestByKey.values()]
+}
+
 interface Subscription {
   id: string
   filter: Filter
@@ -43,7 +88,10 @@ export class ControlledMockRelay {
     // Deliver existing matching events via microtask to avoid TDZ issues
     // (e.g., waitForActivation accesses `unsubscribe` inside the callback,
     // which isn't assigned until subscribe() returns)
-    const existingMatches = this.events.filter((event) => matchFilter(filter, event))
+    // For replaceable events, only deliver the latest per author+d-tag (Nostr relay behavior).
+    const existingMatches = deduplicateReplaceable(
+      this.events.filter((event) => matchFilter(filter, event))
+    )
     if (existingMatches.length > 0) {
       queueMicrotask(() => {
         for (const event of existingMatches) {

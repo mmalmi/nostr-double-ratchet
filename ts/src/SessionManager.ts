@@ -491,6 +491,9 @@ export class SessionManager {
     pubkey: string,
     onAppKeys: (list: AppKeys) => void
   ): Unsubscribe {
+    // Track the latest created_at to skip stale replaceable events that
+    // relays may deliver out of order or alongside their replacements.
+    let latestCreatedAt = 0
     return this.nostrSubscribe(
       {
         kinds: [APP_KEYS_EVENT_KIND],
@@ -498,6 +501,11 @@ export class SessionManager {
         "#d": ["double-ratchet/app-keys"],
       },
       (event) => {
+        // AppKeys events are replaceable (kind 30078).  Skip events that are
+        // strictly older than the most recent one we've already processed.
+        if (event.created_at < latestCreatedAt) return
+        latestCreatedAt = event.created_at
+
         try {
           const list = AppKeys.fromEvent(event)
           // Update delegate mapping whenever we receive an AppKeys
