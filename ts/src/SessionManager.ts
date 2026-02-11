@@ -969,15 +969,16 @@ export class SessionManager {
       const userRecord = this.userRecords.get(target)
       const devices = userRecord?.appKeys?.getAllDevices() ?? []
 
-      if (devices.length > 0) {
+      const otherDevices = devices.filter(
+        d => d.identityPubkey && d.identityPubkey !== this.deviceId
+      )
+
+      if (otherDevices.length > 0) {
         // AppKeys known: queue per-device, skip discovery to avoid growth
-        for (const device of devices) {
-          if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
-            await this.messageQueue.add(device.identityPubkey, completeEvent)
-          }
+        for (const device of otherDevices) {
+          await this.messageQueue.add(device.identityPubkey, completeEvent)
         }
       } else {
-        // Unknown device list: queue a discovery entry (expanded later when AppKeys arrive)
         await this.discoveryQueue.add(target, completeEvent)
       }
     }
