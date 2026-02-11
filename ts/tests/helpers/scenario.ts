@@ -1,433 +1,302 @@
-import { MockRelay } from "./mockRelay"
-import { createMockSessionManager, createMockDelegateSessionManager } from "./mockSessionManager"
+import { vi } from "vitest"
+import { generateSecretKey, getPublicKey, finalizeEvent, UnsignedEvent, VerifiedEvent } from "nostr-tools"
+import { AppKeysManager, DelegateManager } from "../../src/AppKeysManager"
+import { AppKeys } from "../../src/AppKeys"
+import { InMemoryStorageAdapter, StorageAdapter } from "../../src/StorageAdapter"
+import { NostrPublish, NostrSubscribe, APP_KEYS_EVENT_KIND, Rumor } from "../../src/types"
 import { SessionManager } from "../../src/SessionManager"
-import { Rumor } from "../../src/types"
-import type { InMemoryStorageAdapter } from "../../src/StorageAdapter"
-import { generateSecretKey, getPublicKey } from "nostr-tools"
-import { AppKeysManager } from "../../src/AppKeysManager"
+import { MockRelay } from "./mockRelay"
 
-export type ActorId = "alice" | "bob"
+type DeviceRef = { actor: string; deviceId: string }
 
-export interface ScenarioContext {
-  relay: MockRelay
-  actors: Record<ActorId, ActorState>
+type Step =
+  | { type: "addDevice"; actor: string; deviceId: string }
+  | { type: "addDelegateDevice"; actor: string; deviceId: string; mainDeviceId: string }
+  | { type: "send"; from: DeviceRef; to: string; message: string; waitOn?: "all-recipient-devices" | DeviceRef }
+  | { type: "expect"; actor: string; deviceId: string; message: string }
+  | { type: "expectAll"; actor: string; deviceId: string; messages: string[] }
+  | { type: "restart"; actor: string; deviceId: string }
+  | { type: "close"; actor: string; deviceId: string }
+  | { type: "clearEvents" }
+  | { type: "removeDevice"; actor: string; deviceId: string }
+
+interface ScenarioConfig {
+  steps: Step[]
 }
 
-interface MessageWaiter {
-  message: string
-  targetCount: number
-  resolve: () => void
-  reject: (error: Error) => void
-  timeout: ReturnType<typeof setTimeout>
+interface DeviceState {
+  manager: SessionManager
+  storage: StorageAdapter
+  delegateStorage: StorageAdapter
+  delegateIdentityPubkey: string
+  receivedMessages: string[]
+  messageWaiters: Map<string, Array<() => void>>
+  isClosed: boolean
 }
 
 interface ActorState {
   secretKey: Uint8Array
   publicKey: string
+  appKeysManager: AppKeysManager
   devices: Map<string, DeviceState>
-  mainAppKeysManager?: AppKeysManager
 }
 
-interface DeviceState {
-  deviceId: string
-  manager: SessionManager
-  storage: InMemoryStorageAdapter
-  events: Rumor[]
-  messageCounts: Map<string, number>
-  waiters: MessageWaiter[]
-  unsub?: () => void
-  isDelegate?: boolean
-}
-
-interface ActorDeviceRef {
-  actor: ActorId
-  deviceId: string
-}
-
-type WaitTarget = ActorDeviceRef | ActorDeviceRef[] | "all-recipient-devices"
-
-type ScenarioStep =
-  | {
-      type: "send"
-      from: ActorDeviceRef
-      to: ActorId
-      message: string
-      waitOn?: WaitTarget
-    }
-  | { type: "expect"; actor: ActorId; deviceId: string; message: string }
-  | { type: "expectAll"; actor: ActorId; deviceId: string; messages: string[] }
-  | { type: "addDevice"; actor: ActorId; deviceId: string }
-  | { type: "addDelegateDevice"; actor: ActorId; deviceId: string; mainDeviceId: string }
-  | { type: "removeDevice"; actor: ActorId; deviceId: string }
-  | { type: "close"; actor: ActorId; deviceId: string }
-  | { type: "restart"; actor: ActorId; deviceId: string }
-  | { type: "clearEvents" }
-  | { type: "noop" }
-
-type ScenarioDefinition = {
-  steps: ScenarioStep[]
-}
-
-export async function runScenario(def: ScenarioDefinition): Promise<ScenarioContext> {
-  const relay = new MockRelay()
-  const context: ScenarioContext = {
-    relay,
-    actors: {
-      alice: createActorState(),
-      bob: createActorState(),
-    },
-  }
-
-  for (const step of def.steps) {
-    console.log(`\n--- Executing step: ${JSON.stringify(step)} ---`)
-    switch (step.type) {
-      case "send":
-        await sendMessage(context, step.from, step.to, step.message, step.waitOn)
-        break
-      case "expect":
-        await expectMessage(context, step.actor, step.deviceId, step.message)
-        break
-      case "expectAll":
-        await expectAllMessages(context, step.actor, step.deviceId, step.messages)
-        break
-      case "addDevice":
-        await addDevice(context, step.actor, step.deviceId)
-        break
-      case "addDelegateDevice":
-        await addDelegateDevice(context, step.actor, step.deviceId, step.mainDeviceId)
-        break
-      case "removeDevice":
-        await removeDevice(context, step.actor, step.deviceId)
-        break
-      case "close":
-        closeDevice(context, { actor: step.actor, deviceId: step.deviceId })
-        break
-      case "restart":
-        await restartDevice(context, { actor: step.actor, deviceId: step.deviceId })
-        break
-      case "noop":
-        await Promise.resolve()
-        break
-      case "clearEvents":
-        context.relay.clearEvents()
-        break
-      default: {
-        const exhaustive: never = step
-        throw new Error(`Unhandled step ${JSON.stringify(exhaustive)}`)
-      }
-    }
-  }
-
-  return context
-}
-
-function createActorState(): ActorState {
-  const secretKey = generateSecretKey()
-  const publicKey = getPublicKey(secretKey)
-  return {
-    secretKey,
-    publicKey,
-    devices: new Map(),
-  }
-}
-
-async function sendMessage(
-  context: ScenarioContext,
-  from: ActorDeviceRef,
-  to: ActorId,
-  message: string,
-  waitOn?: WaitTarget
-) {
-  const senderDevice = getDevice(context, from)
-  const recipientActor = context.actors[to]
-  if (!recipientActor) {
-    throw new Error(`Unknown recipient actor '${to}'`)
-  }
-
-  const waitTargets = resolveWaitTargets(context, waitOn, recipientActor)
-  const waits = waitTargets.map((device) =>
-    waitForMessage(device, deviceLabel(recipientActor, device), message, {
-      existingOk: false,
-    })
-  )
-
-  await senderDevice.manager.sendMessage(recipientActor.publicKey, message)
-  await Promise.all(waits)
-}
-
-async function expectMessage(
-  context: ScenarioContext,
-  actor: ActorId,
-  deviceId: string,
-  message: string
-) {
-  const device = getDevice(context, { actor, deviceId })
-  await waitForMessage(device, deviceLabel(context.actors[actor], device), message, {
-    existingOk: true,
-  })
-}
-
-async function expectAllMessages(
-  context: ScenarioContext,
-  actor: ActorId,
-  deviceId: string,
-  messages: string[]
-) {
-  console.log(`\n\n\nExpecting all messages on ${actor}:`, messages)
-  const actorState = context.actors[actor]
-  const device = getDevice(context, { actor, deviceId })
-  for (const msg of messages) {
-    await waitForMessage(device, deviceLabel(actorState, device), msg, { existingOk: true })
-  }
-}
-
-function closeDevice(context: ScenarioContext, ref: ActorDeviceRef) {
-  const device = getDevice(context, ref)
-  rejectPendingWaiters(device, new Error(`Device ${refToString(ref)} closed`))
-  device.unsub?.()
-  device.manager.close()
-}
-
-async function restartDevice(context: ScenarioContext, ref: ActorDeviceRef) {
-  const actor = context.actors[ref.actor]
-  if (!actor) {
-    throw new Error(`Unknown actor '${ref.actor}'`)
-  }
-  const device = getDevice(context, ref)
-  device.unsub?.()
-  device.manager.close()
-  const { manager: newManager } = await createMockSessionManager(
-    device.deviceId,
-    context.relay,
-    actor.secretKey,
-    device.storage
-  )
-
-  device.manager = newManager
-  device.unsub = attachManagerListener(actor, device)
-}
-
-function attachManagerListener(actor: ActorState, device: DeviceState): () => void {
-  const onEvent = (event: Rumor) => {
-    device.events.push(event)
-    const content = event.content ?? ""
-    const currentCount = device.messageCounts.get(content) ?? 0
-    const nextCount = currentCount + 1
-    device.messageCounts.set(content, nextCount)
-    resolveWaiters(device, content, nextCount)
-  }
-
-  const unsubscribe = device.manager.onEvent(onEvent)
-  return () => {
-    unsubscribe()
-  }
-}
-
-function resolveWaiters(device: DeviceState, content: string, count: number) {
-  const pending = device.waiters.slice()
-  for (const waiter of pending) {
-    if (waiter.message === content && count >= waiter.targetCount) {
-      waiter.resolve()
-    }
-  }
-}
-
-function waitForMessage(
-  device: DeviceState,
-  label: string,
-  message: string,
-  options: { existingOk: boolean }
-): Promise<void> {
-  const { existingOk } = options
-  const currentCount = device.messageCounts.get(message) ?? 0
-  if (existingOk && currentCount > 0) {
+function waitForMessage(device: DeviceState, message: string, timeoutMs = 10000): Promise<void> {
+  // Already received?
+  if (device.receivedMessages.includes(message)) {
     return Promise.resolve()
   }
 
   return new Promise<void>((resolve, reject) => {
-    const handleResolve = (waiter: MessageWaiter) => {
-      clearTimeout(waiter.timeout)
-      removeWaiter(device, waiter)
+    const timeout = setTimeout(() => {
+      reject(new Error(`Timed out waiting for message "${message}". Received: ${JSON.stringify(device.receivedMessages)}`))
+    }, timeoutMs)
+
+    if (!device.messageWaiters.has(message)) {
+      device.messageWaiters.set(message, [])
+    }
+    device.messageWaiters.get(message)!.push(() => {
+      clearTimeout(timeout)
       resolve()
-    }
-
-    const handleReject = (waiter: MessageWaiter, error: Error) => {
-      clearTimeout(waiter.timeout)
-      removeWaiter(device, waiter)
-      reject(error)
-    }
-
-    const waiter: MessageWaiter = {
-      message,
-      targetCount: currentCount + 1,
-      resolve: () => handleResolve(waiter),
-      reject: (error: Error) => handleReject(waiter, error),
-      timeout: setTimeout(() => {
-        handleReject(
-          waiter,
-          new Error(`Timed out waiting for message '${message}' on ${label}`)
-        )
-      }, 5000),
-    }
-
-    device.waiters.push(waiter)
+    })
   })
 }
 
-function removeWaiter(device: DeviceState, waiter: MessageWaiter) {
-  const index = device.waiters.indexOf(waiter)
-  if (index >= 0) {
-    device.waiters.splice(index, 1)
-  }
-}
+export async function runScenario(config: ScenarioConfig): Promise<void> {
+  const relay = new MockRelay()
+  const actors = new Map<string, ActorState>()
 
-function rejectPendingWaiters(device: DeviceState, error: Error) {
-  const waiters = device.waiters.slice()
-  for (const waiter of waiters) {
-    waiter.reject(error)
-  }
-}
-
-function refToString(ref: ActorDeviceRef): string {
-  return `${ref.actor}/${ref.deviceId}`
-}
-
-async function addDevice(context: ScenarioContext, actorId: ActorId, deviceId: string) {
-  const actor = getActor(context, actorId)
-  if (actor.devices.has(deviceId)) {
-    throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
+  function getActor(name: string): ActorState {
+    const actor = actors.get(name)
+    if (!actor) throw new Error(`Actor "${name}" not found`)
+    return actor
   }
 
-  const { manager, mockStorage, appKeysManager } = await createMockSessionManager(
-    deviceId,
-    context.relay,
-    actor.secretKey
-  )
-
-  // Track the first device's AppKeysManager as the main one for this actor
-  if (!actor.mainAppKeysManager) {
-    actor.mainAppKeysManager = appKeysManager
+  function getDevice(actorName: string, deviceId: string): DeviceState {
+    const actor = getActor(actorName)
+    const device = actor.devices.get(deviceId)
+    if (!device) throw new Error(`Device "${deviceId}" not found for actor "${actorName}"`)
+    return device
   }
 
-  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
-  actor.devices.set(deviceId, deviceState)
-  return deviceState
-}
+  async function createDevice(
+    actorName: string,
+    deviceId: string,
+    secretKey: Uint8Array,
+    appKeysManager: AppKeysManager,
+    existingStorage?: StorageAdapter,
+    existingDelegateStorage?: StorageAdapter,
+  ): Promise<DeviceState> {
+    const publicKey = getPublicKey(secretKey)
+    const storage = existingStorage || new InMemoryStorageAdapter()
 
-async function addDelegateDevice(
-  context: ScenarioContext,
-  actorId: ActorId,
-  deviceId: string,
-  mainDeviceId: string
-) {
-  const actor = getActor(context, actorId)
-  if (actor.devices.has(deviceId)) {
-    throw new Error(`Device '${deviceId}' already exists for actor '${actorId}'`)
-  }
-
-  const mainDevice = actor.devices.get(mainDeviceId)
-  if (!mainDevice) {
-    throw new Error(`Main device '${mainDeviceId}' not found for actor '${actorId}'`)
-  }
-
-  if (!actor.mainAppKeysManager) {
-    throw new Error(`No main AppKeysManager found for actor '${actorId}'`)
-  }
-
-  const { manager, mockStorage } = await createMockDelegateSessionManager(
-    deviceId,
-    context.relay,
-    actor.mainAppKeysManager
-  )
-
-  const deviceState = createDeviceState(actor, deviceId, manager, mockStorage)
-  deviceState.isDelegate = true
-  actor.devices.set(deviceId, deviceState)
-  return deviceState
-}
-
-function getActor(context: ScenarioContext, actorId: ActorId): ActorState {
-  const actor = context.actors[actorId]
-  if (!actor) {
-    throw new Error(`Unknown actor '${actorId}'`)
-  }
-  return actor
-}
-
-function getDevice(context: ScenarioContext, ref: ActorDeviceRef): DeviceState {
-  const actor = getActor(context, ref.actor)
-  const device = actor.devices.get(ref.deviceId)
-  if (!device) {
-    throw new Error(`Device '${ref.deviceId}' not registered for actor '${ref.actor}'`)
-  }
-  return device
-}
-
-function deviceLabel(actor: ActorState, device: DeviceState): string {
-  return `${actor.publicKey.slice(0, 8)}.../${device.deviceId}`
-}
-
-function createDeviceState(
-  actor: ActorState,
-  deviceId: string,
-  manager: SessionManager,
-  storage: InMemoryStorageAdapter
-): DeviceState {
-  const events: Rumor[] = []
-  const deviceState: DeviceState = {
-    deviceId,
-    manager,
-    storage,
-    events,
-    messageCounts: new Map(),
-    waiters: [],
-  }
-
-  deviceState.unsub = attachManagerListener(actor, deviceState)
-  return deviceState
-}
-
-function resolveWaitTargets(
-  context: ScenarioContext,
-  waitOn: WaitTarget | undefined,
-  recipient: ActorState
-): DeviceState[] {
-  if (!waitOn) {
-    const devices = Array.from(recipient.devices.values())
-    if (devices.length === 0) {
-      throw new Error("Recipient actor has no devices. Add one before sending.")
+    const nostrSubscribe: NostrSubscribe = (filter, onEvent) => {
+      const handle = relay.subscribe(filter, onEvent)
+      return handle.close
     }
-    return devices
-  }
 
-  if (waitOn === "all-recipient-devices") {
-    const devices = Array.from(recipient.devices.values())
-    if (devices.length === 0) {
-      throw new Error("Recipient has no devices to wait on")
+    const publish = vi.fn<NostrPublish>(async (event: UnsignedEvent) => {
+      const signedEvent = finalizeEvent(event, secretKey)
+      relay.storeAndDeliver(signedEvent as unknown as VerifiedEvent)
+      return signedEvent as unknown as VerifiedEvent
+    })
+
+    // Delegate publish signs with delegate key
+    const delegateManagerHolder: { manager: DelegateManager | null } = { manager: null }
+    const delegatePublish = vi.fn<NostrPublish>(async (event: UnsignedEvent | VerifiedEvent) => {
+      if ("sig" in event && event.sig) {
+        relay.storeAndDeliver(event as unknown as VerifiedEvent)
+        return event as unknown as VerifiedEvent
+      }
+      const privKey = delegateManagerHolder.manager?.getIdentityKey()
+      if (!privKey) throw new Error("No delegate key available")
+      const signedEvent = finalizeEvent(event as UnsignedEvent, privKey)
+      relay.storeAndDeliver(signedEvent as unknown as VerifiedEvent)
+      return signedEvent as unknown as VerifiedEvent
+    })
+
+    const delegateStorage = existingDelegateStorage || new InMemoryStorageAdapter()
+    const delegateManager = new DelegateManager({
+      nostrSubscribe,
+      nostrPublish: delegatePublish,
+      storage: delegateStorage,
+    })
+    delegateManagerHolder.manager = delegateManager
+
+    await delegateManager.init()
+
+    // Add device to AppKeysManager and publish
+    appKeysManager.addDevice(delegateManager.getRegistrationPayload())
+    await appKeysManager.publish()
+
+    // Activate deterministically
+    await delegateManager.activate(publicKey)
+
+    // Create SessionManager
+    const manager = delegateManager.createSessionManager(storage)
+    await manager.init()
+
+    const deviceState: DeviceState = {
+      manager,
+      storage,
+      delegateStorage,
+      delegateIdentityPubkey: delegateManager.getIdentityPublicKey(),
+      receivedMessages: [],
+      messageWaiters: new Map(),
+      isClosed: false,
     }
-    return devices
+
+    // Register onEvent handler to track received messages
+    manager.onEvent((event: Rumor) => {
+      deviceState.receivedMessages.push(event.content)
+      const waiters = deviceState.messageWaiters.get(event.content)
+      if (waiters) {
+        for (const waiter of waiters) {
+          waiter()
+        }
+        deviceState.messageWaiters.delete(event.content)
+      }
+    })
+
+    return deviceState
   }
 
-  const refs = Array.isArray(waitOn) ? waitOn : [waitOn]
-  return refs.map((ref) => getDevice(context, ref))
-}
+  for (const step of config.steps) {
+    switch (step.type) {
+      case "addDevice": {
+        let actor = actors.get(step.actor)
+        if (!actor) {
+          const secretKey = generateSecretKey()
+          const publicKey = getPublicKey(secretKey)
+          const appKeysManager = new AppKeysManager({
+            nostrPublish: vi.fn<NostrPublish>(async (event: UnsignedEvent) => {
+              const signedEvent = finalizeEvent(event, secretKey)
+              relay.storeAndDeliver(signedEvent as unknown as VerifiedEvent)
+              return signedEvent as unknown as VerifiedEvent
+            }),
+            storage: new InMemoryStorageAdapter(),
+          })
+          await appKeysManager.init()
 
-async function removeDevice(context: ScenarioContext, actorId: ActorId, deviceId: string) {
-  const actor = getActor(context, actorId)
-  if (!actor.mainAppKeysManager) {
-    throw new Error(`No AppKeysManager found for actor '${actorId}'`)
+          // Check for existing AppKeys on relay
+          const existingEvents = relay.getAllEvents()
+          for (const event of existingEvents) {
+            if (event.kind === APP_KEYS_EVENT_KIND && event.pubkey === publicKey) {
+              const tags = event.tags || []
+              const dTag = tags.find((t) => t[0] === "d" && t[1] === "double-ratchet/app-keys")
+              if (dTag) {
+                try {
+                  const appKeys = AppKeys.fromEvent(event)
+                  await appKeysManager.setAppKeys(appKeys)
+                } catch { /* ignore */ }
+              }
+            }
+          }
+
+          actor = { secretKey, publicKey, appKeysManager, devices: new Map() }
+          actors.set(step.actor, actor)
+        }
+
+        const device = await createDevice(
+          step.actor,
+          step.deviceId,
+          actor.secretKey,
+          actor.appKeysManager,
+        )
+        actor.devices.set(step.deviceId, device)
+        break
+      }
+
+      case "addDelegateDevice": {
+        const actor = getActor(step.actor)
+        const device = await createDevice(
+          step.actor,
+          step.deviceId,
+          actor.secretKey,
+          actor.appKeysManager,
+        )
+        actor.devices.set(step.deviceId, device)
+        break
+      }
+
+      case "send": {
+        const fromDevice = getDevice(step.from.actor, step.from.deviceId)
+        const toActor = getActor(step.to)
+
+        await fromDevice.manager.sendMessage(toActor.publicKey, step.message)
+
+        if (step.waitOn === "all-recipient-devices") {
+          const promises: Promise<void>[] = []
+          for (const [, device] of toActor.devices) {
+            if (!device.isClosed) {
+              promises.push(waitForMessage(device, step.message))
+            }
+          }
+          await Promise.all(promises)
+        } else if (step.waitOn && typeof step.waitOn === "object") {
+          const targetDevice = getDevice(step.waitOn.actor, step.waitOn.deviceId)
+          await waitForMessage(targetDevice, step.message)
+        }
+        break
+      }
+
+      case "expect": {
+        const device = getDevice(step.actor, step.deviceId)
+        await waitForMessage(device, step.message)
+        break
+      }
+
+      case "expectAll": {
+        const device = getDevice(step.actor, step.deviceId)
+        await Promise.all(step.messages.map((msg) => waitForMessage(device, msg)))
+        break
+      }
+
+      case "restart": {
+        const actor = getActor(step.actor)
+        const oldDevice = actor.devices.get(step.deviceId)
+        if (oldDevice && !oldDevice.isClosed) {
+          oldDevice.manager.close()
+          oldDevice.isClosed = true
+        }
+
+        // Allow pending async operations (e.g., fetchAppKeys setTimeout)
+        // to complete and persist state before creating the new device
+        await new Promise((r) => setTimeout(r, 200))
+
+        const device = await createDevice(
+          step.actor,
+          step.deviceId,
+          actor.secretKey,
+          actor.appKeysManager,
+          oldDevice?.storage,
+          oldDevice?.delegateStorage,
+        )
+        actor.devices.set(step.deviceId, device)
+        break
+      }
+
+      case "close": {
+        const device = getDevice(step.actor, step.deviceId)
+        device.manager.close()
+        device.isClosed = true
+        break
+      }
+
+      case "clearEvents": {
+        relay.clearEvents()
+        break
+      }
+
+      case "removeDevice": {
+        const actor = getActor(step.actor)
+        const device = actor.devices.get(step.deviceId)
+        if (device) {
+          actor.appKeysManager.revokeDevice(device.delegateIdentityPubkey)
+          await actor.appKeysManager.publish()
+        }
+        break
+      }
+    }
   }
-
-  const device = actor.devices.get(deviceId)
-  if (!device) {
-    throw new Error(`Device '${deviceId}' not found for actor '${actorId}'`)
-  }
-
-  // Get the device's identity pubkey and remove from AppKeys
-  const devicePubkey = device.manager.getDeviceId()
-  actor.mainAppKeysManager.revokeDevice(devicePubkey)
-  await actor.mainAppKeysManager.publish()
-
-  // Wait for AppKeys update to propagate
-  await new Promise(resolve => setTimeout(resolve, 100))
 }
