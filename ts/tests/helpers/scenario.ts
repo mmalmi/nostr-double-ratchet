@@ -134,7 +134,6 @@ export async function runScenario(config: ScenarioConfig): Promise<void> {
 
     // Create SessionManager
     const manager = delegateManager.createSessionManager(storage)
-    await manager.init()
 
     const deviceState: DeviceState = {
       manager,
@@ -146,7 +145,8 @@ export async function runScenario(config: ScenarioConfig): Promise<void> {
       isClosed: false,
     }
 
-    // Register onEvent handler to track received messages
+    // Register onEvent BEFORE init() so events delivered during session
+    // restoration (e.g. messages published while device was offline) are captured
     manager.onEvent((event: Rumor) => {
       deviceState.receivedMessages.push(event.content)
       const waiters = deviceState.messageWaiters.get(event.content)
@@ -157,6 +157,8 @@ export async function runScenario(config: ScenarioConfig): Promise<void> {
         deviceState.messageWaiters.delete(event.content)
       }
     })
+
+    await manager.init()
 
     return deviceState
   }

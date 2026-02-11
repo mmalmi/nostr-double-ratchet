@@ -145,7 +145,6 @@ export async function runControlledScenario(config: ControlledScenarioConfig): P
     await delegateManager.activate(publicKey)
 
     const manager = delegateManager.createSessionManager(storage)
-    await manager.init()
 
     const deviceState: DeviceState = {
       manager,
@@ -157,6 +156,8 @@ export async function runControlledScenario(config: ControlledScenarioConfig): P
       isClosed: false,
     }
 
+    // Register onEvent BEFORE init() so events delivered during session
+    // restoration (e.g. messages published while device was offline) are captured
     manager.onEvent((event: Rumor) => {
       deviceState.receivedMessages.push(event.content)
       const waiters = deviceState.messageWaiters.get(event.content)
@@ -167,6 +168,8 @@ export async function runControlledScenario(config: ControlledScenarioConfig): P
         deviceState.messageWaiters.delete(event.content)
       }
     })
+
+    await manager.init()
 
     return deviceState
   }
@@ -233,7 +236,24 @@ export async function runControlledScenario(config: ControlledScenarioConfig): P
 
       case "send": {
         const fromDevice = getDevice(step.from.actor, step.from.deviceId)
-        const toActor = getActor(step.to)
+
+        // Lazily create target actor if it doesn't exist yet (for discoveryQueue testing)
+        let toActor = actors.get(step.to)
+        if (!toActor) {
+          const secretKey = generateSecretKey()
+          const publicKey = getPublicKey(secretKey)
+          const appKeysManager = new AppKeysManager({
+            nostrPublish: vi.fn<NostrPublish>(async (event: UnsignedEvent) => {
+              const signedEvent = finalizeEvent(event, secretKey)
+              await relay.publishAndDeliver(signedEvent as unknown as VerifiedEvent)
+              return signedEvent as unknown as VerifiedEvent
+            }),
+            storage: new InMemoryStorageAdapter(),
+          })
+          await appKeysManager.init()
+          toActor = { secretKey, publicKey, appKeysManager, devices: new Map() }
+          actors.set(step.to, toActor)
+        }
 
         if (step.ref) {
           log("send (ref:", step.ref + ")", step.from.actor, "->", step.to, `"${step.message}"`)
