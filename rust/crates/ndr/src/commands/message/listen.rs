@@ -5,6 +5,7 @@ use nostr_double_ratchet::{
     REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 
+use crate::commands::owner_claim::resolve_verified_owner_pubkey;
 use crate::config::Config;
 use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
@@ -389,11 +390,39 @@ pub async fn listen(
 
                     match invite.process_invite_response(&event, our_private_key) {
                         Ok(Some(response)) => {
+                            let resolved_owner = response.resolved_owner_pubkey();
+                            let their_pubkey =
+                                match resolve_verified_owner_pubkey(Some(&client), &response).await
+                                {
+                                    Ok(Some(pubkey)) => pubkey,
+                                    Ok(None) => {
+                                        output.event(
+                                            "invite_rejected",
+                                            serde_json::json!({
+                                                "invite_id": stored_invite.id,
+                                                "owner_pubkey": resolved_owner.to_hex(),
+                                                "device_pubkey": response.invitee_identity.to_hex(),
+                                                "reason": "unverified_owner_claim",
+                                            }),
+                                        );
+                                        continue;
+                                    }
+                                    Err(err) => {
+                                        output.event(
+                                        "invite_rejected",
+                                        serde_json::json!({
+                                            "invite_id": stored_invite.id,
+                                            "owner_pubkey": resolved_owner.to_hex(),
+                                            "device_pubkey": response.invitee_identity.to_hex(),
+                                            "reason": format!("owner_verification_error: {}", err),
+                                        }),
+                                    );
+                                        continue;
+                                    }
+                                };
+
                             if invite.purpose.as_deref() == Some("link") {
-                                let owner_pubkey = response
-                                    .owner_public_key
-                                    .unwrap_or(response.invitee_identity);
-                                let owner_pubkey_hex = owner_pubkey.to_hex();
+                                let owner_pubkey_hex = their_pubkey.to_hex();
 
                                 config.set_linked_owner(&owner_pubkey_hex)?;
                                 storage.delete_invite(&stored_invite.id)?;
@@ -410,9 +439,6 @@ pub async fn listen(
                             }
 
                             let session = response.session;
-                            let their_pubkey = response
-                                .owner_public_key
-                                .unwrap_or(response.invitee_identity);
                             let session_state = serde_json::to_string(&session.state)?;
                             let new_chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
                             let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());

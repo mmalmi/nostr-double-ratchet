@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::commands::owner_claim::resolve_verified_owner_pubkey;
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
@@ -224,12 +225,38 @@ pub async fn accept(
     let result = invite.process_invite_response(&event, our_private_key)?;
 
     let response = result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
+    let resolved_owner = response.resolved_owner_pubkey();
+    let needs_owner_verification = resolved_owner != response.invitee_identity;
+
+    let owner_verification_client =
+        if needs_owner_verification && !config.resolved_relays().is_empty() {
+            Some(connect_client(config).await?)
+        } else {
+            None
+        };
+
+    let their_pubkey = resolve_verified_owner_pubkey(owner_verification_client.as_ref(), &response)
+        .await?
+        .ok_or_else(|| {
+            let owner_hex = resolved_owner.to_hex();
+            let device_hex = response.invitee_identity.to_hex();
+            if needs_owner_verification && config.resolved_relays().is_empty() {
+                anyhow::anyhow!(
+                    "Invite acceptance rejected: owner claim {} for device {} is unverified (no relays configured to fetch AppKeys proof)",
+                    owner_hex,
+                    device_hex,
+                )
+            } else {
+                anyhow::anyhow!(
+                    "Invite acceptance rejected: owner claim {} for device {} is unverified (device not authorized by owner AppKeys)",
+                    owner_hex,
+                    device_hex,
+                )
+            }
+        })?;
 
     if invite.purpose.as_deref() == Some("link") {
-        let owner_pubkey = response
-            .owner_public_key
-            .unwrap_or(response.invitee_identity);
-        let owner_pubkey_hex = owner_pubkey.to_hex();
+        let owner_pubkey_hex = their_pubkey.to_hex();
         let mut config = config.clone();
         config.set_linked_owner(&owner_pubkey_hex)?;
 
@@ -248,9 +275,6 @@ pub async fn accept(
     }
 
     let session = response.session;
-    let their_pubkey = response
-        .owner_public_key
-        .unwrap_or(response.invitee_identity);
 
     // Serialize session state
     let session_state = serde_json::to_string(&session.state)?;
@@ -395,6 +419,61 @@ mod tests {
 
         let updated = Config::load(temp.path()).unwrap();
         assert_eq!(updated.linked_owner, Some(owner_pubkey.to_hex()));
+        assert!(storage.list_chats().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_accept_link_invite_rejects_unverified_owner_claim() {
+        let (temp, config, storage) = setup();
+        let output = Output::new(true);
+
+        let device_pubkey_hex = config.public_key().unwrap();
+        let device_pubkey =
+            nostr_double_ratchet::utils::pubkey_from_hex(&device_pubkey_hex).unwrap();
+
+        let mut invite =
+            nostr_double_ratchet::Invite::create_new(device_pubkey, None, None).unwrap();
+        invite.purpose = Some("link".to_string());
+        let serialized = invite.serialize().unwrap();
+
+        storage
+            .save_invite(&StoredInvite {
+                id: "link-unverified-owner".to_string(),
+                label: Some("link".to_string()),
+                url: invite.get_url("https://iris.to").unwrap(),
+                created_at: 0,
+                serialized,
+            })
+            .unwrap();
+
+        let device_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+
+        let (_session, response_event) = invite
+            .accept_with_owner(
+                device_keys.public_key(),
+                device_keys.secret_key().to_secret_bytes(),
+                None,
+                Some(owner_keys.public_key()),
+            )
+            .unwrap();
+
+        let err = accept(
+            "link-unverified-owner",
+            &nostr::JsonUtil::as_json(&response_event),
+            &config,
+            &storage,
+            &output,
+        )
+        .await
+        .expect_err("owner claim should be rejected without AppKeys proof");
+
+        assert!(err.to_string().contains("owner claim"));
+
+        let updated = Config::load(temp.path()).unwrap();
+        assert_eq!(updated.linked_owner, None);
+        let invites = storage.list_invites().unwrap();
+        assert!(invites.iter().any(|i| i.id == "link-unverified-owner"));
         assert!(storage.list_chats().unwrap().is_empty());
     }
 }

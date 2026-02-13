@@ -29,6 +29,29 @@ pub struct InviteResponse {
     pub owner_public_key: Option<PublicKey>,
 }
 
+impl InviteResponse {
+    /// Resolve the chat owner identity from the response.
+    /// Falls back to invitee identity when owner is not provided.
+    pub fn resolved_owner_pubkey(&self) -> PublicKey {
+        self.owner_public_key.unwrap_or(self.invitee_identity)
+    }
+
+    /// Validate that the claimed owner can legitimately represent invitee_identity.
+    ///
+    /// Rules:
+    /// - Single-device users are always valid: owner == invitee_identity.
+    /// - Multi-device claims require AppKeys proof listing invitee_identity as a device.
+    pub fn has_verified_owner_claim(&self, app_keys: Option<&crate::AppKeys>) -> bool {
+        let owner = self.resolved_owner_pubkey();
+        if owner == self.invitee_identity {
+            return true;
+        }
+        app_keys
+            .and_then(|keys| keys.get_device(&self.invitee_identity))
+            .is_some()
+    }
+}
+
 impl Invite {
     pub fn create_new(
         inviter: PublicKey,

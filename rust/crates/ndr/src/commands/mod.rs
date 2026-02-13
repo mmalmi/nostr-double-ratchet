@@ -7,4 +7,5 @@ pub mod link;
 pub mod message;
 
 mod nip19;
+mod owner_claim;
 mod public_invite;
