@@ -73,6 +73,7 @@ pub(super) async fn join_via_public_invite(
     let chat = StoredChat {
         id: chat_id.clone(),
         their_pubkey: their_pubkey_hex,
+        device_id: None,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),

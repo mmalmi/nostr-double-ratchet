@@ -91,6 +91,7 @@ fn setup() -> (TempDir, Config, Storage, String) {
         .save_chat(&StoredChat {
             id: "test-chat".to_string(),
             their_pubkey,
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state: session_state.clone(),
@@ -147,6 +148,7 @@ async fn test_send_message_with_ttl_adds_expiration_tag() {
         .save_chat(&StoredChat {
             id: chat_id.clone(),
             their_pubkey: alice_keys.public_key().to_hex(),
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state,
@@ -214,6 +216,7 @@ async fn test_chat_default_ttl_is_applied_when_sending_without_overrides() {
         .save_chat(&StoredChat {
             id: chat_id.clone(),
             their_pubkey: alice_keys.public_key().to_hex(),
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state,
@@ -333,6 +336,7 @@ fn test_resolve_target_by_hex_pubkey() {
         .save_chat(&StoredChat {
             id: "pk-chat".to_string(),
             their_pubkey: pubkey_hex.clone(),
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state,
@@ -357,6 +361,7 @@ fn test_resolve_target_by_npub() {
         .save_chat(&StoredChat {
             id: "npub-chat".to_string(),
             their_pubkey: pubkey_hex,
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state,
@@ -381,6 +386,7 @@ fn test_resolve_target_by_chat_link_hash_npub() {
         .save_chat(&StoredChat {
             id: "link-chat".to_string(),
             their_pubkey: pubkey_hex.clone(),
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state,
@@ -431,6 +437,7 @@ fn test_resolve_target_prefers_recent() {
         .save_chat(&StoredChat {
             id: "old-chat".to_string(),
             their_pubkey: pubkey_hex.clone(),
+            device_id: None,
             created_at: 1000,
             last_message_at: Some(2000),
             session_state: serde_json::to_string(&session1.state).unwrap(),
@@ -441,6 +448,7 @@ fn test_resolve_target_prefers_recent() {
         .save_chat(&StoredChat {
             id: "new-chat".to_string(),
             their_pubkey: pubkey_hex.clone(),
+            device_id: None,
             created_at: 1000,
             last_message_at: Some(5000),
             session_state: serde_json::to_string(&session2.state).unwrap(),
@@ -465,6 +473,7 @@ fn test_resolve_target_by_petname() {
         .save_chat(&StoredChat {
             id: "pet-chat".to_string(),
             their_pubkey: pubkey_hex,
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state,

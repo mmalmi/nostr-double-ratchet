@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
-    OneToManyChannel, Session, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, GROUP_METADATA_KIND,
-    REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+    FileStorageAdapter, OneToManyChannel, Session, SessionManager, SessionManagerEvent,
+    StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND,
+    RECEIPT_KIND, TYPING_KIND,
 };
 
 use crate::commands::owner_claim::resolve_verified_owner_pubkey;
@@ -18,6 +19,188 @@ use super::common::{
     extract_expiration_tag_seconds, is_expired, parse_chat_settings_ttl_seconds,
 };
 use super::types::{IncomingMessage, IncomingReaction};
+
+fn build_session_manager(
+    config: &Config,
+    storage: &Storage,
+) -> Result<(
+    SessionManager,
+    crossbeam_channel::Receiver<SessionManagerEvent>,
+    String,
+    nostr::PublicKey,
+    String,
+    nostr::PublicKey,
+)> {
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey_hex = config.public_key()?;
+    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
+    let owner_pubkey_hex = config.owner_public_key_hex()?;
+    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
+
+    let session_manager_store: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(
+        FileStorageAdapter::new(storage.data_dir().join("session_manager"))?,
+    );
+
+    let (sm_tx, sm_rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        our_pubkey,
+        our_private_key,
+        our_pubkey_hex.clone(),
+        owner_pubkey,
+        sm_tx,
+        Some(session_manager_store),
+        None,
+    );
+    manager.init()?;
+
+    Ok((
+        manager,
+        sm_rx,
+        our_pubkey_hex,
+        our_pubkey,
+        owner_pubkey_hex,
+        owner_pubkey,
+    ))
+}
+
+fn import_chats_into_session_manager(storage: &Storage, manager: &SessionManager) -> Result<()> {
+    let known: std::collections::HashSet<(String, String)> = manager
+        .export_active_sessions()
+        .into_iter()
+        .map(|(owner, device_id, _)| (owner.to_hex(), device_id))
+        .collect();
+
+    for chat in storage.list_chats()? {
+        let owner_pubkey = match nostr::PublicKey::from_hex(&chat.their_pubkey) {
+            Ok(pk) => pk,
+            Err(_) => continue,
+        };
+        manager.setup_user(owner_pubkey);
+
+        let state: nostr_double_ratchet::SessionState =
+            match serde_json::from_str(&chat.session_state) {
+                Ok(state) => state,
+                Err(_) => continue,
+            };
+
+        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
+        if known.contains(&(owner_pubkey.to_hex(), device_id.clone())) {
+            continue;
+        }
+
+        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
+    }
+
+    Ok(())
+}
+
+fn sync_chats_from_session_manager(storage: &Storage, manager: &SessionManager) -> Result<()> {
+    use std::collections::HashSet;
+
+    let sessions = manager.export_active_sessions();
+    if sessions.is_empty() {
+        return Ok(());
+    }
+
+    let mut chats = storage.list_chats()?;
+    let mut consumed_legacy_chat_ids: HashSet<String> = HashSet::new();
+
+    for (owner_pubkey, device_id, state) in sessions {
+        let owner_hex = owner_pubkey.to_hex();
+        let state_json = serde_json::to_string(&state)?;
+
+        let exact_idx = chats.iter().position(|chat| {
+            chat.their_pubkey == owner_hex && chat.device_id.as_deref() == Some(device_id.as_str())
+        });
+        let legacy_idx = chats.iter().position(|chat| {
+            chat.their_pubkey == owner_hex
+                && chat.device_id.is_none()
+                && !consumed_legacy_chat_ids.contains(&chat.id)
+        });
+
+        if let Some(idx) = exact_idx.or(legacy_idx) {
+            let mut changed = false;
+            let mut chat = chats[idx].clone();
+
+            if legacy_idx == Some(idx) {
+                consumed_legacy_chat_ids.insert(chat.id.clone());
+            }
+
+            if chat.device_id.as_deref() != Some(device_id.as_str()) {
+                chat.device_id = Some(device_id.clone());
+                changed = true;
+            }
+            if chat.session_state != state_json {
+                chat.session_state = state_json.clone();
+                changed = true;
+            }
+
+            if changed {
+                storage.save_chat(&chat)?;
+                chats[idx] = chat;
+            }
+            continue;
+        }
+
+        let chat = crate::storage::StoredChat {
+            id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
+            their_pubkey: owner_hex,
+            device_id: Some(device_id),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+            last_message_at: None,
+            session_state: state_json,
+            message_ttl_seconds: None,
+        };
+        storage.save_chat(&chat)?;
+        chats.push(chat);
+    }
+
+    Ok(())
+}
+
+async fn flush_session_manager_events(
+    manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
+    client: &nostr_sdk::Client,
+    config: &Config,
+    subscribed_manager_filters: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    while let Ok(event) = manager_rx.try_recv() {
+        match event {
+            SessionManagerEvent::Publish(unsigned) => {
+                let sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
+                let keys = nostr::Keys::new(sk);
+                let signed = unsigned
+                    .sign_with_keys(&keys)
+                    .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?;
+                send_event_or_ignore(client, signed).await?;
+            }
+            SessionManagerEvent::PublishSigned(signed) => {
+                send_event_or_ignore(client, signed).await?;
+            }
+            SessionManagerEvent::Subscribe { filter_json, .. } => {
+                if !subscribed_manager_filters.insert(filter_json.clone()) {
+                    continue;
+                }
+                let filter: nostr_sdk::Filter =
+                    serde_json::from_str(&filter_json).with_context(|| {
+                        format!("Failed to parse SessionManager filter: {}", filter_json)
+                    })?;
+                client.subscribe(vec![filter], None).await?;
+            }
+            SessionManagerEvent::Unsubscribe(_) => {
+                // nostr-sdk Client API does not expose stable per-sub-id unsubscribe in this path.
+            }
+            SessionManagerEvent::DecryptedMessage { .. } => {
+                // Decryption handling remains in ndr's existing chat loop for now.
+            }
+            SessionManagerEvent::ReceivedEvent(_) => {}
+        }
+    }
+
+    Ok(())
+}
 
 /// Listen for new messages and invite responses
 pub async fn listen(
@@ -40,9 +223,19 @@ pub async fn listen(
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
 
-    let our_private_key = config.private_key_bytes()?;
     let mut config = config.clone();
     let chat_id_owned = chat_id.map(|s| s.to_string());
+    let (
+        session_manager,
+        session_manager_rx,
+        my_pubkey,
+        my_pubkey_key,
+        owner_pubkey_hex,
+        owner_pubkey,
+    ) = build_session_manager(&config, storage)?;
+    import_chats_into_session_manager(storage, &session_manager)?;
+    sync_chats_from_session_manager(storage, &session_manager)?;
+    let our_private_key = config.private_key_bytes()?;
 
     // Prepare client (don't connect until we have something to subscribe to)
     let client = Client::default();
@@ -209,10 +402,6 @@ pub async fn listen(
         };
 
     // Build initial filters
-    let my_pubkey = config.public_key()?;
-    let my_pubkey_key = nostr::PublicKey::from_hex(&my_pubkey)?;
-    let owner_pubkey_hex = config.owner_public_key_hex()?;
-    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
     let one_to_many = OneToManyChannel::default();
     let mut channel_map = build_channel_map(storage)?;
     let mut group_sender_map = build_group_sender_map(storage)?;
@@ -224,6 +413,7 @@ pub async fn listen(
         mut subscribed_group_sender_pubkeys,
     ) = build_filters(storage, chat_id, &channel_map, &group_sender_map)?;
     let mut last_refresh = Instant::now();
+    let mut subscribed_manager_filters: HashSet<String> = HashSet::new();
 
     // If we receive sender-key messages before the sender-key distribution, keep them here and retry
     // when the distribution arrives.
@@ -283,6 +473,14 @@ pub async fn listen(
             connected = true;
         }
         client.subscribe(filters.clone(), None).await?;
+        flush_session_manager_events(
+            &session_manager_rx,
+            &client,
+            &config,
+            &mut subscribed_manager_filters,
+        )
+        .await?;
+        sync_chats_from_session_manager(storage, &session_manager)?;
     }
 
     // Wait for invites/chats if we have nothing to subscribe to yet
@@ -291,6 +489,8 @@ pub async fn listen(
 
         // Check for filesystem changes
         while let Ok(()) = fs_rx.try_recv() {
+            import_chats_into_session_manager(storage, &session_manager)?;
+            sync_chats_from_session_manager(storage, &session_manager)?;
             channel_map = build_channel_map(storage)?;
             group_sender_map = build_group_sender_map(storage)?;
             let (
@@ -316,6 +516,14 @@ pub async fn listen(
                     connected = true;
                 }
                 client.subscribe(filters.clone(), None).await?;
+                flush_session_manager_events(
+                    &session_manager_rx,
+                    &client,
+                    &config,
+                    &mut subscribed_manager_filters,
+                )
+                .await?;
+                sync_chats_from_session_manager(storage, &session_manager)?;
                 has_subscription = true;
                 break;
             }
@@ -331,6 +539,17 @@ pub async fn listen(
             should_refresh = true;
         }
         if should_refresh || last_refresh.elapsed() >= Duration::from_secs(1) {
+            import_chats_into_session_manager(storage, &session_manager)?;
+            sync_chats_from_session_manager(storage, &session_manager)?;
+            if connected {
+                flush_session_manager_events(
+                    &session_manager_rx,
+                    &client,
+                    &config,
+                    &mut subscribed_manager_filters,
+                )
+                .await?;
+            }
             channel_map = build_channel_map(storage)?;
             group_sender_map = build_group_sender_map(storage)?;
             let (
@@ -376,6 +595,16 @@ pub async fn listen(
         };
 
         if let RelayPoolNotification::Event { event, .. } = notification {
+            session_manager.process_received_event((*event).clone());
+            flush_session_manager_events(
+                &session_manager_rx,
+                &client,
+                &config,
+                &mut subscribed_manager_filters,
+            )
+            .await?;
+            sync_chats_from_session_manager(storage, &session_manager)?;
+
             let event_kind = event.kind.as_u16() as u32;
 
             // Handle invite responses
@@ -438,6 +667,10 @@ pub async fn listen(
                                 continue;
                             }
 
+                            let peer_device_id = response
+                                .device_id
+                                .clone()
+                                .or_else(|| Some(response.invitee_identity.to_hex()));
                             let session = response.session;
                             let session_state = serde_json::to_string(&session.state)?;
                             let new_chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
@@ -446,6 +679,7 @@ pub async fn listen(
                             let chat = crate::storage::StoredChat {
                                 id: new_chat_id.clone(),
                                 their_pubkey: their_pubkey_hex.clone(),
+                                device_id: peer_device_id,
                                 created_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)?
                                     .as_secs(),
@@ -455,6 +689,13 @@ pub async fn listen(
                             };
 
                             storage.save_chat(&chat)?;
+                            session_manager.import_session_state(
+                                their_pubkey,
+                                chat.device_id.clone(),
+                                session.state.clone(),
+                            )?;
+                            session_manager.setup_user(their_pubkey);
+                            sync_chats_from_session_manager(storage, &session_manager)?;
                             storage.delete_invite(&stored_invite.id)?;
 
                             output.event(
@@ -910,6 +1151,7 @@ pub async fn listen(
                                                     let mut chat = crate::storage::StoredChat {
                                                         id: new_chat_id.clone(),
                                                         their_pubkey: rumor_pubkey.clone(),
+                                                        device_id: None,
                                                         created_at: std::time::SystemTime::now()
                                                             .duration_since(std::time::UNIX_EPOCH)?
                                                             .as_secs(),

@@ -38,6 +38,9 @@ pub struct StoredInvite {
 pub struct StoredChat {
     pub id: String,
     pub their_pubkey: String,
+    /// Peer device identity this session is bound to (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
     pub created_at: u64,
     pub last_message_at: Option<u64>,
     pub session_state: String,
@@ -1048,6 +1051,7 @@ mod tests {
         let chat = StoredChat {
             id: "chat-1".to_string(),
             their_pubkey: "abc123".to_string(),
+            device_id: None,
             created_at: 1234567890,
             last_message_at: None,
             session_state: "{}".to_string(),
@@ -1057,9 +1061,29 @@ mod tests {
         storage.save_chat(&chat).unwrap();
         let loaded = storage.get_chat("chat-1").unwrap().unwrap();
         assert_eq!(loaded.their_pubkey, "abc123");
+        assert_eq!(loaded.device_id, None);
 
         let chats = storage.list_chats().unwrap();
         assert_eq!(chats.len(), 1);
+    }
+
+    #[test]
+    fn test_chat_device_id_roundtrip() {
+        let (_temp, storage) = test_storage();
+
+        let chat = StoredChat {
+            id: "chat-device".to_string(),
+            their_pubkey: "owner-pubkey".to_string(),
+            device_id: Some("device-pubkey".to_string()),
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state: "{}".to_string(),
+            message_ttl_seconds: None,
+        };
+
+        storage.save_chat(&chat).unwrap();
+        let loaded = storage.get_chat("chat-device").unwrap().unwrap();
+        assert_eq!(loaded.device_id, Some("device-pubkey".to_string()));
     }
 
     #[test]
@@ -1098,6 +1122,7 @@ mod tests {
         let chat = StoredChat {
             id: "chat-1".to_string(),
             their_pubkey: "abc".to_string(),
+            device_id: None,
             created_at: 0,
             last_message_at: None,
             session_state: "{}".to_string(),
@@ -1211,6 +1236,7 @@ mod tests {
             .save_chat(&StoredChat {
                 id: "c1".to_string(),
                 their_pubkey: "aabbcc".to_string(),
+                device_id: None,
                 created_at: 1000,
                 last_message_at: Some(2000),
                 session_state: "{}".to_string(),
@@ -1222,6 +1248,7 @@ mod tests {
             .save_chat(&StoredChat {
                 id: "c2".to_string(),
                 their_pubkey: "aabbcc".to_string(),
+                device_id: None,
                 created_at: 1000,
                 last_message_at: Some(5000),
                 session_state: "{}".to_string(),

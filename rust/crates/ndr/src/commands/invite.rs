@@ -194,6 +194,36 @@ struct LinkInviteAccepted {
     device_pubkey: String,
 }
 
+fn persist_session_in_session_manager(
+    config: &Config,
+    storage: &Storage,
+    peer_pubkey: nostr::PublicKey,
+    device_id: Option<String>,
+    state: nostr_double_ratchet::SessionState,
+) -> Result<()> {
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey = nostr::PublicKey::from_hex(&config.public_key()?)?;
+    let owner_pubkey = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
+
+    let sm_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> = std::sync::Arc::new(
+        nostr_double_ratchet::FileStorageAdapter::new(storage.data_dir().join("session_manager"))?,
+    );
+    let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
+    let manager = nostr_double_ratchet::SessionManager::new(
+        our_pubkey,
+        our_private_key,
+        config.public_key()?,
+        owner_pubkey,
+        sm_tx,
+        Some(sm_store),
+        None,
+    );
+    manager.init()?;
+    manager.import_session_state(peer_pubkey, device_id, state)?;
+    manager.setup_user(peer_pubkey);
+    Ok(())
+}
+
 /// Process an invite acceptance event (creates a chat session for the inviter)
 pub async fn accept(
     invite_id: &str,
@@ -274,6 +304,10 @@ pub async fn accept(
         return Ok(());
     }
 
+    let peer_device_id = response
+        .device_id
+        .clone()
+        .or_else(|| Some(response.invitee_identity.to_hex()));
     let session = response.session;
 
     // Serialize session state
@@ -285,6 +319,7 @@ pub async fn accept(
     let chat = StoredChat {
         id: chat_id.clone(),
         their_pubkey: their_pubkey_hex.clone(),
+        device_id: peer_device_id,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
@@ -294,6 +329,13 @@ pub async fn accept(
     };
 
     storage.save_chat(&chat)?;
+    persist_session_in_session_manager(
+        config,
+        storage,
+        their_pubkey,
+        chat.device_id.clone(),
+        session.state.clone(),
+    )?;
 
     // Optionally delete the used invite
     storage.delete_invite(invite_id)?;

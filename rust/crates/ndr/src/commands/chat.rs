@@ -119,6 +119,7 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
     let chat = StoredChat {
         id: id.clone(),
         their_pubkey: their_pubkey.clone(),
+        device_id: None,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
@@ -318,6 +319,7 @@ mod tests {
             .save_chat(&StoredChat {
                 id: "test-chat".to_string(),
                 their_pubkey: "abc123".to_string(),
+                device_id: None,
                 created_at: 1234567890,
                 last_message_at: None,
                 session_state: "{}".to_string(),

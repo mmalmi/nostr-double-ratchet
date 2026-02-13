@@ -556,6 +556,21 @@ impl SessionManager {
         Ok(None)
     }
 
+    pub fn export_active_sessions(&self) -> Vec<(PublicKey, String, crate::SessionState)> {
+        let records = self.user_records.lock().unwrap();
+        let mut out = Vec::new();
+
+        for (owner_pubkey, user_record) in records.iter() {
+            for (device_id, device_record) in user_record.device_records.iter() {
+                if let Some(session) = &device_record.active_session {
+                    out.push((*owner_pubkey, device_id.clone(), session.state.clone()));
+                }
+            }
+        }
+
+        out
+    }
+
     pub fn debug_session_keys(&self) -> String {
         let records = self.user_records.lock().unwrap();
         let mut output = String::new();
