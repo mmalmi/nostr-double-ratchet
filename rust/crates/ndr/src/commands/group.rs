@@ -1,11 +1,14 @@
 use anyhow::Result;
+use crossbeam_channel::{Receiver, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
-    SenderKeyDistribution, SenderKeyState, Session, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
+    FileStorageAdapter, SenderKeyDistribution, SenderKeyState, Session, SessionManager,
+    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
     GROUP_SENDER_KEY_DISTRIBUTION_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::nostr_client::send_event_or_ignore;
@@ -67,6 +70,145 @@ struct GroupMessageList {
     messages: Vec<GroupMessageInfo>,
 }
 
+fn import_chats_into_session_manager(
+    storage: &Storage,
+    manager: &SessionManager,
+    my_owner_pubkey_hex: &str,
+) -> Result<()> {
+    let known: std::collections::HashMap<(String, String), String> = manager
+        .export_active_sessions()
+        .into_iter()
+        .filter_map(|(owner, device_id, state)| {
+            serde_json::to_string(&state)
+                .ok()
+                .map(|json| ((owner.to_hex(), device_id), json))
+        })
+        .collect();
+
+    for chat in storage.list_chats()? {
+        if chat.their_pubkey == my_owner_pubkey_hex {
+            continue;
+        }
+
+        let owner_pubkey = match nostr::PublicKey::from_hex(&chat.their_pubkey) {
+            Ok(pk) => pk,
+            Err(_) => continue,
+        };
+        manager.setup_user(owner_pubkey);
+
+        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
+        if known
+            .get(&(owner_pubkey.to_hex(), device_id.clone()))
+            .is_some_and(|known_state| known_state == &chat.session_state)
+        {
+            continue;
+        }
+
+        let state: nostr_double_ratchet::SessionState =
+            match serde_json::from_str(&chat.session_state) {
+                Ok(state) => state,
+                Err(_) => continue,
+            };
+
+        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
+    }
+
+    Ok(())
+}
+
+fn sync_member_chats_from_session_manager(
+    storage: &Storage,
+    manager: &SessionManager,
+    member_owner_pubkey_hex: &str,
+) -> Result<()> {
+    use std::collections::HashMap;
+
+    let sessions_by_device: HashMap<String, nostr_double_ratchet::SessionState> = manager
+        .export_active_sessions()
+        .into_iter()
+        .filter_map(|(owner_pubkey, device_id, state)| {
+            (owner_pubkey.to_hex() == member_owner_pubkey_hex).then_some((device_id, state))
+        })
+        .collect();
+
+    if sessions_by_device.is_empty() {
+        return Ok(());
+    }
+
+    for mut chat in storage
+        .list_chats()?
+        .into_iter()
+        .filter(|c| c.their_pubkey == member_owner_pubkey_hex)
+    {
+        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
+        let Some(state) = sessions_by_device.get(&device_id) else {
+            continue;
+        };
+        let state_json = serde_json::to_string(state)?;
+
+        let mut changed = false;
+        if chat.device_id.as_deref() != Some(device_id.as_str()) {
+            chat.device_id = Some(device_id);
+            changed = true;
+        }
+        if chat.session_state != state_json {
+            chat.session_state = state_json;
+            changed = true;
+        }
+
+        if changed {
+            storage.save_chat(&chat)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn build_session_manager(
+    config: &Config,
+    storage: &Storage,
+) -> Result<(SessionManager, Receiver<SessionManagerEvent>)> {
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey_hex = config.public_key()?;
+    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
+    let owner_pubkey_hex = config.owner_public_key_hex()?;
+    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
+
+    let session_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
+        storage.data_dir().join("session_manager"),
+    )?);
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        our_pubkey,
+        our_private_key,
+        our_pubkey_hex,
+        owner_pubkey,
+        tx,
+        Some(session_manager_store),
+        None,
+    );
+    manager.init()?;
+    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
+    Ok((manager, rx))
+}
+
+async fn flush_session_manager_events(
+    rx: &Receiver<SessionManagerEvent>,
+    client: &Client,
+) -> Result<()> {
+    loop {
+        match rx.try_recv() {
+            Ok(SessionManagerEvent::PublishSigned(event)) => {
+                send_event_or_ignore(client, event).await?;
+            }
+            Ok(_) => {}
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    Ok(())
+}
+
 /// Fan-out group metadata to members after a mutation.
 async fn fan_out_metadata(
     group: &nostr_double_ratchet::group::GroupData,
@@ -85,36 +227,29 @@ async fn fan_out_metadata(
     for relay in &relays {
         client.add_relay(relay).await?;
     }
-    let mut connected = false;
+    client.connect().await;
+
+    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    const MAX_DELIVERY_ATTEMPTS: usize = 20;
+    const DELIVERY_RETRY_MS: u64 = 100;
 
     for member in &group.members {
         if member == &my_owner_pubkey {
             continue;
         }
 
-        let chat = match storage.get_chat_by_pubkey(member)? {
-            Some(c) => c,
-            None => continue,
-        };
-
-        let session_state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-        let mut session = Session::new(session_state, chat.id.clone());
-
-        // Exclude secret for removed members
         let exclude_secret = excluded_member.map(|e| e == member).unwrap_or(false);
         let metadata_content =
             nostr_double_ratchet::group::build_group_metadata_content(group, exclude_secret);
+        let recipient_owner = match nostr::PublicKey::from_hex(member) {
+            Ok(pk) => pk,
+            Err(_) => continue,
+        };
 
         let tags: Vec<Vec<String>> = vec![
             vec!["l".to_string(), group.id.clone()],
             vec!["ms".to_string(), now_ms.to_string()],
         ];
-
         let nostr_tags: Vec<nostr::Tag> = tags
             .iter()
             .filter_map(|t| nostr::Tag::parse(t).ok())
@@ -128,60 +263,66 @@ async fn fan_out_metadata(
         .tags(nostr_tags)
         .build(my_pk);
 
-        let encrypted = match session.send_event(unsigned) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
+            import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
+            let event_ids = session_manager
+                .send_event_recipient_only(recipient_owner, unsigned.clone())
+                .unwrap_or_default();
+            let flushed_ok = flush_session_manager_events(&session_manager_rx, &client)
+                .await
+                .is_ok();
+            sync_member_chats_from_session_manager(storage, &session_manager, member)?;
 
-        let mut updated_chat = chat;
-        updated_chat.session_state = serde_json::to_string(&session.state)?;
-        storage.save_chat(&updated_chat)?;
+            if flushed_ok && !event_ids.is_empty() {
+                break;
+            }
 
-        if !connected {
-            client.connect().await;
-            connected = true;
+            if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
+            }
         }
-        send_event_or_ignore(&client, encrypted).await?;
     }
 
     // Also fan-out without secret to the removed member
     if let Some(removed) = excluded_member {
-        if let Some(chat) = storage.get_chat_by_pubkey(removed)? {
-            if let Ok(state) =
-                serde_json::from_str::<nostr_double_ratchet::SessionState>(&chat.session_state)
-            {
-                let mut session = Session::new(state, chat.id.clone());
-                let metadata_content =
-                    nostr_double_ratchet::group::build_group_metadata_content(group, true);
+        let metadata_content =
+            nostr_double_ratchet::group::build_group_metadata_content(group, true);
+        let recipient_owner = match nostr::PublicKey::from_hex(removed) {
+            Ok(pk) => pk,
+            Err(_) => return Ok(()),
+        };
 
-                let tags: Vec<Vec<String>> = vec![
-                    vec!["l".to_string(), group.id.clone()],
-                    vec!["ms".to_string(), now_ms.to_string()],
-                ];
+        let tags: Vec<Vec<String>> = vec![
+            vec!["l".to_string(), group.id.clone()],
+            vec!["ms".to_string(), now_ms.to_string()],
+        ];
+        let nostr_tags: Vec<nostr::Tag> = tags
+            .iter()
+            .filter_map(|t| nostr::Tag::parse(t).ok())
+            .collect();
+        let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
+        let unsigned = nostr::EventBuilder::new(
+            nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
+            &metadata_content,
+        )
+        .tags(nostr_tags)
+        .build(my_pk);
 
-                let nostr_tags: Vec<nostr::Tag> = tags
-                    .iter()
-                    .filter_map(|t| nostr::Tag::parse(t).ok())
-                    .collect();
+        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
+            import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
+            let event_ids = session_manager
+                .send_event_recipient_only(recipient_owner, unsigned.clone())
+                .unwrap_or_default();
+            let flushed_ok = flush_session_manager_events(&session_manager_rx, &client)
+                .await
+                .is_ok();
+            sync_member_chats_from_session_manager(storage, &session_manager, removed)?;
 
-                let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
-                let unsigned = nostr::EventBuilder::new(
-                    nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
-                    &metadata_content,
-                )
-                .tags(nostr_tags)
-                .build(my_pk);
-
-                if let Ok(encrypted) = session.send_event(unsigned) {
-                    let mut updated_chat = chat;
-                    updated_chat.session_state = serde_json::to_string(&session.state)?;
-                    storage.save_chat(&updated_chat)?;
-
-                    if !connected {
-                        client.connect().await;
-                    }
-                    let _ = client.send_event(encrypted).await;
-                }
+            if flushed_ok && !event_ids.is_empty() {
+                break;
+            }
+            if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
             }
         }
     }
@@ -206,6 +347,9 @@ async fn fan_out_sender_key_distribution(
 ) -> Result<()> {
     let my_device_pubkey = config.public_key()?;
     let my_owner_pubkey = config.owner_public_key_hex()?;
+    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    const MAX_DELIVERY_ATTEMPTS: usize = 20;
+    const DELIVERY_RETRY_MS: u64 = 100;
 
     for member in &group.members {
         if member == &my_owner_pubkey {
@@ -231,8 +375,35 @@ async fn fan_out_sender_key_distribution(
         .custom_created_at(nostr::Timestamp::from(now_s))
         .build(my_pk);
 
+        let recipient_owner = match nostr::PublicKey::from_hex(member) {
+            Ok(pk) => pk,
+            Err(_) => continue,
+        };
+
         let mut delivered = false;
-        for _ in 0..20 {
+        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
+            // Pull in any chats that may have been created concurrently by `ndr message listen`.
+            import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
+
+            let event_ids = session_manager
+                .send_event_recipient_only(recipient_owner, unsigned.clone())
+                .unwrap_or_default();
+            let flushed_ok = flush_session_manager_events(&session_manager_rx, client)
+                .await
+                .is_ok();
+            sync_member_chats_from_session_manager(storage, &session_manager, member)?;
+
+            if flushed_ok && !event_ids.is_empty() {
+                delivered = true;
+                break;
+            }
+
+            if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
+            }
+        }
+
+        if !delivered {
             let member_chats: Vec<_> = storage
                 .list_chats()?
                 .into_iter()
@@ -242,19 +413,22 @@ async fn fan_out_sender_key_distribution(
             for chat in member_chats {
                 let session_state: nostr_double_ratchet::SessionState =
                     match serde_json::from_str(&chat.session_state) {
-                        Ok(s) => s,
+                        Ok(state) => state,
                         Err(_) => continue,
                     };
 
                 let mut session = Session::new(session_state, chat.id.clone());
                 let encrypted = match session.send_event(unsigned.clone()) {
-                    Ok(e) => e,
+                    Ok(event) => event,
                     Err(_) => continue,
                 };
 
                 let mut published = false;
                 for _ in 0..3 {
-                    if send_event_or_ignore(client, encrypted.clone()).await.is_ok() {
+                    if send_event_or_ignore(client, encrypted.clone())
+                        .await
+                        .is_ok()
+                    {
                         published = true;
                         break;
                     }
@@ -271,12 +445,10 @@ async fn fan_out_sender_key_distribution(
                 delivered = true;
                 break;
             }
+        }
 
-            if delivered {
-                break;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if !delivered {
+            continue;
         }
     }
 

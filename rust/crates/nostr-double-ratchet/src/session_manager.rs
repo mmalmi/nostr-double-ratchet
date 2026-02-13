@@ -1,6 +1,6 @@
 use crate::{
-    is_app_keys_event, AppKeys, InMemoryStorage, Invite, NostrPubSub, OneToManyChannel, Result,
-    SenderKeyDistribution, SenderKeyState, StorageAdapter, UserRecord,
+    is_app_keys_event, AppKeys, DeviceEntry, InMemoryStorage, Invite, MessageQueue, NostrPubSub,
+    OneToManyChannel, Result, SenderKeyDistribution, SenderKeyState, StorageAdapter, UserRecord,
     GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 };
 use nostr::{Keys, PublicKey, Tag, UnsignedEvent};
@@ -63,6 +63,8 @@ pub struct SessionManager {
     cached_app_keys: Arc<Mutex<HashMap<PublicKey, AppKeys>>>,
     processed_invite_responses: Arc<Mutex<HashSet<String>>>,
     message_history: Arc<Mutex<HashMap<PublicKey, Vec<UnsignedEvent>>>>,
+    message_queue: MessageQueue,
+    discovery_queue: MessageQueue,
     invite_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
     app_keys_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
     pending_acceptances: Arc<Mutex<HashSet<PublicKey>>>,
@@ -168,13 +170,16 @@ impl SessionManager {
         storage: Option<Arc<dyn StorageAdapter>>,
         invite: Option<Invite>,
     ) -> Self {
+        let storage = storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
+        let message_queue = MessageQueue::new(storage.clone(), "v1/message-queue/");
+        let discovery_queue = MessageQueue::new(storage.clone(), "v1/discovery-queue/");
         Self {
             user_records: Arc::new(Mutex::new(HashMap::new())),
             our_public_key,
             our_identity_key,
             device_id,
             owner_public_key,
-            storage: storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new())),
+            storage,
             pubsub,
             initialized: Arc::new(Mutex::new(false)),
             invite_state: Arc::new(Mutex::new(None)),
@@ -183,6 +188,8 @@ impl SessionManager {
             cached_app_keys: Arc::new(Mutex::new(HashMap::new())),
             processed_invite_responses: Arc::new(Mutex::new(HashSet::new())),
             message_history: Arc::new(Mutex::new(HashMap::new())),
+            message_queue,
+            discovery_queue,
             invite_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             app_keys_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             pending_acceptances: Arc::new(Mutex::new(HashSet::new())),
@@ -268,7 +275,26 @@ impl SessionManager {
                 }
             }
         }
+        let active_device_ids: Vec<String> = records
+            .values()
+            .flat_map(|user_record| {
+                user_record
+                    .device_records
+                    .iter()
+                    .filter_map(|(device_id, device_record)| {
+                        device_record
+                            .active_session
+                            .as_ref()
+                            .map(|_| device_id.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         drop(records);
+
+        for device_id in active_device_ids {
+            let _ = self.flush_message_queue(&device_id);
+        }
 
         // Start listening for AppKeys for our owner (to discover sibling devices)
         self.setup_user(self.owner_public_key);
@@ -672,39 +698,81 @@ impl SessionManager {
         Ok(event)
     }
 
-    pub fn send_event(&self, recipient: PublicKey, event: UnsignedEvent) -> Result<Vec<String>> {
-        let recipient_owner = self.resolve_to_owner(&recipient);
+    fn send_event_internal(
+        &self,
+        recipient_owner: PublicKey,
+        event: UnsignedEvent,
+        include_owner_sync: bool,
+    ) -> Result<Vec<String>> {
+        let mut owners = vec![recipient_owner];
+        if include_owner_sync && self.owner_public_key != recipient_owner {
+            owners.push(self.owner_public_key);
+        }
 
-        // Add to history for recipient and our owner (for sibling device sync)
+        // Add to history for all target owners.
         let mut history = self.message_history.lock().unwrap();
-        for key in [recipient_owner, self.owner_public_key] {
-            history.entry(key).or_default().push(event.clone());
+        for owner in owners.iter().copied() {
+            history.entry(owner).or_default().push(event.clone());
         }
         drop(history);
 
-        // Ensure we are set up for recipient and our own owner
-        self.setup_user(recipient_owner);
-        self.setup_user(self.owner_public_key);
+        // Ensure all target owners are set up.
+        for owner in owners.iter().copied() {
+            self.setup_user(owner);
+        }
 
-        // Gather target devices (recipient + own siblings), de-dup, exclude ourselves
-        let mut device_targets: Vec<(PublicKey, String)> = Vec::new();
+        // Gather known devices per owner.
+        let mut owner_targets: HashMap<PublicKey, Vec<String>> = HashMap::new();
         {
             let records = self.user_records.lock().unwrap();
-            for owner in [recipient_owner, self.owner_public_key] {
+            for owner in owners.iter().copied() {
+                let mut device_ids = Vec::new();
                 if let Some(record) = records.get(&owner) {
                     for device_id in record.device_records.keys() {
                         if device_id != &self.device_id {
-                            device_targets.push((owner, device_id.clone()));
+                            device_ids.push(device_id.clone());
                         }
+                    }
+                }
+                owner_targets.insert(owner, device_ids);
+            }
+        }
+
+        // Queue for each target owner:
+        // - known devices -> message queue per device
+        // - no known devices -> discovery queue per owner
+        for owner in owners.iter().copied() {
+            let mut seen_for_owner = HashSet::new();
+            let device_ids = owner_targets.get(&owner).cloned().unwrap_or_default();
+            let mut queued_any_device = false;
+            for device_id in device_ids {
+                if !seen_for_owner.insert(device_id.clone()) {
+                    continue;
+                }
+                queued_any_device = true;
+                let _ = self.message_queue.add(&device_id, &event);
+            }
+            if !queued_any_device {
+                let _ = self.discovery_queue.add(&owner.to_hex(), &event);
+            }
+        }
+
+        // Current known active targets to send immediately.
+        let mut device_targets: Vec<(PublicKey, String)> = Vec::new();
+        let mut seen = HashSet::new();
+        for owner in owners.iter().copied() {
+            if let Some(device_ids) = owner_targets.get(&owner) {
+                for device_id in device_ids {
+                    if seen.insert(device_id.clone()) {
+                        device_targets.push((owner, device_id.clone()));
                     }
                 }
             }
         }
 
-        let mut seen = HashSet::new();
-        device_targets.retain(|(_, device_id)| seen.insert(device_id.clone()));
-
         let mut event_ids = Vec::new();
+        let inner_event_id = event.id.as_ref().map(|id| id.to_string());
+        let mut published_device_ids: Vec<String> = Vec::new();
 
         for (owner, device_id) in device_targets {
             let mut records = self.user_records.lock().unwrap();
@@ -726,19 +794,48 @@ impl SessionManager {
             if let Some(ref mut session) = device_record.active_session {
                 if let Ok(signed_event) = session.send_event(event.clone()) {
                     event_ids.push(signed_event.id.to_string());
-                    let _ = self.pubsub.publish_signed(signed_event);
+                    if self.pubsub.publish_signed(signed_event).is_ok() {
+                        published_device_ids.push(device_id.clone());
+                    }
                 }
+            }
+        }
+
+        if let Some(ref id) = inner_event_id {
+            let mut seen = HashSet::new();
+            for device_id in published_device_ids {
+                if !seen.insert(device_id.clone()) {
+                    continue;
+                }
+                let _ = self
+                    .message_queue
+                    .remove_by_target_and_event_id(&device_id, id);
+                let _ = self.flush_message_queue(&device_id);
             }
         }
 
         if !event_ids.is_empty() {
             let _ = self.store_user_record(&recipient_owner);
-            if self.owner_public_key != recipient_owner {
+            if include_owner_sync && self.owner_public_key != recipient_owner {
                 let _ = self.store_user_record(&self.owner_public_key);
             }
         }
 
         Ok(event_ids)
+    }
+
+    pub fn send_event(&self, recipient: PublicKey, event: UnsignedEvent) -> Result<Vec<String>> {
+        let recipient_owner = self.resolve_to_owner(&recipient);
+        self.send_event_internal(recipient_owner, event, true)
+    }
+
+    pub fn send_event_recipient_only(
+        &self,
+        recipient: PublicKey,
+        event: UnsignedEvent,
+    ) -> Result<Vec<String>> {
+        let recipient_owner = self.resolve_to_owner(&recipient);
+        self.send_event_internal(recipient_owner, event, false)
     }
 
     fn device_invite_key(&self, device_id: &str) -> String {
@@ -1515,6 +1612,91 @@ impl SessionManager {
         }
     }
 
+    fn flush_message_queue(&self, device_identity: &str) -> Result<()> {
+        let entries = self.message_queue.get_for_target(device_identity)?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let owner_pubkey = {
+            let records = self.user_records.lock().unwrap();
+            records.iter().find_map(|(owner, user_record)| {
+                user_record
+                    .device_records
+                    .contains_key(device_identity)
+                    .then_some(*owner)
+            })
+        };
+        let Some(owner_pubkey) = owner_pubkey else {
+            return Ok(());
+        };
+
+        let mut sent: Vec<(String, Option<String>)> = Vec::new();
+        {
+            let mut records = self.user_records.lock().unwrap();
+            let Some(user_record) = records.get_mut(&owner_pubkey) else {
+                return Ok(());
+            };
+            let Some(device_record) = user_record.device_records.get_mut(device_identity) else {
+                return Ok(());
+            };
+            let Some(session) = device_record.active_session.as_mut() else {
+                return Ok(());
+            };
+
+            for entry in &entries {
+                if let Ok(signed_event) = session.send_event(entry.event.clone()) {
+                    if self.pubsub.publish_signed(signed_event).is_ok() {
+                        sent.push((
+                            entry.id.clone(),
+                            entry.event.id.as_ref().map(|id| id.to_string()),
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (entry_id, maybe_event_id) in sent {
+            if let Some(event_id) = maybe_event_id {
+                let _ = self
+                    .message_queue
+                    .remove_by_target_and_event_id(device_identity, &event_id);
+            } else {
+                let _ = self.message_queue.remove(&entry_id);
+            }
+        }
+
+        let _ = self.store_user_record(&owner_pubkey);
+        Ok(())
+    }
+
+    fn expand_discovery_queue(
+        &self,
+        owner_pubkey: PublicKey,
+        devices: &[DeviceEntry],
+    ) -> Result<()> {
+        let entries = self
+            .discovery_queue
+            .get_for_target(&owner_pubkey.to_hex())?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        for entry in entries {
+            for device in devices {
+                let device_id = device.identity_pubkey.to_hex();
+                if device_id == self.device_id {
+                    continue;
+                }
+                let _ = self.message_queue.add(&device_id, &entry.event);
+            }
+
+            let _ = self.discovery_queue.remove(&entry.id);
+        }
+
+        Ok(())
+    }
+
     fn send_message_history(&self, owner_pubkey: PublicKey, device_id: &str) {
         let history = {
             self.message_history
@@ -1576,6 +1758,7 @@ impl SessionManager {
         self.update_delegate_mapping(owner_pubkey, &app_keys);
 
         let devices = app_keys.get_all_devices();
+        let _ = self.expand_discovery_queue(owner_pubkey, &devices);
         let active_ids: HashSet<String> = devices
             .iter()
             .map(|d| hex::encode(d.identity_pubkey.to_bytes()))
@@ -1600,8 +1783,26 @@ impl SessionManager {
             }
         }
 
-        for device in devices {
+        for device in &devices {
             self.subscribe_to_device_invite(owner_pubkey, device.identity_pubkey);
+        }
+
+        for device in &devices {
+            let device_id = device.identity_pubkey.to_hex();
+            if device_id == self.device_id {
+                continue;
+            }
+            let has_active_session = {
+                let records = self.user_records.lock().unwrap();
+                records
+                    .get(&owner_pubkey)
+                    .and_then(|r| r.device_records.get(&device_id))
+                    .and_then(|d| d.active_session.as_ref())
+                    .is_some()
+            };
+            if has_active_session {
+                let _ = self.flush_message_queue(&device_id);
+            }
         }
     }
 
@@ -1772,6 +1973,7 @@ impl SessionManager {
 
                     let _ = self.store_user_record(&owner_pubkey);
                     self.send_message_history(owner_pubkey, &device_id);
+                    let _ = self.flush_message_queue(&device_id);
 
                     self.processed_invite_responses
                         .lock()
@@ -1845,6 +2047,7 @@ impl SessionManager {
                     self.record_known_device_identity(owner_pubkey, inviter_device);
                     let _ = self.store_user_record(&owner_pubkey);
                     self.send_message_history(owner_pubkey, &device_id);
+                    let _ = self.flush_message_queue(&device_id);
                 }
 
                 self.pending_acceptances
@@ -1911,6 +2114,13 @@ impl SessionManager {
                 if let Ok(rumor) = serde_json::from_str::<UnsignedEvent>(&plaintext) {
                     self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor);
                     let _ = self.maybe_handle_group_sender_key_distribution(owner_pubkey, &rumor);
+
+                    // Mirror incoming peer messages to our other linked devices.
+                    // We only do this for peer-originated traffic; owner-originated sync
+                    // traffic is not re-mirrored to avoid loops.
+                    if owner_pubkey != self.owner_public_key {
+                        let _ = self.send_event_internal(self.owner_public_key, rumor, false);
+                    }
                 }
 
                 let _ = self
@@ -2254,6 +2464,97 @@ mod tests {
         assert!(
             events.iter().any(|ev| matches!(ev, SessionManagerEvent::Subscribe { subid, .. } if subid.starts_with("group-sender-event-"))),
             "expected group sender-key subscription on init"
+        );
+    }
+
+    #[test]
+    fn queued_message_survives_restart_and_flushes_after_session_creation() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_keys = Keys::generate();
+        let bob_pubkey = bob_keys.public_key();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+
+        let (tx1, _rx1) = crossbeam_channel::unbounded();
+        let manager1 = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx1,
+            Some(storage.clone()),
+            None,
+        );
+        manager1.init().unwrap();
+
+        let (inner_id, published_ids) = manager1
+            .send_text_with_inner_id(bob_pubkey, "queued before restart".to_string(), None)
+            .unwrap();
+        assert!(published_ids.is_empty());
+        assert!(
+            !storage.list("v1/discovery-queue/").unwrap().is_empty(),
+            "expected discovery queue entries when recipient devices are unknown"
+        );
+
+        drop(manager1);
+
+        let (tx2, rx2) = crossbeam_channel::unbounded();
+        let manager2 = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx2,
+            Some(storage.clone()),
+            None,
+        );
+        manager2.init().unwrap();
+        let _ = drain_events(&rx2);
+
+        let mut app_keys = AppKeys::new(vec![]);
+        app_keys.add_device(DeviceEntry::new(bob_pubkey, 1));
+        let app_keys_event = app_keys
+            .get_event(bob_pubkey)
+            .sign_with_keys(&bob_keys)
+            .unwrap();
+        manager2.process_received_event(app_keys_event);
+
+        let bob_device_id = bob_pubkey.to_hex();
+        let queued_keys = storage.list("v1/message-queue/").unwrap();
+        assert!(
+            queued_keys
+                .iter()
+                .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
+            "expected discovery entry to expand into message queue for bob device"
+        );
+
+        let invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None).unwrap();
+        let invite_event = invite
+            .get_event()
+            .unwrap()
+            .sign_with_keys(&bob_keys)
+            .unwrap();
+        manager2.process_received_event(invite_event);
+
+        let events = drain_events(&rx2);
+        assert!(
+            events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "expected queued message to be published after session creation"
+        );
+
+        let remaining_keys = storage.list("v1/message-queue/").unwrap();
+        assert!(
+            !remaining_keys
+                .iter()
+                .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
+            "expected queue entry to be removed after successful publish"
         );
     }
 

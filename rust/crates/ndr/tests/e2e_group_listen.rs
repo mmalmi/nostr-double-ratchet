@@ -3,6 +3,8 @@
 mod common;
 
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -13,18 +15,77 @@ struct Listener {
     stdout: BufReader<tokio::process::ChildStdout>,
 }
 
+static NDR_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
+}
+
+fn expected_ndr_binary_path() -> PathBuf {
+    let path = workspace_root().join("target/debug/ndr");
+    #[cfg(windows)]
+    {
+        path.set_extension("exe");
+    }
+    path
+}
+
+fn resolve_ndr_binary_path() -> PathBuf {
+    if let Ok(bin_path) = std::env::var("CARGO_BIN_EXE_ndr") {
+        return PathBuf::from(bin_path);
+    }
+
+    let path = expected_ndr_binary_path();
+    if path.exists() {
+        return path;
+    }
+
+    let status = std::process::Command::new("cargo")
+        .arg("build")
+        .arg("-q")
+        .arg("-p")
+        .arg("ndr")
+        .current_dir(workspace_root())
+        .status()
+        .expect("failed to run cargo build -p ndr");
+    assert!(
+        status.success(),
+        "failed to build ndr binary for integration tests"
+    );
+    path
+}
+
+fn ndr_command() -> Command {
+    let bin_path = NDR_BIN_PATH
+        .get_or_init(resolve_ndr_binary_path)
+        .to_path_buf();
+    let mut cmd = Command::new(bin_path);
+    cmd.env("NOSTR_PREFER_LOCAL", "0");
+    cmd
+}
+
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::new("cargo")
-        .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
-        .arg("--json")
-        .arg("--data-dir")
-        .arg(data_dir)
-        .args(args)
-        .output()
-        .await
-        .expect("Failed to run ndr");
+    let command = format!(
+        "ndr --json --data-dir {} {}",
+        data_dir.display(),
+        args.join(" ")
+    );
+    let mut cmd = ndr_command();
+    let output = tokio::time::timeout(
+        Duration::from_secs(90),
+        cmd.arg("--json")
+            .arg("--data-dir")
+            .arg(data_dir)
+            .args(args)
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("Timed out running command: {}", command))
+    .unwrap_or_else(|e| panic!("Failed to run ndr command '{}': {}", command, e));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -39,9 +100,8 @@ async fn run_ndr(data_dir: &Path, args: &[&str]) -> serde_json::Value {
 
 /// Start ndr listen in background and return (child, stdout_reader)
 async fn start_ndr_listen(data_dir: &Path) -> (Child, BufReader<tokio::process::ChildStdout>) {
-    let mut child = Command::new("cargo")
-        .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
+    let mut cmd = ndr_command();
+    let mut child = cmd
         .arg("--json")
         .arg("--data-dir")
         .arg(data_dir)
@@ -103,6 +163,7 @@ async fn read_until_event(
     event_name: &str,
     timeout: Duration,
 ) -> Option<serde_json::Value> {
+    let debug_wait = std::env::var_os("NDR_TEST_DEBUG_WAIT").is_some();
     let start = Instant::now();
     while start.elapsed() < timeout {
         let mut line = String::new();
@@ -112,6 +173,9 @@ async fn read_until_event(
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+                if debug_wait {
+                    println!("[wait:{}] {}", event_name, trimmed);
                 }
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
                     if json.get("event").and_then(|v| v.as_str()) == Some(event_name) {
@@ -131,6 +195,7 @@ async fn read_until_event_with_content(
     content: Option<&str>,
     timeout: Duration,
 ) -> Option<serde_json::Value> {
+    let debug_wait = std::env::var_os("NDR_TEST_DEBUG_WAIT").is_some();
     let start = Instant::now();
     while start.elapsed() < timeout {
         let mut line = String::new();
@@ -140,6 +205,9 @@ async fn read_until_event_with_content(
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+                if debug_wait {
+                    println!("[wait:{}] {}", event_name, trimmed);
                 }
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
                     if json.get("event").and_then(|v| v.as_str()) != Some(event_name) {
@@ -328,6 +396,226 @@ async fn test_listen_group_metadata_and_message() {
         stop_child(child).await;
     }
     if let Some(child) = bob_child {
+        stop_child(child).await;
+    }
+    relay.stop().await;
+
+    if let Err(err) = result {
+        panic!("{:?}", err);
+    }
+}
+
+#[tokio::test]
+async fn test_group_metadata_and_messages_reach_linked_second_device() {
+    let mut relay = common::WsRelay::new();
+    let addr = relay.start().await.expect("Failed to start relay");
+    let relay_url = format!("ws://{}", addr);
+    println!("Relay started at: {}", relay_url);
+
+    let alice_dir = setup_ndr_dir(&relay_url);
+    let bob_primary_dir = setup_ndr_dir(&relay_url);
+    let bob_secondary_dir = setup_ndr_dir(&relay_url);
+
+    let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let bob_sk = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    let alice_login = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
+    let alice_pubkey = alice_login["data"]["pubkey"]
+        .as_str()
+        .expect("alice pubkey")
+        .to_string();
+
+    let bob_primary_login = run_ndr(bob_primary_dir.path(), &["login", bob_sk]).await;
+    let bob_owner_pubkey = bob_primary_login["data"]["pubkey"]
+        .as_str()
+        .expect("bob owner pubkey")
+        .to_string();
+
+    // Secondary device creates a private link invite.
+    let link = run_ndr(bob_secondary_dir.path(), &["link", "create"]).await;
+    let link_url = link["data"]["url"]
+        .as_str()
+        .expect("link invite url")
+        .to_string();
+
+    let mut alice_child: Option<Child> = None;
+    let mut bob_primary_child: Option<Child> = None;
+    let mut bob_secondary_child: Option<Child> = None;
+
+    let result = async {
+        // Start secondary listen before accepting link so it can process link_accepted.
+        let (child, mut bob_secondary_stdout) = start_ndr_listen(bob_secondary_dir.path()).await;
+        bob_secondary_child = Some(child);
+        assert!(
+            read_until_command(&mut bob_secondary_stdout, "listen", Duration::from_secs(5)).await,
+            "Bob secondary should print listen message"
+        );
+
+        // Main Bob device accepts secondary's link invite.
+        let _ = run_ndr(bob_primary_dir.path(), &["link", "accept", &link_url]).await;
+
+        let linked = read_until_event(
+            &mut bob_secondary_stdout,
+            "link_accepted",
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("Bob secondary should receive link_accepted");
+        assert_eq!(
+            linked["owner_pubkey"].as_str(),
+            Some(bob_owner_pubkey.as_str())
+        );
+
+        // Start Alice listen to process invite responses.
+        let (child, mut alice_stdout) = start_ndr_listen(alice_dir.path()).await;
+        alice_child = Some(child);
+        assert!(
+            read_until_command(&mut alice_stdout, "listen", Duration::from_secs(5)).await,
+            "Alice should print listen message"
+        );
+
+        // Establish Alice <-> Bob owner chat.
+        let invite = run_ndr(
+            alice_dir.path(),
+            &["invite", "create", "-l", "linked-group-test"],
+        )
+        .await;
+        let invite_url = invite["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
+        let _ = run_ndr(bob_primary_dir.path(), &["chat", "join", &invite_url]).await;
+
+        let session_event = read_until_event(
+            &mut alice_stdout,
+            "session_created",
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("Alice should receive session_created");
+        assert_eq!(
+            session_event["their_pubkey"].as_str(),
+            Some(bob_owner_pubkey.as_str())
+        );
+
+        // Kickoff so Alice can send.
+        let kickoff = "kickoff-bob-linked";
+        let _ = run_ndr(bob_primary_dir.path(), &["send", &alice_pubkey, kickoff]).await;
+        let kickoff_event = read_until_event(&mut alice_stdout, "message", Duration::from_secs(10))
+            .await
+            .expect("Alice should receive kickoff");
+        assert_eq!(kickoff_event["content"].as_str(), Some(kickoff));
+
+        // Start Bob primary listen.
+        let (child, mut bob_primary_stdout) = start_ndr_listen(bob_primary_dir.path()).await;
+        bob_primary_child = Some(child);
+        assert!(
+            read_until_command(&mut bob_primary_stdout, "listen", Duration::from_secs(5)).await,
+            "Bob primary should print listen message"
+        );
+
+        // Wait until Bob secondary discovers/creates owner chat with Alice.
+        assert!(
+            wait_for_chat_with_pubkey(
+                bob_secondary_dir.path(),
+                &alice_pubkey,
+                Duration::from_secs(20)
+            )
+            .await,
+            "Bob secondary should discover chat with Alice owner"
+        );
+
+        // Alice creates group with Bob owner.
+        let group_create = run_ndr(
+            alice_dir.path(),
+            &[
+                "group",
+                "create",
+                "--name",
+                "Linked Device Group",
+                "--members",
+                &bob_owner_pubkey,
+            ],
+        )
+        .await;
+        let group_id = group_create["data"]["id"]
+            .as_str()
+            .expect("group id")
+            .to_string();
+
+        // Both Bob devices should receive the created group metadata.
+        let bob_primary_created = read_until_event(
+            &mut bob_primary_stdout,
+            "group_metadata",
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("Bob primary should receive group_metadata created");
+        assert_eq!(
+            bob_primary_created["group_id"].as_str(),
+            Some(group_id.as_str())
+        );
+        assert_eq!(bob_primary_created["action"].as_str(), Some("created"));
+
+        let bob_secondary_created = read_until_event(
+            &mut bob_secondary_stdout,
+            "group_metadata",
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("Bob secondary should receive group_metadata created");
+        assert_eq!(
+            bob_secondary_created["group_id"].as_str(),
+            Some(group_id.as_str())
+        );
+        assert_eq!(bob_secondary_created["action"].as_str(), Some("created"));
+
+        // Both devices accept to enable group subscriptions.
+        let _ = run_ndr(bob_primary_dir.path(), &["group", "accept", &group_id]).await;
+        let _ = run_ndr(bob_secondary_dir.path(), &["group", "accept", &group_id]).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        // Alice sends one group message; both Bob devices should receive it.
+        let msg = "hello linked devices";
+        let _ = run_ndr(alice_dir.path(), &["group", "send", &group_id, msg]).await;
+
+        let bob_primary_msg = read_until_event_with_content(
+            &mut bob_primary_stdout,
+            "group_message",
+            Some(msg),
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("Bob primary should receive group_message");
+        assert_eq!(
+            bob_primary_msg["group_id"].as_str(),
+            Some(group_id.as_str())
+        );
+
+        let bob_secondary_msg = read_until_event_with_content(
+            &mut bob_secondary_stdout,
+            "group_message",
+            Some(msg),
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("Bob secondary should receive group_message");
+        assert_eq!(
+            bob_secondary_msg["group_id"].as_str(),
+            Some(group_id.as_str())
+        );
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Some(child) = alice_child {
+        stop_child(child).await;
+    }
+    if let Some(child) = bob_primary_child {
+        stop_child(child).await;
+    }
+    if let Some(child) = bob_secondary_child {
         stop_child(child).await;
     }
     relay.stop().await;
