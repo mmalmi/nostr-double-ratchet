@@ -485,3 +485,149 @@ fn test_resolve_target_by_petname() {
     let chat = resolve_target("alice", &storage).unwrap();
     assert_eq!(chat.id, "pet-chat");
 }
+
+fn build_rumor_json(
+    sender_owner_hex: &str,
+    kind: u32,
+    content: &str,
+    tags: Vec<Vec<String>>,
+) -> String {
+    serde_json::json!({
+        "id": "rumor-id",
+        "pubkey": sender_owner_hex,
+        "created_at": 0,
+        "kind": kind,
+        "tags": tags,
+        "content": content,
+    })
+    .to_string()
+}
+
+#[test]
+fn test_session_manager_decrypted_incoming_from_same_owner_routes_to_single_chat() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::load(temp.path()).unwrap();
+    let me = nostr::Keys::generate();
+    config
+        .set_private_key(&me.secret_key().to_secret_hex())
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
+    let output = Output::new(true);
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let peer_owner = nostr::Keys::generate().public_key().to_hex();
+    storage
+        .save_chat(&StoredChat {
+            id: "peer-chat".to_string(),
+            their_pubkey: peer_owner.clone(),
+            device_id: None,
+            created_at: 1000,
+            last_message_at: None,
+            session_state: "{}".to_string(),
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+
+    let rumor1 = build_rumor_json(&peer_owner, 14, "hi from peer device 1", vec![]);
+    let rumor2 = build_rumor_json(&peer_owner, 14, "hi from peer device 2", vec![]);
+
+    let handled1 = super::listen::apply_session_manager_one_to_one_decrypted(
+        nostr::PublicKey::from_hex(&peer_owner).unwrap(),
+        &rumor1,
+        Some("outer-1"),
+        2000,
+        &config,
+        &storage,
+        &output,
+    )
+    .unwrap();
+    let handled2 = super::listen::apply_session_manager_one_to_one_decrypted(
+        nostr::PublicKey::from_hex(&peer_owner).unwrap(),
+        &rumor2,
+        Some("outer-2"),
+        2001,
+        &config,
+        &storage,
+        &output,
+    )
+    .unwrap();
+
+    assert!(handled1);
+    assert!(handled2);
+
+    let messages = storage.get_messages("peer-chat", 10).unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].chat_id, "peer-chat");
+    assert_eq!(messages[1].chat_id, "peer-chat");
+    assert!(!messages[0].is_outgoing);
+    assert!(!messages[1].is_outgoing);
+}
+
+#[test]
+fn test_session_manager_decrypted_sibling_copy_routes_to_peer_chat_as_outgoing() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::load(temp.path()).unwrap();
+    let me = nostr::Keys::generate();
+    let my_owner_hex = me.public_key().to_hex();
+    config
+        .set_private_key(&me.secret_key().to_secret_hex())
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
+    let output = Output::new(true);
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let peer_owner = nostr::Keys::generate().public_key().to_hex();
+    storage
+        .save_chat(&StoredChat {
+            id: "peer-chat".to_string(),
+            their_pubkey: peer_owner.clone(),
+            device_id: None,
+            created_at: 1000,
+            last_message_at: None,
+            session_state: "{}".to_string(),
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+    storage
+        .save_chat(&StoredChat {
+            id: "self-chat".to_string(),
+            their_pubkey: my_owner_hex.clone(),
+            device_id: Some("my-other-device".to_string()),
+            created_at: 1000,
+            last_message_at: None,
+            session_state: "{}".to_string(),
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+
+    let rumor = build_rumor_json(
+        &my_owner_hex,
+        14,
+        "hello from sibling device",
+        vec![vec!["p".to_string(), peer_owner.clone()]],
+    );
+
+    let handled = super::listen::apply_session_manager_one_to_one_decrypted(
+        nostr::PublicKey::from_hex(&my_owner_hex).unwrap(),
+        &rumor,
+        Some("outer-self-1"),
+        3000,
+        &config,
+        &storage,
+        &output,
+    )
+    .unwrap();
+    assert!(handled);
+
+    let peer_messages = storage.get_messages("peer-chat", 10).unwrap();
+    assert_eq!(peer_messages.len(), 1);
+    assert!(peer_messages[0].is_outgoing);
+    assert_eq!(peer_messages[0].chat_id, "peer-chat");
+
+    let self_messages = storage.get_messages("self-chat", 10).unwrap();
+    assert!(self_messages.is_empty());
+}
