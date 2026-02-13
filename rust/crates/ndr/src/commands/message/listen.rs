@@ -69,10 +69,14 @@ fn import_chats_into_session_manager(
     manager: &SessionManager,
     my_owner_pubkey_hex: &str,
 ) -> Result<()> {
-    let known: std::collections::HashSet<(String, String)> = manager
+    let known: std::collections::HashMap<(String, String), String> = manager
         .export_active_sessions()
         .into_iter()
-        .map(|(owner, device_id, _)| (owner.to_hex(), device_id))
+        .filter_map(|(owner, device_id, state)| {
+            serde_json::to_string(&state)
+                .ok()
+                .map(|json| ((owner.to_hex(), device_id), json))
+        })
         .collect();
 
     for chat in storage.list_chats()? {
@@ -86,16 +90,19 @@ fn import_chats_into_session_manager(
         };
         manager.setup_user(owner_pubkey);
 
+        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
+        if known
+            .get(&(owner_pubkey.to_hex(), device_id.clone()))
+            .is_some_and(|known_state| known_state == &chat.session_state)
+        {
+            continue;
+        }
+
         let state: nostr_double_ratchet::SessionState =
             match serde_json::from_str(&chat.session_state) {
                 Ok(state) => state,
                 Err(_) => continue,
             };
-
-        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
-        if known.contains(&(owner_pubkey.to_hex(), device_id.clone())) {
-            continue;
-        }
 
         manager.import_session_state(owner_pubkey, Some(device_id), state)?;
     }
@@ -248,6 +255,13 @@ fn fallback_event_id(event_id: Option<&str>, decrypted_event: &serde_json::Value
                 .map(str::to_string)
         })
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+fn decrypted_content_is_group_routed(content_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(content_json)
+        .ok()
+        .and_then(|event| extract_group_id_tag(&event))
+        .is_some()
 }
 
 pub(super) fn apply_session_manager_one_to_one_decrypted(
@@ -688,6 +702,10 @@ pub async fn listen(
         ),
     );
 
+    // Create notifications receiver before any subscribe() call to avoid missing
+    // backfilled events that relays may send immediately upon subscription.
+    let mut notifications = client.notifications();
+
     // Set up filesystem watcher for invites and chats directories
     let (fs_tx, fs_rx) = mpsc::channel();
     let mut _watcher =
@@ -739,55 +757,55 @@ pub async fn listen(
         sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
     }
 
-    // Wait for invites/chats if we have nothing to subscribe to yet
+    // Wait for invites/chats if we have nothing to subscribe to yet.
+    // Poll storage even without filesystem events so brand-new dirs/files created by
+    // sibling `ndr` processes are discovered quickly.
     while !has_subscription {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Check for filesystem changes
-        while let Ok(()) = fs_rx.try_recv() {
-            import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-            sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-            channel_map = build_channel_map(storage)?;
-            group_sender_map = build_group_sender_map(storage)?;
-            let (
-                new_filters,
-                new_pubkeys,
-                new_invite_pubkeys,
-                new_channel_pubkeys,
-                new_group_sender_pubkeys,
-            ) = build_filters(
-                storage,
-                chat_id_owned.as_deref(),
-                &channel_map,
-                &group_sender_map,
-            )?;
-            if !new_filters.is_empty() {
-                filters = new_filters;
-                subscribed_pubkeys = new_pubkeys;
-                subscribed_invite_pubkeys = new_invite_pubkeys;
-                subscribed_channel_pubkeys = new_channel_pubkeys;
-                subscribed_group_sender_pubkeys = new_group_sender_pubkeys;
-                if !connected {
-                    client.connect().await;
-                    connected = true;
-                }
-                client.subscribe(filters.clone(), None).await?;
-                let _ = flush_session_manager_events(
-                    &session_manager_rx,
-                    &client,
-                    &config,
-                    &mut subscribed_manager_filters,
-                )
-                .await?;
-                sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-                has_subscription = true;
-                break;
+        // Drain fs events to avoid unbounded queue growth.
+        while let Ok(()) = fs_rx.try_recv() {}
+
+        import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+        sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+        channel_map = build_channel_map(storage)?;
+        group_sender_map = build_group_sender_map(storage)?;
+        let (
+            new_filters,
+            new_pubkeys,
+            new_invite_pubkeys,
+            new_channel_pubkeys,
+            new_group_sender_pubkeys,
+        ) = build_filters(
+            storage,
+            chat_id_owned.as_deref(),
+            &channel_map,
+            &group_sender_map,
+        )?;
+        if !new_filters.is_empty() {
+            filters = new_filters;
+            subscribed_pubkeys = new_pubkeys;
+            subscribed_invite_pubkeys = new_invite_pubkeys;
+            subscribed_channel_pubkeys = new_channel_pubkeys;
+            subscribed_group_sender_pubkeys = new_group_sender_pubkeys;
+            if !connected {
+                client.connect().await;
+                connected = true;
             }
+            client.subscribe(filters.clone(), None).await?;
+            let _ = flush_session_manager_events(
+                &session_manager_rx,
+                &client,
+                &config,
+                &mut subscribed_manager_filters,
+            )
+            .await?;
+            sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+            has_subscription = true;
         }
     }
 
     // Handle incoming events - only start after we have a subscription
-    let mut notifications = client.notifications();
     loop {
         // Check for filesystem changes (new invites/chats created by other processes)
         let mut should_refresh = false;
@@ -861,7 +879,13 @@ pub async fn listen(
                 &mut subscribed_manager_filters,
             )
             .await?;
-            sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+            let current_event_group_routed = decrypted_events.iter().any(|decrypted| {
+                decrypted.event_id.as_deref() == Some(current_event_id.as_str())
+                    && decrypted_content_is_group_routed(&decrypted.content)
+            });
+            if !current_event_group_routed {
+                sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+            }
 
             let mut handled_by_session_manager = false;
             for decrypted in decrypted_events {
@@ -959,27 +983,63 @@ pub async fn listen(
                                 .clone()
                                 .or_else(|| Some(response.invitee_identity.to_hex()));
                             let session = response.session;
-                            let session_state = serde_json::to_string(&session.state)?;
-                            let new_chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                            let response_state = session.state.clone();
                             let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
+                            let mut import_state = response_state.clone();
 
-                            let chat = crate::storage::StoredChat {
-                                id: new_chat_id.clone(),
-                                their_pubkey: their_pubkey_hex.clone(),
-                                device_id: peer_device_id,
-                                created_at: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)?
-                                    .as_secs(),
-                                last_message_at: None,
-                                session_state,
-                                message_ttl_seconds: None,
+                            let chat = if let Some(mut existing_chat) =
+                                storage.get_chat_by_pubkey(&their_pubkey_hex)?
+                            {
+                                let selected_state = match serde_json::from_str::<
+                                    nostr_double_ratchet::SessionState,
+                                >(&existing_chat.session_state)
+                                {
+                                    Ok(existing_state) => {
+                                        let existing_can_send = Session::new(
+                                            existing_state.clone(),
+                                            existing_chat.id.clone(),
+                                        )
+                                        .can_send();
+                                        let response_can_send = Session::new(
+                                            response_state.clone(),
+                                            existing_chat.id.clone(),
+                                        )
+                                        .can_send();
+                                        if existing_can_send && !response_can_send {
+                                            existing_state
+                                        } else {
+                                            response_state.clone()
+                                        }
+                                    }
+                                    Err(_) => response_state.clone(),
+                                };
+
+                                import_state = selected_state.clone();
+                                if peer_device_id.is_some() {
+                                    existing_chat.device_id = peer_device_id.clone();
+                                }
+                                existing_chat.session_state = serde_json::to_string(&selected_state)?;
+                                storage.save_chat(&existing_chat)?;
+                                existing_chat
+                            } else {
+                                let new_chat = crate::storage::StoredChat {
+                                    id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
+                                    their_pubkey: their_pubkey_hex.clone(),
+                                    device_id: peer_device_id,
+                                    created_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)?
+                                        .as_secs(),
+                                    last_message_at: None,
+                                    session_state: serde_json::to_string(&response_state)?,
+                                    message_ttl_seconds: None,
+                                };
+                                storage.save_chat(&new_chat)?;
+                                new_chat
                             };
-
-                            storage.save_chat(&chat)?;
                             session_manager.import_session_state(
                                 their_pubkey,
                                 chat.device_id.clone(),
-                                session.state.clone(),
+                                import_state,
                             )?;
                             session_manager.setup_user(their_pubkey);
                             sync_chats_from_session_manager(
@@ -993,7 +1053,7 @@ pub async fn listen(
                                 "session_created",
                                 serde_json::json!({
                                     "invite_id": stored_invite.id,
-                                    "chat_id": new_chat_id,
+                                    "chat_id": chat.id,
                                     "their_pubkey": their_pubkey_hex,
                                 }),
                             );
@@ -1417,6 +1477,14 @@ pub async fn listen(
                                             continue;
                                         }
 
+                                        // Deterministic tie-breaker:
+                                        // when two members publish group invites concurrently, only
+                                        // the lexicographically-smaller owner pubkey auto-accepts.
+                                        // This avoids creating two competing sessions for the same peer.
+                                        if owner_pubkey_hex >= rumor_pubkey {
+                                            continue;
+                                        }
+
                                         // Auto-accept: parse invite URL, create session
                                         if !invite_url.is_empty() {
                                             if let Ok(invite) =
@@ -1818,7 +1886,9 @@ pub async fn listen(
                                     // Learn/update the sender's per-group outer pubkey mapping.
                                     if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey
                                     {
-                                        if nostr::PublicKey::from_hex(sender_event_pubkey).is_ok() {
+                                        if let Ok(sender_event_pk) =
+                                            nostr::PublicKey::from_hex(sender_event_pubkey)
+                                        {
                                             storage.upsert_group_sender(&StoredGroupSender {
                                                 group_id: gid.clone(),
                                                 identity_pubkey: sender_device_pubkey_hex.clone(),
@@ -1826,6 +1896,29 @@ pub async fn listen(
                                                 sender_event_pubkey: sender_event_pubkey.clone(),
                                                 sender_event_secret_key: None,
                                             })?;
+
+                                            group_sender_map.insert(
+                                                sender_event_pubkey.clone(),
+                                                (
+                                                    gid.clone(),
+                                                    from_pubkey_hex.clone(),
+                                                    sender_device_pubkey_hex.clone(),
+                                                ),
+                                            );
+
+                                            let sender_event_hex = sender_event_pk.to_hex();
+                                            if !subscribed_group_sender_pubkeys
+                                                .contains(&sender_event_hex)
+                                            {
+                                                let sender_filter = Filter::new()
+                                                    .kind(nostr::Kind::Custom(
+                                                        MESSAGE_EVENT_KIND as u16,
+                                                    ))
+                                                    .authors(vec![sender_event_pk]);
+                                                client.subscribe(vec![sender_filter], None).await?;
+                                                subscribed_group_sender_pubkeys
+                                                    .insert(sender_event_hex);
+                                            }
                                         }
                                     }
 

@@ -212,19 +212,6 @@ async fn fan_out_sender_key_distribution(
             continue;
         }
 
-        let chat = match storage.get_chat_by_pubkey(member)? {
-            Some(c) => c,
-            None => continue,
-        };
-
-        let session_state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-        let mut session = Session::new(session_state, chat.id.clone());
-
         let tags: Vec<Vec<String>> = vec![
             vec!["l".to_string(), group.id.clone()],
             vec!["key".to_string(), key_id.to_string()],
@@ -244,16 +231,53 @@ async fn fan_out_sender_key_distribution(
         .custom_created_at(nostr::Timestamp::from(now_s))
         .build(my_pk);
 
-        let encrypted = match session.send_event(unsigned) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let mut delivered = false;
+        for _ in 0..20 {
+            let member_chats: Vec<_> = storage
+                .list_chats()?
+                .into_iter()
+                .filter(|c| c.their_pubkey == *member)
+                .collect();
 
-        let mut updated_chat = chat;
-        updated_chat.session_state = serde_json::to_string(&session.state)?;
-        storage.save_chat(&updated_chat)?;
+            for chat in member_chats {
+                let session_state: nostr_double_ratchet::SessionState =
+                    match serde_json::from_str(&chat.session_state) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
 
-        let _ = client.send_event(encrypted).await;
+                let mut session = Session::new(session_state, chat.id.clone());
+                let encrypted = match session.send_event(unsigned.clone()) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+
+                let mut published = false;
+                for _ in 0..3 {
+                    if send_event_or_ignore(client, encrypted.clone()).await.is_ok() {
+                        published = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+
+                if !published {
+                    continue;
+                }
+
+                let mut updated_chat = chat.clone();
+                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                storage.save_chat(&updated_chat)?;
+                delivered = true;
+                break;
+            }
+
+            if delivered {
+                break;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     Ok(())
