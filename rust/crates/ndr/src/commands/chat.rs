@@ -1,7 +1,10 @@
 use anyhow::Result;
 use nostr::Tag;
-use nostr_double_ratchet::{Session, CHAT_SETTINGS_KIND};
+use nostr_double_ratchet::{
+    FileStorageAdapter, Session, SessionManager, StorageAdapter, CHAT_SETTINGS_KIND,
+};
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
@@ -134,12 +137,53 @@ pub async fn show(id: &str, storage: &Storage, output: &Output) -> Result<()> {
 }
 
 /// Delete a chat
-pub async fn delete(id: &str, storage: &Storage, output: &Output) -> Result<()> {
+pub async fn delete(id: &str, config: &Config, storage: &Storage, output: &Output) -> Result<()> {
+    let chat = storage
+        .get_chat(id)?
+        .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?;
+
+    // Best-effort SessionManager cleanup to remove persisted multi-device session state.
+    // Local chat file deletion below still succeeds even if this cleanup fails.
+    if config.is_logged_in() {
+        let _ = delete_session_manager_chat(config, storage, &chat.their_pubkey);
+    }
+
     if storage.delete_chat(id)? {
         output.success_message("chat.delete", &format!("Deleted chat {}", id));
     } else {
         anyhow::bail!("Chat not found: {}", id);
     }
+    Ok(())
+}
+
+fn delete_session_manager_chat(
+    config: &Config,
+    storage: &Storage,
+    their_pubkey_hex: &str,
+) -> Result<()> {
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey_hex = config.public_key()?;
+    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
+    let owner_pubkey_hex = config.owner_public_key_hex()?;
+    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
+    let their_pubkey = nostr::PublicKey::from_hex(their_pubkey_hex)?;
+
+    let session_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
+        storage.data_dir().join("session_manager"),
+    )?);
+
+    let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        our_pubkey,
+        our_private_key,
+        our_pubkey_hex,
+        owner_pubkey,
+        sm_tx,
+        Some(session_manager_store),
+        None,
+    );
+    manager.init()?;
+    manager.delete_chat(their_pubkey)?;
     Ok(())
 }
 
@@ -258,6 +302,7 @@ pub async fn ttl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StoredChat;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Config, Storage) {
@@ -281,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chat_crud() {
-        let (_temp, _config, storage) = setup();
+        let (_temp, config, storage) = setup();
         let output = Output::new(true);
 
         // Add a chat manually
@@ -304,8 +349,44 @@ mod tests {
         show("test-chat", &storage, &output).await.unwrap();
 
         // Delete
-        delete("test-chat", &storage, &output).await.unwrap();
+        delete("test-chat", &config, &storage, &output)
+            .await
+            .unwrap();
 
         assert!(storage.list_chats().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_cleans_session_manager_user_record() {
+        let (_temp, config, storage) = setup();
+        let output = Output::new(true);
+        let their_pubkey = nostr::Keys::generate().public_key().to_hex();
+
+        storage
+            .save_chat(&StoredChat {
+                id: "delete-sync-chat".to_string(),
+                their_pubkey: their_pubkey.clone(),
+                device_id: None,
+                created_at: 1234567890,
+                last_message_at: None,
+                session_state: "{}".to_string(),
+                message_ttl_seconds: None,
+            })
+            .unwrap();
+
+        let session_manager_dir = storage.data_dir().join("session_manager");
+        std::fs::create_dir_all(&session_manager_dir).unwrap();
+        let user_record_file = session_manager_dir.join(format!("user_{}.json", their_pubkey));
+        std::fs::write(&user_record_file, "{}").unwrap();
+
+        delete("delete-sync-chat", &config, &storage, &output)
+            .await
+            .unwrap();
+
+        assert!(storage.get_chat("delete-sync-chat").unwrap().is_none());
+        assert!(
+            !user_record_file.exists(),
+            "expected SessionManager user record to be removed"
+        );
     }
 }

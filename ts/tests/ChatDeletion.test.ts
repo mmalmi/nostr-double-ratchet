@@ -16,26 +16,20 @@ async function waitFor(
 }
 
 describe("SessionManager local chat deletion", () => {
-  it("deleteChat should tombstone locally and sync to sibling devices", async () => {
+  it("deleteChat should remove local session state and allow explicit reinit", async () => {
     const sharedRelay = new MockRelay()
-    const alice1 = await createMockSessionManager("alice-device-1", sharedRelay)
-    const alice2 = await createMockSessionManager("alice-device-2", sharedRelay, alice1.secretKey)
+    const alice = await createMockSessionManager("alice-device-1", sharedRelay)
     const bob = await createMockSessionManager("bob-device-1", sharedRelay)
 
-    // Ensure alice devices have an active sibling session so local tombstone sync can fan out.
-    const siblingReady = new Promise<void>((resolve) => {
-      alice2.manager.onEvent((event) => {
-        if (event.content === "bootstrap-delete-sync") resolve()
-      })
-    })
-    await alice1.manager.sendMessage(alice1.publicKey, "bootstrap-delete-sync")
-    await siblingReady
+    alice.manager.setupUser(bob.publicKey)
+    expect(alice.manager.getUserRecords().has(bob.publicKey)).toBe(true)
 
-    await alice1.manager.deleteChat(bob.publicKey)
+    await alice.manager.deleteChat(bob.publicKey)
+    expect(alice.manager.getUserRecords().has(bob.publicKey)).toBe(false)
 
-    expect(alice1.manager.isChatTombstoned(bob.publicKey)).toBe(true)
+    await alice.manager.sendMessage(bob.publicKey, "after-delete-reinit")
 
-    await waitFor(() => alice2.manager.isChatTombstoned(bob.publicKey))
-    expect(alice2.manager.isChatTombstoned(bob.publicKey)).toBe(true)
+    await waitFor(() => alice.manager.getUserRecords().has(bob.publicKey))
+    expect(alice.manager.getUserRecords().has(bob.publicKey)).toBe(true)
   })
 })

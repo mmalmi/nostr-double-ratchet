@@ -80,7 +80,6 @@ pub struct SessionManager {
     peer_send_options: Arc<Mutex<HashMap<PublicKey, crate::SendOptions>>>,
     group_send_options: Arc<Mutex<HashMap<String, crate::SendOptions>>>,
     auto_adopt_chat_settings: Arc<Mutex<bool>>,
-    chat_tombstones: Arc<Mutex<HashSet<PublicKey>>>,
     group_sender_events: Arc<Mutex<HashMap<PublicKey, GroupSenderEventInfo>>>,
     group_sender_key_states: Arc<Mutex<HashMap<(PublicKey, u32), SenderKeyState>>>,
     group_sender_key_pending: Arc<Mutex<HashMap<(PublicKey, u32), Vec<nostr::Event>>>>,
@@ -149,16 +148,17 @@ impl SessionManager {
         *self.auto_adopt_chat_settings.lock().unwrap() = enabled;
     }
 
-    pub fn is_chat_tombstoned(&self, user_pubkey: PublicKey) -> bool {
-        let owner_pubkey = self.resolve_to_owner(&user_pubkey);
-        owner_pubkey != self.owner_public_key
-            && self.chat_tombstones.lock().unwrap().contains(&owner_pubkey)
-    }
-
+    /// Delete local chat/session state for a peer owner.
+    ///
+    /// This is intentionally local-only and does not create persistent tombstones.
+    /// A chat can be re-initialized later by explicit join/send flows.
     pub fn delete_chat(&self, user_pubkey: PublicKey) -> Result<()> {
         self.init()?;
         let owner_pubkey = self.resolve_to_owner(&user_pubkey);
-        self.delete_chat_internal(owner_pubkey, true)
+        if owner_pubkey == self.owner_public_key {
+            return Ok(());
+        }
+        self.delete_user_local(owner_pubkey)
     }
 
     pub fn new(
@@ -218,7 +218,6 @@ impl SessionManager {
             peer_send_options: Arc::new(Mutex::new(HashMap::new())),
             group_send_options: Arc::new(Mutex::new(HashMap::new())),
             auto_adopt_chat_settings: Arc::new(Mutex::new(true)),
-            chat_tombstones: Arc::new(Mutex::new(HashSet::new())),
             group_sender_events: Arc::new(Mutex::new(HashMap::new())),
             group_sender_key_states: Arc::new(Mutex::new(HashMap::new())),
             group_sender_key_pending: Arc::new(Mutex::new(HashMap::new())),
@@ -236,7 +235,6 @@ impl SessionManager {
 
         self.load_all_user_records()?;
         let _ = self.load_send_options();
-        let _ = self.load_chat_tombstones();
         let _ = self.load_group_sender_event_infos();
 
         // Ensure our own device is present in our owner's record
@@ -689,11 +687,6 @@ impl SessionManager {
         let owner_pubkey = owner_pubkey_hint
             .or(invite.owner_public_key)
             .unwrap_or_else(|| self.resolve_to_owner(&inviter_device_pubkey));
-        if self.is_chat_tombstoned(owner_pubkey) {
-            return Err(crate::Error::Invite(
-                "Chat is tombstoned locally".to_string(),
-            ));
-        }
 
         if owner_pubkey != inviter_device_pubkey {
             let cached_app_keys = self
@@ -857,10 +850,6 @@ impl SessionManager {
         event: UnsignedEvent,
         include_owner_sync: bool,
     ) -> Result<Vec<String>> {
-        if recipient_owner != self.owner_public_key && self.is_chat_tombstoned(recipient_owner) {
-            return Ok(Vec::new());
-        }
-
         let mut owners = vec![recipient_owner];
         if include_owner_sync && self.owner_public_key != recipient_owner {
             owners.push(self.owner_public_key);
@@ -995,48 +984,6 @@ impl SessionManager {
         self.send_event_internal(recipient_owner, event, false)
     }
 
-    fn delete_chat_internal(
-        &self,
-        owner_pubkey: PublicKey,
-        sync_to_own_devices: bool,
-    ) -> Result<()> {
-        if owner_pubkey == self.owner_public_key {
-            return Ok(());
-        }
-
-        self.apply_chat_tombstone(owner_pubkey)?;
-        if sync_to_own_devices {
-            self.publish_chat_tombstone(owner_pubkey)?;
-        }
-        Ok(())
-    }
-
-    fn apply_chat_tombstone(&self, owner_pubkey: PublicKey) -> Result<()> {
-        self.set_chat_tombstone(owner_pubkey, true)?;
-        self.delete_user_local(owner_pubkey)
-    }
-
-    fn publish_chat_tombstone(&self, owner_pubkey: PublicKey) -> Result<()> {
-        if owner_pubkey == self.owner_public_key {
-            return Ok(());
-        }
-
-        let payload = crate::LocalChatTombstonePayloadV1 {
-            typ: "chat-tombstone".to_string(),
-            v: 1,
-            peer_pubkey: owner_pubkey.to_hex(),
-        };
-        let content = serde_json::to_string(&payload)?;
-        let event = self.build_message_event(
-            self.owner_public_key,
-            crate::LOCAL_CHAT_TOMBSTONE_KIND,
-            content,
-            vec![],
-        )?;
-        let _ = self.send_event_recipient_only(self.owner_public_key, event)?;
-        Ok(())
-    }
-
     fn delete_user_local(&self, owner_pubkey: PublicKey) -> Result<()> {
         if owner_pubkey == self.owner_public_key {
             return Ok(());
@@ -1098,6 +1045,7 @@ impl SessionManager {
             self.message_queue.remove_for_target(&device_id)?;
         }
 
+        let _ = self.storage.del(&self.send_options_peer_key(&owner_pubkey));
         let _ = self.storage.del(&self.user_record_key(&owner_pubkey));
         Ok(())
     }
@@ -1128,18 +1076,6 @@ impl SessionManager {
 
     fn send_options_group_key(&self, group_id: &str) -> String {
         format!("{}{}", self.send_options_group_prefix(), group_id)
-    }
-
-    fn chat_tombstone_prefix(&self) -> String {
-        "chat-tombstone/".to_string()
-    }
-
-    fn chat_tombstone_key(&self, owner_pubkey: &PublicKey) -> String {
-        format!(
-            "{}{}",
-            self.chat_tombstone_prefix(),
-            hex::encode(owner_pubkey.to_bytes())
-        )
     }
 
     fn load_send_options(&self) -> Result<()> {
@@ -1189,49 +1125,6 @@ impl SessionManager {
             }
         }
 
-        Ok(())
-    }
-
-    fn set_chat_tombstone(&self, user_pubkey: PublicKey, tombstoned: bool) -> Result<()> {
-        let owner_pubkey = self.resolve_to_owner(&user_pubkey);
-        if owner_pubkey == self.owner_public_key {
-            return Ok(());
-        }
-
-        let key = self.chat_tombstone_key(&owner_pubkey);
-        if tombstoned {
-            self.chat_tombstones.lock().unwrap().insert(owner_pubkey);
-            self.storage.put(
-                &key,
-                serde_json::json!({
-                    "tombstoned": true,
-                    "at": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64
-                })
-                .to_string(),
-            )?;
-        } else {
-            self.chat_tombstones.lock().unwrap().remove(&owner_pubkey);
-            let _ = self.storage.del(&key);
-        }
-        Ok(())
-    }
-
-    fn load_chat_tombstones(&self) -> Result<()> {
-        let prefix = self.chat_tombstone_prefix();
-        let keys = self.storage.list(&prefix)?;
-        let mut tombstones = self.chat_tombstones.lock().unwrap();
-        for key in keys {
-            let hex_pk = key.strip_prefix(&prefix).unwrap_or("");
-            if hex_pk.is_empty() {
-                continue;
-            }
-            if let Ok(pubkey) = crate::utils::pubkey_from_hex(hex_pk) {
-                tombstones.insert(pubkey);
-            }
-        }
         Ok(())
     }
 
@@ -1350,42 +1243,6 @@ impl SessionManager {
             }
             _ => {}
         }
-    }
-
-    fn maybe_handle_local_chat_tombstone(
-        &self,
-        from_owner_pubkey: PublicKey,
-        rumor: &UnsignedEvent,
-    ) -> bool {
-        if rumor.kind.as_u16() != crate::LOCAL_CHAT_TOMBSTONE_KIND as u16 {
-            return false;
-        }
-
-        // Local chat tombstones are only trusted from our own owner scope.
-        if from_owner_pubkey != self.owner_public_key {
-            return true;
-        }
-
-        let payload =
-            match serde_json::from_str::<crate::LocalChatTombstonePayloadV1>(&rumor.content) {
-                Ok(payload) => payload,
-                Err(_) => return true,
-            };
-
-        if payload.typ != "chat-tombstone" || payload.v != 1 {
-            return true;
-        }
-
-        let Ok(peer_pubkey) = crate::utils::pubkey_from_hex(&payload.peer_pubkey) else {
-            return true;
-        };
-        if peer_pubkey == self.owner_public_key {
-            return true;
-        }
-
-        let owner_pubkey = self.resolve_to_owner(&peer_pubkey);
-        let _ = self.delete_chat_internal(owner_pubkey, false);
-        true
     }
 
     fn user_record_key(&self, pubkey: &PublicKey) -> String {
@@ -1878,11 +1735,6 @@ impl SessionManager {
 
     pub fn setup_user(&self, user_pubkey: PublicKey) {
         let owner_pubkey = self.resolve_to_owner(&user_pubkey);
-        if owner_pubkey != self.owner_public_key
-            && self.chat_tombstones.lock().unwrap().contains(&owner_pubkey)
-        {
-            return;
-        }
 
         // Ensure record exists
         {
@@ -2121,10 +1973,6 @@ impl SessionManager {
     }
 
     fn handle_app_keys_event(&self, owner_pubkey: PublicKey, app_keys: AppKeys) {
-        if self.is_chat_tombstoned(owner_pubkey) {
-            return;
-        }
-
         self.update_delegate_mapping(owner_pubkey, &app_keys);
 
         let devices = app_keys.get_all_devices();
@@ -2317,9 +2165,6 @@ impl SessionManager {
                     let owner_pubkey = response
                         .owner_public_key
                         .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
-                    if self.is_chat_tombstoned(owner_pubkey) {
-                        return;
-                    }
 
                     if !self.is_device_authorized(owner_pubkey, response.invitee_identity) {
                         return;
@@ -2421,32 +2266,18 @@ impl SessionManager {
                     None
                 };
 
-                if self.is_chat_tombstoned(owner_pubkey) {
-                    return;
-                }
-
-                let mut consume_rumor = false;
                 if let Ok(rumor) = serde_json::from_str::<UnsignedEvent>(&plaintext) {
-                    if self.maybe_handle_local_chat_tombstone(owner_pubkey, &rumor) {
-                        consume_rumor = true;
-                    } else {
-                        self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor);
-                        let _ = self.maybe_handle_group_sender_key_distribution(
-                            owner_pubkey,
-                            sender_device,
-                            &rumor,
-                        );
-                    }
-                }
-
-                if !consume_rumor {
-                    let _ = self.pubsub.decrypted_message(
+                    self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor);
+                    let _ = self.maybe_handle_group_sender_key_distribution(
                         owner_pubkey,
                         sender_device,
-                        plaintext,
-                        event_id,
+                        &rumor,
                     );
                 }
+
+                let _ =
+                    self.pubsub
+                        .decrypted_message(owner_pubkey, sender_device, plaintext, event_id);
                 let _ = self.store_user_record(&owner_pubkey);
             } else if let Some((sender, sender_device, plaintext, event_id)) =
                 self.try_decrypt_group_sender_key_outer(&event, None)
@@ -2512,6 +2343,28 @@ mod tests {
         let result = manager.send_text(recipient, "test".to_string(), None);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_delete_chat_removes_local_state_and_allows_reinit() {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key();
+        let identity_key = keys.secret_key().to_secret_bytes();
+        let device_id = "test-device".to_string();
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
+        manager.init().unwrap();
+
+        let peer = Keys::generate().public_key();
+        manager.setup_user(peer);
+        assert!(manager.get_user_pubkeys().contains(&peer));
+
+        manager.delete_chat(peer).unwrap();
+        assert!(!manager.get_user_pubkeys().contains(&peer));
+
+        manager.send_text(peer, "reinit".to_string(), None).unwrap();
+        assert!(manager.get_user_pubkeys().contains(&peer));
     }
 
     #[test]

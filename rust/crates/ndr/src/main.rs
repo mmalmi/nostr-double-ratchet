@@ -438,7 +438,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
                 commands::chat::join(&url, &config, &storage, output).await
             }
             ChatCommands::Show { id } => commands::chat::show(&id, &storage, output).await,
-            ChatCommands::Delete { id } => commands::chat::delete(&id, &storage, output).await,
+            ChatCommands::Delete { id } => {
+                commands::chat::delete(&id, &config, &storage, output).await
+            }
             ChatCommands::Ttl {
                 target,
                 ttl,

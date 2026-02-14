@@ -117,22 +117,11 @@ export const CHAT_SETTINGS_KIND = 10448;
  */
 export const KIND_CHAT_SETTINGS = CHAT_SETTINGS_KIND;
 
-/**
- * Internal encrypted control event used to sync local chat tombstones across own devices.
- */
-export const LOCAL_CHAT_TOMBSTONE_KIND = 10449;
-
 export interface ChatSettingsPayloadV1 {
   type: "chat-settings";
   v: 1;
   /** Default TTL (seconds) to apply to outgoing messages for this chat. */
   messageTtlSeconds?: number | null;
-}
-
-export interface LocalChatTombstonePayloadV1 {
-  type: "chat-tombstone";
-  v: 1;
-  peerPubkey: string;
 }
 
 
