@@ -282,7 +282,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
                                 }
                             }
 
-                            // Send matching stored events
+                            // Store subscription
+                            subscriptions.write().await.insert(
+                                sub_id.clone(),
+                                Subscription {
+                                    filters: filters.clone(),
+                                },
+                            );
+
+                            // Send matching stored events.
+                            // Registering the subscription first avoids a race where an event
+                            // published during REQ handling could be missed by both backlog replay
+                            // and live broadcast fanout.
                             let events = state.events.read().await;
                             for event in events.iter() {
                                 if filters.iter().any(|f| f.matches(event)) {
@@ -295,12 +306,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
                             // Send EOSE
                             let eose_msg = serde_json::json!(["EOSE", &sub_id]);
                             let _ = tx.send(eose_msg.to_string()).await;
-
-                            // Store subscription
-                            subscriptions
-                                .write()
-                                .await
-                                .insert(sub_id, Subscription { filters });
                         }
                     }
                     "CLOSE" => {

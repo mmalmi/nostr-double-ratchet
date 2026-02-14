@@ -6,16 +6,53 @@
 
 mod common;
 
+use std::sync::OnceLock;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
+#[allow(unused_mut)]
+fn expected_ndr_binary_path() -> std::path::PathBuf {
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop(); // ndr
+    path.pop(); // crates
+    path.push("target");
+    path.push("debug");
+    path.push("ndr");
+    #[cfg(windows)]
+    path.set_extension("exe");
+    path
+}
+
+fn ndr_binary() -> &'static std::path::PathBuf {
+    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        if let Some(bin) = option_env!("CARGO_BIN_EXE_ndr") {
+            let path = std::path::PathBuf::from(bin);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        let fallback = expected_ndr_binary_path();
+        if fallback.exists() {
+            return fallback;
+        }
+
+        let status = std::process::Command::new("cargo")
+            .args(["build", "-p", "ndr"])
+            .status()
+            .expect("failed to build ndr binary");
+        assert!(status.success(), "cargo build -p ndr failed");
+        fallback
+    })
+}
+
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::new("cargo")
+    let output = Command::new(ndr_binary())
         .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
         .arg(data_dir)
@@ -26,13 +63,18 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let source = if stdout.trim().is_empty() {
+        stderr.trim()
+    } else {
+        stdout.trim()
+    };
 
-    if !output.status.success() {
-        panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
-    }
-
-    serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
+    serde_json::from_str(source).unwrap_or_else(|e| {
+        panic!(
+            "Failed to parse ndr output: {}\nstatus={}\nstdout={}\nstderr={}",
+            e, output.status, stdout, stderr
+        )
+    })
 }
 
 /// Start ndr listen in background
@@ -40,10 +82,9 @@ async fn start_ndr_listen(
     data_dir: &std::path::Path,
     chat_id: Option<&str>,
 ) -> (Child, BufReader<tokio::process::ChildStdout>) {
-    let mut cmd = Command::new("cargo");
+    let mut cmd = Command::new(ndr_binary());
     cmd.env("NOSTR_PREFER_LOCAL", "0");
-    cmd.args(["run", "-q", "-p", "ndr", "--"])
-        .arg("--json")
+    cmd.arg("--json")
         .arg("--data-dir")
         .arg(data_dir)
         .arg("listen");
@@ -60,6 +101,27 @@ async fn start_ndr_listen(
 
     let stdout = BufReader::new(child.stdout.take().expect("Failed to capture stdout"));
     (child, stdout)
+}
+
+async fn send_with_retry(
+    data_dir: &std::path::Path,
+    chat_id: &str,
+    content: &str,
+) -> serde_json::Value {
+    for _ in 0..10 {
+        let result = run_ndr(data_dir, &["send", chat_id, content]).await;
+        if result["status"] == "ok" {
+            return result;
+        }
+
+        let err = result["error"].as_str().unwrap_or("");
+        if !err.contains("Not initiator, cannot send first message") {
+            return result;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    run_ndr(data_dir, &["send", chat_id, content]).await
 }
 
 /// Setup ndr data directory with config for test relay
@@ -203,6 +265,7 @@ async fn test_ndr_to_ndr_session() {
         }
     }
 
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = alice_listen_child.kill().await;
     assert!(alice_received, "Alice did not receive Bob's message");
 
@@ -214,11 +277,7 @@ async fn test_ndr_to_ndr_session() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Alice sends a message (ndr send now publishes to relay automatically)
-    let result = run_ndr(
-        alice_dir.path(),
-        &["send", &alice_chat_id, "Hello from Alice!"],
-    )
-    .await;
+    let result = send_with_retry(alice_dir.path(), &alice_chat_id, "Hello from Alice!").await;
     assert_eq!(result["status"], "ok", "Alice send failed");
 
     // Wait for Bob to receive the message

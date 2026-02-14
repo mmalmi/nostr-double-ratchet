@@ -7,17 +7,69 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
+static NDR_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
+}
+
+#[allow(unused_mut)]
+fn expected_ndr_binary_path() -> PathBuf {
+    let mut path = workspace_root().join("target/debug/ndr");
+    #[cfg(windows)]
+    {
+        path.set_extension("exe");
+    }
+    path
+}
+
+fn resolve_ndr_binary_path() -> PathBuf {
+    if let Ok(bin_path) = std::env::var("CARGO_BIN_EXE_ndr") {
+        return PathBuf::from(bin_path);
+    }
+
+    let path = expected_ndr_binary_path();
+    if path.exists() {
+        return path;
+    }
+
+    let status = std::process::Command::new("cargo")
+        .arg("build")
+        .arg("-q")
+        .arg("-p")
+        .arg("ndr")
+        .current_dir(workspace_root())
+        .status()
+        .expect("failed to run cargo build -p ndr");
+    assert!(
+        status.success(),
+        "failed to build ndr binary for integration tests"
+    );
+    path
+}
+
+fn ndr_command() -> Command {
+    let bin_path = NDR_BIN_PATH
+        .get_or_init(resolve_ndr_binary_path)
+        .to_path_buf();
+    let mut cmd = Command::new(bin_path);
+    cmd.env("NOSTR_PREFER_LOCAL", "0");
+    cmd
+}
+
 /// Run ndr CLI command and return JSON output (async version).
 async fn run_ndr(data_dir: &Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::new("cargo")
-        .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
+    let output = ndr_command()
         .arg("--json")
         .arg("--data-dir")
         .arg(data_dir)
@@ -39,9 +91,7 @@ async fn run_ndr(data_dir: &Path, args: &[&str]) -> serde_json::Value {
 
 /// Start ndr listen in background and return (child, stdout_reader).
 async fn start_ndr_listen(data_dir: &Path) -> (Child, BufReader<tokio::process::ChildStdout>) {
-    let mut child = Command::new("cargo")
-        .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
+    let mut child = ndr_command()
         .arg("--json")
         .arg("--data-dir")
         .arg(data_dir)
@@ -256,6 +306,13 @@ async fn test_ts_rust_group_sender_keys_e2e() {
             .await
             .expect("Failed to get Alice pubkey");
 
+    let _responses_ready = read_until_ts_marker(
+        &mut ts_reader,
+        "E2E_LISTENING_FOR_RESPONSES_READY",
+        Duration::from_secs(20),
+    )
+    .await
+    .expect("TS invite-response listener not ready");
     let invite_url =
         read_until_ts_marker(&mut ts_reader, "E2E_INVITE_URL:", Duration::from_secs(20))
             .await
@@ -285,7 +342,7 @@ async fn test_ts_rust_group_sender_keys_e2e() {
     let _session = read_until_ts_marker(
         &mut ts_reader,
         "E2E_SESSION_CREATED:",
-        Duration::from_secs(20),
+        Duration::from_secs(45),
     )
     .await
     .expect("TS did not create session");

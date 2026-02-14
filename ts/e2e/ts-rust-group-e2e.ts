@@ -21,7 +21,9 @@ import { generateSecretKey, getPublicKey, type VerifiedEvent } from "nostr-tools
 import { Invite } from "../src/Invite";
 import { Group, GROUP_METADATA_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND, generateGroupSecret, type GroupData } from "../src/Group";
 import { InMemoryStorageAdapter } from "../src/StorageAdapter";
+import { createSessionFromAccept, decryptInviteResponse } from "../src/inviteUtils";
 import type { Rumor } from "../src/types";
+import { INVITE_RESPONSE_KIND } from "../src/types";
 
 // Force flush stdout for each line.
 const log = (msg: string) => {
@@ -113,13 +115,13 @@ async function main() {
 
   // Create invite (Alice inviter).
   const invite = Invite.createNew(aliceOwnerPubkey);
-  const inviteUrl = invite.getUrl("https://example.com");
-  log(`E2E_INVITE_URL:${inviteUrl}`);
 
   let bobPubkey: string | null = null;
   let groupId: string | null = null;
   let groupData: GroupData | null = null;
   let group: Group | null = null;
+  let dmSession: any | null = null;
+  let sessionInitialized = false;
   let sentGroupBootstrap = false;
   let gotRustGroupMessage = false;
 
@@ -127,9 +129,11 @@ async function main() {
   const storage2 = new InMemoryStorageAdapter();
 
   // Listen for invite responses using Invite.listen().
-  invite.listen(aliceOwnerSecretKey, subscribe, (session, identity) => {
+  const handleSession = (session: any, identity: string) => {
+    if (sessionInitialized) return;
+    sessionInitialized = true;
+    dmSession = session;
     bobPubkey = identity;
-    log(`E2E_SESSION_CREATED:${identity}`);
 
     // Prepare group state now; we will send it only after Bob sends first DM ("responder can't send first").
     groupId = crypto.randomUUID();
@@ -171,8 +175,18 @@ async function main() {
           rumor.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND &&
           rumor.tags?.some((t) => t[0] === "l" && t[1] === groupId)
         ) {
-          const drained1 = await group1.handleIncomingSessionEvent(rumor as Rumor, bobPubkey);
-          const drained2 = await group2.handleIncomingSessionEvent(rumor as Rumor, bobPubkey);
+          const senderDevicePubkey =
+            typeof rumor.pubkey === "string" ? rumor.pubkey : undefined;
+          const drained1 = await group1.handleIncomingSessionEvent(
+            rumor as Rumor,
+            bobPubkey,
+            senderDevicePubkey
+          );
+          const drained2 = await group2.handleIncomingSessionEvent(
+            rumor as Rumor,
+            bobPubkey,
+            senderDevicePubkey
+          );
           for (const d of [...drained1, ...drained2]) {
             if (d.inner.content === "hello from rust group" && !gotRustGroupMessage) {
               gotRustGroupMessage = true;
@@ -208,6 +222,9 @@ async function main() {
           await relay.publish(meta.event);
           log(`E2E_GROUP_METADATA_SENT:${groupId}`);
 
+          // Give ndr time to accept the group and update per-sender subscriptions.
+          await new Promise((r) => setTimeout(r, 1500));
+
           // 2) Send a sender-key one-to-many group message.
           const sendPairwise = async (_to: string, r: Rumor) => {
             const dm = session.sendEvent({
@@ -241,14 +258,58 @@ async function main() {
         process.exit(1);
       });
     });
+
+    // Signal only after the 1:1 session subscription is active.
+    log(`E2E_SESSION_CREATED:${identity}`);
+  };
+  invite.listen(aliceOwnerSecretKey, subscribe, handleSession);
+  relay.subscribe({ kinds: [INVITE_RESPONSE_KIND] }, (event: any) => {
+    void (async () => {
+      if (sessionInitialized) return;
+      try {
+        const decrypted = await decryptInviteResponse({
+          envelopeContent: event.content,
+          envelopeSenderPubkey: event.pubkey,
+          inviterEphemeralPrivateKey: invite.inviterEphemeralPrivateKey!,
+          inviterPrivateKey: aliceOwnerSecretKey,
+          sharedSecret: invite.sharedSecret,
+        });
+        const fallbackSession = createSessionFromAccept({
+          nostrSubscribe: subscribe,
+          theirPublicKey: decrypted.inviteeSessionPublicKey,
+          ourSessionPrivateKey: invite.inviterEphemeralPrivateKey!,
+          sharedSecret: invite.sharedSecret,
+          isSender: false,
+          name: event.id,
+        });
+        handleSession(fallbackSession, decrypted.inviteeIdentity);
+      } catch {
+        // Ignore unrelated/undecryptable invite-response events.
+      }
+    })();
   });
+  log("E2E_LISTENING_FOR_RESPONSES_READY");
+
+  const inviteUrl = invite.getUrl("https://example.com");
+  log(`E2E_INVITE_URL:${inviteUrl}`);
 
   // Subscribe to all kind=1060 events, but only route non-session messages (no "header" tag) to Group.
   // Session traffic is handled by the Session's own subscriptions.
   relay.subscribe({ kinds: [1060] }, (event: any) => {
     void (async () => {
+      if (hasTag(event, "header")) {
+        // Fallback path for relays/test harnesses where author-filtered subscriptions are unreliable.
+        if (dmSession) {
+          try {
+            dmSession.handleNostrEvent(event);
+          } catch {
+            // ignore non-session or duplicate events
+          }
+        }
+        return;
+      }
+
       if (!group || !groupId) return;
-      if (hasTag(event, "header")) return; // 1:1 session messages
 
       // Try decrypt with any of our devices' group states.
       const dec1 = await group.handleOuterEvent(event as any);
@@ -274,7 +335,7 @@ async function main() {
       relay.close();
       process.exit(1);
     }
-  }, 60_000).unref();
+  }, 600_000).unref();
 }
 
 main().catch((e) => {

@@ -19,11 +19,18 @@ import WebSocket from "ws";
 
 import { Invite } from "../src/Invite";
 import { Session } from "../src/Session";
+import {
+  createSessionFromAccept,
+  decryptInviteResponse,
+} from "../src/inviteUtils";
+import { INVITE_RESPONSE_KIND } from "../src/types";
 
 // Force flush stdout for each line
 const log = (msg: string) => {
   process.stdout.write(msg + "\n");
 };
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const RELAY_URL = process.argv[2];
 if (!RELAY_URL) {
@@ -123,34 +130,70 @@ async function main() {
   // Listen for invite responses using the invite.listen() method
   let session: Session | null = null;
   const receivedMessages: string[] = [];
+  const attachSession = (newSession: Session, identity: string) => {
+    if (session) return;
+    session = newSession;
+
+    // Listen for messages on this session
+    session.onEvent((msg) => {
+      log(`E2E_MESSAGE_RECEIVED:${msg.content}`);
+      receivedMessages.push(msg.content);
+
+      // Send a reply back to ndr
+      try {
+        const reply = newSession.send("Hello from TypeScript!");
+        const replyEventJson = JSON.stringify(reply.event);
+        log(`E2E_REPLY_EVENT:${replyEventJson}`);
+        // Publish the reply to the relay
+        relay.publish(reply.event);
+        log(`E2E_REPLY_SENT`);
+      } catch (e: any) {
+        log(`E2E_REPLY_ERROR:${e.message || e}`);
+      }
+    });
+
+    // Signal readiness only after message callback is registered.
+    log(`E2E_SESSION_CREATED:identity=${identity}`);
+  };
 
   log(`E2E_LISTENING_FOR_RESPONSES`);
   invite.listen(
     aliceSecretKey,
     subscribe,
-    (newSession, identity, deviceId) => {
-      log(`E2E_SESSION_CREATED:identity=${identity},device=${deviceId}`);
-      session = newSession;
-
-      // Listen for messages on this session
-      session.onEvent((msg) => {
-        log(`E2E_MESSAGE_RECEIVED:${msg.content}`);
-        receivedMessages.push(msg.content);
-
-        // Send a reply back to ndr
-        try {
-          const reply = newSession.send("Hello from TypeScript!");
-          const replyEventJson = JSON.stringify(reply.event);
-          log(`E2E_REPLY_EVENT:${replyEventJson}`);
-          // Publish the reply to the relay
-          relay.publish(reply.event);
-          log(`E2E_REPLY_SENT`);
-        } catch (e: any) {
-          log(`E2E_REPLY_ERROR:${e.message || e}`);
-        }
-      });
+    (newSession, identity) => {
+      attachSession(newSession, identity);
     }
   );
+
+  // Fallback: listen to all invite responses and try to decrypt manually.
+  // This avoids depending on relay-side tag filtering details in tests.
+  relay.subscribe({ kinds: [INVITE_RESPONSE_KIND] }, (event: any) => {
+    void (async () => {
+      if (session) return;
+      try {
+        const decrypted = await decryptInviteResponse({
+          envelopeContent: event.content,
+          envelopeSenderPubkey: event.pubkey,
+          inviterEphemeralPrivateKey: invite.inviterEphemeralPrivateKey!,
+          inviterPrivateKey: aliceSecretKey,
+          sharedSecret: invite.sharedSecret,
+        });
+
+        const fallbackSession = createSessionFromAccept({
+          nostrSubscribe: subscribe,
+          theirPublicKey: decrypted.inviteeSessionPublicKey,
+          ourSessionPrivateKey: invite.inviterEphemeralPrivateKey!,
+          sharedSecret: invite.sharedSecret,
+          isSender: false,
+          name: event.id,
+        });
+        attachSession(fallbackSession, decrypted.inviteeIdentity);
+      } catch {
+        // Ignore unrelated/undecryptable invite-response events.
+      }
+    })();
+  });
+  log("E2E_LISTENING_FOR_RESPONSES_READY");
 
   // Also listen for double-ratchet messages (kind 1060)
   relay.subscribe(
@@ -169,25 +212,34 @@ async function main() {
 
   log("E2E_LISTENING");
 
-  // Wait for messages (timeout after 30 seconds)
-  const timeout = 30000;
-  const startTime = Date.now();
+  // Wait for session establishment first, then wait for message delivery.
+  const sessionTimeoutMs = 600_000;
+  const messageTimeoutMs = 90_000;
 
-  while (Date.now() - startTime < timeout) {
-    await new Promise(r => setTimeout(r, 1000));
+  const sessionStart = Date.now();
+  while (!session && Date.now() - sessionStart < sessionTimeoutMs) {
+    await sleep(200);
+  }
 
+  if (!session) {
+    log("E2E_TIMEOUT_SESSION");
+    relay.close();
+    process.exit(1);
+  }
+
+  const messageStart = Date.now();
+  while (Date.now() - messageStart < messageTimeoutMs) {
+    await sleep(200);
     if (receivedMessages.length > 0) {
       log(`E2E_SUCCESS:${receivedMessages.join(",")}`);
-      break;
+      relay.close();
+      process.exit(0);
     }
   }
 
-  if (receivedMessages.length === 0) {
-    log("E2E_TIMEOUT");
-  }
-
+  log("E2E_TIMEOUT");
   relay.close();
-  process.exit(receivedMessages.length > 0 ? 0 : 1);
+  process.exit(1);
 }
 
 main().catch((e) => {

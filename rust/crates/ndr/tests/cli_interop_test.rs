@@ -7,13 +7,50 @@
 //! 4. Receive and decrypt the message
 
 use std::process::Command;
+use std::sync::OnceLock;
 use tempfile::TempDir;
 
+#[allow(unused_mut)]
+fn expected_ndr_binary_path() -> std::path::PathBuf {
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop(); // ndr
+    path.pop(); // crates
+    path.push("target");
+    path.push("debug");
+    path.push("ndr");
+    #[cfg(windows)]
+    path.set_extension("exe");
+    path
+}
+
+fn ndr_binary() -> &'static std::path::PathBuf {
+    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        if let Some(bin) = option_env!("CARGO_BIN_EXE_ndr") {
+            let path = std::path::PathBuf::from(bin);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        let fallback = expected_ndr_binary_path();
+        if fallback.exists() {
+            return fallback;
+        }
+
+        let status = Command::new("cargo")
+            .args(["build", "-p", "ndr"])
+            .status()
+            .expect("failed to build ndr binary");
+        assert!(status.success(), "cargo build -p ndr failed");
+        fallback
+    })
+}
+
 fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::new("cargo")
+    let output = Command::new(ndr_binary())
         .env("NDR_IGNORE_PUBLISH_ERRORS", "1")
         .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
         .arg(data_dir)

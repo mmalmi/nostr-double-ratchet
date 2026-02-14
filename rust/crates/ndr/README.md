@@ -114,6 +114,24 @@ ndr listen --chat <id>      # Listen on specific chat
 ndr receive <event_json>    # Decrypt a nostr event
 ```
 
+### Groups
+
+```bash
+ndr group create --name <name> --members <owner_pubkey_csv>
+ndr group list
+ndr group show <group_id>
+ndr group update <group_id> [--name ...] [--description ...] [--picture ...]
+ndr group add-member <group_id> <owner_pubkey>
+ndr group remove-member <group_id> <owner_pubkey>
+ndr group add-admin <group_id> <owner_pubkey>
+ndr group remove-admin <group_id> <owner_pubkey>
+ndr group accept <group_id>
+ndr group send <group_id> <msg>
+ndr group react <group_id> <msg_id> <emoji>
+ndr group rotate-sender-key <group_id>
+ndr group messages <group_id>
+```
+
 ## Configuration
 
 Default data directory: `~/.local/share/ndr/` (Linux) or platform equivalent.
@@ -170,3 +188,10 @@ ndr --json receive "$event"
 # Reply
 ndr --json send <chat_id> "I received your message"
 ```
+
+## Security Notes
+
+- Outer events are signature-verified; sender attribution is resolved from authenticated session context plus owner/device mapping.
+- `ownerPubkey` claims are checked against AppKeys in multi-device flows.
+- Inner rumor `pubkey` is not treated as trusted sender identity.
+- Inner message payloads are unsigned and deniable; do not treat them as non-repudiable signatures.

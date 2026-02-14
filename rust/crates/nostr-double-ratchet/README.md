@@ -1,129 +1,106 @@
 # nostr-double-ratchet
 
-Rust implementation of the Double Ratchet protocol for Nostr, providing forward-secure end-to-end encrypted messaging.
-
-## Overview
-
-Based on Signal's Double Ratchet with header encryption, this crate implements secure session management over Nostr events. Messages are encrypted using NIP-44 and the double ratchet algorithm ensures forward secrecy even if keys are compromised.
+Rust library implementing Double Ratchet messaging for Nostr, including multi-device session management and sender-key group messaging.
 
 ## Features
 
-- **Double Ratchet encryption** - Forward secrecy with automatic key rotation
-- **Out-of-order message handling** - Skipped message keys cached for delivery flexibility
-- **Session persistence** - Serialize/deserialize session state
-- **NIP-44 integration** - Uses Nostr's standardized encryption
-- **Type-safe** - Leverages enostr's Pubkey type
+- 1:1 Double Ratchet sessions over Nostr events
+- Invite/bootstrap flows for secure session establishment
+- `SessionManager` for multi-device owner/device routing
+- AppKeys-based device authorization and owner-claim validation
+- Sender-key + one-to-many group messaging primitives
+- Persistent storage adapters and message/discovery queues
+- TypeScript/Rust interop test coverage
 
-## Usage
+## Security Properties
+
+### Confidentiality
+
+- 1:1 payloads are encrypted with Double Ratchet and NIP-44.
+- Group payloads are encrypted with sender-key chains and published as one-to-many outer events.
+
+### Forward Secrecy And Post-Compromise Recovery
+
+- 1:1 chains ratchet continuously, providing forward secrecy.
+- Future secrecy recovers after fresh ratchet steps if transient compromise ends.
+
+### Author/Device Verification
+
+- Outer Nostr events are signature-verified.
+- Identity attribution is based on authenticated session context and owner/device mapping.
+- For multi-device owner claims, AppKeys are used to verify device authorization.
+- Inner rumor `pubkey` is not treated as a trusted sender identity source.
+
+### Plausible Deniability
+
+- Inner rumors are unsigned payloads transported inside encrypted channels.
+- This preserves deniability for inner content at the cost of strong non-repudiation.
+
+## Group Messaging Architecture
+
+Groups are handled with a hybrid model:
+
+1. Membership is tracked by owner pubkeys.
+2. Group metadata and sender-key distributions are sent over authenticated 1:1 sessions.
+3. Each sender device uses a per-group sender-event keypair and sender-key state.
+4. Group messages are published once (one-to-many), then decrypted by members with sender-key state.
+5. Shared-channel events are used by higher-level integrations for signed bootstrap invites when pairwise sessions are missing.
+
+## Basic 1:1 Usage
 
 ```rust
-use nostr_double_ratchet::{Session, Result};
 use nostr::Keys;
+use nostr_double_ratchet::Session;
 
-// Initialize sessions
 let alice_keys = Keys::generate();
 let bob_keys = Keys::generate();
 
-let shared_secret = [0u8; 32]; // Exchange securely via invite mechanism
+// Shared secret must come from a secure invite/bootstrap flow.
+let shared_secret = [7u8; 32];
 
 let mut alice = Session::init(
-    bob_pubkey,
+    bob_keys.public_key(),
     alice_keys.secret_key().to_secret_bytes(),
-    true,  // initiator
+    true,
     shared_secret,
-    Some("alice".to_string()),
+    Some("alice-chat".to_string()),
 )?;
 
 let mut bob = Session::init(
-    alice_pubkey,
+    alice_keys.public_key(),
     bob_keys.secret_key().to_secret_bytes(),
-    false,  // responder
+    false,
     shared_secret,
-    Some("bob".to_string()),
+    Some("bob-chat".to_string()),
 )?;
 
-// Send encrypted message
-let event = alice.send("Hello Bob!".to_string())?;
-
-// Receive and decrypt
-let plaintext = bob.receive(&event)?;
+let outer = alice.send("hello bob".to_string())?;
+let plaintext = bob.receive(&outer)?;
+assert!(plaintext.is_some());
+# Ok::<(), nostr_double_ratchet::Error>(())
 ```
 
-## Disappearing Messages (Expiration)
+## Disappearing Messages
 
-For disappearing messages, include a NIP-40-style `["expiration", "<unix seconds>"]` tag in the *inner* rumor event.
-When sending via `SessionManager`, you can set per-send overrides or configure defaults:
+Use NIP-40-style `["expiration", "<unix seconds>"]` tags in inner rumors.  
+`SessionManager` helpers support global, per-peer, and per-group defaults through `SendOptions`.
 
-```rust
-use nostr_double_ratchet::{SendOptions, SessionManager};
-
-// Assuming you already have a SessionManager named `manager`.
-
-// Apply a global default (e.g. 60s from now)
-manager.set_default_send_options(Some(SendOptions {
-    ttl_seconds: Some(60),
-    expires_at: None,
-}))?;
-
-// Per-peer default (overrides global default)
-manager.set_peer_send_options(bob_pubkey, Some(SendOptions {
-    ttl_seconds: Some(120),
-    expires_at: None,
-}))?;
-
-// Use defaults (no per-send options)
-manager.send_text(bob_pubkey, "hi".to_string(), None)?;
-
-// Disable expiration for a single send even if defaults exist
-manager.send_text(bob_pubkey, "persist".to_string(), Some(SendOptions::default()))?;
-```
-
-## Disappearing Message Signaling (1:1 Chat Settings)
-
-To coordinate disappearing messages in a 1:1 chat, Iris uses an encrypted settings rumor:
+## 1:1 Chat Settings Signaling
 
 - Kind: `CHAT_SETTINGS_KIND = 10448`
-- Content JSON: `{ "type": "chat-settings", "v": 1, "messageTtlSeconds": <seconds> }`
-- Settings events themselves do **not** expire.
+- Content: `{ "type": "chat-settings", "v": 1, "messageTtlSeconds": <seconds|null> }`
+- Settings events themselves should not expire
 
-The receiver auto-adopts the setting by default and updates their per-peer outgoing SendOptions.
+Receivers can auto-adopt or reject incoming settings policy.
 
-```rust
-use nostr_double_ratchet::SessionManager;
-
-// Set TTL for this peer and notify them (receiver auto-adopts)
-manager.set_chat_settings_for_peer(bob_pubkey, 60)?;
-
-// Disable per-peer expiration even if you have a global default
-manager.set_chat_settings_for_peer(bob_pubkey, 0)?;
-
-// Turn off auto-adopt if you want to require user confirmation
-manager.set_auto_adopt_chat_settings(false);
-```
-
-## Tests
-
-Run the test suite:
+## Testing
 
 ```bash
-cargo test -p nostr-double-ratchet
+cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
 ```
 
-Tests cover:
-- Session initialization (initiator/responder)
-- Message encryption/decryption
-- Multi-message conversations
-- Out-of-order delivery
-- Session persistence
-- Consecutive messages with ratchet stepping
+For CLI/e2e coverage (including cross-language tests), run:
 
-## Architecture
-
-- `Session` - Core double ratchet implementation
-- `SessionState` - Serializable session state with all keys and counters
-- `Header` - Message metadata (sequence number, next public key, chain length)
-- Utilities - KDF using HKDF-SHA256, serialization helpers
-
-## Status
-
-Core functionality complete, including SessionManager, Invite, and multi-device support via AppKeys.
+```bash
+cargo test -p ndr --manifest-path rust/Cargo.toml
+```
