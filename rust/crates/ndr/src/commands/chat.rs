@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
-use crate::storage::{Storage, StoredChat};
+use crate::storage::Storage;
 
 #[derive(Serialize)]
 struct ChatList {
@@ -86,7 +86,10 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
                     ChatJoinedWithEvent {
                         id: joined.chat.id,
                         their_pubkey: joined.chat.their_pubkey,
-                        response_event: Some(nostr::JsonUtil::as_json(&joined.response_event)),
+                        response_event: joined
+                            .response_event
+                            .as_ref()
+                            .map(nostr::JsonUtil::as_json),
                     },
                 );
                 return Ok(());
@@ -98,48 +101,15 @@ pub async fn join(url: &str, config: &Config, storage: &Storage, output: &Output
     if invite.purpose.as_deref() == Some("link") {
         anyhow::bail!("Link invite detected. Use 'ndr link accept <url>' instead.");
     }
-    let their_pubkey = hex::encode(invite.inviter.to_bytes());
 
-    // Get our keys
-    let our_private_key = config.private_key_bytes()?;
-    let our_pubkey_hex = config.public_key()?;
-    let our_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&our_pubkey_hex)?;
-    let owner_pubkey_hex = config.owner_public_key_hex()?;
-    let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
-
-    // Accept the invite - creates session and response event
-    let (session, response_event) =
-        invite.accept_with_owner(our_pubkey, our_private_key, None, Some(owner_pubkey))?;
-
-    // Serialize session state
-    let session_state = serde_json::to_string(&session.state)?;
-
-    let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-
-    let chat = StoredChat {
-        id: id.clone(),
-        their_pubkey: their_pubkey.clone(),
-        device_id: None,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs(),
-        last_message_at: None,
-        session_state,
-        message_ttl_seconds: None,
-    };
-
-    storage.save_chat(&chat)?;
-
-    // Publish response event to relays (best-effort when publish errors are ignored).
-    let client = connect_client(config).await?;
-    send_event_or_ignore(&client, response_event.clone()).await?;
+    let joined = crate::commands::public_invite::join_via_invite(invite, config, storage).await?;
 
     output.success(
         "chat.join",
         ChatJoinedWithEvent {
-            id,
-            their_pubkey,
-            response_event: Some(nostr::JsonUtil::as_json(&response_event)),
+            id: joined.chat.id,
+            their_pubkey: joined.chat.their_pubkey,
+            response_event: joined.response_event.as_ref().map(nostr::JsonUtil::as_json),
         },
     );
 

@@ -29,7 +29,7 @@ pub use one_to_many::*;
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
 pub use sender_key::*;
 pub use session::Session;
-pub use session_manager::{SessionManager, SessionManagerEvent};
+pub use session_manager::{AcceptInviteResult, SessionManager, SessionManagerEvent};
 pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};
 pub use types::*;

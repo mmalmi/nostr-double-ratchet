@@ -26,6 +26,13 @@ pub enum SessionManagerEvent {
     },
 }
 
+pub struct AcceptInviteResult {
+    pub owner_pubkey: PublicKey,
+    pub inviter_device_pubkey: PublicKey,
+    pub device_id: String,
+    pub created_new_session: bool,
+}
+
 struct InviteState {
     invite: Invite,
     our_identity_key: [u8; 32],
@@ -650,6 +657,131 @@ impl SessionManager {
 
     pub fn get_owner_pubkey(&self) -> PublicKey {
         self.owner_public_key
+    }
+
+    pub fn accept_invite(
+        &self,
+        invite: &Invite,
+        owner_pubkey_hint: Option<PublicKey>,
+    ) -> Result<AcceptInviteResult> {
+        let inviter_device_pubkey = invite.inviter;
+        if inviter_device_pubkey == self.our_public_key {
+            return Err(crate::Error::Invite(
+                "Cannot accept invite from this device".to_string(),
+            ));
+        }
+
+        let owner_pubkey = owner_pubkey_hint
+            .or(invite.owner_public_key)
+            .unwrap_or_else(|| self.resolve_to_owner(&inviter_device_pubkey));
+
+        if owner_pubkey != inviter_device_pubkey {
+            let cached_app_keys = self
+                .cached_app_keys
+                .lock()
+                .unwrap()
+                .get(&owner_pubkey)
+                .cloned();
+            if let Some(app_keys) = cached_app_keys {
+                if app_keys.get_device(&inviter_device_pubkey).is_none() {
+                    return Err(crate::Error::Invite(
+                        "Invite device is not authorized by cached AppKeys".to_string(),
+                    ));
+                }
+                self.update_delegate_mapping(owner_pubkey, &app_keys);
+            } else {
+                let known_device_identities = self
+                    .user_records
+                    .lock()
+                    .unwrap()
+                    .get(&owner_pubkey)
+                    .map(|record| record.known_device_identities.clone())
+                    .unwrap_or_default();
+                if !known_device_identities.is_empty() {
+                    let inviter_hex = inviter_device_pubkey.to_hex();
+                    if !known_device_identities.iter().any(|id| id == &inviter_hex) {
+                        return Err(crate::Error::Invite(
+                            "Invite device is not authorized by stored AppKeys".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let device_id = invite
+            .device_id
+            .clone()
+            .unwrap_or_else(|| hex::encode(inviter_device_pubkey.to_bytes()));
+
+        let already_has_session = {
+            let records = self.user_records.lock().unwrap();
+            records
+                .get(&owner_pubkey)
+                .and_then(|r| r.device_records.get(&device_id))
+                .and_then(|d| d.active_session.as_ref())
+                .is_some()
+        };
+        if already_has_session {
+            self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
+            return Ok(AcceptInviteResult {
+                owner_pubkey,
+                inviter_device_pubkey,
+                device_id,
+                created_new_session: false,
+            });
+        }
+
+        {
+            let mut pending = self.pending_acceptances.lock().unwrap();
+            if pending.contains(&inviter_device_pubkey) {
+                return Err(crate::Error::Invite(
+                    "Invite acceptance already in progress".to_string(),
+                ));
+            }
+            pending.insert(inviter_device_pubkey);
+        }
+
+        let result = (|| -> Result<AcceptInviteResult> {
+            let (mut session, response_event) = invite.accept_with_owner(
+                self.our_public_key,
+                self.our_identity_key,
+                Some(self.device_id.clone()),
+                Some(self.owner_public_key),
+            )?;
+
+            self.pubsub.publish_signed(response_event)?;
+
+            session.set_pubsub(self.pubsub.clone());
+            let _ = session.subscribe_to_messages();
+
+            {
+                let mut records = self.user_records.lock().unwrap();
+                let user_record = records
+                    .entry(owner_pubkey)
+                    .or_insert_with(|| UserRecord::new(hex::encode(owner_pubkey.to_bytes())));
+                self.upsert_device_record(user_record, &device_id);
+                user_record.upsert_session(Some(&device_id), session);
+            }
+
+            self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
+            let _ = self.store_user_record(&owner_pubkey);
+            self.send_message_history(owner_pubkey, &device_id);
+            let _ = self.flush_message_queue(&device_id);
+
+            Ok(AcceptInviteResult {
+                owner_pubkey,
+                inviter_device_pubkey,
+                device_id,
+                created_new_session: true,
+            })
+        })();
+
+        self.pending_acceptances
+            .lock()
+            .unwrap()
+            .remove(&inviter_device_pubkey);
+
+        result
     }
 
     fn build_message_event(
@@ -1993,74 +2125,7 @@ impl SessionManager {
 
         if event.kind.as_u16() == crate::INVITE_EVENT_KIND as u16 {
             if let Ok(invite) = Invite::from_event(&event) {
-                if invite.inviter == self.our_public_key {
-                    return;
-                }
-
-                let inviter_device = invite.inviter;
-                let owner_pubkey = self.resolve_to_owner(&inviter_device);
-
-                if !self.is_device_authorized(owner_pubkey, inviter_device) {
-                    return;
-                }
-
-                let device_id = invite
-                    .device_id
-                    .clone()
-                    .unwrap_or_else(|| hex::encode(inviter_device.to_bytes()));
-
-                let already_has_session = {
-                    let records = self.user_records.lock().unwrap();
-                    records
-                        .get(&owner_pubkey)
-                        .and_then(|r| r.device_records.get(&device_id))
-                        .and_then(|d| d.active_session.as_ref())
-                        .is_some()
-                };
-
-                if already_has_session {
-                    return;
-                }
-
-                {
-                    let mut pending = self.pending_acceptances.lock().unwrap();
-                    if pending.contains(&inviter_device) {
-                        return;
-                    }
-                    pending.insert(inviter_device);
-                }
-
-                let accept_result = invite.accept_with_owner(
-                    self.our_public_key,
-                    self.our_identity_key,
-                    Some(self.device_id.clone()),
-                    Some(self.owner_public_key),
-                );
-
-                if let Ok((mut session, response_event)) = accept_result {
-                    let _ = self.pubsub.publish_signed(response_event);
-                    session.set_pubsub(self.pubsub.clone());
-                    let _ = session.subscribe_to_messages();
-
-                    {
-                        let mut records = self.user_records.lock().unwrap();
-                        let user_record = records.entry(owner_pubkey).or_insert_with(|| {
-                            UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
-                        });
-                        self.upsert_device_record(user_record, &device_id);
-                        user_record.upsert_session(Some(&device_id), session);
-                    }
-
-                    self.record_known_device_identity(owner_pubkey, inviter_device);
-                    let _ = self.store_user_record(&owner_pubkey);
-                    self.send_message_history(owner_pubkey, &device_id);
-                    let _ = self.flush_message_queue(&device_id);
-                }
-
-                self.pending_acceptances
-                    .lock()
-                    .unwrap()
-                    .remove(&inviter_device);
+                let _ = self.accept_invite(&invite, None);
             }
             return;
         }

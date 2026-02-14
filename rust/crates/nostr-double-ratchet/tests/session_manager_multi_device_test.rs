@@ -27,6 +27,63 @@ fn drain_events(rx: &Receiver<SessionManagerEvent>) {
 }
 
 #[test]
+fn test_accept_invite_routes_session_under_claimed_owner() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let alice_owner = alice_keys.public_key();
+
+    let bob_owner_keys = Keys::generate();
+    let bob_owner = bob_owner_keys.public_key();
+    let bob_device_keys = Keys::generate();
+    let bob_device = bob_device_keys.public_key();
+    let bob_device_id = bob_device.to_hex();
+
+    let mut invite = Invite::create_new(bob_device, Some(bob_device_id.clone()), None)?;
+    invite.owner_public_key = Some(bob_owner);
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        alice_keys.public_key(),
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_keys.public_key().to_hex(),
+        alice_owner,
+        tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+    manager.init()?;
+    drain_events(&rx);
+
+    let accepted = manager.accept_invite(&invite, Some(bob_owner))?;
+    assert_eq!(accepted.owner_pubkey, bob_owner);
+    assert_eq!(accepted.device_id, bob_device_id);
+
+    let mut saw_response = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if let Ok(event) = rx.recv_timeout(Duration::from_millis(100)) {
+            if let SessionManagerEvent::PublishSigned(signed) = event {
+                if signed.kind.as_u16() == nostr_double_ratchet::INVITE_RESPONSE_KIND as u16 {
+                    saw_response = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_response,
+        "expected invite response publish from accept_invite"
+    );
+
+    let exported = manager.export_active_session_state(bob_owner)?;
+    assert!(
+        exported.is_some(),
+        "expected active session under owner/device"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_multi_device_self_fanout() -> Result<()> {
     let owner_keys = Keys::generate();
     let owner_pubkey = owner_keys.public_key();
