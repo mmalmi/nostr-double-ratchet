@@ -318,3 +318,103 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_delete_chat_syncs_tombstone_to_sibling_devices() -> Result<()> {
+    let owner_keys = Keys::generate();
+    let owner_pubkey = owner_keys.public_key();
+
+    let device1_keys = Keys::generate();
+    let device2_keys = Keys::generate();
+
+    let device1_id = hex::encode(device1_keys.public_key().to_bytes());
+    let device2_id = hex::encode(device2_keys.public_key().to_bytes());
+
+    let invite1 = Invite::create_new(device1_keys.public_key(), Some(device1_id.clone()), None)?;
+    let invite2 = Invite::create_new(device2_keys.public_key(), Some(device2_id.clone()), None)?;
+
+    let (tx1, rx1) = crossbeam_channel::unbounded();
+    let (tx2, rx2) = crossbeam_channel::unbounded();
+
+    let manager1 = SessionManager::new(
+        device1_keys.public_key(),
+        device1_keys.secret_key().to_secret_bytes(),
+        device1_id.clone(),
+        owner_pubkey,
+        tx1,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        Some(invite1.clone()),
+    );
+
+    let manager2 = SessionManager::new(
+        device2_keys.public_key(),
+        device2_keys.secret_key().to_secret_bytes(),
+        device2_id.clone(),
+        owner_pubkey,
+        tx2,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        Some(invite2.clone()),
+    );
+
+    manager1.init()?;
+    manager2.init()?;
+    drain_events(&rx1);
+    drain_events(&rx2);
+
+    let app_keys = AppKeys::new(vec![
+        DeviceEntry::new(device1_keys.public_key(), 1),
+        DeviceEntry::new(device2_keys.public_key(), 2),
+    ]);
+
+    let app_keys_event = app_keys
+        .get_event(owner_pubkey)
+        .sign_with_keys(&owner_keys)?;
+
+    manager1.process_received_event(app_keys_event.clone());
+    manager2.process_received_event(app_keys_event);
+
+    let invite_event = invite1.get_event()?.sign_with_keys(&device1_keys)?;
+    manager2.process_received_event(invite_event);
+
+    let response_event = loop {
+        let signed = recv_signed_event(&rx2);
+        if signed.kind.as_u16() == nostr_double_ratchet::INVITE_RESPONSE_KIND as u16 {
+            break signed;
+        }
+    };
+    manager1.process_received_event(response_event);
+
+    // Prime ratchet from manager2 -> manager1 so manager1 can send to manager2 immediately.
+    manager2.send_text(owner_pubkey, "ping".to_string(), None)?;
+    let ping_event = loop {
+        let signed = recv_signed_event(&rx2);
+        if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
+            break signed;
+        }
+    };
+    manager1.process_received_event(ping_event);
+    drain_events(&rx1);
+    drain_events(&rx2);
+
+    let target_chat_owner = Keys::generate().public_key();
+    manager1.delete_chat(target_chat_owner)?;
+    assert!(manager1.is_chat_tombstoned(target_chat_owner));
+
+    let tombstone_sync_event = loop {
+        let signed = recv_signed_event(&rx1);
+        if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
+            break signed;
+        }
+    };
+    manager2.process_received_event(tombstone_sync_event);
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if manager2.is_chat_tombstoned(target_chat_owner) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    panic!("expected tombstone to sync to sibling device");
+}

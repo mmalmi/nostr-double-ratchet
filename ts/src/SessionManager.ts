@@ -7,11 +7,13 @@ import {
   APP_KEYS_EVENT_KIND,
   CHAT_MESSAGE_KIND,
   CHAT_SETTINGS_KIND,
+  LOCAL_CHAT_TOMBSTONE_KIND,
   RECEIPT_KIND,
   TYPING_KIND,
   ReceiptType,
   ExpirationOptions,
   ChatSettingsPayloadV1,
+  LocalChatTombstonePayloadV1,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { MessageQueue } from "./MessageQueue"
@@ -112,6 +114,7 @@ export class SessionManager {
   private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
   private groupExpiration: Map<string, ExpirationOptions | null> = new Map()
   private autoAdoptChatSettings: boolean = true
+  private chatTombstones: Set<string> = new Set()
 
   // Persist user records in-order per key so older async writes can't overwrite newer state.
   private userRecordWriteChain: Map<string, Promise<void>> = new Map()
@@ -145,6 +148,14 @@ export class SessionManager {
 
   private expirationGroupKey(groupId: string): string {
     return `${this.expirationGroupPrefix()}${encodeURIComponent(groupId)}`
+  }
+
+  private chatTombstonePrefix(): string {
+    return `${this.versionPrefix}/chat-tombstone/`
+  }
+
+  private chatTombstoneKey(peerPubkey: string): string {
+    return `${this.chatTombstonePrefix()}${peerPubkey}`
   }
 
   private validateExpirationOptions(options: ExpirationOptions | undefined): void {
@@ -210,6 +221,15 @@ export class SessionManager {
     }
   }
 
+  private async loadChatTombstones(): Promise<void> {
+    const keys = await this.storage.list(this.chatTombstonePrefix())
+    for (const key of keys) {
+      const peerPubkey = key.slice(this.chatTombstonePrefix().length)
+      if (!peerPubkey) continue
+      this.chatTombstones.add(peerPubkey)
+    }
+  }
+
   constructor(
     ourPublicKey: string,
     identityKey: IdentityKey,
@@ -248,6 +268,10 @@ export class SessionManager {
 
     await this.loadExpirationSettings().catch(() => {
       // Failed to load expiration settings
+    })
+
+    await this.loadChatTombstones().catch(() => {
+      // Failed to load chat tombstones
     })
 
     // Add our own device to user record to prevent accepting our own invite
@@ -304,6 +328,9 @@ export class SessionManager {
           // Get owner pubkey from response (required for proper chat routing)
           // If not present (old client), fall back to resolveToOwner
           const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
+          if (this.isChatTombstoned(claimedOwner)) {
+            return
+          }
 
           // Verify the device is authorized by fetching owner's AppKeys
           const appKeys = await this.fetchAppKeys(claimedOwner)
@@ -606,6 +633,16 @@ export class SessionManager {
         return
       }
 
+      if (this.isChatTombstoned(userPubkey)) {
+        return
+      }
+
+      if (this.maybeHandleLocalChatTombstone(event, userPubkey)) {
+        promoteToActive(session)
+        this.storeUserRecord(userPubkey).catch(() => {})
+        return
+      }
+
       this.maybeAutoAdoptChatSettings(event, userPubkey)
 
       for (const cb of this.internalSubscriptions) {
@@ -636,6 +673,11 @@ export class SessionManager {
   }
 
   setupUser(userPubkey: string) {
+    const owner = this.resolveToOwner(userPubkey)
+    if (owner !== this.ownerPublicKey && this.chatTombstones.has(owner)) {
+      return
+    }
+
     const userRecord = this.getOrCreateUserRecord(userPubkey)
 
     // Track which device identities we've subscribed to for invites
@@ -730,6 +772,10 @@ export class SessionManager {
     }
 
     this.attachAppKeysSubscription(userPubkey, async (appKeys) => {
+      if (this.isChatTombstoned(userPubkey)) {
+        return
+      }
+
       const devices = appKeys.getAllDevices()
       const activeDeviceIds = new Set(devices.map(d => d.identityPubkey))
 
@@ -803,6 +849,27 @@ export class SessionManager {
    */
   setAutoAdoptChatSettings(enabled: boolean) {
     this.autoAdoptChatSettings = enabled
+  }
+
+  isChatTombstoned(userPubkey: string): boolean {
+    const owner = this.resolveToOwner(userPubkey)
+    return owner !== this.ownerPublicKey && this.chatTombstones.has(owner)
+  }
+
+  private async setChatTombstone(userPubkey: string, tombstoned: boolean): Promise<void> {
+    const owner = this.resolveToOwner(userPubkey)
+    if (owner === this.ownerPublicKey) return
+
+    if (tombstoned) {
+      this.chatTombstones.add(owner)
+      await this.storage
+        .put(this.chatTombstoneKey(owner), { tombstoned: true, at: Date.now() })
+        .catch(() => {})
+      return
+    }
+
+    this.chatTombstones.delete(owner)
+    await this.storage.del(this.chatTombstoneKey(owner)).catch(() => {})
   }
 
   getDeviceId(): string {
@@ -887,30 +954,80 @@ export class SessionManager {
     this.storeUserRecord(publicKey).catch(() => {})
   }
 
-  async deleteUser(userPubkey: string): Promise<void> {
-    await this.init()
+  async deleteChat(
+    userPubkey: string,
+    options: { syncToOwnDevices?: boolean; tombstone?: boolean } = {}
+  ): Promise<void> {
+    return this.deleteUser(userPubkey, options)
+  }
 
-    const userRecord = this.userRecords.get(userPubkey)
+  async deleteUser(
+    userPubkey: string,
+    options: { syncToOwnDevices?: boolean; tombstone?: boolean } = {}
+  ): Promise<void> {
+    await this.init()
+    const ownerPubkey = this.resolveToOwner(userPubkey)
+    if (ownerPubkey === this.ownerPublicKey) return
+    const syncToOwnDevices = options.syncToOwnDevices ?? true
+    const tombstone = options.tombstone ?? true
+
+    await this.deleteUserLocal(ownerPubkey)
+
+    if (tombstone) {
+      await this.setChatTombstone(ownerPubkey, true)
+    }
+
+    if (syncToOwnDevices) {
+      await this.publishChatTombstone(ownerPubkey).catch(() => {})
+    }
+  }
+
+  private async publishChatTombstone(userPubkey: string): Promise<void> {
+    const ownerPubkey = this.resolveToOwner(userPubkey)
+    if (ownerPubkey === this.ownerPublicKey) return
+    const payload: LocalChatTombstonePayloadV1 = {
+      type: "chat-tombstone",
+      v: 1,
+      peerPubkey: ownerPubkey,
+    }
+    await this.sendMessage(this.ownerPublicKey, JSON.stringify(payload), {
+      kind: LOCAL_CHAT_TOMBSTONE_KIND,
+      expiration: null,
+    })
+  }
+
+  private async deleteUserLocal(userPubkey: string): Promise<void> {
+    const ownerPubkey = this.resolveToOwner(userPubkey)
+    if (ownerPubkey === this.ownerPublicKey) return
+
+    const userRecord = this.userRecords.get(ownerPubkey)
 
     if (userRecord) {
       for (const device of userRecord.devices.values()) {
         if (device.activeSession) {
           this.removeSessionSubscription(
-            userPubkey,
+            ownerPubkey,
             device.deviceId,
             device.activeSession.name
           )
         }
 
         for (const session of device.inactiveSessions) {
-          this.removeSessionSubscription(userPubkey, device.deviceId, session.name)
+          this.removeSessionSubscription(ownerPubkey, device.deviceId, session.name)
+        }
+
+        const inviteSubKey = `invite:${device.deviceId}`
+        const inviteUnsub = this.inviteSubscriptions.get(inviteSubKey)
+        if (inviteUnsub) {
+          inviteUnsub()
+          this.inviteSubscriptions.delete(inviteSubKey)
         }
       }
 
-      this.userRecords.delete(userPubkey)
+      this.userRecords.delete(ownerPubkey)
     }
 
-    const appKeysKey = `appkeys:${userPubkey}`
+    const appKeysKey = `appkeys:${ownerPubkey}`
     const appKeysUnsub = this.inviteSubscriptions.get(appKeysKey)
     if (appKeysUnsub) {
       appKeysUnsub()
@@ -918,7 +1035,7 @@ export class SessionManager {
     }
 
     // Remove discovery queue entries for this owner
-    await this.discoveryQueue.removeForTarget(userPubkey)
+    await this.discoveryQueue.removeForTarget(ownerPubkey)
     // Remove message queue entries for all known devices
     if (userRecord) {
       for (const [deviceId] of userRecord.devices) {
@@ -927,8 +1044,8 @@ export class SessionManager {
     }
 
     await Promise.allSettled([
-      this.deleteUserSessionsFromStorage(userPubkey),
-      this.storage.del(this.userRecordKey(userPubkey)),
+      this.deleteUserSessionsFromStorage(ownerPubkey),
+      this.storage.del(this.userRecordKey(ownerPubkey)),
     ])
   }
 
@@ -997,6 +1114,9 @@ export class SessionManager {
       invite.ownerPubkey ||
       this.resolveToOwner(deviceId) ||
       deviceId
+    if (this.isChatTombstoned(ownerPublicKey)) {
+      throw new Error("Chat is tombstoned locally")
+    }
 
     const userRecord = this.getOrCreateUserRecord(ownerPublicKey)
     const existingRecord = userRecord.devices.get(deviceId)
@@ -1052,6 +1172,11 @@ export class SessionManager {
     event: Partial<Rumor>
   ): Promise<Rumor | undefined> {
     await this.init()
+
+    const recipientOwner = this.resolveToOwner(recipientIdentityKey)
+    if (recipientOwner !== this.ownerPublicKey && this.chatTombstones.has(recipientOwner)) {
+      return
+    }
 
     // Queue event for devices that don't have sessions yet
     const completeEvent = event as Rumor
@@ -1279,6 +1404,35 @@ export class SessionManager {
     return this.sendMessage(recipientPublicKey, "typing", {
       kind: TYPING_KIND,
     })
+  }
+
+  private maybeHandleLocalChatTombstone(event: Rumor, fromOwnerPubkey: string): boolean {
+    if (event.kind !== LOCAL_CHAT_TOMBSTONE_KIND) return false
+
+    // Ignore tombstone controls from other users; this control plane is owner-local only.
+    if (fromOwnerPubkey !== this.ownerPublicKey) {
+      return true
+    }
+
+    let payload: unknown
+    try {
+      payload = JSON.parse(event.content)
+    } catch {
+      return true
+    }
+
+    const p = payload as Partial<LocalChatTombstonePayloadV1>
+    if (p?.type !== "chat-tombstone" || p?.v !== 1 || typeof p?.peerPubkey !== "string") {
+      return true
+    }
+
+    const peer = this.resolveToOwner(p.peerPubkey)
+    if (!peer || peer === this.ownerPublicKey) {
+      return true
+    }
+
+    this.deleteUser(peer, { syncToOwnDevices: false, tombstone: true }).catch(() => {})
+    return true
   }
 
   private maybeAutoAdoptChatSettings(event: Rumor, fromOwnerPubkey: string): void {

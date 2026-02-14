@@ -14,6 +14,8 @@ pub const CHAT_MESSAGE_KIND: u32 = 14;
 ///
 /// Settings events themselves should not expire (no NIP-40 expiration tag).
 pub const CHAT_SETTINGS_KIND: u32 = 10448;
+/// Internal encrypted control event used to sync local chat tombstones across own devices.
+pub const LOCAL_CHAT_TOMBSTONE_KIND: u32 = 10449;
 pub const REACTION_KIND: u32 = 7;
 pub const RECEIPT_KIND: u32 = 15;
 pub const TYPING_KIND: u32 = 25;
@@ -46,6 +48,15 @@ pub struct ChatSettingsPayloadV1 {
     /// Default TTL (seconds) to apply to outgoing messages for this chat.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalChatTombstonePayloadV1 {
+    #[serde(rename = "type")]
+    pub typ: String,
+    pub v: u32,
+    pub peer_pubkey: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
