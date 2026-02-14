@@ -53,6 +53,16 @@ export interface UserRecord {
   appKeys?: AppKeys
 }
 
+export interface AcceptInviteOptions {
+  ownerPublicKey?: string
+}
+
+export interface AcceptInviteResult {
+  ownerPublicKey: string
+  deviceId: string
+  session: Session
+}
+
 interface StoredSessionEntry {
   name: string
   state: string
@@ -965,6 +975,76 @@ export class SessionManager {
       }
     }
     await this.storeUserRecord(ownerPubkey).catch(() => {})
+  }
+
+  async acceptInvite(
+    invite: Invite,
+    options: AcceptInviteOptions = {}
+  ): Promise<AcceptInviteResult> {
+    await this.init()
+
+    const deviceId = invite.deviceId || invite.inviter
+    if (!deviceId) {
+      throw new Error("Invite device id is required")
+    }
+
+    if (deviceId === this.deviceId) {
+      throw new Error("Cannot accept invite from this device")
+    }
+
+    const ownerPublicKey =
+      options.ownerPublicKey ||
+      invite.ownerPubkey ||
+      this.resolveToOwner(deviceId) ||
+      deviceId
+
+    const userRecord = this.getOrCreateUserRecord(ownerPublicKey)
+    const existingRecord = userRecord.devices.get(deviceId)
+    if (existingRecord?.activeSession) {
+      return { ownerPublicKey, deviceId, session: existingRecord.activeSession }
+    }
+
+    // When an invite claims delegate ownership, verify against AppKeys when available.
+    if (ownerPublicKey !== deviceId) {
+      const appKeys = await this.fetchAppKeys(ownerPublicKey).catch(() => null)
+      if (appKeys) {
+        const isAuthorized = appKeys
+          .getAllDevices()
+          .some((device) => device.identityPubkey === deviceId)
+        if (!isAuthorized) {
+          throw new Error("Invite device is not authorized by owner AppKeys")
+        }
+        this.updateDelegateMapping(ownerPublicKey, appKeys)
+      } else {
+        const persistedAppKeys = this.userRecords.get(ownerPublicKey)?.appKeys
+        const isAuthorized =
+          persistedAppKeys
+            ?.getAllDevices()
+            .some((device) => device.identityPubkey === deviceId) ?? false
+        if (persistedAppKeys && !isAuthorized) {
+          throw new Error("Invite device is not authorized by persisted AppKeys")
+        }
+      }
+    }
+
+    const encryptor =
+      this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
+    const { session, event } = await invite.accept(
+      this.nostrSubscribe,
+      this.ourPublicKey,
+      encryptor,
+      this.ownerPublicKey
+    )
+    await this.nostrPublish(event)
+
+    const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
+    this.delegateToOwner.set(deviceId, ownerPublicKey)
+    this.attachSessionSubscription(ownerPublicKey, deviceRecord, session)
+    this.setupUser(ownerPublicKey)
+    await this.flushMessageQueue(deviceId).catch(() => {})
+    await this.storeUserRecord(ownerPublicKey).catch(() => {})
+
+    return { ownerPublicKey, deviceId, session }
   }
 
   async sendEvent(
