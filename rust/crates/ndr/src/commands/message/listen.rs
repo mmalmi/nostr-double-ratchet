@@ -195,6 +195,7 @@ fn sync_chats_from_session_manager(
 
 struct SessionManagerDecrypted {
     sender: nostr::PublicKey,
+    sender_device: Option<nostr::PublicKey>,
     content: String,
     event_id: Option<String>,
 }
@@ -262,45 +263,6 @@ fn decrypted_content_is_group_routed(content_json: &str) -> bool {
         .ok()
         .and_then(|event| extract_group_id_tag(&event))
         .is_some()
-}
-
-fn resolve_group_sender_owner_pubkey(
-    default_owner_pubkey_hex: &str,
-    decrypted_event: &serde_json::Value,
-    group_id: &str,
-    owner_pubkey_hex: &str,
-    storage: &Storage,
-) -> Result<String> {
-    if default_owner_pubkey_hex != owner_pubkey_hex {
-        return Ok(default_owner_pubkey_hex.to_string());
-    }
-
-    let Some(sender_device_pubkey_hex) = decrypted_event.get("pubkey").and_then(|v| v.as_str())
-    else {
-        return Ok(default_owner_pubkey_hex.to_string());
-    };
-
-    if let Some(group) = storage.get_group(group_id)? {
-        if group
-            .data
-            .members
-            .iter()
-            .any(|member| member == sender_device_pubkey_hex)
-        {
-            return Ok(sender_device_pubkey_hex.to_string());
-        }
-    }
-
-    if let Some(mapped_owner) = storage
-        .list_group_senders(group_id)?
-        .into_iter()
-        .find(|sender| sender.identity_pubkey == sender_device_pubkey_hex)
-        .and_then(|sender| sender.owner_pubkey)
-    {
-        return Ok(mapped_owner);
-    }
-
-    Ok(default_owner_pubkey_hex.to_string())
 }
 
 pub(super) fn apply_session_manager_one_to_one_decrypted(
@@ -495,11 +457,13 @@ async fn flush_session_manager_events(
             }
             SessionManagerEvent::DecryptedMessage {
                 sender,
+                sender_device,
                 content,
                 event_id,
             } => {
                 decrypted.push(SessionManagerDecrypted {
                     sender,
+                    sender_device,
                     content,
                     event_id,
                 });
@@ -917,33 +881,40 @@ pub async fn listen(
                 &mut subscribed_manager_filters,
             )
             .await?;
-            let session_group_decrypts: Vec<(nostr::PublicKey, String, Option<String>, u64)> =
-                decrypted_events
-                    .iter()
-                    .filter_map(|decrypted| {
-                        if !decrypted_content_is_group_routed(&decrypted.content) {
-                            return None;
-                        }
-                        let timestamp =
-                            if decrypted.event_id.as_deref() == Some(current_event_id.as_str()) {
-                                current_timestamp
-                            } else {
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(current_timestamp)
-                            };
-                        Some((
-                            decrypted.sender,
-                            decrypted.content.clone(),
-                            decrypted.event_id.clone(),
-                            timestamp,
-                        ))
-                    })
-                    .collect();
-            let current_event_group_routed = session_group_decrypts
+            let session_group_decrypts: Vec<(
+                nostr::PublicKey,
+                Option<nostr::PublicKey>,
+                String,
+                Option<String>,
+                u64,
+            )> = decrypted_events
                 .iter()
-                .any(|(_, _, event_id, _)| event_id.as_deref() == Some(current_event_id.as_str()));
+                .filter_map(|decrypted| {
+                    if !decrypted_content_is_group_routed(&decrypted.content) {
+                        return None;
+                    }
+                    let timestamp =
+                        if decrypted.event_id.as_deref() == Some(current_event_id.as_str()) {
+                            current_timestamp
+                        } else {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(current_timestamp)
+                        };
+                    Some((
+                        decrypted.sender,
+                        decrypted.sender_device,
+                        decrypted.content.clone(),
+                        decrypted.event_id.clone(),
+                        timestamp,
+                    ))
+                })
+                .collect();
+            let current_event_group_routed =
+                session_group_decrypts.iter().any(|(_, _, _, event_id, _)| {
+                    event_id.as_deref() == Some(current_event_id.as_str())
+                });
 
             let mut handled_any_by_session_manager = false;
             let mut handled_by_session_manager = false;
@@ -1909,17 +1880,7 @@ pub async fn listen(
                                 })
                             });
 
-                            let from_pubkey_hex = if let Some(ref gid) = group_id {
-                                resolve_group_sender_owner_pubkey(
-                                    &chat.their_pubkey,
-                                    &decrypted_event,
-                                    gid,
-                                    &config.owner_public_key_hex()?,
-                                    storage,
-                                )?
-                            } else {
-                                chat.their_pubkey.clone()
-                            };
+                            let from_pubkey_hex = chat.their_pubkey.clone();
 
                             // Always update session state first
                             let mut updated_chat = chat.clone();
@@ -2034,20 +1995,11 @@ pub async fn listen(
                                         continue;
                                     }
 
-                                    // Per-device sender keys: the inner event's `pubkey` is the sender device.
-                                    // Fallback to owner pubkey for older clients that didn't set it.
-                                    let sender_device_pubkey_hex = decrypted_event
-                                        .get("pubkey")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let sender_device_pubkey_hex =
-                                        if nostr::PublicKey::from_hex(sender_device_pubkey_hex)
-                                            .is_ok()
-                                        {
-                                            sender_device_pubkey_hex.to_string()
-                                        } else {
-                                            from_pubkey_hex.clone()
-                                        };
+                                    let sender_device_pubkey_hex = chat
+                                        .device_id
+                                        .clone()
+                                        .filter(|d| nostr::PublicKey::from_hex(d).is_ok())
+                                        .unwrap_or_else(|| from_pubkey_hex.clone());
 
                                     // Learn/update the sender's per-group outer pubkey mapping.
                                     if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey
@@ -2605,8 +2557,13 @@ pub async fn listen(
                             .push(outer_event);
                     }
 
-                    for (sender_owner_pubkey, content_json, group_event_id, group_timestamp) in
-                        &session_group_decrypts
+                    for (
+                        sender_owner_pubkey,
+                        sender_device_pubkey,
+                        content_json,
+                        group_event_id,
+                        group_timestamp,
+                    ) in &session_group_decrypts
                     {
                         if decrypted_current_event
                             && group_event_id.as_deref() == Some(current_event_id.as_str())
@@ -2629,13 +2586,7 @@ pub async fn listen(
                             .as_str()
                             .unwrap_or(content_json)
                             .to_string();
-                        let from_pubkey_hex = resolve_group_sender_owner_pubkey(
-                            &sender_owner_pubkey.to_hex(),
-                            &decrypted_event,
-                            &gid,
-                            &config.owner_public_key_hex()?,
-                            storage,
-                        )?;
+                        let from_pubkey_hex = sender_owner_pubkey.to_hex();
                         let timestamp = *group_timestamp;
 
                         if rumor_kind == GROUP_METADATA_KIND {
@@ -2753,16 +2704,10 @@ pub async fn listen(
                                 continue;
                             }
 
-                            let sender_device_pubkey_hex = decrypted_event
-                                .get("pubkey")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let sender_device_pubkey_hex =
-                                if nostr::PublicKey::from_hex(sender_device_pubkey_hex).is_ok() {
-                                    sender_device_pubkey_hex.to_string()
-                                } else {
-                                    from_pubkey_hex.clone()
-                                };
+                            let sender_device_pubkey_hex = sender_device_pubkey
+                                .as_ref()
+                                .map(|pk| pk.to_hex())
+                                .unwrap_or_else(|| from_pubkey_hex.clone());
 
                             if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey {
                                 if let Ok(sender_event_pk) =

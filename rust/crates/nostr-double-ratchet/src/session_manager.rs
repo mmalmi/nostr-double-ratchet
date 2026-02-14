@@ -20,6 +20,7 @@ pub enum SessionManagerEvent {
     ReceivedEvent(nostr::Event),
     DecryptedMessage {
         sender: PublicKey,
+        sender_device: Option<PublicKey>,
         content: String,
         event_id: Option<String>,
     },
@@ -1265,6 +1266,7 @@ impl SessionManager {
     fn maybe_handle_group_sender_key_distribution(
         &self,
         from_owner_pubkey: PublicKey,
+        from_sender_device_pubkey: Option<PublicKey>,
         rumor: &UnsignedEvent,
     ) -> Result<()> {
         if rumor.kind.as_u16() != GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16 {
@@ -1290,7 +1292,9 @@ impl SessionManager {
         let info = GroupSenderEventInfo {
             group_id: dist.group_id.clone(),
             sender_owner_pubkey: from_owner_pubkey,
-            sender_device_pubkey: Some(rumor.pubkey),
+            // Sender device must come from authenticated session context.
+            // Never trust inner rumor `pubkey` for identity attribution.
+            sender_device_pubkey: from_sender_device_pubkey,
         };
         self.store_group_sender_event_info(sender_event_pubkey, &info)?;
         self.ensure_sender_key_state_from_distribution(sender_event_pubkey, &dist)?;
@@ -1316,10 +1320,12 @@ impl SessionManager {
         });
 
         for outer in pending {
-            if let Some((sender, plaintext, event_id)) =
+            if let Some((sender, sender_device, plaintext, event_id)) =
                 self.try_decrypt_group_sender_key_outer(&outer, Some(info.clone()))
             {
-                let _ = self.pubsub.decrypted_message(sender, plaintext, event_id);
+                let _ = self
+                    .pubsub
+                    .decrypted_message(sender, sender_device, plaintext, event_id);
             }
         }
 
@@ -1330,7 +1336,7 @@ impl SessionManager {
         &self,
         outer: &nostr::Event,
         info_hint: Option<GroupSenderEventInfo>,
-    ) -> Option<(PublicKey, String, Option<String>)> {
+    ) -> Option<(PublicKey, Option<PublicKey>, String, Option<String>)> {
         if outer.kind.as_u16() != crate::MESSAGE_EVENT_KIND as u16 {
             return None;
         }
@@ -1398,6 +1404,7 @@ impl SessionManager {
 
         Some((
             info.sender_owner_pubkey,
+            info.sender_device_pubkey,
             plaintext,
             Some(outer.id.to_string()),
         ))
@@ -2102,35 +2109,38 @@ impl SessionManager {
             }
 
             if let Some((owner_pubkey, plaintext, device_id)) = decrypted {
-                if let Ok(sender_pk) = crate::utils::pubkey_from_hex(&device_id) {
+                let sender_device = if let Ok(sender_pk) = crate::utils::pubkey_from_hex(&device_id)
+                {
                     let sender_owner = self.resolve_to_owner(&sender_pk);
                     if sender_owner != sender_pk
                         && !self.is_device_authorized(sender_owner, sender_pk)
                     {
                         return;
                     }
-                }
+                    Some(sender_pk)
+                } else {
+                    None
+                };
 
                 if let Ok(rumor) = serde_json::from_str::<UnsignedEvent>(&plaintext) {
                     self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor);
-                    let _ = self.maybe_handle_group_sender_key_distribution(owner_pubkey, &rumor);
-
-                    // Mirror incoming peer messages to our other linked devices.
-                    // We only do this for peer-originated traffic; owner-originated sync
-                    // traffic is not re-mirrored to avoid loops.
-                    if owner_pubkey != self.owner_public_key {
-                        let _ = self.send_event_internal(self.owner_public_key, rumor, false);
-                    }
+                    let _ = self.maybe_handle_group_sender_key_distribution(
+                        owner_pubkey,
+                        sender_device,
+                        &rumor,
+                    );
                 }
 
-                let _ = self
-                    .pubsub
-                    .decrypted_message(owner_pubkey, plaintext, event_id);
+                let _ =
+                    self.pubsub
+                        .decrypted_message(owner_pubkey, sender_device, plaintext, event_id);
                 let _ = self.store_user_record(&owner_pubkey);
-            } else if let Some((sender, plaintext, event_id)) =
+            } else if let Some((sender, sender_device, plaintext, event_id)) =
                 self.try_decrypt_group_sender_key_outer(&event, None)
             {
-                let _ = self.pubsub.decrypted_message(sender, plaintext, event_id);
+                let _ = self
+                    .pubsub
+                    .decrypted_message(sender, sender_device, plaintext, event_id);
             }
         }
     }
@@ -2239,7 +2249,11 @@ mod tests {
         .build(sender_device_pubkey);
 
         manager
-            .maybe_handle_group_sender_key_distribution(sender_owner_pubkey, &dist_rumor)
+            .maybe_handle_group_sender_key_distribution(
+                sender_owner_pubkey,
+                Some(sender_device_pubkey),
+                &dist_rumor,
+            )
             .unwrap();
 
         let events = drain_events(&rx);
@@ -2277,13 +2291,15 @@ mod tests {
         let dec = events.iter().find_map(|ev| match ev {
             SessionManagerEvent::DecryptedMessage {
                 sender,
+                sender_device,
                 content,
                 event_id,
-            } => Some((*sender, content.clone(), event_id.clone())),
+            } => Some((*sender, *sender_device, content.clone(), event_id.clone())),
             _ => None,
         });
-        let (sender, content, event_id) = dec.expect("expected decrypted message");
+        let (sender, sender_device, content, event_id) = dec.expect("expected decrypted message");
         assert_eq!(sender, sender_owner_pubkey);
+        assert_eq!(sender_device, Some(sender_device_pubkey));
         assert_eq!(event_id, Some(outer.id.to_string()));
 
         let rumor: UnsignedEvent = serde_json::from_str(&content).unwrap();
@@ -2335,7 +2351,11 @@ mod tests {
         .custom_created_at(nostr::Timestamp::from(1))
         .build(sender_device_pubkey);
         manager
-            .maybe_handle_group_sender_key_distribution(sender_owner_pubkey, &dist1_rumor)
+            .maybe_handle_group_sender_key_distribution(
+                sender_owner_pubkey,
+                Some(sender_device_pubkey),
+                &dist1_rumor,
+            )
             .unwrap();
         let _ = drain_events(&rx);
 
@@ -2385,7 +2405,11 @@ mod tests {
         .custom_created_at(nostr::Timestamp::from(2))
         .build(sender_device_pubkey);
         manager
-            .maybe_handle_group_sender_key_distribution(sender_owner_pubkey, &dist2_rumor)
+            .maybe_handle_group_sender_key_distribution(
+                sender_owner_pubkey,
+                Some(sender_device_pubkey),
+                &dist2_rumor,
+            )
             .unwrap();
 
         let events = drain_events(&rx);
@@ -2444,7 +2468,11 @@ mod tests {
             .build(sender_device_pubkey);
 
             manager
-                .maybe_handle_group_sender_key_distribution(sender_owner_pubkey, &dist_rumor)
+                .maybe_handle_group_sender_key_distribution(
+                    sender_owner_pubkey,
+                    Some(sender_device_pubkey),
+                    &dist_rumor,
+                )
                 .unwrap();
         }
 

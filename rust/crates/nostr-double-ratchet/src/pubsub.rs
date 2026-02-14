@@ -14,6 +14,7 @@ pub trait NostrPubSub: Send + Sync {
     fn decrypted_message(
         &self,
         sender: PublicKey,
+        sender_device: Option<PublicKey>,
         content: String,
         event_id: Option<String>,
     ) -> Result<()>;
@@ -44,11 +45,13 @@ impl NostrPubSub for crossbeam_channel::Sender<SessionManagerEvent> {
     fn decrypted_message(
         &self,
         sender: PublicKey,
+        sender_device: Option<PublicKey>,
         content: String,
         event_id: Option<String>,
     ) -> Result<()> {
         self.send(SessionManagerEvent::DecryptedMessage {
             sender,
+            sender_device,
             content,
             event_id,
         })
@@ -97,10 +100,12 @@ impl NostrPubSub for ChannelPubSub {
     fn decrypted_message(
         &self,
         sender: PublicKey,
+        sender_device: Option<PublicKey>,
         content: String,
         event_id: Option<String>,
     ) -> Result<()> {
-        self.tx.decrypted_message(sender, content, event_id)
+        self.tx
+            .decrypted_message(sender, sender_device, content, event_id)
     }
 
     fn received_event(&self, event: nostr::Event) -> Result<()> {
@@ -127,6 +132,7 @@ pub enum SessionEvent {
     Unsubscribe(String),
     DecryptedMessage {
         sender: PublicKey,
+        sender_device: Option<PublicKey>,
         content: String,
         event_id: Option<String>,
     },
@@ -222,10 +228,12 @@ pub mod test_utils {
                 }
                 crate::session_manager::SessionManagerEvent::DecryptedMessage {
                     sender,
+                    sender_device,
                     content,
                     event_id,
                 } => SessionEvent::DecryptedMessage {
                     sender,
+                    sender_device,
                     content,
                     event_id,
                 },

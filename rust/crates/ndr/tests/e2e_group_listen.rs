@@ -406,7 +406,7 @@ async fn test_listen_group_metadata_and_message() {
 }
 
 #[tokio::test]
-async fn test_group_metadata_and_messages_reach_linked_second_device() {
+async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror() {
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -592,17 +592,17 @@ async fn test_group_metadata_and_messages_reach_linked_second_device() {
             Some(group_id.as_str())
         );
 
+        // Safety invariant: do not owner-mirror peer group messages to linked devices.
         let bob_secondary_msg = read_until_event_with_content(
             &mut bob_secondary_stdout,
             "group_message",
             Some(msg),
-            Duration::from_secs(20),
+            Duration::from_secs(3),
         )
-        .await
-        .expect("Bob secondary should receive group_message");
-        assert_eq!(
-            bob_secondary_msg["group_id"].as_str(),
-            Some(group_id.as_str())
+        .await;
+        assert!(
+            bob_secondary_msg.is_none(),
+            "Bob secondary should not receive owner-mirrored peer group_message"
         );
 
         Ok::<(), anyhow::Error>(())
