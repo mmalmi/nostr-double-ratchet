@@ -94,7 +94,9 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
 
     // Now deliver the distribution via the 1:1 session path.
     const distRumor = sent[0]!.rumor;
-    const after = await bob.handleIncomingSessionEvent(distRumor, aliceOwnerPk);
+    const rejected = await bob.handleIncomingSessionEvent(distRumor, aliceOwnerPk);
+    expect(rejected).toHaveLength(0);
+    const after = await bob.handleIncomingSessionEvent(distRumor, aliceOwnerPk, aliceDevicePk);
     expect(after).toHaveLength(1);
     expect(after[0]!.inner.content).toBe("hello out of order");
     expect(after[0]!.senderOwnerPubkey).toBe(aliceOwnerPk);
@@ -134,7 +136,7 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
     });
 
     // Deliver distribution + outer.
-    await bob.handleIncomingSessionEvent(sent.pop()!.rumor, aliceOwnerPk);
+    await bob.handleIncomingSessionEvent(sent.pop()!.rumor, aliceOwnerPk, aliceDevicePk);
     const first = await bob.handleOuterEvent(published.pop() as any);
     expect(first?.inner.content).toBe("m1");
     const firstKeyId = first?.keyId;
@@ -153,7 +155,7 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
 
     // Deliver rotation distribution (there may be one for rotate + one for send; either order ok).
     for (const s of sent) {
-      await bob.handleIncomingSessionEvent(s.rumor, aliceOwnerPk);
+      await bob.handleIncomingSessionEvent(s.rumor, aliceOwnerPk, aliceDevicePk);
     }
     const second = await bob.handleOuterEvent(published[0] as any);
     expect(second?.inner.content).toBe("m2");
@@ -208,13 +210,80 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
     // Deliver the same distribution to both devices (simulating SessionManager fanout).
     expect(sent).toHaveLength(1);
     const distRumor = sent[0]!.rumor;
-    const r1 = await bob1.handleIncomingSessionEvent(distRumor, aliceOwnerPk);
-    const r2 = await bob2.handleIncomingSessionEvent(distRumor, aliceOwnerPk);
+    const r1 = await bob1.handleIncomingSessionEvent(distRumor, aliceOwnerPk, aliceDevicePk);
+    const r2 = await bob2.handleIncomingSessionEvent(distRumor, aliceOwnerPk, aliceDevicePk);
 
     expect(r1).toHaveLength(1);
     expect(r2).toHaveLength(1);
     expect(r1[0]!.inner.content).toBe("hello bob devices");
     expect(r2[0]!.inner.content).toBe("hello bob devices");
   });
-});
 
+  it("rejects impersonation when sender device context mismatches the signed rumor", async () => {
+    const groupId = "group-impersonation";
+
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+    const bobDevicePk = getPublicKey(generateSecretKey());
+    const attackerDevicePk = getPublicKey(generateSecretKey());
+
+    const alice = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    const bob = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+      ourOwnerPubkey: bobOwnerPk,
+      ourDevicePubkey: bobDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    const sent: Array<{ to: string; rumor: Rumor }> = [];
+    let outer: unknown | null = null;
+    await alice.sendMessage("impersonation-test", {
+      sendPairwise: async (to, rumor) => sent.push({ to, rumor }),
+      publishOuter: async (event) => {
+        outer = event;
+      },
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(outer).not.toBeNull();
+
+    // Queue outer first.
+    expect(await bob.handleOuterEvent(outer as any)).toBeNull();
+
+    const distRumor = sent[0]!.rumor;
+
+    // Forged rumor pubkey does not match authenticated sender device context.
+    const forgedRumor = { ...distRumor, pubkey: attackerDevicePk } as Rumor;
+    const forgedAccepted = await bob.handleIncomingSessionEvent(
+      forgedRumor,
+      aliceOwnerPk,
+      aliceDevicePk
+    );
+    expect(forgedAccepted).toHaveLength(0);
+
+    // Even with authentic rumor, mismatched sender-device context must be rejected.
+    const mismatchedContext = await bob.handleIncomingSessionEvent(
+      distRumor,
+      aliceOwnerPk,
+      attackerDevicePk
+    );
+    expect(mismatchedContext).toHaveLength(0);
+
+    // Correct sender-device context succeeds.
+    const accepted = await bob.handleIncomingSessionEvent(
+      distRumor,
+      aliceOwnerPk,
+      aliceDevicePk
+    );
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]!.inner.content).toBe("impersonation-test");
+  });
+});

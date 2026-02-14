@@ -1091,6 +1091,10 @@ pub async fn accept(id: &str, config: &Config, storage: &Storage, output: &Outpu
                     let my_device_pubkey = config.public_key()?;
                     let my_owner_pubkey_hex = config.owner_public_key_hex()?;
                     let my_owner_pubkey = nostr::PublicKey::from_hex(&my_owner_pubkey_hex)?;
+                    let my_device_private_key = config.private_key_bytes()?;
+                    let my_device_secret_key =
+                        nostr::SecretKey::from_slice(&my_device_private_key)?;
+                    let my_device_keys = nostr::Keys::new(my_device_secret_key);
 
                     // Create an invite for group members to establish 1:1 sessions
                     let my_device_pk = nostr::PublicKey::from_hex(&my_device_pubkey)?;
@@ -1100,23 +1104,26 @@ pub async fn accept(id: &str, config: &Config, storage: &Storage, output: &Outpu
                     invite.owner_public_key = Some(my_owner_pubkey);
                     let invite_url = invite.get_url("https://chat.iris.to")?;
 
-                    let rumor_json = serde_json::json!({
-                        "id": uuid::Uuid::new_v4().to_string(),
-                        "pubkey": my_owner_pubkey_hex,
-                        "created_at": std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        "kind": nostr_double_ratchet::GROUP_INVITE_RUMOR_KIND,
-                        "tags": [],
-                        "content": serde_json::json!({
-                            "inviteUrl": invite_url,
-                            "groupId": id,
-                        }).to_string()
+                    let inner_content = serde_json::json!({
+                        "inviteUrl": invite_url,
+                        "groupId": id,
+                        "ownerPubkey": my_owner_pubkey_hex,
                     })
                     .to_string();
+                    let inner_unsigned = nostr::EventBuilder::new(
+                        nostr::Kind::Custom(nostr_double_ratchet::GROUP_INVITE_RUMOR_KIND as u16),
+                        inner_content,
+                    )
+                    .tag(
+                        nostr::Tag::parse(&["l".to_string(), id.to_string()])
+                            .map_err(|e| anyhow::anyhow!("Invalid group tag: {}", e))?,
+                    )
+                    .build(my_device_pk);
+                    let inner_signed = inner_unsigned.sign_with_keys(&my_device_keys)?;
 
-                    if let Ok(event) = channel.create_event(&rumor_json) {
+                    if let Ok(event) =
+                        channel.create_event(&nostr::JsonUtil::as_json(&inner_signed))
+                    {
                         let client = Client::default();
                         let relays = config.resolved_relays();
                         for relay in &relays {

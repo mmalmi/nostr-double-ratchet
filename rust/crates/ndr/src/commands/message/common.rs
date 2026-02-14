@@ -171,11 +171,3 @@ pub(super) fn collect_chat_pubkeys(
     }
     Ok(pubkeys)
 }
-
-pub(super) fn allow_insecure_shared_channel_sender_keys() -> bool {
-    if let Ok(val) = std::env::var("NDR_ALLOW_INSECURE_SHARED_CHANNEL_SENDER_KEYS") {
-        let val = val.trim().to_lowercase();
-        return matches!(val.as_str(), "1" | "true" | "yes" | "on");
-    }
-    false
-}

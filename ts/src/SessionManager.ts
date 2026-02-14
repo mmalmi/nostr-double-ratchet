@@ -28,7 +28,8 @@ import {
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
 import { getEventHash } from "nostr-tools"
 
-export type OnEventCallback = (event: Rumor, from: string) => void
+export type OnEventMeta = { fromDeviceId?: string }
+export type OnEventCallback = (event: Rumor, from: string, meta?: OnEventMeta) => void
 
 /**
  * Credentials for the invite handshake - used to listen for and decrypt invite responses
@@ -597,7 +598,9 @@ export class SessionManager {
 
       this.maybeAutoAdoptChatSettings(event, userPubkey)
 
-      for (const cb of this.internalSubscriptions) cb(event, userPubkey)
+      for (const cb of this.internalSubscriptions) {
+        cb(event, userPubkey, { fromDeviceId: deviceRecord.deviceId })
+      }
       promoteToActive(session)
       this.storeUserRecord(userPubkey).catch(() => {})
     })

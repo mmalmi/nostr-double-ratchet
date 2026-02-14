@@ -429,8 +429,14 @@ export class Group {
    *
    * Currently this only consumes sender-key distribution rumors (kind 10446) for this group.
    * It may return decrypted outer group events that were pending until the distribution arrived.
+   *
+   * `fromSenderDevicePubkey` must come from authenticated session context (not `event.pubkey`).
    */
-  async handleIncomingSessionEvent(event: Rumor, fromOwnerPubkey: string): Promise<GroupDecryptedEvent[]> {
+  async handleIncomingSessionEvent(
+    event: Rumor,
+    fromOwnerPubkey: string,
+    fromSenderDevicePubkey?: string
+  ): Promise<GroupDecryptedEvent[]> {
     await this.init();
 
     if (!this.memberOwnerPubkeys.includes(fromOwnerPubkey)) {
@@ -446,8 +452,9 @@ export class Group {
     if (!dist) return [];
     if (dist.groupId !== this.groupId()) return [];
 
-    const senderDevicePubkey = event.pubkey;
-    if (!isHex32(senderDevicePubkey)) return [];
+    const senderDevicePubkey = fromSenderDevicePubkey;
+    if (!senderDevicePubkey || !isHex32(senderDevicePubkey)) return [];
+    if (isHex32(event.pubkey) && event.pubkey !== senderDevicePubkey) return [];
 
     // Persist sender->owner mapping (for UI attribution).
     this.senderDeviceToOwner.set(senderDevicePubkey, fromOwnerPubkey);
@@ -555,4 +562,3 @@ export class Group {
     };
   }
 }
-

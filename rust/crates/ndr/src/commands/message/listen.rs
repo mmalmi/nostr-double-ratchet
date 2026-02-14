@@ -6,7 +6,7 @@ use nostr_double_ratchet::{
     RECEIPT_KIND, TYPING_KIND,
 };
 
-use crate::commands::owner_claim::resolve_verified_owner_pubkey;
+use crate::commands::owner_claim::{fetch_latest_app_keys, resolve_verified_owner_pubkey};
 use crate::config::Config;
 use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
@@ -16,8 +16,8 @@ use crate::storage::{
 };
 
 use super::common::{
-    allow_insecure_shared_channel_sender_keys, collect_chat_pubkeys, extract_e_tag, extract_e_tags,
-    extract_expiration_tag_seconds, is_expired, parse_chat_settings_ttl_seconds,
+    collect_chat_pubkeys, extract_e_tag, extract_e_tags, extract_expiration_tag_seconds,
+    is_expired, parse_chat_settings_ttl_seconds,
 };
 use super::types::{IncomingMessage, IncomingReaction};
 
@@ -483,8 +483,8 @@ pub async fn listen(
     output: &Output,
 ) -> Result<()> {
     use nostr_double_ratchet::{
-        GROUP_INVITE_RUMOR_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND, GROUP_SENDER_KEY_MESSAGE_KIND,
-        INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND, SHARED_CHANNEL_KIND,
+        GROUP_INVITE_RUMOR_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND, INVITE_RESPONSE_KIND,
+        MESSAGE_EVENT_KIND, SHARED_CHANNEL_KIND,
     };
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
     use notify::{Event as NotifyEvent, EventKind, RecursiveMode, Watcher};
@@ -1119,577 +1119,237 @@ pub async fn listen(
                 continue;
             }
 
-            // Handle SharedChannel events (kind 4)
+            // Shared-channel is only used for signed group-invite announcements that bootstrap
+            // 1:1 sessions between members without an existing channel.
             if event_kind == SHARED_CHANNEL_KIND {
                 let sender_hex = event.pubkey.to_hex();
                 if let Some((channel, group_id)) = channel_map.get(&sender_hex) {
-                    if let Ok(inner_json) = channel.decrypt_event(&event) {
-                        // We support two formats on the shared channel:
-                        // 1) Unsigned "rumor" JSON (used for legacy group invites).
-                        // 2) Signed Nostr events (used for sender-key distribution and messages).
+                    let Ok(inner_json) = channel.decrypt_event(&event) else {
+                        continue;
+                    };
+                    let Ok(inner_event) = (|| {
+                        let ev: nostr::Event = nostr::JsonUtil::from_json(inner_json.as_str())?;
+                        Ok::<nostr::Event, nostr::event::Error>(ev)
+                    })() else {
+                        // Reject unsigned/non-event payloads.
+                        continue;
+                    };
 
-                        if let Ok(inner_event) = (|| {
-                            let ev: nostr::Event = nostr::JsonUtil::from_json(inner_json.as_str())?;
-                            Ok::<nostr::Event, nostr::event::Error>(ev)
-                        })() {
-                            // Signed event path
-                            if inner_event.verify().is_err() {
-                                continue;
-                            }
+                    // Inner payload must be an authentic signed event.
+                    if inner_event.verify().is_err() {
+                        continue;
+                    }
+                    if inner_event.kind.as_u16() as u32 != GROUP_INVITE_RUMOR_KIND {
+                        continue;
+                    }
 
-                            // Skip our own events.
-                            if inner_event.pubkey.to_hex() == my_pubkey {
-                                continue;
-                            }
+                    // Skip our own device announcements.
+                    let signer_device_pubkey = inner_event.pubkey;
+                    if signer_device_pubkey.to_hex() == my_pubkey {
+                        continue;
+                    }
 
-                            match inner_event.kind.as_u16() as u32 {
-                                GROUP_SENDER_KEY_DISTRIBUTION_KIND => {
-                                    // Forward secrecy note:
-                                    // SharedChannel encryption is a static shared secret; don't rely on it for sender-key
-                                    // distribution unless explicitly opted-in for compatibility.
-                                    if !allow_insecure_shared_channel_sender_keys() {
-                                        continue;
-                                    }
-
-                                    // Sender-key distribution (one per sender per group, plus rotations).
-                                    let dist = match serde_json::from_str::<
-                                        nostr_double_ratchet::SenderKeyDistribution,
-                                    >(
-                                        &inner_event.content
-                                    ) {
-                                        Ok(d) => d,
-                                        Err(_) => continue,
-                                    };
-
-                                    if dist.group_id != *group_id {
-                                        continue;
-                                    }
-
-                                    let sender_pubkey_hex = inner_event.pubkey.to_hex();
-                                    if let Some(group) = storage.get_group(group_id)? {
-                                        if !group.data.members.contains(&sender_pubkey_hex) {
-                                            continue;
-                                        }
-                                    }
-
-                                    // Don't overwrite an existing progressed state (would break decrypt).
-                                    if storage
-                                        .get_group_sender_key_state(
-                                            group_id,
-                                            &sender_pubkey_hex,
-                                            dist.key_id,
-                                        )?
-                                        .is_none()
-                                    {
-                                        let state = nostr_double_ratchet::SenderKeyState::new(
-                                            dist.key_id,
-                                            dist.chain_key,
-                                            dist.iteration,
-                                        );
-                                        storage.upsert_group_sender_key_state(
-                                            group_id,
-                                            &sender_pubkey_hex,
-                                            &state,
-                                        )?;
-                                    }
-
-                                    // Retry any pending messages for this (group,sender,key_id).
-                                    let pending_key =
-                                        (group_id.clone(), sender_pubkey_hex.clone(), dist.key_id);
-                                    if let Some(mut pending) =
-                                        pending_sender_key_messages.remove(&pending_key)
-                                    {
-                                        // Best-effort: process in message-number order.
-                                        pending.sort_by_key(|e| {
-                                            e.tags
-                                                .iter()
-                                                .find_map(|t| {
-                                                    let v = t.clone().to_vec();
-                                                    if v.first().map(|s| s.as_str()) == Some("n") {
-                                                        v.get(1)?.parse::<u64>().ok()
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                                .unwrap_or(0)
-                                        });
-
-                                        for env in pending {
-                                            // Re-run handling by re-inserting into the loop's logic:
-                                            // simplest is to just push it back into the current branch below.
-                                            // We'll attempt decrypt inline.
-                                            let key_id = dist.key_id;
-                                            let n = env
-                                                .tags
-                                                .iter()
-                                                .find_map(|t| {
-                                                    let v = t.clone().to_vec();
-                                                    if v.first().map(|s| s.as_str()) == Some("n") {
-                                                        v.get(1)?.parse::<u32>().ok()
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                                .unwrap_or(0);
-
-                                            if let Some(mut st) = storage
-                                                .get_group_sender_key_state(
-                                                    group_id,
-                                                    &sender_pubkey_hex,
-                                                    key_id,
-                                                )?
-                                            {
-                                                if let Ok(plaintext_json) =
-                                                    st.decrypt(n, &env.content)
-                                                {
-                                                    storage.upsert_group_sender_key_state(
-                                                        group_id,
-                                                        &sender_pubkey_hex,
-                                                        &st,
-                                                    )?;
-
-                                                    if let Ok(decrypted_event) =
-                                                        serde_json::from_str::<serde_json::Value>(
-                                                            &plaintext_json,
-                                                        )
-                                                    {
-                                                        let rumor_kind = decrypted_event["kind"]
-                                                            .as_u64()
-                                                            .unwrap_or(CHAT_MESSAGE_KIND as u64)
-                                                            as u32;
-                                                        let content = decrypted_event["content"]
-                                                            .as_str()
-                                                            .unwrap_or(&plaintext_json)
-                                                            .to_string();
-
-                                                        let timestamp = env.created_at.as_u64();
-                                                        let now_seconds =
-                                                            std::time::SystemTime::now()
-                                                                .duration_since(
-                                                                    std::time::UNIX_EPOCH,
-                                                                )?
-                                                                .as_secs();
-                                                        let expires_at =
-                                                            extract_expiration_tag_seconds(
-                                                                &decrypted_event,
-                                                            );
-
-                                                        if rumor_kind == CHAT_MESSAGE_KIND
-                                                            || rumor_kind == 14
-                                                        {
-                                                            if is_expired(expires_at, now_seconds) {
-                                                                continue;
-                                                            }
-                                                            let msg_id = env.id.to_hex();
-                                                            let stored = StoredGroupMessage {
-                                                                id: msg_id.clone(),
-                                                                group_id: group_id.clone(),
-                                                                sender_pubkey: sender_pubkey_hex
-                                                                    .clone(),
-                                                                content: content.clone(),
-                                                                timestamp,
-                                                                is_outgoing: false,
-                                                                expires_at,
-                                                            };
-                                                            storage.save_group_message(&stored)?;
-                                                            output.event(
-                                                                "group_message",
-                                                                serde_json::json!({
-                                                                    "group_id": group_id,
-                                                                    "message_id": msg_id,
-                                                                    "sender_pubkey": sender_pubkey_hex,
-                                                                    "content": content,
-                                                                    "timestamp": timestamp,
-                                                                }),
-                                                            );
-                                                        } else if rumor_kind == REACTION_KIND {
-                                                            let message_id =
-                                                                extract_e_tag(&decrypted_event);
-                                                            output.event(
-                                                                "group_reaction",
-                                                                serde_json::json!({
-                                                                    "group_id": group_id,
-                                                                    "sender_pubkey": sender_pubkey_hex,
-                                                                    "message_id": message_id,
-                                                                    "emoji": content,
-                                                                    "timestamp": timestamp,
-                                                                }),
-                                                            );
-                                                        } else if rumor_kind == TYPING_KIND {
-                                                            output.event(
-                                                                "group_typing",
-                                                                serde_json::json!({
-                                                                    "group_id": group_id,
-                                                                    "sender_pubkey": sender_pubkey_hex,
-                                                                    "timestamp": timestamp,
-                                                                }),
-                                                            );
-                                                        }
-                                                    }
-                                                } else {
-                                                    // Still can't decrypt; drop.
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    output.event(
-                                        "group_sender_key",
-                                        serde_json::json!({
-                                            "group_id": group_id,
-                                            "sender_pubkey": sender_pubkey_hex,
-                                            "key_id": dist.key_id,
-                                            "iteration": dist.iteration,
-                                            "transport": "shared_channel",
-                                        }),
-                                    );
-                                }
-                                GROUP_SENDER_KEY_MESSAGE_KIND => {
-                                    // Sender-key encrypted group event.
-                                    let sender_pubkey_hex = inner_event.pubkey.to_hex();
-
-                                    // Extract group id + header tags.
-                                    let group_tag = inner_event.tags.iter().find_map(|t| {
-                                        let v = t.clone().to_vec();
-                                        if v.first().map(|s| s.as_str()) == Some("l") {
-                                            v.get(1).cloned()
-                                        } else {
-                                            None
-                                        }
-                                    });
-                                    let gid = group_tag.unwrap_or_else(|| group_id.clone());
-                                    if gid != *group_id {
-                                        continue;
-                                    }
-
-                                    let key_id = inner_event
-                                        .tags
-                                        .iter()
-                                        .find_map(|t| {
-                                            let v = t.clone().to_vec();
-                                            if v.first().map(|s| s.as_str()) == Some("key") {
-                                                v.get(1)?.parse::<u32>().ok()
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .unwrap_or(0);
-                                    let n = inner_event
-                                        .tags
-                                        .iter()
-                                        .find_map(|t| {
-                                            let v = t.clone().to_vec();
-                                            if v.first().map(|s| s.as_str()) == Some("n") {
-                                                v.get(1)?.parse::<u32>().ok()
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .unwrap_or(0);
-
-                                    let Some(mut st) = storage.get_group_sender_key_state(
-                                        &gid,
-                                        &sender_pubkey_hex,
-                                        key_id,
-                                    )?
-                                    else {
-                                        pending_sender_key_messages
-                                            .entry((gid.clone(), sender_pubkey_hex.clone(), key_id))
-                                            .or_default()
-                                            .push(inner_event);
-                                        continue;
-                                    };
-
-                                    let plaintext_json = match st.decrypt(n, &inner_event.content) {
-                                        Ok(p) => p,
-                                        Err(_) => continue,
-                                    };
-                                    storage.upsert_group_sender_key_state(
-                                        &gid,
-                                        &sender_pubkey_hex,
-                                        &st,
-                                    )?;
-
-                                    let decrypted_event: serde_json::Value =
-                                        match serde_json::from_str(&plaintext_json) {
-                                            Ok(v) => v,
-                                            Err(_) => continue,
-                                        };
-
-                                    let rumor_kind = decrypted_event["kind"]
-                                        .as_u64()
-                                        .unwrap_or(CHAT_MESSAGE_KIND as u64)
-                                        as u32;
-                                    let content = decrypted_event["content"]
-                                        .as_str()
-                                        .unwrap_or(&plaintext_json)
-                                        .to_string();
-
-                                    let timestamp = inner_event.created_at.as_u64();
-                                    let now_seconds = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)?
-                                        .as_secs();
-                                    let expires_at =
-                                        extract_expiration_tag_seconds(&decrypted_event);
-
-                                    if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
-                                        if is_expired(expires_at, now_seconds) {
-                                            continue;
-                                        }
-                                        let msg_id = inner_event.id.to_hex();
-                                        let stored = StoredGroupMessage {
-                                            id: msg_id.clone(),
-                                            group_id: gid.clone(),
-                                            sender_pubkey: sender_pubkey_hex.clone(),
-                                            content: content.clone(),
-                                            timestamp,
-                                            is_outgoing: false,
-                                            expires_at,
-                                        };
-                                        storage.save_group_message(&stored)?;
-
-                                        output.event(
-                                            "group_message",
-                                            serde_json::json!({
-                                                "group_id": gid,
-                                                "message_id": msg_id,
-                                                "sender_pubkey": sender_pubkey_hex,
-                                                "content": content,
-                                                "timestamp": timestamp,
-                                            }),
-                                        );
-                                    } else if rumor_kind == REACTION_KIND {
-                                        let message_id = extract_e_tag(&decrypted_event);
-                                        output.event(
-                                            "group_reaction",
-                                            serde_json::json!({
-                                                "group_id": gid,
-                                                "sender_pubkey": sender_pubkey_hex,
-                                                "message_id": message_id,
-                                                "emoji": content,
-                                                "timestamp": timestamp,
-                                            }),
-                                        );
-                                    } else if rumor_kind == TYPING_KIND {
-                                        output.event(
-                                            "group_typing",
-                                            serde_json::json!({
-                                                "group_id": gid,
-                                                "sender_pubkey": sender_pubkey_hex,
-                                                "timestamp": timestamp,
-                                            }),
-                                        );
-                                    }
-                                }
-                                _ => {}
-                            }
-
+                    // Bind inner payload to the decrypted shared-channel group.
+                    let tag_group_id = inner_event.tags.iter().find_map(|t| {
+                        let v = t.clone().to_vec();
+                        if v.first().map(|s| s.as_str()) == Some("l") {
+                            v.get(1).cloned()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(tag_gid) = tag_group_id {
+                        if tag_gid != *group_id {
                             continue;
                         }
+                    }
 
-                        // Unsigned rumor path (legacy)
-                        if let Ok(rumor) = serde_json::from_str::<serde_json::Value>(&inner_json) {
-                            let rumor_kind = rumor["kind"].as_u64().unwrap_or(0) as u32;
-                            let rumor_pubkey = rumor["pubkey"].as_str().unwrap_or("").to_string();
+                    let invite_data: serde_json::Value =
+                        match serde_json::from_str(&inner_event.content) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                    let invite_url = invite_data
+                        .get("inviteUrl")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if invite_url.is_empty() {
+                        continue;
+                    }
+                    if invite_data.get("groupId").and_then(|v| v.as_str())
+                        != Some(group_id.as_str())
+                    {
+                        continue;
+                    }
 
-                            // Skip if it's our own event
-                            if rumor_pubkey == owner_pubkey_hex {
-                                continue;
-                            }
+                    let signer_device_hex = signer_device_pubkey.to_hex();
+                    let claimed_owner_hex = invite_data
+                        .get("ownerPubkey")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(signer_device_hex.as_str())
+                        .to_string();
+                    let Ok(claimed_owner_pubkey) = nostr::PublicKey::from_hex(&claimed_owner_hex)
+                    else {
+                        continue;
+                    };
 
-                            if rumor_kind == GROUP_INVITE_RUMOR_KIND {
-                                // Group member published an invite on the channel
-                                let content_str = rumor["content"].as_str().unwrap_or("{}");
-                                if let Ok(invite_data) =
-                                    serde_json::from_str::<serde_json::Value>(content_str)
-                                {
-                                    let invite_url =
-                                        invite_data["inviteUrl"].as_str().unwrap_or("");
+                    let Some(group) = storage.get_group(group_id)? else {
+                        continue;
+                    };
+                    if !group.data.members.contains(&claimed_owner_hex) {
+                        continue;
+                    }
 
-                                    // Check if this is from a group member
-                                    if let Some(group) = storage.get_group(group_id)? {
-                                        if !group.data.members.contains(&rumor_pubkey) {
-                                            continue;
-                                        }
+                    // The signer must either be the owner itself or an authorized delegate device.
+                    let signer_owner_pubkey = if claimed_owner_pubkey == signer_device_pubkey {
+                        claimed_owner_pubkey
+                    } else {
+                        let app_keys = fetch_latest_app_keys(&client, claimed_owner_pubkey).await?;
+                        let authorized = app_keys
+                            .as_ref()
+                            .and_then(|keys| keys.get_device(&signer_device_pubkey))
+                            .is_some();
+                        if !authorized {
+                            continue;
+                        }
+                        claimed_owner_pubkey
+                    };
+                    let signer_owner_hex = signer_owner_pubkey.to_hex();
 
-                                        // Deterministic tie-breaker:
-                                        // when two members publish group invites concurrently, only
-                                        // the lexicographically-smaller owner pubkey auto-accepts.
-                                        // This avoids creating competing sessions for the same peer.
-                                        if owner_pubkey_hex >= rumor_pubkey {
-                                            continue;
-                                        }
+                    // Skip if it's our own owner identity.
+                    if signer_owner_hex == owner_pubkey_hex {
+                        continue;
+                    }
 
-                                        // If we already have a *sendable* session, skip auto-accept.
-                                        // For concurrent invites, an existing inviter-side session can be
-                                        // present but still non-sendable; in that case we must still
-                                        // accept to avoid deadlock.
-                                        let peer_chats: Vec<_> = storage
-                                            .list_chats()?
-                                            .into_iter()
-                                            .filter(|chat| chat.their_pubkey == rumor_pubkey)
-                                            .collect();
-                                        if peer_chats.iter().any(|existing_chat| {
-                                            let existing_can_send = serde_json::from_str::<
-                                                nostr_double_ratchet::SessionState,
-                                            >(
-                                                &existing_chat.session_state
-                                            )
-                                            .map(|state| {
-                                                Session::new(state, existing_chat.id.clone())
-                                                    .can_send()
-                                            })
-                                            .unwrap_or(false);
-                                            existing_can_send
-                                                || existing_chat.last_message_at.is_some()
-                                        }) {
-                                            continue;
-                                        }
+                    // Deterministic tie-breaker:
+                    // when two members publish group invites concurrently, only
+                    // the lexicographically-smaller owner pubkey auto-accepts.
+                    if owner_pubkey_hex >= signer_owner_hex {
+                        continue;
+                    }
 
-                                        // Auto-accept: parse invite URL, create session
-                                        if !invite_url.is_empty() {
-                                            if let Ok(invite) =
-                                                nostr_double_ratchet::Invite::from_url(invite_url)
-                                            {
-                                                if let Ok((mut accept_session, response_event)) =
-                                                    invite.accept_with_owner(
-                                                        my_pubkey_key,
-                                                        our_private_key,
-                                                        None,
-                                                        Some(owner_pubkey),
-                                                    )
-                                                {
-                                                    // Merge into existing chat if present; otherwise create one.
-                                                    let mut chat = if let Some(mut existing_chat) =
-                                                        storage.get_chat_by_pubkey(&rumor_pubkey)?
-                                                    {
-                                                        let selected_state =
-                                                            match serde_json::from_str::<
-                                                                nostr_double_ratchet::SessionState,
-                                                            >(
-                                                                &existing_chat.session_state
-                                                            ) {
-                                                                Ok(existing_state) => {
-                                                                    let existing_can_send =
-                                                                        Session::new(
-                                                                            existing_state.clone(),
-                                                                            existing_chat
-                                                                                .id
-                                                                                .clone(),
-                                                                        )
-                                                                        .can_send();
-                                                                    let accepted_can_send =
-                                                                        Session::new(
-                                                                            accept_session
-                                                                                .state
-                                                                                .clone(),
-                                                                            existing_chat
-                                                                                .id
-                                                                                .clone(),
-                                                                        )
-                                                                        .can_send();
-                                                                    if existing_can_send
-                                                                        && !accepted_can_send
-                                                                    {
-                                                                        existing_state
-                                                                    } else {
-                                                                        accept_session.state.clone()
-                                                                    }
-                                                                }
-                                                                Err(_) => {
-                                                                    accept_session.state.clone()
-                                                                }
-                                                            };
+                    // Parse invite and bind it to the signed announcer identity.
+                    let Ok(invite) = nostr_double_ratchet::Invite::from_url(invite_url) else {
+                        continue;
+                    };
+                    let invite_owner_pubkey = invite.owner_public_key.unwrap_or(invite.inviter);
+                    if invite_owner_pubkey != signer_owner_pubkey {
+                        continue;
+                    }
+                    if invite.inviter != signer_device_pubkey {
+                        continue;
+                    }
 
-                                                        accept_session.state =
-                                                            selected_state.clone();
-                                                        existing_chat.device_id =
-                                                            Some(invite.inviter.to_hex());
-                                                        existing_chat.session_state =
-                                                            serde_json::to_string(&selected_state)?;
-                                                        storage.save_chat(&existing_chat)?;
-                                                        existing_chat
-                                                    } else {
-                                                        let new_chat = crate::storage::StoredChat {
-                                                            id: uuid::Uuid::new_v4().to_string()
-                                                                [..8]
-                                                                .to_string(),
-                                                            their_pubkey: rumor_pubkey.clone(),
-                                                            device_id: Some(
-                                                                invite.inviter.to_hex(),
-                                                            ),
-                                                            created_at: std::time::SystemTime::now(
-                                                            )
-                                                            .duration_since(std::time::UNIX_EPOCH)?
-                                                            .as_secs(),
-                                                            last_message_at: None,
-                                                            session_state: serde_json::to_string(
-                                                                &accept_session.state,
-                                                            )?,
-                                                            message_ttl_seconds: None,
-                                                        };
-                                                        storage.save_chat(&new_chat)?;
-                                                        new_chat
-                                                    };
+                    // If we already have a *sendable* session, skip auto-accept.
+                    // For concurrent invites, an existing inviter-side session can be
+                    // present but still non-sendable; in that case we must still
+                    // accept to avoid deadlock.
+                    let peer_chats: Vec<_> = storage
+                        .list_chats()?
+                        .into_iter()
+                        .filter(|chat| chat.their_pubkey == signer_owner_hex)
+                        .collect();
+                    if peer_chats.iter().any(|existing_chat| {
+                        let existing_can_send =
+                            serde_json::from_str::<nostr_double_ratchet::SessionState>(
+                                &existing_chat.session_state,
+                            )
+                            .map(|state| Session::new(state, existing_chat.id.clone()).can_send())
+                            .unwrap_or(false);
+                        existing_can_send || existing_chat.last_message_at.is_some()
+                    }) {
+                        continue;
+                    }
 
-                                                    // Publish the response event
-                                                    send_event_or_ignore(&client, response_event)
-                                                        .await?;
-
-                                                    // Kick off the session by sending a lightweight typing event.
-                                                    //
-                                                    // The inviter is a non-initiator (see Invite::process_invite_response),
-                                                    // so they must receive at least one message before they can send. In
-                                                    // group chats, this prevents sender-key fan-out from stalling.
-                                                    if let Ok(typing_event) =
-                                                        accept_session.send_typing()
-                                                    {
-                                                        // Persist ratcheted state before network I/O.
-                                                        chat.session_state = serde_json::to_string(
-                                                            &accept_session.state,
-                                                        )?;
-                                                        storage.save_chat(&chat)?;
-
-                                                        // Best-effort; group functionality still works if this fails.
-                                                        let _ =
-                                                            client.send_event(typing_event).await;
-                                                    }
-
-                                                    // Update subscription for new chat's keys
-                                                    let new_pubkeys = collect_chat_pubkeys(
-                                                        storage,
-                                                        chat_id_owned.as_deref(),
-                                                    )?;
-                                                    if !new_pubkeys.is_empty() {
-                                                        let new_filter = Filter::new()
-                                                            .kind(nostr::Kind::Custom(
-                                                                MESSAGE_EVENT_KIND as u16,
-                                                            ))
-                                                            .authors(new_pubkeys.clone());
-                                                        client
-                                                            .subscribe(vec![new_filter], None)
-                                                            .await?;
-                                                        subscribed_pubkeys = new_pubkeys
-                                                            .iter()
-                                                            .map(|pk| pk.to_hex())
-                                                            .collect();
-                                                    }
-
-                                                    output.event(
-                                                        "group_invite_accepted",
-                                                        serde_json::json!({
-                                                            "group_id": group_id,
-                                                            "member_pubkey": rumor_pubkey,
-                                                            "chat_id": chat.id,
-                                                        }),
-                                                    );
-                                                }
-                                            }
+                    if let Ok((mut accept_session, response_event)) = invite.accept_with_owner(
+                        my_pubkey_key,
+                        our_private_key,
+                        None,
+                        Some(owner_pubkey),
+                    ) {
+                        // Merge into existing chat if present; otherwise create one.
+                        let mut chat = if let Some(mut existing_chat) =
+                            storage.get_chat_by_pubkey(&signer_owner_hex)?
+                        {
+                            let selected_state =
+                                match serde_json::from_str::<nostr_double_ratchet::SessionState>(
+                                    &existing_chat.session_state,
+                                ) {
+                                    Ok(existing_state) => {
+                                        let existing_can_send = Session::new(
+                                            existing_state.clone(),
+                                            existing_chat.id.clone(),
+                                        )
+                                        .can_send();
+                                        let accepted_can_send = Session::new(
+                                            accept_session.state.clone(),
+                                            existing_chat.id.clone(),
+                                        )
+                                        .can_send();
+                                        if existing_can_send && !accepted_can_send {
+                                            existing_state
+                                        } else {
+                                            accept_session.state.clone()
                                         }
                                     }
-                                }
-                            }
+                                    Err(_) => accept_session.state.clone(),
+                                };
+
+                            accept_session.state = selected_state.clone();
+                            existing_chat.device_id = Some(invite.inviter.to_hex());
+                            existing_chat.session_state = serde_json::to_string(&selected_state)?;
+                            storage.save_chat(&existing_chat)?;
+                            existing_chat
+                        } else {
+                            let new_chat = crate::storage::StoredChat {
+                                id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
+                                their_pubkey: signer_owner_hex.clone(),
+                                device_id: Some(invite.inviter.to_hex()),
+                                created_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)?
+                                    .as_secs(),
+                                last_message_at: None,
+                                session_state: serde_json::to_string(&accept_session.state)?,
+                                message_ttl_seconds: None,
+                            };
+                            storage.save_chat(&new_chat)?;
+                            new_chat
+                        };
+
+                        // Publish the response event.
+                        send_event_or_ignore(&client, response_event).await?;
+
+                        // Kick off the session by sending a lightweight typing event.
+                        // The inviter is a non-initiator (see Invite::process_invite_response),
+                        // so they must receive at least one message before they can send.
+                        if let Ok(typing_event) = accept_session.send_typing() {
+                            // Persist ratcheted state before network I/O.
+                            chat.session_state = serde_json::to_string(&accept_session.state)?;
+                            storage.save_chat(&chat)?;
+
+                            // Best-effort; group functionality still works if this fails.
+                            let _ = client.send_event(typing_event).await;
                         }
+
+                        // Update subscription for new chat's keys.
+                        let new_pubkeys = collect_chat_pubkeys(storage, chat_id_owned.as_deref())?;
+                        if !new_pubkeys.is_empty() {
+                            let new_filter = Filter::new()
+                                .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+                                .authors(new_pubkeys.clone());
+                            client.subscribe(vec![new_filter], None).await?;
+                            subscribed_pubkeys = new_pubkeys.iter().map(|pk| pk.to_hex()).collect();
+                        }
+
+                        output.event(
+                            "group_invite_accepted",
+                            serde_json::json!({
+                                "group_id": group_id,
+                                "member_pubkey": signer_owner_hex,
+                                "chat_id": chat.id,
+                                "sender_device_pubkey": signer_device_hex,
+                            }),
+                        );
                     }
                 }
                 continue;

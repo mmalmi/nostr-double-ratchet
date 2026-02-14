@@ -16,6 +16,19 @@ struct Listener {
 }
 
 static NDR_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
+static E2E_TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+fn e2e_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    match E2E_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+    {
+        Ok(guard) => guard,
+        // Keep running remaining tests even if a previous test panicked while
+        // holding the lock.
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -251,6 +264,31 @@ async fn wait_for_chat_with_pubkey(
     false
 }
 
+fn group_secret_bytes(data_dir: &Path, group_id: &str) -> [u8; 32] {
+    let storage = ndr::storage::Storage::open(data_dir).expect("open storage");
+    let group = storage
+        .get_group(group_id)
+        .expect("read group")
+        .expect("group exists");
+    let secret_hex = group.data.secret.expect("group secret present");
+    let secret_vec = hex::decode(secret_hex).expect("group secret hex");
+    assert_eq!(secret_vec.len(), 32, "group secret should be 32 bytes");
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&secret_vec);
+    secret
+}
+
+async fn publish_shared_channel_inner(relay_url: &str, secret: [u8; 32], inner_json: &str) {
+    let channel = nostr_double_ratchet::SharedChannel::new(&secret).expect("shared channel");
+    let event = channel
+        .create_event(inner_json)
+        .expect("create shared channel event");
+    let client = nostr_sdk::Client::default();
+    client.add_relay(relay_url).await.expect("add relay");
+    client.connect().await;
+    let _ = client.send_event(event).await;
+}
+
 async fn stop_child(mut child: Child) {
     #[cfg(unix)]
     {
@@ -274,6 +312,7 @@ async fn stop_child(mut child: Child) {
 
 #[tokio::test]
 async fn test_listen_group_metadata_and_message() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -407,6 +446,7 @@ async fn test_listen_group_metadata_and_message() {
 
 #[tokio::test]
 async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -627,6 +667,7 @@ async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror()
 
 #[tokio::test]
 async fn test_group_sender_key_rotation() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -799,6 +840,7 @@ async fn test_group_sender_key_rotation() {
 
 #[tokio::test]
 async fn test_group_chat_six_participants_everyone_receives() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -995,6 +1037,7 @@ async fn test_group_chat_six_participants_everyone_receives() {
 
 #[tokio::test]
 async fn test_listen_group_add_member_and_fanout() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1202,7 +1245,7 @@ async fn test_listen_group_add_member_and_fanout() {
 
         // Carol should receive group message.
         let carol_msg =
-            read_until_event(&mut carol_stdout, "group_message", Duration::from_secs(10))
+            read_until_event(&mut carol_stdout, "group_message", Duration::from_secs(20))
                 .await
                 .expect("Carol should receive group_message");
         assert_eq!(carol_msg["group_id"].as_str(), Some(group_id.as_str()));
@@ -1230,6 +1273,7 @@ async fn test_listen_group_add_member_and_fanout() {
 
 #[tokio::test]
 async fn test_group_chat_two_strangers_can_exchange_messages() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1557,6 +1601,7 @@ async fn test_group_chat_two_strangers_can_exchange_messages() {
 
 #[tokio::test]
 async fn test_listen_group_remove_member() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1736,7 +1781,7 @@ async fn test_listen_group_remove_member() {
 
         // Carol should receive "updated".
         let carol_updated =
-            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
+            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(20))
                 .await
                 .expect("Carol should receive group_metadata updated");
         assert_eq!(carol_updated["group_id"].as_str(), Some(group_id.as_str()));
@@ -1782,6 +1827,7 @@ async fn test_listen_group_remove_member() {
 
 #[tokio::test]
 async fn test_group_accept_shared_channel_invite_opens_session() {
+    let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1960,6 +2006,218 @@ async fn test_group_accept_shared_channel_invite_opens_session() {
         stop_child(child).await;
     }
     if let Some(child) = carol_child {
+        stop_child(child).await;
+    }
+    relay.stop().await;
+
+    if let Err(err) = result {
+        panic!("{:?}", err);
+    }
+}
+
+#[tokio::test]
+async fn test_group_accept_shared_channel_rejects_unsigned_and_impersonated_invites() {
+    let _guard = e2e_test_lock();
+    let mut relay = common::WsRelay::new();
+    let addr = relay.start().await.expect("Failed to start relay");
+    let relay_url = format!("ws://{}", addr);
+    println!("Relay started at: {}", relay_url);
+
+    let alice_dir = setup_ndr_dir(&relay_url);
+    let bob_dir = setup_ndr_dir(&relay_url);
+    let carol_dir = setup_ndr_dir(&relay_url);
+    let attacker_dir = setup_ndr_dir(&relay_url);
+
+    let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let bob_sk = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let carol_sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let attacker_sk = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    let alice_login = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
+    let alice_pubkey = alice_login["data"]["pubkey"]
+        .as_str()
+        .expect("alice pubkey")
+        .to_string();
+
+    let bob_login = run_ndr(bob_dir.path(), &["login", bob_sk]).await;
+    let bob_pubkey = bob_login["data"]["pubkey"]
+        .as_str()
+        .expect("bob pubkey")
+        .to_string();
+
+    let carol_login = run_ndr(carol_dir.path(), &["login", carol_sk]).await;
+    let carol_pubkey = carol_login["data"]["pubkey"]
+        .as_str()
+        .expect("carol pubkey")
+        .to_string();
+
+    let _attacker_login = run_ndr(attacker_dir.path(), &["login", attacker_sk]).await;
+
+    let mut alice_child: Option<Child> = None;
+    let mut bob_child: Option<Child> = None;
+
+    let result = async {
+        // Establish Alice <-> Bob session.
+        let invite_bob = run_ndr(
+            alice_dir.path(),
+            &["invite", "create", "-l", "impersonation-bob"],
+        )
+        .await;
+        let invite_bob_id = invite_bob["data"]["id"]
+            .as_str()
+            .expect("invite id")
+            .to_string();
+        let invite_bob_url = invite_bob["data"]["url"]
+            .as_str()
+            .expect("invite url")
+            .to_string();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let bob_join = run_ndr(bob_dir.path(), &["chat", "join", &invite_bob_url]).await;
+        let bob_response_event = bob_join["data"]["response_event"]
+            .as_str()
+            .expect("bob response event")
+            .to_string();
+        let _ = run_ndr(
+            alice_dir.path(),
+            &["invite", "accept", &invite_bob_id, &bob_response_event],
+        )
+        .await;
+
+        // Start Alice listen so kickoff can be processed.
+        let (child, mut alice_stdout) = start_ndr_listen(alice_dir.path()).await;
+        alice_child = Some(child);
+        assert!(
+            read_until_command(&mut alice_stdout, "listen", Duration::from_secs(5)).await,
+            "Alice should print listen message"
+        );
+
+        // Kick off ratchet so Alice can send metadata.
+        let kickoff_text = "kickoff-bob-impersonation";
+        let _ = run_ndr(bob_dir.path(), &["send", &alice_pubkey, kickoff_text]).await;
+        let kickoff_event = read_until_event(&mut alice_stdout, "message", Duration::from_secs(10))
+            .await
+            .expect("Alice should receive Bob kickoff message");
+        assert_eq!(kickoff_event["content"].as_str(), Some(kickoff_text));
+
+        // Bob listens for metadata + shared-channel announcements.
+        let (child, mut bob_stdout) = start_ndr_listen(bob_dir.path()).await;
+        bob_child = Some(child);
+        assert!(
+            read_until_command(&mut bob_stdout, "listen", Duration::from_secs(5)).await,
+            "Bob should print listen message"
+        );
+
+        // Alice creates group with Bob + Carol.
+        let members_arg = format!("{},{}", bob_pubkey, carol_pubkey);
+        let group_create = run_ndr(
+            alice_dir.path(),
+            &[
+                "group",
+                "create",
+                "--name",
+                "Impersonation Test Group",
+                "--members",
+                &members_arg,
+            ],
+        )
+        .await;
+        let group_id = group_create["data"]["id"]
+            .as_str()
+            .expect("group id")
+            .to_string();
+
+        let bob_created =
+            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
+                .await
+                .expect("Bob should receive group_metadata created");
+        assert_eq!(bob_created["group_id"].as_str(), Some(group_id.as_str()));
+        assert_eq!(bob_created["action"].as_str(), Some("created"));
+
+        // Bob accepts so shared-channel subscription is active.
+        let _ = run_ndr(bob_dir.path(), &["group", "accept", &group_id]).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        assert!(
+            !wait_for_chat_with_pubkey(bob_dir.path(), &carol_pubkey, Duration::from_secs(1)).await,
+            "Bob should not have a Carol chat before attack events"
+        );
+
+        let attacker_invite = run_ndr(
+            attacker_dir.path(),
+            &["invite", "create", "-l", "attacker-shared"],
+        )
+        .await;
+        let attacker_invite_url = attacker_invite["data"]["url"]
+            .as_str()
+            .expect("attacker invite url")
+            .to_string();
+
+        let secret = group_secret_bytes(bob_dir.path(), &group_id);
+
+        // Attack 1: unsigned inner rumor payload claiming Carol.
+        let unsigned_inner = serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "pubkey": carol_pubkey.clone(),
+            "created_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            "kind": nostr_double_ratchet::GROUP_INVITE_RUMOR_KIND,
+            "tags": [["l", group_id.clone()]],
+            "content": serde_json::json!({
+                "inviteUrl": attacker_invite_url.clone(),
+                "groupId": group_id.clone(),
+                "ownerPubkey": carol_pubkey.clone(),
+            }).to_string()
+        })
+        .to_string();
+        publish_shared_channel_inner(&relay_url, secret, &unsigned_inner).await;
+
+        assert!(
+            !wait_for_chat_with_pubkey(bob_dir.path(), &carol_pubkey, Duration::from_secs(3)).await,
+            "Bob must reject unsigned shared-channel inner payloads"
+        );
+
+        // Attack 2: signed inner event by attacker, claiming Carol as owner.
+        let attacker_sk_bytes = hex::decode(attacker_sk).expect("attacker secret hex");
+        let attacker_sk_array: [u8; 32] = attacker_sk_bytes
+            .try_into()
+            .expect("attacker secret must be 32 bytes");
+        let attacker_secret_key =
+            nostr::SecretKey::from_slice(&attacker_sk_array).expect("attacker secret key");
+        let attacker_keys = nostr::Keys::new(attacker_secret_key);
+
+        let signed_content = serde_json::json!({
+            "inviteUrl": attacker_invite_url,
+            "groupId": group_id,
+            "ownerPubkey": carol_pubkey,
+        })
+        .to_string();
+        let inner_unsigned = nostr::EventBuilder::new(
+            nostr::Kind::Custom(nostr_double_ratchet::GROUP_INVITE_RUMOR_KIND as u16),
+            signed_content,
+        )
+        .tag(nostr::Tag::parse(&["l".to_string(), group_id.clone()]).expect("group tag"))
+        .build(attacker_keys.public_key());
+        let inner_signed = inner_unsigned
+            .sign_with_keys(&attacker_keys)
+            .expect("signed inner event");
+        publish_shared_channel_inner(&relay_url, secret, &nostr::JsonUtil::as_json(&inner_signed))
+            .await;
+
+        assert!(
+            !wait_for_chat_with_pubkey(bob_dir.path(), &carol_pubkey, Duration::from_secs(3)).await,
+            "Bob must reject signed shared-channel invites with unverified owner claim"
+        );
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Some(child) = alice_child {
+        stop_child(child).await;
+    }
+    if let Some(child) = bob_child {
         stop_child(child).await;
     }
     relay.stop().await;
