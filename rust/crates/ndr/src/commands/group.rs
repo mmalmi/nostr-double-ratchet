@@ -3,7 +3,7 @@ use crossbeam_channel::{Receiver, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
     FileStorageAdapter, SenderKeyDistribution, SenderKeyState, Session, SessionManager,
-    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
+    SessionManagerEvent, SharedChannel, StorageAdapter, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
     GROUP_SENDER_KEY_DISTRIBUTION_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
@@ -190,22 +190,121 @@ fn build_session_manager(
     );
     manager.init()?;
     import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
+
+    // Drop any initial SessionManager events (device invite publication, subscribe requests, etc).
+    // Group commands only care about publishing ratchet message events that they explicitly send.
+    loop {
+        match rx.try_recv() {
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
     Ok((manager, rx))
 }
 
-async fn flush_session_manager_events(
-    rx: &Receiver<SessionManagerEvent>,
-    client: &Client,
-) -> Result<()> {
+fn drain_session_manager_message_events(rx: &Receiver<SessionManagerEvent>) -> Vec<nostr::Event> {
+    let mut message_events = Vec::new();
+
     loop {
         match rx.try_recv() {
-            Ok(SessionManagerEvent::PublishSigned(event)) => {
-                send_event_or_ignore(client, event).await?;
+            Ok(SessionManagerEvent::PublishSigned(event))
+                if event.kind.as_u16() == nostr_double_ratchet::MESSAGE_EVENT_KIND as u16 =>
+            {
+                message_events.push(event);
             }
             Ok(_) => {}
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         }
     }
+
+    message_events
+}
+
+async fn publish_events_with_retry(
+    client: &Client,
+    events: &[nostr::Event],
+    attempts: usize,
+    retry_ms: u64,
+) -> bool {
+    if events.is_empty() {
+        return false;
+    }
+
+    for attempt in 0..attempts {
+        let mut all_ok = true;
+        for ev in events {
+            if send_event_or_ignore(client, ev.clone()).await.is_err() {
+                all_ok = false;
+                break;
+            }
+        }
+
+        if all_ok {
+            return true;
+        }
+
+        if attempt + 1 < attempts {
+            tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+        }
+    }
+
+    false
+}
+
+async fn publish_sender_key_distribution_shared_channel(
+    group: &nostr_double_ratchet::group::GroupData,
+    dist_json: &str,
+    key_id: u32,
+    now_ms: u64,
+    now_s: u64,
+    config: &Config,
+    client: &Client,
+) -> Result<()> {
+    let Some(secret_hex) = group.secret.as_deref() else {
+        return Ok(());
+    };
+    let Ok(secret_bytes) = hex::decode(secret_hex) else {
+        return Ok(());
+    };
+    if secret_bytes.len() != 32 {
+        return Ok(());
+    }
+    let mut secret_arr = [0u8; 32];
+    secret_arr.copy_from_slice(&secret_bytes);
+    let Ok(channel) = SharedChannel::new(&secret_arr) else {
+        return Ok(());
+    };
+
+    let my_device_pubkey_hex = config.public_key()?;
+    let my_owner_pubkey_hex = config.owner_public_key_hex()?;
+    let my_device_private_key = config.private_key_bytes()?;
+    let my_device_secret_key = nostr::SecretKey::from_slice(&my_device_private_key)?;
+    let my_device_keys = nostr::Keys::new(my_device_secret_key);
+    let my_device_pk = nostr::PublicKey::from_hex(&my_device_pubkey_hex)?;
+
+    // Include owner pubkey claim so recipients can attribute linked devices correctly.
+    let tags: Vec<Vec<String>> = vec![
+        vec!["l".to_string(), group.id.clone()],
+        vec!["key".to_string(), key_id.to_string()],
+        vec!["ms".to_string(), now_ms.to_string()],
+        vec!["p".to_string(), my_owner_pubkey_hex],
+    ];
+    let nostr_tags: Vec<nostr::Tag> = tags
+        .iter()
+        .filter_map(|t| nostr::Tag::parse(t).ok())
+        .collect();
+
+    let inner_unsigned = nostr::EventBuilder::new(
+        nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+        dist_json,
+    )
+    .tags(nostr_tags)
+    .custom_created_at(nostr::Timestamp::from(now_s))
+    .build(my_device_pk);
+    let inner_signed = inner_unsigned.sign_with_keys(&my_device_keys)?;
+
+    let outer = channel.create_event(&nostr::JsonUtil::as_json(&inner_signed))?;
+    send_event_or_ignore(client, outer).await?;
     Ok(())
 }
 
@@ -263,23 +362,34 @@ async fn fan_out_metadata(
         .tags(nostr_tags)
         .build(my_pk);
 
+        let mut message_events: Vec<nostr::Event> = Vec::new();
         for attempt in 0..MAX_DELIVERY_ATTEMPTS {
             import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
             let event_ids = session_manager
                 .send_event_recipient_only(recipient_owner, unsigned.clone())
                 .unwrap_or_default();
-            let flushed_ok = flush_session_manager_events(&session_manager_rx, &client)
-                .await
-                .is_ok();
+            let drained = drain_session_manager_message_events(&session_manager_rx);
             sync_member_chats_from_session_manager(storage, &session_manager, member)?;
 
-            if flushed_ok && !event_ids.is_empty() {
+            if !drained.is_empty() && !event_ids.is_empty() {
+                message_events = drained;
                 break;
             }
 
             if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
                 tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
             }
+        }
+
+        let published = publish_events_with_retry(
+            &client,
+            &message_events,
+            MAX_DELIVERY_ATTEMPTS,
+            DELIVERY_RETRY_MS,
+        )
+        .await;
+        if published {
+            continue;
         }
     }
 
@@ -308,23 +418,32 @@ async fn fan_out_metadata(
         .tags(nostr_tags)
         .build(my_pk);
 
+        let mut message_events: Vec<nostr::Event> = Vec::new();
         for attempt in 0..MAX_DELIVERY_ATTEMPTS {
             import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
             let event_ids = session_manager
                 .send_event_recipient_only(recipient_owner, unsigned.clone())
                 .unwrap_or_default();
-            let flushed_ok = flush_session_manager_events(&session_manager_rx, &client)
-                .await
-                .is_ok();
+            let drained = drain_session_manager_message_events(&session_manager_rx);
             sync_member_chats_from_session_manager(storage, &session_manager, removed)?;
 
-            if flushed_ok && !event_ids.is_empty() {
+            if !drained.is_empty() && !event_ids.is_empty() {
+                message_events = drained;
                 break;
             }
+
             if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
                 tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
             }
         }
+
+        let _ = publish_events_with_retry(
+            &client,
+            &message_events,
+            MAX_DELIVERY_ATTEMPTS,
+            DELIVERY_RETRY_MS,
+        )
+        .await;
     }
 
     Ok(())
@@ -344,12 +463,13 @@ async fn fan_out_sender_key_distribution(
     config: &Config,
     storage: &Storage,
     client: &Client,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let my_device_pubkey = config.public_key()?;
     let my_owner_pubkey = config.owner_public_key_hex()?;
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
+    let mut delivered_members: Vec<String> = Vec::new();
 
     for member in &group.members {
         if member == &my_owner_pubkey {
@@ -381,6 +501,7 @@ async fn fan_out_sender_key_distribution(
         };
 
         let mut delivered = false;
+        let mut message_events: Vec<nostr::Event> = Vec::new();
         for attempt in 0..MAX_DELIVERY_ATTEMPTS {
             // Pull in any chats that may have been created concurrently by `ndr message listen`.
             import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
@@ -388,19 +509,28 @@ async fn fan_out_sender_key_distribution(
             let event_ids = session_manager
                 .send_event_recipient_only(recipient_owner, unsigned.clone())
                 .unwrap_or_default();
-            let flushed_ok = flush_session_manager_events(&session_manager_rx, client)
-                .await
-                .is_ok();
+            let drained = drain_session_manager_message_events(&session_manager_rx);
             sync_member_chats_from_session_manager(storage, &session_manager, member)?;
 
-            if flushed_ok && !event_ids.is_empty() {
-                delivered = true;
+            if !drained.is_empty() && !event_ids.is_empty() {
+                message_events = drained;
                 break;
             }
 
             if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
                 tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
             }
+        }
+
+        if publish_events_with_retry(
+            client,
+            &message_events,
+            MAX_DELIVERY_ATTEMPTS,
+            DELIVERY_RETRY_MS,
+        )
+        .await
+        {
+            delivered = true;
         }
 
         if !delivered {
@@ -450,9 +580,10 @@ async fn fan_out_sender_key_distribution(
         if !delivered {
             continue;
         }
+        delivered_members.push(member.clone());
     }
 
-    Ok(())
+    Ok(delivered_members)
 }
 
 pub async fn create(
@@ -751,6 +882,12 @@ async fn ensure_group_sender_key(
             dist.sender_event_pubkey = Some(sender_event_pubkey_hex.to_string());
             let dist_json = serde_json::to_string(&dist)?;
 
+            // Reliability: also publish the distribution on the group's SharedChannel so members
+            // can learn our sender-event pubkey and sender key even if 1:1 delivery is delayed.
+            let _ = publish_sender_key_distribution_shared_channel(
+                group, &dist_json, key_id, now_ms, now_s, config, client,
+            )
+            .await;
             let _ = fan_out_sender_key_distribution(
                 group, &dist_json, key_id, now_ms, now_s, config, storage, client,
             )
@@ -771,6 +908,16 @@ async fn ensure_group_sender_key(
         );
         dist.sender_event_pubkey = Some(sender_event_pubkey_hex.to_string());
         let dist_json = serde_json::to_string(&dist)?;
+        let _ = publish_sender_key_distribution_shared_channel(
+            group,
+            &dist_json,
+            sender_key.key_id,
+            now_ms,
+            now_s,
+            config,
+            client,
+        )
+        .await;
         let _ = fan_out_sender_key_distribution(
             group,
             &dist_json,

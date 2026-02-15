@@ -61,6 +61,15 @@ pub struct PubSubEvent {
     pub event_id: Option<String>,
 }
 
+/// Result of accepting an invite through SessionManager.
+#[derive(uniffi::Record)]
+pub struct SessionManagerAcceptInviteResult {
+    pub owner_pubkey_hex: String,
+    pub inviter_device_pubkey_hex: String,
+    pub device_id: String,
+    pub created_new_session: bool,
+}
+
 /// Generate a new keypair.
 #[uniffi::export]
 pub fn generate_keypair() -> FfiKeyPair {
@@ -496,6 +505,58 @@ impl SessionManagerHandle {
         Ok(())
     }
 
+    /// Accept an invite URL using SessionManager's owner-aware routing/auth checks.
+    ///
+    /// This flow also emits the signed invite response via SessionManager pubsub events,
+    /// so hosts should continue draining and publishing `publish_signed` events.
+    pub fn accept_invite_from_url(
+        &self,
+        invite_url: String,
+        owner_pubkey_hint_hex: Option<String>,
+    ) -> Result<SessionManagerAcceptInviteResult, NdrError> {
+        let invite = Invite::from_url(&invite_url)?;
+        let owner_pubkey_hint = owner_pubkey_hint_hex
+            .as_deref()
+            .map(nostr_double_ratchet::utils::pubkey_from_hex)
+            .transpose()?;
+
+        let manager = self.inner.lock().unwrap();
+        manager.init()?;
+        let accepted = manager.accept_invite(&invite, owner_pubkey_hint)?;
+
+        Ok(SessionManagerAcceptInviteResult {
+            owner_pubkey_hex: accepted.owner_pubkey.to_hex(),
+            inviter_device_pubkey_hex: accepted.inviter_device_pubkey.to_hex(),
+            device_id: accepted.device_id,
+            created_new_session: accepted.created_new_session,
+        })
+    }
+
+    /// Accept an invite event JSON using SessionManager's owner-aware routing/auth checks.
+    pub fn accept_invite_from_event_json(
+        &self,
+        event_json: String,
+        owner_pubkey_hint_hex: Option<String>,
+    ) -> Result<SessionManagerAcceptInviteResult, NdrError> {
+        let event: nostr::Event = serde_json::from_str(&event_json)?;
+        let invite = Invite::from_event(&event)?;
+        let owner_pubkey_hint = owner_pubkey_hint_hex
+            .as_deref()
+            .map(nostr_double_ratchet::utils::pubkey_from_hex)
+            .transpose()?;
+
+        let manager = self.inner.lock().unwrap();
+        manager.init()?;
+        let accepted = manager.accept_invite(&invite, owner_pubkey_hint)?;
+
+        Ok(SessionManagerAcceptInviteResult {
+            owner_pubkey_hex: accepted.owner_pubkey.to_hex(),
+            inviter_device_pubkey_hex: accepted.inviter_device_pubkey.to_hex(),
+            device_id: accepted.device_id,
+            created_new_session: accepted.created_new_session,
+        })
+    }
+
     /// Send a text message to a recipient.
     pub fn send_text(
         &self,
@@ -761,6 +822,7 @@ impl SessionManagerHandle {
                             sender,
                             content,
                             event_id,
+                            ..
                         } => PubSubEvent {
                             kind: "decrypted_message".to_string(),
                             subid: None,

@@ -29,9 +29,8 @@ async fn test_group_create_autogenerates_identity_without_warnings() {
 
     let member = nostr::Keys::generate().public_key().to_hex();
 
-    let output = Command::new("cargo")
+    let output = Command::new(common::ndr_binary())
         .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
         .arg(dir.path())

@@ -8,9 +8,8 @@ use nostr_double_ratchet::Invite;
 
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
-    let output = tokio::process::Command::new("cargo")
+    let output = tokio::process::Command::new(common::ndr_binary())
         .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
         .arg(data_dir)

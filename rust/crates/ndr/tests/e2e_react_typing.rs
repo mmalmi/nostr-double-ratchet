@@ -15,9 +15,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::new("cargo")
+    let output = Command::new(common::ndr_binary())
         .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
         .arg(data_dir)
@@ -180,9 +179,8 @@ async fn test_react_and_typing_e2e() {
     println!("TS sent reply with id: {}", reply_id);
 
     // Start ndr listen to receive the reply from TS
-    let mut listen_child = Command::new("cargo")
+    let mut listen_child = Command::new(common::ndr_binary())
         .env("NOSTR_PREFER_LOCAL", "0")
-        .args(["run", "-q", "-p", "ndr", "--"])
         .arg("--json")
         .arg("--data-dir")
         .arg(bob_dir.path())

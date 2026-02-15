@@ -127,6 +127,169 @@ async fn test_send_message() {
 }
 
 #[tokio::test]
+async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let sender_keys = nostr::Keys::generate();
+    let our_device_id = sender_keys.public_key().to_hex();
+
+    let mut config = Config::load(temp.path()).unwrap();
+    config
+        .set_private_key(&sender_keys.secret_key().to_secret_hex())
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
+    let output = Output::new(true);
+
+    let recipient_owner_keys = nostr::Keys::generate();
+    let recipient_device1_keys = nostr::Keys::generate();
+    let recipient_device2_keys = nostr::Keys::generate();
+    let recipient_owner = recipient_owner_keys.public_key();
+    let device1_id = recipient_device1_keys.public_key().to_hex();
+    let device2_id = recipient_device2_keys.public_key().to_hex();
+
+    // Build two sender-side sessions for two recipient devices under the same owner.
+    let invite1 = nostr_double_ratchet::Invite::create_new(
+        recipient_device1_keys.public_key(),
+        Some(device1_id.clone()),
+        None,
+    )
+    .unwrap();
+    let (session1, _) = invite1
+        .accept_with_owner(
+            sender_keys.public_key(),
+            sender_keys.secret_key().to_secret_bytes(),
+            Some(our_device_id.clone()),
+            Some(sender_keys.public_key()),
+        )
+        .unwrap();
+
+    let invite2 = nostr_double_ratchet::Invite::create_new(
+        recipient_device2_keys.public_key(),
+        Some(device2_id.clone()),
+        None,
+    )
+    .unwrap();
+    let (session2, _) = invite2
+        .accept_with_owner(
+            sender_keys.public_key(),
+            sender_keys.secret_key().to_secret_bytes(),
+            Some(our_device_id.clone()),
+            Some(sender_keys.public_key()),
+        )
+        .unwrap();
+
+    // Legacy chat storage tracks a single selected device session.
+    storage
+        .save_chat(&StoredChat {
+            id: "peer-chat".to_string(),
+            their_pubkey: recipient_owner.to_hex(),
+            device_id: Some(device1_id.clone()),
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state: serde_json::to_string(&session1.state).unwrap(),
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+
+    // Persist SessionManager state with both recipient devices + AppKeys authorization.
+    {
+        let session_manager_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> =
+            std::sync::Arc::new(
+                nostr_double_ratchet::FileStorageAdapter::new(
+                    storage.data_dir().join("session_manager"),
+                )
+                .unwrap(),
+            );
+        let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
+        let manager = nostr_double_ratchet::SessionManager::new(
+            sender_keys.public_key(),
+            sender_keys.secret_key().to_secret_bytes(),
+            our_device_id.clone(),
+            sender_keys.public_key(),
+            sm_tx,
+            Some(session_manager_store),
+            None,
+        );
+        manager.init().unwrap();
+        manager
+            .import_session_state(
+                recipient_owner,
+                Some(device1_id.clone()),
+                session1.state.clone(),
+            )
+            .unwrap();
+        manager
+            .import_session_state(
+                recipient_owner,
+                Some(device2_id.clone()),
+                session2.state.clone(),
+            )
+            .unwrap();
+
+        let mut app_keys = nostr_double_ratchet::AppKeys::new(Vec::new());
+        app_keys.add_device(nostr_double_ratchet::DeviceEntry::new(
+            recipient_device1_keys.public_key(),
+            1,
+        ));
+        app_keys.add_device(nostr_double_ratchet::DeviceEntry::new(
+            recipient_device2_keys.public_key(),
+            1,
+        ));
+        let app_keys_event = app_keys
+            .get_event(recipient_owner)
+            .sign_with_keys(&recipient_owner_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_event);
+    }
+
+    send(
+        "peer-chat",
+        "fanout",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+        &output,
+    )
+    .await
+    .unwrap();
+
+    let session_manager_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> =
+        std::sync::Arc::new(
+            nostr_double_ratchet::FileStorageAdapter::new(
+                storage.data_dir().join("session_manager"),
+            )
+            .unwrap(),
+        );
+    let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
+    let manager = nostr_double_ratchet::SessionManager::new(
+        sender_keys.public_key(),
+        sender_keys.secret_key().to_secret_bytes(),
+        our_device_id,
+        sender_keys.public_key(),
+        sm_tx,
+        Some(session_manager_store),
+        None,
+    );
+    manager.init().unwrap();
+
+    let mut recipient_sends: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    for (owner, device_id, state) in manager.export_active_sessions() {
+        if owner == recipient_owner {
+            recipient_sends.insert(device_id, state.sending_chain_message_number);
+        }
+    }
+
+    assert_eq!(recipient_sends.get(&device1_id), Some(&1));
+    assert_eq!(recipient_sends.get(&device2_id), Some(&1));
+}
+
+#[tokio::test]
 async fn test_send_message_with_ttl_adds_expiration_tag() {
     init_test_env();
 
@@ -493,7 +656,7 @@ fn build_rumor_json(
     tags: Vec<Vec<String>>,
 ) -> String {
     serde_json::json!({
-        "id": "rumor-id",
+        "id": uuid::Uuid::new_v4().to_string(),
         "pubkey": sender_owner_hex,
         "created_at": 0,
         "kind": kind,

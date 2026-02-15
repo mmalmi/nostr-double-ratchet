@@ -49,7 +49,23 @@ impl StorageAdapter for FileStorageAdapter {
             })?;
         }
 
-        fs::write(&path, value)
+        // Atomic-ish write so other processes never observe a partially-written JSON blob.
+        // Use a unique temp file to avoid interleaving when multiple writers race.
+        let tmp_path = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+        fs::write(&tmp_path, value)
+            .map_err(|e| crate::Error::Storage(format!("Failed to write file: {}", e)))?;
+
+        #[cfg(windows)]
+        {
+            // `rename` on Windows won't overwrite an existing file.
+            if path.exists() {
+                fs::remove_file(&path).map_err(|e| {
+                    crate::Error::Storage(format!("Failed to replace existing file: {}", e))
+                })?;
+            }
+        }
+
+        fs::rename(&tmp_path, &path)
             .map_err(|e| crate::Error::Storage(format!("Failed to write file: {}", e)))?;
 
         Ok(())

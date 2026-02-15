@@ -202,6 +202,46 @@ async fn read_until_event(
     None
 }
 
+async fn read_until_group_metadata_action(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    group_id: &str,
+    action: &str,
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    let debug_wait = std::env::var_os("NDR_TEST_DEBUG_WAIT").is_some();
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let mut line = String::new();
+        match tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => return None, // EOF
+            Ok(Ok(_)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if debug_wait {
+                    println!("[wait:group_metadata] {}", trimmed);
+                }
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                    continue;
+                };
+                if json.get("event").and_then(|v| v.as_str()) != Some("group_metadata") {
+                    continue;
+                }
+                if json.get("group_id").and_then(|v| v.as_str()) != Some(group_id) {
+                    continue;
+                }
+                if json.get("action").and_then(|v| v.as_str()) != Some(action) {
+                    continue;
+                }
+                return Some(json);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 async fn read_until_event_with_content(
     reader: &mut BufReader<tokio::process::ChildStdout>,
     event_name: &str,
@@ -1043,7 +1083,12 @@ async fn test_group_chat_six_participants_everyone_receives() {
                     Duration::from_secs(10),
                 )
                 .await
-                .expect("recipient should receive group_message");
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} should receive group_message '{}' from {}",
+                        participants[recipient_idx].name, msg, sender.name
+                    )
+                });
                 assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
                 assert_eq!(event["content"].as_str(), Some(msg.as_str()));
             }
@@ -1921,8 +1966,13 @@ async fn test_listen_group_remove_member() {
         .await;
 
         // Bob should receive "removed".
-        let bob_removed =
-            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(20)).await;
+        let bob_removed = read_until_group_metadata_action(
+            &mut bob_stdout,
+            &group_id,
+            "removed",
+            Duration::from_secs(20),
+        )
+        .await;
         if let Some(event) = bob_removed {
             assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
             assert_eq!(event["action"].as_str(), Some("removed"));
@@ -1934,8 +1984,13 @@ async fn test_listen_group_remove_member() {
         }
 
         // Carol should receive "updated".
-        let carol_updated =
-            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(20)).await;
+        let carol_updated = read_until_group_metadata_action(
+            &mut carol_stdout,
+            &group_id,
+            "updated",
+            Duration::from_secs(20),
+        )
+        .await;
         if let Some(event) = carol_updated {
             assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
             assert_eq!(event["action"].as_str(), Some("updated"));

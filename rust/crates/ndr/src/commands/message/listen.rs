@@ -2204,16 +2204,19 @@ pub async fn listen(
                     }
                 }
 
-                if !session_group_decrypts.is_empty() {
-                    if let Some((sender_event_pubkey, key_id, outer_event)) =
-                        maybe_unmapped_group_outer.filter(|_| !decrypted_current_event)
-                    {
-                        pending_group_sender_events
-                            .entry((sender_event_pubkey, key_id))
-                            .or_default()
-                            .push(outer_event);
-                    }
+                // If this looks like a per-sender published group outer event but we don't yet
+                // have the sender_event_pubkey mapping (i.e. sender key distribution not processed
+                // yet), stash it so we can decrypt it once we learn (sender_event_pubkey,key_id).
+                if let Some((sender_event_pubkey, key_id, outer_event)) =
+                    maybe_unmapped_group_outer.filter(|_| !decrypted_current_event)
+                {
+                    pending_group_sender_events
+                        .entry((sender_event_pubkey, key_id))
+                        .or_default()
+                        .push(outer_event);
+                }
 
+                if !session_group_decrypts.is_empty() {
                     for (
                         sender_owner_pubkey,
                         sender_device_pubkey,

@@ -1,7 +1,6 @@
 use anyhow::Result;
-use nostr::Tag;
 use nostr_double_ratchet::{
-    FileStorageAdapter, Session, SessionManager, StorageAdapter, CHAT_SETTINGS_KIND,
+    FileStorageAdapter, SessionManager, SessionManagerEvent, StorageAdapter,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -237,53 +236,85 @@ pub async fn ttl(
     }
 
     // Send an encrypted settings rumor so the peer can auto-adopt.
-    let session_state: nostr_double_ratchet::SessionState =
-        serde_json::from_str(&chat.session_state).map_err(|e| {
+    let recipient = nostr::PublicKey::from_hex(&chat.their_pubkey)
+        .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
+
+    let ttl_to_send = ttl_seconds.unwrap_or(0);
+
+    let our_private_key = config.private_key_bytes()?;
+    let our_pubkey_hex = config.public_key()?;
+    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
+    let owner_pubkey_hex = config.owner_public_key_hex()?;
+    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
+
+    let session_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
+        storage.data_dir().join("session_manager"),
+    )?);
+    let (sm_tx, sm_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
+    let manager = SessionManager::new(
+        our_pubkey,
+        our_private_key,
+        our_pubkey_hex,
+        owner_pubkey,
+        sm_tx,
+        Some(session_manager_store),
+        None,
+    );
+    manager.init()?;
+
+    // Import the current selected session so we can send via SessionManager.
+    let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
+    let state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
+        .map_err(|e| {
             anyhow::anyhow!(
                 "Invalid session state: {}. Chat may not be properly initialized.",
                 e
             )
         })?;
-    let mut session = Session::new(session_state, chat.id.clone());
+    manager.import_session_state(recipient, Some(device_id), state)?;
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-    let now_s = now.as_secs();
-    let now_ms = now.as_millis() as u64;
-
-    let recipient = nostr::PublicKey::from_hex(&chat.their_pubkey)
-        .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
-
-    let payload = serde_json::json!({
-        "type": "chat-settings",
-        "v": 1,
-        "messageTtlSeconds": ttl_seconds,
-    })
-    .to_string();
-
-    let tags = vec![
-        Tag::parse(&["p".to_string(), recipient.to_hex()])
-            .map_err(|e| anyhow::anyhow!("Invalid tag: {}", e))?,
-        Tag::parse(&["ms".to_string(), now_ms.to_string()])
-            .map_err(|e| anyhow::anyhow!("Invalid tag: {}", e))?,
-    ];
-
-    let owner_pk = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
-    let unsigned =
-        nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_SETTINGS_KIND as u16), &payload)
-            .tags(tags)
-            .custom_created_at(nostr::Timestamp::from(now_s))
-            .build(owner_pk);
-
-    let encrypted_event = session
-        .send_event(unsigned)
-        .map_err(|e| anyhow::anyhow!("Failed to encrypt settings: {}", e))?;
-
-    // Persist ratcheted state before network I/O.
-    chat.session_state = serde_json::to_string(&session.state)?;
-    storage.save_chat(&chat)?;
+    let event_ids = manager.send_chat_settings(recipient, ttl_to_send)?;
 
     let client = connect_client(config).await?;
-    send_event_or_ignore(&client, encrypted_event.clone()).await?;
+    let signing_keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
+
+    // Drain and publish only message events (kind 1060), skipping any invite/device housekeeping.
+    let mut published_events = Vec::new();
+    while let Ok(ev) = sm_rx.try_recv() {
+        let signed = match ev {
+            SessionManagerEvent::Publish(unsigned) => unsigned.sign_with_keys(&signing_keys)?,
+            SessionManagerEvent::PublishSigned(signed) => signed,
+            SessionManagerEvent::Subscribe { .. }
+            | SessionManagerEvent::Unsubscribe(_)
+            | SessionManagerEvent::ReceivedEvent(_)
+            | SessionManagerEvent::DecryptedMessage { .. } => continue,
+        };
+        if signed.kind.as_u16() != nostr_double_ratchet::MESSAGE_EVENT_KIND as u16 {
+            continue;
+        }
+        send_event_or_ignore(&client, signed.clone()).await?;
+        published_events.push(signed);
+    }
+
+    // Update the stored selected session state from SessionManager.
+    let mut sessions: Vec<(String, nostr_double_ratchet::SessionState)> = manager
+        .export_active_sessions()
+        .into_iter()
+        .filter(|(owner, _, _)| *owner == recipient)
+        .map(|(_, device_id, state)| (device_id, state))
+        .collect();
+    sessions.sort_by(|a, b| a.0.cmp(&b.0));
+    if !sessions.is_empty() {
+        let selected_idx = chat
+            .device_id
+            .as_ref()
+            .and_then(|current| sessions.iter().position(|(d, _)| d == current))
+            .unwrap_or(0);
+        let (selected_device_id, selected_state) = sessions[selected_idx].clone();
+        chat.device_id = Some(selected_device_id);
+        chat.session_state = serde_json::to_string(&selected_state)?;
+        storage.save_chat(&chat)?;
+    }
 
     output.success(
         "chat.ttl",
@@ -292,7 +323,10 @@ pub async fn ttl(
             "their_pubkey": chat.their_pubkey,
             "message_ttl_seconds": ttl_seconds,
             "local_only": false,
-            "event": nostr::JsonUtil::as_json(&encrypted_event),
+            "event": published_events
+                .first()
+                .map(nostr::JsonUtil::as_json)
+                .unwrap_or_else(|| event_ids.first().cloned().unwrap_or_default()),
         }),
     );
 
