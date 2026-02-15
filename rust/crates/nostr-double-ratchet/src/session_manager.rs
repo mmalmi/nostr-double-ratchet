@@ -856,11 +856,15 @@ impl SessionManager {
         }
 
         // Add to history for all target owners.
-        let mut history = self.message_history.lock().unwrap();
-        for owner in owners.iter().copied() {
-            history.entry(owner).or_default().push(event.clone());
+        //
+        // Avoid persisting ephemeral typing indicators here: they are noisy, not meaningful to replay
+        // to newly discovered devices, and can grow memory usage in long-running processes.
+        if event.kind.as_u16() != crate::TYPING_KIND as u16 {
+            let mut history = self.message_history.lock().unwrap();
+            for owner in owners.iter().copied() {
+                history.entry(owner).or_default().push(event.clone());
+            }
         }
-        drop(history);
 
         // Ensure all target owners are set up.
         for owner in owners.iter().copied() {
@@ -2343,6 +2347,23 @@ mod tests {
         let result = manager.send_text(recipient, "test".to_string(), None);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_send_typing_does_not_record_in_message_history() {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key();
+        let identity_key = keys.secret_key().to_secret_bytes();
+        let device_id = "test-device".to_string();
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
+
+        let recipient = Keys::generate().public_key();
+        manager.send_typing(recipient, None).unwrap();
+
+        let history = manager.message_history.lock().unwrap();
+        assert!(history.is_empty());
     }
 
     #[test]
