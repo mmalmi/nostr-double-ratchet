@@ -104,6 +104,7 @@ fn setup() -> (TempDir, Config, Storage, String) {
 
 #[tokio::test]
 async fn test_send_message() {
+    init_test_env();
     let (_temp, config, storage, _) = setup();
     let output = Output::new(true);
 
@@ -123,6 +124,35 @@ async fn test_send_message() {
     let messages = storage.get_messages("test-chat", 10).unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].content, "Hello!");
+    assert!(messages[0].is_outgoing);
+}
+
+#[tokio::test]
+async fn test_send_stores_inner_rumor_id_as_message_id() {
+    init_test_env();
+    let (_temp, config, storage, _) = setup();
+
+    let sent = super::send::send_message_impl(
+        "test-chat",
+        "Hello inner id!",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+    )
+    .await
+    .unwrap();
+
+    assert!(!sent.id.is_empty());
+    assert_eq!(sent.id, sent.inner_message_id);
+    assert!(!sent.event_ids.is_empty());
+    assert!(!sent.event_ids.contains(&sent.inner_message_id));
+
+    let messages = storage.get_messages("test-chat", 10).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, sent.inner_message_id);
+    assert_eq!(messages[0].content, "Hello inner id!");
     assert!(messages[0].is_outgoing);
 }
 

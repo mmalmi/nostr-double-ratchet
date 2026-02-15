@@ -2,7 +2,16 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub(super) struct MessageSent {
+    /// Stable message ID (inner/rumor event id). This is the ID to use for replies/reactions.
     pub(super) id: String,
+    /// Explicit alias for the stable inner/rumor event id.
+    ///
+    /// Keep this for bot integrations that prefer a dedicated field name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(super) inner_message_id: String,
+    /// Published outer event ids (one per recipient device when fanning out).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) event_ids: Vec<String>,
     pub(super) chat_id: String,
     pub(super) content: String,
     pub(super) timestamp: u64,

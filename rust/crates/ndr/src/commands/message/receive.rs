@@ -47,6 +47,11 @@ pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Re
                     .unwrap_or(CHAT_MESSAGE_KIND as u64) as u32;
 
                 let timestamp = event.created_at.as_u64();
+                // Prefer the decrypted (inner/rumor) id when available; outer event ids vary per-device.
+                let msg_id = decrypted_event["id"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| event.id.to_hex());
                 let from_pubkey_hex = chat.their_pubkey.clone();
                 let expires_at = extract_expiration_tag_seconds(&decrypted_event);
 
@@ -87,7 +92,6 @@ pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Re
                 if let Some(gid) = group_id {
                     // Group message
                     if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
-                        let msg_id = event.id.to_hex();
                         if is_expired(expires_at, now_seconds) {
                             storage.save_chat(&updated_chat)?;
                             output.success(
@@ -120,7 +124,7 @@ pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Re
                         "receive",
                         serde_json::json!({
                             "group_id": gid,
-                            "message_id": event.id.to_hex(),
+                            "message_id": msg_id,
                             "sender_pubkey": from_pubkey_hex,
                             "content": content,
                             "timestamp": timestamp,
@@ -128,7 +132,6 @@ pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Re
                     );
                 } else {
                     // 1:1 message
-                    let msg_id = event.id.to_hex();
                     if is_expired(expires_at, now_seconds) {
                         storage.save_chat(&updated_chat)?;
                         output.success(

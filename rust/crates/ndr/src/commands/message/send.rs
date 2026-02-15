@@ -315,23 +315,30 @@ pub(super) async fn prepare_send_message(
     }
 
     let owner_pk = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
-    let unsigned = nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), message)
-        .tags(nostr_tags)
-        .custom_created_at(nostr::Timestamp::from(now_s))
-        .build(owner_pk);
+    let mut unsigned =
+        nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), message)
+            .tags(nostr_tags)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(owner_pk);
+
+    // Ensure the rumor id is computed and stable (this is the id we expose to bots/UI).
+    unsigned.id = None;
+    unsigned.ensure_id();
+    let inner_id = unsigned
+        .id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Encrypt the message as a kind-1060 outer event.
     let encrypted_event = session
         .send_event(unsigned)
         .map_err(|e| anyhow::anyhow!("Failed to encrypt message: {}", e))?;
 
-    // Use the outer event ID as message ID (for reaction compatibility with iris-chat)
-    let msg_id = encrypted_event.id.to_hex();
-
     let from_pubkey = config.public_key()?;
 
     let stored_message = StoredMessage {
-        id: msg_id.clone(),
+        id: inner_id.clone(),
         chat_id: chat_id.to_string(),
         from_pubkey,
         content: message.to_string(),
@@ -359,6 +366,31 @@ pub async fn send(
     storage: &Storage,
     output: &Output,
 ) -> Result<()> {
+    let sent = send_message_impl(
+        target,
+        message,
+        reply_to,
+        ttl_seconds,
+        expires_at_seconds,
+        config,
+        storage,
+    )
+    .await?;
+
+    output.success("send", sent);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn send_message_impl(
+    target: &str,
+    message: &str,
+    reply_to: Option<&str>,
+    ttl_seconds: Option<u64>,
+    expires_at_seconds: Option<u64>,
+    config: &Config,
+    storage: &Storage,
+) -> Result<MessageSent> {
     if !config.is_logged_in() {
         anyhow::bail!("Not logged in. Use 'ndr login <key>' first.");
     }
@@ -397,15 +429,25 @@ pub async fn send(
     }
 
     let owner_pk = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
-    let unsigned = nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), message)
-        .tags(nostr_tags)
-        .custom_created_at(nostr::Timestamp::from(now_s))
-        .build(owner_pk);
+    let mut unsigned =
+        nostr::EventBuilder::new(nostr::Kind::Custom(CHAT_MESSAGE_KIND as u16), message)
+            .tags(nostr_tags)
+            .custom_created_at(nostr::Timestamp::from(now_s))
+            .build(owner_pk);
+
+    // Ensure id is set and matches what will be encrypted and decrypted later.
+    unsigned.id = None;
+    unsigned.ensure_id();
     let inner_id = unsigned
         .id
         .as_ref()
         .map(|id| id.to_string())
         .unwrap_or_default();
+    let stable_message_id = if inner_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        inner_id.clone()
+    };
 
     let (manager, manager_rx, signing_keys, owner_pubkey_hex) =
         build_session_manager(config, storage)?;
@@ -424,19 +466,8 @@ pub async fn send(
     chat.last_message_at = Some(now_s);
     storage.save_chat(&chat)?;
 
-    let fallback_id = if inner_id.is_empty() {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        inner_id
-    };
-    let msg_id = published_events
-        .first()
-        .map(|evt| evt.id.to_hex())
-        .or_else(|| event_ids.first().cloned())
-        .unwrap_or(fallback_id);
-
     let stored_message = StoredMessage {
-        id: msg_id.clone(),
+        id: stable_message_id.clone(),
         chat_id: chat.id.clone(),
         from_pubkey: config.public_key()?,
         content: message.to_string(),
@@ -446,21 +477,18 @@ pub async fn send(
     };
     storage.save_message(&stored_message)?;
 
-    output.success(
-        "send",
-        MessageSent {
-            id: msg_id,
-            chat_id: chat.id,
-            content: message.to_string(),
-            timestamp: now_s,
-            event: published_events
-                .first()
-                .map(nostr::JsonUtil::as_json)
-                .unwrap_or_default(),
-        },
-    );
-
-    Ok(())
+    Ok(MessageSent {
+        id: stable_message_id.clone(),
+        inner_message_id: inner_id,
+        event_ids,
+        chat_id: chat.id,
+        content: message.to_string(),
+        timestamp: now_s,
+        event: published_events
+            .first()
+            .map(nostr::JsonUtil::as_json)
+            .unwrap_or_default(),
+    })
 }
 
 /// React to a message
