@@ -485,7 +485,7 @@ pub async fn listen(
     };
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
     use notify::{Event as NotifyEvent, EventKind, RecursiveMode, Watcher};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -685,6 +685,13 @@ pub async fn listen(
     let mut last_refresh = Instant::now();
     let mut subscribed_manager_filters: HashSet<String> = HashSet::new();
 
+    // Deduplicate events across relays and overlapping subscriptions.
+    // Without this, the same event can be processed multiple times (CPU heavy) and
+    // can contribute to unbounded notification backlog (memory heavy).
+    const MAX_SEEN_EVENT_IDS: usize = 20_000;
+    let mut seen_event_ids: HashSet<String> = HashSet::new();
+    let mut seen_event_ids_order: VecDeque<String> = VecDeque::new();
+
     // If we receive sender-key messages before the sender-key distribution, keep them here and retry
     // when the distribution arrives.
     let mut pending_sender_key_messages: HashMap<(String, String, u32), Vec<nostr::Event>> =
@@ -869,6 +876,16 @@ pub async fn listen(
 
         if let RelayPoolNotification::Event { event, .. } = notification {
             let current_event_id = event.id.to_hex();
+            if seen_event_ids.contains(&current_event_id) {
+                continue;
+            }
+            seen_event_ids.insert(current_event_id.clone());
+            seen_event_ids_order.push_back(current_event_id.clone());
+            if seen_event_ids_order.len() > MAX_SEEN_EVENT_IDS {
+                if let Some(old) = seen_event_ids_order.pop_front() {
+                    seen_event_ids.remove(&old);
+                }
+            }
             let current_timestamp = event.created_at.as_u64();
             session_manager.process_received_event((*event).clone());
             let decrypted_events = flush_session_manager_events(

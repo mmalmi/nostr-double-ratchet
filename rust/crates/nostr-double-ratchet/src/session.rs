@@ -464,6 +464,8 @@ impl Session {
             self.state.receiving_chain_message_number += 1;
         }
 
+        // Bound stored skipped keys to avoid unbounded memory growth when many messages are missed.
+        prune_skipped_message_keys(&mut entry.message_keys);
         Ok(())
     }
 
@@ -685,4 +687,70 @@ fn normalize_inner_rumor_id(plaintext: &str) -> String {
     obj.insert("id".to_string(), serde_json::Value::String(computed));
 
     serde_json::to_string(&v).unwrap_or_else(|_| plaintext.to_string())
+}
+
+fn prune_skipped_message_keys(map: &mut HashMap<u32, [u8; 32]>) {
+    if map.len() <= MAX_SKIP {
+        return;
+    }
+
+    // Drop the oldest skipped keys first (smallest message numbers).
+    // This sacrifices decrypting very old out-of-order messages in exchange for bounded memory.
+    let mut keys: Vec<u32> = map.keys().copied().collect();
+    keys.sort_unstable();
+    let to_remove = map.len().saturating_sub(MAX_SKIP);
+    for k in keys.into_iter().take(to_remove) {
+        map.remove(&k);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skip_message_keys_prunes_to_max_skip() {
+        let our_keys = Keys::generate();
+        let our_next = SerializableKeyPair {
+            public_key: our_keys.public_key(),
+            private_key: our_keys.secret_key().to_secret_bytes(),
+        };
+
+        let mut session = Session::new(
+            SessionState {
+                root_key: [0u8; 32],
+                their_current_nostr_public_key: None,
+                their_next_nostr_public_key: None,
+                our_current_nostr_key: None,
+                our_next_nostr_key: our_next,
+                receiving_chain_key: Some([7u8; 32]),
+                sending_chain_key: None,
+                sending_chain_message_number: 0,
+                receiving_chain_message_number: 0,
+                previous_sending_chain_message_count: 0,
+                skipped_keys: HashMap::new(),
+            },
+            "test".to_string(),
+        );
+
+        let sender = Keys::generate().public_key();
+
+        session
+            .skip_message_keys(MAX_SKIP as u32, &sender)
+            .unwrap();
+        session
+            .skip_message_keys((MAX_SKIP * 2) as u32, &sender)
+            .unwrap();
+
+        let entry = session.state.skipped_keys.get(&sender).unwrap();
+        assert!(
+            entry.message_keys.len() <= MAX_SKIP,
+            "expected skipped keys to be pruned to MAX_SKIP"
+        );
+        // Oldest key should be gone; newest should remain.
+        assert!(!entry.message_keys.contains_key(&0));
+        assert!(entry
+            .message_keys
+            .contains_key(&((MAX_SKIP * 2 - 1) as u32)));
+    }
 }
