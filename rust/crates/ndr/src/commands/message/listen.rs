@@ -247,14 +247,11 @@ fn resolve_chat_for_one_to_one_decrypted(
 }
 
 fn fallback_event_id(event_id: Option<&str>, decrypted_event: &serde_json::Value) -> String {
-    event_id
+    decrypted_event
+        .get("id")
+        .and_then(|v| v.as_str())
         .map(str::to_string)
-        .or_else(|| {
-            decrypted_event
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
+        .or_else(|| event_id.map(str::to_string))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
