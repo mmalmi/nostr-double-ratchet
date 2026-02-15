@@ -41,14 +41,18 @@ pub struct NostrFilter {
     pub authors: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kinds: Option<Vec<u32>>,
-    #[serde(rename = "#p", skip_serializing_if = "Option::is_none")]
-    pub p_tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub until: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Arbitrary NIP-01 tag filters like "#p", "#d", "#l", etc.
+    ///
+    /// The value list matches on the 2nd element of a Nostr tag:
+    /// filter {"#d":["x"]} matches event tag ["d","x",...].
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub tag_filters: HashMap<String, Vec<String>>,
 }
 
 impl NostrFilter {
@@ -68,11 +72,17 @@ impl NostrFilter {
                 return false;
             }
         }
-        if let Some(ref p_tags) = self.p_tags {
-            let has_match = event
-                .tags
-                .iter()
-                .any(|t| t.len() >= 2 && t[0] == "p" && p_tags.contains(&t[1]));
+        for (key, vals) in &self.tag_filters {
+            let Some(tag_name) = key.strip_prefix('#') else {
+                continue;
+            };
+            if tag_name.is_empty() || vals.is_empty() {
+                continue;
+            }
+
+            let has_match = event.tags.iter().any(|t| {
+                t.len() >= 2 && t[0] == tag_name && vals.iter().any(|v| v == &t[1])
+            });
             if !has_match {
                 return false;
             }
@@ -336,5 +346,36 @@ mod tests {
         assert!(relay.url().is_some());
         println!("Relay started at: {}", addr);
         relay.stop().await;
+    }
+
+    #[test]
+    fn test_filter_matches_arbitrary_tag_filters() {
+        let event = NostrEvent {
+            id: "e1".to_string(),
+            pubkey: "pk1".to_string(),
+            created_at: 123,
+            kind: 30078,
+            tags: vec![
+                vec!["d".to_string(), "double-ratchet/app-keys".to_string()],
+                vec!["l".to_string(), "double-ratchet/invites".to_string()],
+                vec!["p".to_string(), "someone".to_string()],
+            ],
+            content: "".to_string(),
+            sig: "sig".to_string(),
+        };
+
+        let filter: NostrFilter =
+            serde_json::from_str("{\"#d\":[\"double-ratchet/app-keys\"]}").unwrap();
+        assert!(filter.matches(&event));
+
+        let filter: NostrFilter =
+            serde_json::from_str("{\"#l\":[\"double-ratchet/invites\"]}").unwrap();
+        assert!(filter.matches(&event));
+
+        let filter: NostrFilter = serde_json::from_str("{\"#p\":[\"someone\"]}").unwrap();
+        assert!(filter.matches(&event));
+
+        let filter: NostrFilter = serde_json::from_str("{\"#d\":[\"nope\"]}").unwrap();
+        assert!(!filter.matches(&event));
     }
 }
