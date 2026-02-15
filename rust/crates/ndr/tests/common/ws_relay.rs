@@ -80,9 +80,10 @@ impl NostrFilter {
                 continue;
             }
 
-            let has_match = event.tags.iter().any(|t| {
-                t.len() >= 2 && t[0] == tag_name && vals.iter().any(|v| v == &t[1])
-            });
+            let has_match = event
+                .tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == tag_name && vals.iter().any(|v| v == &t[1]));
             if !has_match {
                 return false;
             }

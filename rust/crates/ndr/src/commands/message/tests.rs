@@ -509,6 +509,42 @@ async fn test_send_updates_last_message_at() {
     assert!(after.last_message_at.is_some());
 }
 
+#[tokio::test]
+async fn test_receive_typing_does_not_save_message() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let storage = Storage::open(temp.path()).unwrap();
+    let output = Output::new(true);
+
+    let (_alice_keys, bob_keys, mut bob_session, alice_session) = create_test_session_pair();
+
+    let chat_id = "peer-chat".to_string();
+    let session_state = serde_json::to_string(&alice_session.state).unwrap();
+    storage
+        .save_chat(&StoredChat {
+            id: chat_id.clone(),
+            their_pubkey: bob_keys.public_key().to_hex(),
+            device_id: None,
+            created_at: 1234567890,
+            last_message_at: None,
+            session_state,
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+
+    let typing_event = bob_session.send_typing().unwrap();
+    receive(&typing_event.as_json(), &storage, &output)
+        .await
+        .unwrap();
+
+    let messages = storage.get_messages(&chat_id, 10).unwrap();
+    assert_eq!(messages.len(), 0);
+
+    let chat = storage.get_chat(&chat_id).unwrap().unwrap();
+    assert!(chat.last_message_at.is_none());
+}
+
 #[test]
 fn test_resolve_target_by_chat_id() {
     let (_temp, _config, storage, _) = setup();

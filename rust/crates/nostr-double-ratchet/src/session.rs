@@ -735,9 +735,7 @@ mod tests {
 
         let sender = Keys::generate().public_key();
 
-        session
-            .skip_message_keys(MAX_SKIP as u32, &sender)
-            .unwrap();
+        session.skip_message_keys(MAX_SKIP as u32, &sender).unwrap();
         session
             .skip_message_keys((MAX_SKIP * 2) as u32, &sender)
             .unwrap();

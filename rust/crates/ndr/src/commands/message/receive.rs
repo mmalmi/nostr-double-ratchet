@@ -1,12 +1,17 @@
 use anyhow::Result;
 
-use nostr_double_ratchet::{Session, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND};
+use nostr_double_ratchet::{
+    Session, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+};
 
 use crate::output::Output;
-use crate::storage::{Storage, StoredGroupMessage, StoredMessage};
+use crate::storage::{Storage, StoredGroupMessage, StoredMessage, StoredReaction};
 
-use super::common::{extract_expiration_tag_seconds, is_expired, parse_chat_settings_ttl_seconds};
-use super::types::IncomingMessage;
+use super::common::{
+    extract_e_tag, extract_e_tags, extract_expiration_tag_seconds, is_expired,
+    parse_chat_settings_ttl_seconds,
+};
+use super::types::{IncomingMessage, IncomingReaction};
 
 /// Receive and decrypt a message from a nostr event
 pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Result<()> {
@@ -87,6 +92,105 @@ pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Re
                         );
                         return Ok(());
                     }
+                }
+
+                // Receipt / reaction / typing indicators should not be stored as messages.
+                if rumor_kind == RECEIPT_KIND {
+                    let message_ids = extract_e_tags(&decrypted_event);
+                    storage.save_chat(&updated_chat)?;
+                    if let Some(gid) = group_id {
+                        output.success(
+                            "receive",
+                            serde_json::json!({
+                                "group_id": gid,
+                                "from_pubkey": from_pubkey_hex,
+                                "kind": RECEIPT_KIND,
+                                "type": content,
+                                "message_ids": message_ids,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    } else {
+                        output.success(
+                            "receive",
+                            serde_json::json!({
+                                "chat_id": updated_chat.id,
+                                "from_pubkey": from_pubkey_hex,
+                                "kind": RECEIPT_KIND,
+                                "type": content,
+                                "message_ids": message_ids,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    }
+                    return Ok(());
+                }
+
+                if rumor_kind == REACTION_KIND {
+                    let message_id = extract_e_tag(&decrypted_event);
+                    if let Some(gid) = group_id {
+                        storage.save_chat(&updated_chat)?;
+                        output.success(
+                            "receive",
+                            serde_json::json!({
+                                "group_id": gid,
+                                "sender_pubkey": from_pubkey_hex,
+                                "kind": REACTION_KIND,
+                                "message_id": message_id,
+                                "emoji": content,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    } else {
+                        let stored = StoredReaction {
+                            id: msg_id.clone(),
+                            chat_id: updated_chat.id.clone(),
+                            message_id: message_id.clone(),
+                            from_pubkey: from_pubkey_hex.clone(),
+                            emoji: content.clone(),
+                            timestamp,
+                            is_outgoing: false,
+                        };
+                        storage.save_reaction(&stored)?;
+                        storage.save_chat(&updated_chat)?;
+                        output.success(
+                            "receive",
+                            IncomingReaction {
+                                chat_id: updated_chat.id,
+                                from_pubkey: from_pubkey_hex,
+                                message_id,
+                                emoji: content,
+                                timestamp,
+                            },
+                        );
+                    }
+                    return Ok(());
+                }
+
+                if rumor_kind == TYPING_KIND {
+                    storage.save_chat(&updated_chat)?;
+                    if let Some(gid) = group_id {
+                        output.success(
+                            "receive",
+                            serde_json::json!({
+                                "group_id": gid,
+                                "sender_pubkey": from_pubkey_hex,
+                                "kind": TYPING_KIND,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    } else {
+                        output.success(
+                            "receive",
+                            serde_json::json!({
+                                "chat_id": updated_chat.id,
+                                "from_pubkey": from_pubkey_hex,
+                                "kind": TYPING_KIND,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    }
+                    return Ok(());
                 }
 
                 if let Some(gid) = group_id {

@@ -123,12 +123,17 @@ async fn test_ts_ndr_multidevice_appkeys_fanout() {
     let (mut ts_child, mut ts_reader) = start_ts_script(&relay_url).await;
 
     // Wait for essentials from TS
-    let _connected = read_until_marker(&mut ts_reader, "E2E_RELAY_CONNECTED:", Duration::from_secs(10))
-        .await
-        .expect("TS failed to connect to relay");
-    let _owner_pubkey = read_until_marker(&mut ts_reader, "E2E_OWNER_PUBKEY:", Duration::from_secs(10))
-        .await
-        .expect("Missing owner pubkey");
+    let _connected = read_until_marker(
+        &mut ts_reader,
+        "E2E_RELAY_CONNECTED:",
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("TS failed to connect to relay");
+    let _owner_pubkey =
+        read_until_marker(&mut ts_reader, "E2E_OWNER_PUBKEY:", Duration::from_secs(10))
+            .await
+            .expect("Missing owner pubkey");
     let invite_url = read_until_marker(&mut ts_reader, "E2E_INVITE_URL:", Duration::from_secs(10))
         .await
         .expect("Missing invite URL");
@@ -219,4 +224,3 @@ async fn test_ts_ndr_multidevice_appkeys_fanout() {
     let _ = ts_child.kill().await;
     relay.stop().await;
 }
-
