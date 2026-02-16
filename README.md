@@ -6,6 +6,16 @@ End-to-end encrypted messaging primitives for Nostr, implemented in TypeScript a
 
 Used by [chat.iris.to](https://chat.iris.to) and by CLI tooling in this repo.
 
+## Install `ndr` CLI (latest release)
+
+Linux/macOS one-liner (auto-detect arch + OS):
+
+```bash
+curl -fsSL "https://github.com/mmalmi/nostr-double-ratchet/releases/latest/download/ndr-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/apple-darwin/' | sed 's/linux/unknown-linux-musl/').tar.gz" | tar -xz && cd ndr && ./install.sh
+```
+
+For Windows/manual install options, see [Releases](https://github.com/mmalmi/nostr-double-ratchet/releases/latest).
+
 ## Status
 
 - 1:1 messaging via Double Ratchet over Nostr events
