@@ -534,7 +534,7 @@ async fn test_receive_typing_does_not_save_message() {
         .unwrap();
 
     let typing_event = bob_session.send_typing().unwrap();
-    receive(&typing_event.as_json(), &storage, &output)
+    super::receive::receive(&typing_event.as_json(), &storage, &output)
         .await
         .unwrap();
 

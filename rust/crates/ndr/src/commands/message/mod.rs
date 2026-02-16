@@ -1,11 +1,11 @@
 mod common;
 mod listen;
+#[cfg(test)]
 mod receive;
 mod send;
 mod types;
 
 pub use listen::listen;
-pub use receive::receive;
 pub use send::{react, read, receipt, send, typing};
 
 pub fn resolve_target(

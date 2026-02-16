@@ -111,7 +111,6 @@ ndr react <chat_id> <msg_id> <emoji>  # React to a message
 ndr read <chat_id>          # Read message history
 ndr listen                  # Listen for incoming messages
 ndr listen --chat <id>      # Listen on specific chat
-ndr receive <event_json>    # Decrypt a nostr event
 ```
 
 ### Groups

@@ -117,12 +117,6 @@ enum Commands {
         chat: Option<String>,
     },
 
-    /// Receive and decrypt a nostr event
-    Receive {
-        /// The nostr event JSON
-        event: String,
-    },
-
     /// Group management
     #[command(subcommand)]
     Group(GroupCommands),
@@ -500,7 +494,6 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Listen { chat } => {
             commands::message::listen(chat.as_deref(), &config, &storage, output).await
         }
-        Commands::Receive { event } => commands::message::receive(&event, &storage, output).await,
         Commands::Group(cmd) => match cmd {
             GroupCommands::Create { name, members } => {
                 commands::group::create(&name, &members, &config, &storage, output).await
