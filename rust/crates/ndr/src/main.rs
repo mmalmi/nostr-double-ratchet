@@ -107,6 +107,7 @@ enum Commands {
     },
 
     /// Receive and decrypt a raw encrypted event JSON
+    #[command(hide = true)]
     Receive {
         /// Raw encrypted Nostr event JSON
         event: String,
