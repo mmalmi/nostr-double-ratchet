@@ -97,6 +97,31 @@ impl MessageQueue {
     pub fn remove(&self, id: &str) -> Result<()> {
         self.storage.del(&self.key(id))
     }
+
+    /// Remove entries older than `max_age_ms` milliseconds.
+    pub fn remove_expired(&self, max_age_ms: u64) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let keys = self.storage.list(&self.prefix)?;
+        let mut removed = 0;
+        for key in keys {
+            let Some(raw) = self.storage.get(&key)? else {
+                continue;
+            };
+            let Ok(entry) = serde_json::from_str::<QueueEntry>(&raw) else {
+                let _ = self.storage.del(&key);
+                removed += 1;
+                continue;
+            };
+            if now.saturating_sub(entry.created_at) > max_age_ms {
+                let _ = self.storage.del(&key);
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]

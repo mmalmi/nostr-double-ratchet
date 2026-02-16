@@ -91,6 +91,11 @@ impl UserRecord {
             device.active_session = Some(session);
         }
 
+        const MAX_INACTIVE: usize = 10;
+        if device.inactive_sessions.len() > MAX_INACTIVE {
+            device.inactive_sessions.truncate(MAX_INACTIVE);
+        }
+
         device.last_activity = Some(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

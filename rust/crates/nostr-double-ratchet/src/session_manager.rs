@@ -337,6 +337,11 @@ impl SessionManager {
         Ok(event_ids)
     }
 
+    /// Remove discovery queue entries older than `max_age_ms` milliseconds.
+    pub fn cleanup_discovery_queue(&self, max_age_ms: u64) -> Result<usize> {
+        self.discovery_queue.remove_expired(max_age_ms)
+    }
+
     #[deprecated(
         note = "use send_text(recipient, text, Some(SendOptions{ expires_at: Some(...) }))"
     )]

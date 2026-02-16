@@ -503,6 +503,9 @@ pub async fn listen(
         owner_pubkey_hex,
         owner_pubkey,
     ) = build_session_manager(&config, storage)?;
+    // Clean up stale discovery queue entries (older than 24 hours).
+    let _ = session_manager.cleanup_discovery_queue(24 * 60 * 60 * 1000);
+
     import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
     sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
     let our_private_key = config.private_key_bytes()?;
@@ -593,11 +596,21 @@ pub async fn listen(
     };
 
     // Helper to build filters from current state
+    // Limit relay backfill to recent events to avoid replaying entire history on restart.
+    let since_timestamp = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        nostr::Timestamp::from(now.saturating_sub(3600))
+    };
+
     let build_filters =
         |storage: &Storage,
          chat_id: Option<&str>,
          channel_map: &HashMap<String, (nostr_double_ratchet::SharedChannel, String)>,
-         group_sender_map: &GroupSenderMap|
+         group_sender_map: &GroupSenderMap,
+         since: nostr::Timestamp|
          -> Result<FilterState> {
             let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
             let subscribed_pubkeys: HashSet<String> =
@@ -609,7 +622,8 @@ pub async fn listen(
                 filters.push(
                     Filter::new()
                         .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                        .authors(pubkeys_to_watch),
+                        .authors(pubkeys_to_watch)
+                        .since(since),
                 );
             }
 
@@ -623,7 +637,8 @@ pub async fn listen(
                 filters.push(
                     Filter::new()
                         .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                        .authors(group_sender_pubkeys),
+                        .authors(group_sender_pubkeys)
+                        .since(since),
                 );
             }
 
@@ -643,7 +658,8 @@ pub async fn listen(
                 filters.push(
                     Filter::new()
                         .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
-                        .pubkeys(ephemeral_pubkeys),
+                        .pubkeys(ephemeral_pubkeys)
+                        .since(since),
                 );
             }
 
@@ -658,7 +674,8 @@ pub async fn listen(
                 filters.push(
                     Filter::new()
                         .kind(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16))
-                        .authors(channel_pubkeys),
+                        .authors(channel_pubkeys)
+                        .since(since),
                 );
             }
 
@@ -681,7 +698,7 @@ pub async fn listen(
         mut subscribed_invite_pubkeys,
         mut subscribed_channel_pubkeys,
         mut subscribed_group_sender_pubkeys,
-    ) = build_filters(storage, chat_id, &channel_map, &group_sender_map)?;
+    ) = build_filters(storage, chat_id, &channel_map, &group_sender_map, since_timestamp)?;
     let mut last_refresh = Instant::now();
     let mut subscribed_manager_filters: HashSet<String> = HashSet::new();
 
@@ -788,6 +805,7 @@ pub async fn listen(
             chat_id_owned.as_deref(),
             &channel_map,
             &group_sender_map,
+            since_timestamp,
         )?;
         if !new_filters.is_empty() {
             filters = new_filters;
@@ -843,6 +861,7 @@ pub async fn listen(
                 chat_id_owned.as_deref(),
                 &channel_map,
                 &group_sender_map,
+                since_timestamp,
             )?;
             if !new_filters.is_empty()
                 && (new_filters.len() != filters.len()
