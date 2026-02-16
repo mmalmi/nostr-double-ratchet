@@ -659,7 +659,9 @@ pub async fn listen(
                     Filter::new()
                         .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
                         .pubkeys(ephemeral_pubkeys)
-                        .since(since),
+                        // Invite response events intentionally randomize `created_at` over a wide
+                        // window for metadata resistance, so applying a recent `since` cutoff can
+                        // drop valid responses and break session bootstrap.
                 );
             }
 

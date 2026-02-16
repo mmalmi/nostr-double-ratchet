@@ -106,6 +106,12 @@ enum Commands {
         limit: usize,
     },
 
+    /// Receive and decrypt a raw encrypted event JSON
+    Receive {
+        /// Raw encrypted Nostr event JSON
+        event: String,
+    },
+
     /// Manage contacts (petnames)
     #[command(subcommand)]
     Contact(ContactCommands),
@@ -384,6 +390,7 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
             | Commands::React { .. }
             | Commands::Typing { .. }
             | Commands::Receipt { .. }
+            | Commands::Receive { .. }
             | Commands::Listen { .. }
             | Commands::Group(GroupCommands::Create { .. })
             | Commands::Group(GroupCommands::Update { .. })
@@ -482,6 +489,7 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Read { target, limit } => {
             commands::message::read(&target, limit, &storage, output).await
         }
+        Commands::Receive { event } => commands::message::receive(&event, &storage, output).await,
         Commands::Contact(cmd) => match cmd {
             ContactCommands::Add { pubkey, name } => {
                 commands::contact::add(&pubkey, &name, &storage, output).await
