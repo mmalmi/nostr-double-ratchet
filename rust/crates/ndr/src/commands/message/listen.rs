@@ -658,10 +658,9 @@ pub async fn listen(
                 filters.push(
                     Filter::new()
                         .kind(nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16))
-                        .pubkeys(ephemeral_pubkeys)
-                        // Invite response events intentionally randomize `created_at` over a wide
-                        // window for metadata resistance, so applying a recent `since` cutoff can
-                        // drop valid responses and break session bootstrap.
+                        .pubkeys(ephemeral_pubkeys), // Invite response events intentionally randomize `created_at` over a wide
+                                                     // window for metadata resistance, so applying a recent `since` cutoff can
+                                                     // drop valid responses and break session bootstrap.
                 );
             }
 
@@ -700,7 +699,13 @@ pub async fn listen(
         mut subscribed_invite_pubkeys,
         mut subscribed_channel_pubkeys,
         mut subscribed_group_sender_pubkeys,
-    ) = build_filters(storage, chat_id, &channel_map, &group_sender_map, since_timestamp)?;
+    ) = build_filters(
+        storage,
+        chat_id,
+        &channel_map,
+        &group_sender_map,
+        since_timestamp,
+    )?;
     let mut last_refresh = Instant::now();
     let mut subscribed_manager_filters: HashSet<String> = HashSet::new();
 

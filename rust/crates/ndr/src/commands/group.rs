@@ -116,6 +116,19 @@ fn import_chats_into_session_manager(
     Ok(())
 }
 
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn should_group_send_session_fanout() -> bool {
+    env_truthy("NDR_GROUP_SEND_SESSION_FANOUT") || env_truthy("NDR_GROUP_SEND_COMPAT")
+}
+
 fn sync_member_chats_from_session_manager(
     storage: &Storage,
     manager: &SessionManager,
@@ -586,6 +599,117 @@ async fn fan_out_sender_key_distribution(
     Ok(delivered_members)
 }
 
+/// Compatibility transport for group messages: fan-out over per-member 1:1 sessions.
+///
+/// Iris currently routes many group messages over 1:1 ratchet sessions. When enabled, this keeps
+/// `ndr group send` interoperable with those clients.
+async fn fan_out_group_message_via_sessions(
+    group: &nostr_double_ratchet::group::GroupData,
+    unsigned: nostr::UnsignedEvent,
+    config: &Config,
+    storage: &Storage,
+    client: &Client,
+) -> Result<bool> {
+    let my_owner_pubkey = config.owner_public_key_hex()?;
+    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    const MAX_DELIVERY_ATTEMPTS: usize = 20;
+    const DELIVERY_RETRY_MS: u64 = 100;
+    let mut delivered_any = false;
+
+    for member in &group.members {
+        if member == &my_owner_pubkey {
+            continue;
+        }
+
+        let recipient_owner = match nostr::PublicKey::from_hex(member) {
+            Ok(pk) => pk,
+            Err(_) => continue,
+        };
+
+        let mut delivered = false;
+        let mut message_events: Vec<nostr::Event> = Vec::new();
+
+        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
+            import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
+            let event_ids = session_manager
+                .send_event_recipient_only(recipient_owner, unsigned.clone())
+                .unwrap_or_default();
+            let drained = drain_session_manager_message_events(&session_manager_rx);
+            sync_member_chats_from_session_manager(storage, &session_manager, member)?;
+
+            if !drained.is_empty() && !event_ids.is_empty() {
+                message_events = drained;
+                break;
+            }
+
+            if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
+            }
+        }
+
+        if publish_events_with_retry(
+            client,
+            &message_events,
+            MAX_DELIVERY_ATTEMPTS,
+            DELIVERY_RETRY_MS,
+        )
+        .await
+        {
+            delivered = true;
+        }
+
+        if !delivered {
+            let member_chats: Vec<_> = storage
+                .list_chats()?
+                .into_iter()
+                .filter(|c| c.their_pubkey == *member)
+                .collect();
+
+            for chat in member_chats {
+                let session_state: nostr_double_ratchet::SessionState =
+                    match serde_json::from_str(&chat.session_state) {
+                        Ok(state) => state,
+                        Err(_) => continue,
+                    };
+
+                let mut session = Session::new(session_state, chat.id.clone());
+                let encrypted = match session.send_event(unsigned.clone()) {
+                    Ok(event) => event,
+                    Err(_) => continue,
+                };
+
+                let mut published = false;
+                for _ in 0..3 {
+                    if send_event_or_ignore(client, encrypted.clone())
+                        .await
+                        .is_ok()
+                    {
+                        published = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+
+                if !published {
+                    continue;
+                }
+
+                let mut updated_chat = chat.clone();
+                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                storage.save_chat(&updated_chat)?;
+                delivered = true;
+                break;
+            }
+        }
+
+        if delivered {
+            delivered_any = true;
+        }
+    }
+
+    Ok(delivered_any)
+}
+
 pub async fn create(
     name: &str,
     members: &[String],
@@ -957,9 +1081,6 @@ pub async fn send_message(
 
     let my_device_pubkey = config.public_key()?;
     let my_owner_pubkey = config.owner_public_key_hex()?;
-    let (sender_event_keys, sender_event_keys_changed) =
-        ensure_group_sender_event_keys(id, &my_device_pubkey, &my_owner_pubkey, storage)?;
-    let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let now_s = now.as_secs();
@@ -972,20 +1093,6 @@ pub async fn send_message(
         client.add_relay(relay).await?;
     }
     client.connect().await;
-
-    let mut sender_key = ensure_group_sender_key(
-        &group.data,
-        id,
-        &my_device_pubkey,
-        &sender_event_pubkey_hex,
-        sender_event_keys_changed,
-        now_ms,
-        now_s,
-        config,
-        storage,
-        &client,
-    )
-    .await?;
 
     // Build the plaintext group event (unsigned), then encrypt it with the sender key.
     let mut tags: Vec<Vec<String>> = Vec::new();
@@ -1005,6 +1112,66 @@ pub async fn send_message(
         .tags(nostr_tags)
         .custom_created_at(nostr::Timestamp::from(now_s))
         .build(my_pk);
+
+    if should_group_send_session_fanout() {
+        let published = fan_out_group_message_via_sessions(
+            &group.data,
+            inner.clone(),
+            config,
+            storage,
+            &client,
+        )
+        .await?;
+        if !published {
+            anyhow::bail!("Failed to publish group message via 1:1 session fan-out");
+        }
+
+        let msg_id = inner
+            .id
+            .as_ref()
+            .map(|id| id.to_hex())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let stored_msg = StoredGroupMessage {
+            id: msg_id.clone(),
+            group_id: id.to_string(),
+            sender_pubkey: my_owner_pubkey.clone(),
+            content: message.to_string(),
+            timestamp: now_s,
+            is_outgoing: true,
+            expires_at: None,
+        };
+        storage.save_group_message(&stored_msg)?;
+
+        output.success(
+            "group.send",
+            serde_json::json!({
+                "id": msg_id,
+                "group_id": id,
+                "content": message,
+                "timestamp": now_s,
+                "published": true,
+                "transport": "session_fanout",
+            }),
+        );
+        return Ok(());
+    }
+
+    let (sender_event_keys, sender_event_keys_changed) =
+        ensure_group_sender_event_keys(id, &my_device_pubkey, &my_owner_pubkey, storage)?;
+    let sender_event_pubkey_hex = sender_event_keys.public_key().to_hex();
+    let mut sender_key = ensure_group_sender_key(
+        &group.data,
+        id,
+        &my_device_pubkey,
+        &sender_event_pubkey_hex,
+        sender_event_keys_changed,
+        now_ms,
+        now_s,
+        config,
+        storage,
+        &client,
+    )
+    .await?;
 
     let inner_json = serde_json::to_string(&inner)?;
     let channel = nostr_double_ratchet::OneToManyChannel::default();
