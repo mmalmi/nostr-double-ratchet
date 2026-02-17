@@ -112,7 +112,7 @@ describe('Invite NDK Integration', () => {
     }
     console.log(`Connected to ${connectedRelays} relays out of ${DEFAULT_RELAYS.length}`)
 
-  }, 10000) // Reduced timeout to 10 seconds
+  }, 30000) // Allow relay connection + stabilization delay
 
   afterAll(async () => {
     // Clean up connections
