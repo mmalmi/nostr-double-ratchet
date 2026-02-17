@@ -121,6 +121,22 @@ impl GroupManager {
         self.group_to_sender_events.remove(group_id);
     }
 
+    /// Return all sender-event pubkeys currently known across managed groups.
+    ///
+    /// This includes mappings learned from local sends and from incoming sender-key
+    /// distribution rumors. The returned list is de-duplicated and sorted.
+    pub fn known_sender_event_pubkeys(&mut self) -> Vec<PublicKey> {
+        let group_ids: Vec<String> = self.groups.keys().cloned().collect();
+        for group_id in group_ids {
+            self.refresh_group_sender_mappings(&group_id);
+        }
+
+        let mut values: Vec<PublicKey> = self.sender_event_to_group.keys().copied().collect();
+        values.sort_by_key(|pk| pk.to_hex());
+        values.dedup();
+        values
+    }
+
     pub fn send_message<F, G>(
         &mut self,
         group_id: &str,

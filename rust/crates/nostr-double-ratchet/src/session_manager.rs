@@ -56,6 +56,9 @@ struct GroupSenderEventInfo {
     sender_device_pubkey: Option<PublicKey>,
 }
 
+type GroupSenderKeySlot = (PublicKey, u32);
+type GroupSenderKeyPending = HashMap<GroupSenderKeySlot, Vec<nostr::Event>>;
+
 pub struct SessionManager {
     user_records: Arc<Mutex<HashMap<PublicKey, UserRecord>>>,
     our_public_key: PublicKey,
@@ -82,7 +85,7 @@ pub struct SessionManager {
     auto_adopt_chat_settings: Arc<Mutex<bool>>,
     group_sender_events: Arc<Mutex<HashMap<PublicKey, GroupSenderEventInfo>>>,
     group_sender_key_states: Arc<Mutex<HashMap<(PublicKey, u32), SenderKeyState>>>,
-    group_sender_key_pending: Arc<Mutex<HashMap<(PublicKey, u32), Vec<nostr::Event>>>>,
+    group_sender_key_pending: Arc<Mutex<GroupSenderKeyPending>>,
     group_sender_event_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
 }
 
@@ -866,39 +869,39 @@ impl SessionManager {
         // to newly discovered devices, and can grow memory usage in long-running processes.
         if event.kind.as_u16() != crate::TYPING_KIND as u16 {
             let mut history = self.message_history.lock().unwrap();
-            for owner in owners.iter().copied() {
-                history.entry(owner).or_default().push(event.clone());
+            for owner in &owners {
+                history.entry(*owner).or_default().push(event.clone());
             }
         }
 
         // Ensure all target owners are set up.
-        for owner in owners.iter().copied() {
-            self.setup_user(owner);
+        for owner in &owners {
+            self.setup_user(*owner);
         }
 
         // Gather known devices per owner.
         let mut owner_targets: HashMap<PublicKey, Vec<String>> = HashMap::new();
         {
             let records = self.user_records.lock().unwrap();
-            for owner in owners.iter().copied() {
+            for owner in &owners {
                 let mut device_ids = Vec::new();
-                if let Some(record) = records.get(&owner) {
+                if let Some(record) = records.get(owner) {
                     for device_id in record.device_records.keys() {
                         if device_id != &self.device_id {
                             device_ids.push(device_id.clone());
                         }
                     }
                 }
-                owner_targets.insert(owner, device_ids);
+                owner_targets.insert(*owner, device_ids);
             }
         }
 
         // Queue for each target owner:
         // - known devices -> message queue per device
         // - no known devices -> discovery queue per owner
-        for owner in owners.iter().copied() {
+        for owner in &owners {
             let mut seen_for_owner = HashSet::new();
-            let device_ids = owner_targets.get(&owner).cloned().unwrap_or_default();
+            let device_ids = owner_targets.get(owner).cloned().unwrap_or_default();
             let mut queued_any_device = false;
             for device_id in device_ids {
                 if !seen_for_owner.insert(device_id.clone()) {
@@ -915,11 +918,11 @@ impl SessionManager {
         // Current known active targets to send immediately.
         let mut device_targets: Vec<(PublicKey, String)> = Vec::new();
         let mut seen = HashSet::new();
-        for owner in owners.iter().copied() {
-            if let Some(device_ids) = owner_targets.get(&owner) {
+        for owner in &owners {
+            if let Some(device_ids) = owner_targets.get(owner) {
                 for device_id in device_ids {
                     if seen.insert(device_id.clone()) {
-                        device_targets.push((owner, device_id.clone()));
+                        device_targets.push((*owner, device_id.clone()));
                     }
                 }
             }

@@ -6,10 +6,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use nostr_double_ratchet::{
-    AppKeys, DeviceEntry, FileStorageAdapter, Invite, Session, SessionManager, SessionManagerEvent,
-    SessionState, StorageAdapter,
+    AppKeys, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent, GroupManager,
+    GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, Session, SessionManager,
+    SessionManagerEvent, SessionState, StorageAdapter,
 };
 
 mod error;
@@ -68,6 +69,44 @@ pub struct SessionManagerAcceptInviteResult {
     pub inviter_device_pubkey_hex: String,
     pub device_id: String,
     pub created_new_session: bool,
+}
+
+/// FFI-friendly group metadata payload.
+#[derive(uniffi::Record)]
+pub struct FfiGroupData {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub picture: Option<String>,
+    pub members: Vec<String>,
+    pub admins: Vec<String>,
+    pub created_at_ms: u64,
+    pub secret: Option<String>,
+    pub accepted: Option<bool>,
+}
+
+/// Result of sending a group event through GroupManager.
+#[derive(uniffi::Record)]
+pub struct GroupSendResult {
+    pub outer_event_json: String,
+    pub inner_event_json: String,
+    pub outer_event_id: String,
+    pub inner_event_id: String,
+}
+
+/// Decrypted group event returned by GroupManager.
+#[derive(uniffi::Record)]
+pub struct GroupDecryptedResult {
+    pub group_id: String,
+    pub sender_event_pubkey_hex: String,
+    pub sender_device_pubkey_hex: String,
+    pub sender_owner_pubkey_hex: Option<String>,
+    pub outer_event_id: String,
+    pub outer_created_at: u64,
+    pub key_id: u32,
+    pub message_number: u32,
+    pub inner_event_json: String,
+    pub inner_event_id: String,
 }
 
 /// Generate a new keypair.
@@ -426,6 +465,8 @@ impl SessionHandle {
 pub struct SessionManagerHandle {
     inner: Mutex<SessionManager>,
     event_rx: Mutex<Receiver<SessionManagerEvent>>,
+    event_tx: Sender<SessionManagerEvent>,
+    group_manager: Mutex<GroupManager>,
 }
 
 #[uniffi::export]
@@ -445,20 +486,30 @@ impl SessionManagerHandle {
             None => our_pubkey,
         };
 
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
         let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
         let manager = SessionManager::new(
             our_pubkey,
             our_identity_key,
             device_id,
             owner_pubkey,
-            tx,
-            None,
+            tx.clone(),
+            Some(storage.clone()),
             None,
         );
+
+        let group_manager = GroupManager::new(GroupManagerOptions {
+            our_owner_pubkey: owner_pubkey,
+            our_device_pubkey: our_pubkey,
+            storage: Some(storage),
+            one_to_many: None,
+        });
 
         Ok(Arc::new(Self {
             inner: Mutex::new(manager),
             event_rx: Mutex::new(rx),
+            event_tx: tx,
+            group_manager: Mutex::new(group_manager),
         }))
     }
 
@@ -480,6 +531,7 @@ impl SessionManagerHandle {
 
         let storage = FileStorageAdapter::new(std::path::PathBuf::from(storage_path))
             .map_err(NdrError::from)?;
+        let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
 
         let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
         let manager = SessionManager::new(
@@ -487,14 +539,23 @@ impl SessionManagerHandle {
             our_identity_key,
             device_id,
             owner_pubkey,
-            tx,
-            Some(Arc::new(storage) as Arc<dyn StorageAdapter>),
+            tx.clone(),
+            Some(storage.clone()),
             None,
         );
+
+        let group_manager = GroupManager::new(GroupManagerOptions {
+            our_owner_pubkey: owner_pubkey,
+            our_device_pubkey: our_pubkey,
+            storage: Some(storage),
+            one_to_many: None,
+        });
 
         Ok(Arc::new(Self {
             inner: Mutex::new(manager),
             event_rx: Mutex::new(rx),
+            event_tx: tx,
+            group_manager: Mutex::new(group_manager),
         }))
     }
 
@@ -683,6 +744,135 @@ impl SessionManagerHandle {
             inner_id,
             outer_event_ids,
         })
+    }
+
+    /// Upsert group metadata into the embedded GroupManager.
+    pub fn group_upsert(&self, group: FfiGroupData) -> Result<(), NdrError> {
+        let mut group_manager = self.group_manager.lock().unwrap();
+        group_manager.upsert_group(GroupData {
+            id: group.id,
+            name: group.name,
+            description: group.description,
+            picture: group.picture,
+            members: group.members,
+            admins: group.admins,
+            created_at: group.created_at_ms,
+            secret: group.secret,
+            accepted: group.accepted,
+        })?;
+        Ok(())
+    }
+
+    /// Remove a group from the embedded GroupManager.
+    pub fn group_remove(&self, group_id: String) {
+        let mut group_manager = self.group_manager.lock().unwrap();
+        group_manager.remove_group(&group_id);
+    }
+
+    /// Return known sender-event pubkeys used for one-to-many group transport.
+    pub fn group_known_sender_event_pubkeys(&self) -> Vec<String> {
+        let mut group_manager = self.group_manager.lock().unwrap();
+        group_manager
+            .known_sender_event_pubkeys()
+            .into_iter()
+            .map(|pk| pk.to_hex())
+            .collect()
+    }
+
+    /// Send a group event through GroupManager.
+    ///
+    /// Pairwise sender-key distribution rumors are sent through SessionManager sessions.
+    /// The encrypted one-to-many outer event is emitted via the SessionManager pubsub queue.
+    pub fn group_send_event(
+        &self,
+        group_id: String,
+        kind: u32,
+        content: String,
+        tags_json: String,
+        now_ms: Option<u64>,
+    ) -> Result<GroupSendResult, NdrError> {
+        let tags: Vec<Vec<String>> = if tags_json.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&tags_json)?
+        };
+
+        let session_manager = self.inner.lock().unwrap();
+        let mut group_manager = self.group_manager.lock().unwrap();
+        let event_tx = self.event_tx.clone();
+
+        let mut send_pairwise = |recipient_owner: nostr::PublicKey,
+                                 rumor: &nostr::UnsignedEvent|
+         -> nostr_double_ratchet::Result<()> {
+            session_manager.send_event(recipient_owner, rumor.clone())?;
+            Ok(())
+        };
+
+        let mut publish_outer = |outer: &nostr::Event| -> nostr_double_ratchet::Result<()> {
+            event_tx
+                .send(SessionManagerEvent::PublishSigned(outer.clone()))
+                .map_err(|e| nostr_double_ratchet::Error::Storage(e.to_string()))?;
+            Ok(())
+        };
+
+        let result = group_manager.send_event(
+            &group_id,
+            GroupSendEvent {
+                kind,
+                content,
+                tags,
+            },
+            &mut send_pairwise,
+            &mut publish_outer,
+            now_ms,
+        )?;
+
+        Ok(GroupSendResult {
+            outer_event_json: serde_json::to_string(&result.outer)?,
+            inner_event_json: serde_json::to_string(&result.inner)?,
+            outer_event_id: result.outer.id.to_string(),
+            inner_event_id: unsigned_event_id_string(&result.inner),
+        })
+    }
+
+    /// Handle a decrypted pairwise session rumor that may carry sender-key distribution.
+    pub fn group_handle_incoming_session_event(
+        &self,
+        event_json: String,
+        from_owner_pubkey_hex: String,
+        from_sender_device_pubkey_hex: Option<String>,
+    ) -> Result<Vec<GroupDecryptedResult>, NdrError> {
+        let event: nostr::UnsignedEvent = serde_json::from_str(&event_json)?;
+        let from_owner_pubkey =
+            nostr_double_ratchet::utils::pubkey_from_hex(&from_owner_pubkey_hex)?;
+
+        let from_sender_device_pubkey = match from_sender_device_pubkey_hex {
+            Some(hex) => Some(nostr_double_ratchet::utils::pubkey_from_hex(&hex)?),
+            None => Some(event.pubkey),
+        };
+
+        let mut group_manager = self.group_manager.lock().unwrap();
+        let decrypted = group_manager.handle_incoming_session_event(
+            &event,
+            from_owner_pubkey,
+            from_sender_device_pubkey,
+        );
+        Ok(decrypted
+            .into_iter()
+            .map(group_decrypted_to_result)
+            .collect())
+    }
+
+    /// Handle an incoming relay event that may be an encrypted one-to-many group outer event.
+    pub fn group_handle_outer_event(
+        &self,
+        event_json: String,
+    ) -> Result<Option<GroupDecryptedResult>, NdrError> {
+        let event: nostr::Event = serde_json::from_str(&event_json)?;
+        let mut group_manager = self.group_manager.lock().unwrap();
+        Ok(group_manager
+            .handle_outer_event(&event)
+            .map(group_decrypted_to_result))
     }
 
     /// Send a delivery/read receipt for messages.
@@ -899,6 +1089,29 @@ fn parse_secret(hex_str: &str) -> Result<[u8; 32], NdrError> {
     Ok(arr)
 }
 
+fn unsigned_event_id_string(event: &nostr::UnsignedEvent) -> String {
+    event
+        .id
+        .as_ref()
+        .map(std::string::ToString::to_string)
+        .unwrap_or_default()
+}
+
+fn group_decrypted_to_result(event: GroupDecryptedEvent) -> GroupDecryptedResult {
+    GroupDecryptedResult {
+        group_id: event.group_id,
+        sender_event_pubkey_hex: event.sender_event_pubkey.to_hex(),
+        sender_device_pubkey_hex: event.sender_device_pubkey.to_hex(),
+        sender_owner_pubkey_hex: event.sender_owner_pubkey.map(|pk| pk.to_hex()),
+        outer_event_id: event.outer_event_id,
+        outer_created_at: event.outer_created_at,
+        key_id: event.key_id,
+        message_number: event.message_number,
+        inner_event_json: serde_json::to_string(&event.inner).unwrap_or_default(),
+        inner_event_id: unsigned_event_id_string(&event.inner),
+    }
+}
+
 uniffi::setup_scaffolding!();
 
 /// Result of processing an invite response.
@@ -1101,6 +1314,52 @@ mod tests {
         // Restore session from state
         let restored = SessionHandle::from_state_json(state_json).unwrap();
         assert_eq!(session.can_send(), restored.can_send());
+    }
+
+    #[test]
+    fn test_group_send_event_tracks_sender_event_pubkey() {
+        let kp = generate_keypair();
+        let manager = SessionManagerHandle::new(
+            kp.public_key_hex.clone(),
+            kp.private_key_hex.clone(),
+            kp.public_key_hex.clone(),
+            None,
+        )
+        .unwrap();
+        manager.init().unwrap();
+
+        manager
+            .group_upsert(FfiGroupData {
+                id: "group-ffi-test".to_string(),
+                name: "ffi".to_string(),
+                description: None,
+                picture: None,
+                members: vec![kp.public_key_hex.clone()],
+                admins: vec![kp.public_key_hex.clone()],
+                created_at_ms: 1_700_000_000_000,
+                secret: None,
+                accepted: Some(true),
+            })
+            .unwrap();
+
+        assert!(manager.group_known_sender_event_pubkeys().is_empty());
+
+        let send = manager
+            .group_send_event(
+                "group-ffi-test".to_string(),
+                14,
+                "hello".to_string(),
+                "[]".to_string(),
+                Some(1_700_000_000_000),
+            )
+            .unwrap();
+        assert!(!send.outer_event_json.is_empty());
+        assert!(!send.inner_event_json.is_empty());
+        assert!(!send.outer_event_id.is_empty());
+        assert!(!send.inner_event_id.is_empty());
+
+        let sender_event_pubkeys = manager.group_known_sender_event_pubkeys();
+        assert_eq!(sender_event_pubkeys.len(), 1);
     }
 
     #[test]

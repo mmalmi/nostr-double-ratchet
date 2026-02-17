@@ -153,6 +153,9 @@ fn send_message_uses_device_pubkey_and_distributes_sender_key_once() {
     );
     assert_eq!(pairwise_first[0].pubkey, alice_device);
     assert_eq!(published_first.len(), 1);
+    let known_sender_events = manager.known_sender_event_pubkeys();
+    assert_eq!(known_sender_events.len(), 1);
+    assert_eq!(known_sender_events[0], published_first[0].pubkey);
 
     let mut pairwise_second: Vec<UnsignedEvent> = Vec::new();
     let mut published_second: Vec<Event> = Vec::new();
@@ -257,6 +260,9 @@ fn decrypts_typescript_outer_after_distribution_mapping() {
     .build(sender_device);
 
     let _ = manager.handle_incoming_session_event(&dist_event, alice_owner, Some(sender_device));
+    let known_sender_events = manager.known_sender_event_pubkeys();
+    assert_eq!(known_sender_events.len(), 1);
+    assert_eq!(known_sender_events[0].to_hex(), vectors.sender_pubkey);
 
     let outer: Event = serde_json::from_value(vectors.messages[0].outer_event.clone()).unwrap();
     let decrypted = manager
