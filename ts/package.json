@@ -46,6 +46,6 @@
     "ws": "^8.18.2"
   },
   "dependencies": {
-    "nostr-tools": "^2.15.2"
+    "nostr-tools": "^2.23.1"
   }
 }

@@ -2,9 +2,10 @@
 // We intentionally avoid depending on transitive base64 libs.
 
 export function base64Encode(bytes: Uint8Array): string {
-  // Prefer built-ins when available.
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(bytes).toString("base64");
+  // Prefer Node's Buffer when available without introducing a hard dependency.
+  const nodeBuffer = (globalThis as { Buffer?: { from: (...args: unknown[]) => Uint8Array & { toString: (encoding?: string) => string } } }).Buffer;
+  if (nodeBuffer) {
+    return nodeBuffer.from(bytes).toString("base64");
   }
 
   if (typeof btoa !== "function") {
@@ -22,8 +23,9 @@ export function base64Encode(bytes: Uint8Array): string {
 }
 
 export function base64Decode(b64: string): Uint8Array {
-  if (typeof Buffer !== "undefined") {
-    return new Uint8Array(Buffer.from(b64, "base64"));
+  const nodeBuffer = (globalThis as { Buffer?: { from: (...args: unknown[]) => Uint8Array } }).Buffer;
+  if (nodeBuffer) {
+    return new Uint8Array(nodeBuffer.from(b64, "base64"));
   }
 
   if (typeof atob !== "function") {

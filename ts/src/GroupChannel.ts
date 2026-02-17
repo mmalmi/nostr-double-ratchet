@@ -347,15 +347,24 @@ export class Group {
     return rumor;
   }
 
-  private buildGroupInnerRumor(nowSeconds: number, nowMs: number, message: string): Rumor {
+  private buildGroupInnerRumor(
+    nowSeconds: number,
+    nowMs: number,
+    event: { kind: number; content: string; tags?: string[][] }
+  ): Rumor {
+    const tags = [...(event.tags || [])];
+    if (!tags.some((tag) => tag[0] === "l")) {
+      tags.unshift(["l", this.groupId()]);
+    }
+    if (!tags.some((tag) => tag[0] === "ms")) {
+      tags.push(["ms", String(nowMs)]);
+    }
+
     const rumor: Rumor = {
-      kind: CHAT_MESSAGE_KIND,
-      content: message,
+      kind: event.kind,
+      content: event.content,
       created_at: nowSeconds,
-      tags: [
-        ["l", this.groupId()],
-        ["ms", String(nowMs)],
-      ],
+      tags,
       pubkey: this.ourDevicePubkey,
       id: "",
     };
@@ -387,13 +396,13 @@ export class Group {
   }
 
   /**
-   * Send a group message:
+   * Send an inner group event over one-to-many transport.
    * - Ensures we have sender-event keys and a sender key state.
    * - Distributes sender key to group members if needed.
    * - Publishes exactly one outer event via OneToManyChannel.
    */
-  async sendMessage(
-    message: string,
+  async sendEvent(
+    event: { kind: number; content: string; tags?: string[][] },
     opts: { sendPairwise: PairwiseSend; publishOuter: PublishOuter; nowMs?: number }
   ): Promise<{ outer: VerifiedEvent; inner: Rumor }> {
     await this.init();
@@ -414,7 +423,7 @@ export class Group {
       );
     }
 
-    const inner = this.buildGroupInnerRumor(nowSeconds, nowMs, message);
+    const inner = this.buildGroupInnerRumor(nowSeconds, nowMs, event);
     const innerJson = JSON.stringify(inner);
     const outer = this.oneToMany.encryptToOuterEvent(senderEventSecretKey, senderKey, innerJson, nowSeconds);
 
@@ -422,6 +431,22 @@ export class Group {
     await opts.publishOuter(outer);
 
     return { outer, inner };
+  }
+
+  /**
+   * Send a regular group chat message (kind 14).
+   */
+  async sendMessage(
+    message: string,
+    opts: { sendPairwise: PairwiseSend; publishOuter: PublishOuter; nowMs?: number }
+  ): Promise<{ outer: VerifiedEvent; inner: Rumor }> {
+    return this.sendEvent(
+      {
+        kind: CHAT_MESSAGE_KIND,
+        content: message,
+      },
+      opts
+    );
   }
 
   /**
