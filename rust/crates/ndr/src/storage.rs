@@ -693,19 +693,6 @@ impl Storage {
             .join(format!("{}.json", identity_pubkey))
     }
 
-    pub fn get_group_sender(
-        &self,
-        group_id: &str,
-        identity_pubkey: &str,
-    ) -> Result<Option<StoredGroupSender>> {
-        let path = self.group_sender_path(group_id, identity_pubkey);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(path)?;
-        Ok(Some(serde_json::from_str(&content)?))
-    }
-
     pub fn upsert_group_sender(&self, sender: &StoredGroupSender) -> Result<()> {
         let dir = self.group_senders_dir.join(&sender.group_id);
         fs::create_dir_all(&dir)?;
@@ -777,15 +764,6 @@ impl Storage {
     ) -> Result<Option<nostr_double_ratchet::SenderKeyState>> {
         let states = self.get_group_sender_keys(group_id, sender_pubkey)?;
         Ok(states.into_iter().find(|s| s.key_id == key_id))
-    }
-
-    pub fn get_latest_group_sender_key_state(
-        &self,
-        group_id: &str,
-        sender_pubkey: &str,
-    ) -> Result<Option<nostr_double_ratchet::SenderKeyState>> {
-        let states = self.get_group_sender_keys(group_id, sender_pubkey)?;
-        Ok(states.into_iter().last())
     }
 
     pub fn upsert_group_sender_key_state(
