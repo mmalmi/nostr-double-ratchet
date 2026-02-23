@@ -510,6 +510,68 @@ async fn test_send_updates_last_message_at() {
 }
 
 #[tokio::test]
+async fn test_send_chat_id_routes_by_pubkey_not_selected_chat_id() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let storage = Storage::open(temp.path()).unwrap();
+    let output = Output::new(true);
+
+    let mut config = Config::load(temp.path()).unwrap();
+    config
+        .set_private_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
+
+    let session = create_test_session();
+    let session_state = serde_json::to_string(&session.state).unwrap();
+    let peer_pubkey = nostr::Keys::generate().public_key().to_hex();
+
+    // Two chats with the same peer pubkey. "new-chat" is the canonical one by recency.
+    storage
+        .save_chat(&StoredChat {
+            id: "old-chat".to_string(),
+            their_pubkey: peer_pubkey.clone(),
+            device_id: Some("device-old".to_string()),
+            created_at: 1000,
+            last_message_at: Some(1000),
+            session_state: session_state.clone(),
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+    storage
+        .save_chat(&StoredChat {
+            id: "new-chat".to_string(),
+            their_pubkey: peer_pubkey,
+            device_id: Some("device-new".to_string()),
+            created_at: 1000,
+            last_message_at: Some(5000),
+            session_state,
+            message_ttl_seconds: None,
+        })
+        .unwrap();
+
+    send(
+        "old-chat",
+        "route by pubkey",
+        None,
+        None,
+        None,
+        &config,
+        &storage,
+        &output,
+    )
+    .await
+    .unwrap();
+
+    let old_messages = storage.get_messages("old-chat", 10).unwrap();
+    let new_messages = storage.get_messages("new-chat", 10).unwrap();
+    assert!(old_messages.is_empty());
+    assert_eq!(new_messages.len(), 1);
+    assert_eq!(new_messages[0].content, "route by pubkey");
+}
+
+#[tokio::test]
 async fn test_receive_typing_does_not_save_message() {
     init_test_env();
 

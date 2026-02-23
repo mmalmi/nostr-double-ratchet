@@ -56,7 +56,7 @@ enum Commands {
 
     /// Send a message
     Send {
-        /// Chat ID, npub, hex pubkey, or contact name
+        /// Recipient npub, hex pubkey, or contact name
         target: String,
         /// Message content
         message: String,

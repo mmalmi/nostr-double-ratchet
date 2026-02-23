@@ -30,29 +30,27 @@ async fn resolve_or_join_chat(
     config: &Config,
     storage: &Storage,
 ) -> Result<StoredChat> {
-    match resolve_target(target, storage) {
-        Ok(chat) => Ok(chat),
-        Err(resolve_err) => {
-            let target_pubkey = match resolve_target_pubkey(target, storage) {
-                Ok(pubkey) => pubkey,
-                Err(_) => return Err(resolve_err),
-            };
+    // Resolve recipient pubkey first, even when a chat/channel id was provided.
+    // This keeps send routing owner-centric and lets SessionManager fan out.
+    let target_pubkey = if let Ok(Some(chat)) = storage.get_chat(target) {
+        chat.their_pubkey
+    } else {
+        resolve_target_pubkey(target, storage)?
+    };
 
-            match crate::commands::public_invite::join_via_public_invite(
-                &target_pubkey,
-                config,
-                storage,
-            )
-            .await
-            {
-                Ok(joined) => Ok(joined.chat),
-                Err(err) => Err(anyhow::anyhow!(
-                    "Chat not found and no public invite available for {}: {}",
-                    target,
-                    err
-                )),
-            }
-        }
+    if let Ok(Some(chat)) = storage.get_chat_by_pubkey(&target_pubkey) {
+        return Ok(chat);
+    }
+
+    match crate::commands::public_invite::join_via_public_invite(&target_pubkey, config, storage)
+        .await
+    {
+        Ok(joined) => Ok(joined.chat),
+        Err(err) => Err(anyhow::anyhow!(
+            "Chat not found and no public invite available for {}: {}",
+            target,
+            err
+        )),
     }
 }
 
@@ -460,7 +458,7 @@ pub(super) async fn send_message_impl(
         flush_session_manager_message_events(&manager_rx, &signing_keys, &client).await?;
     sync_chats_from_session_manager(storage, &manager, &owner_pubkey_hex)?;
 
-    if let Some(updated_chat) = storage.get_chat(&chat.id)? {
+    if let Some(updated_chat) = storage.get_chat_by_pubkey(&recipient_pk.to_hex())? {
         chat = updated_chat;
     }
     chat.last_message_at = Some(now_s);
