@@ -886,8 +886,17 @@ impl SessionManager {
             for owner in &owners {
                 let mut device_ids = Vec::new();
                 if let Some(record) = records.get(owner) {
+                    let mut seen = HashSet::new();
+                    for identity_hex in &record.known_device_identities {
+                        if identity_hex == &self.device_id {
+                            continue;
+                        }
+                        if seen.insert(identity_hex.clone()) {
+                            device_ids.push(identity_hex.clone());
+                        }
+                    }
                     for device_id in record.device_records.keys() {
-                        if device_id != &self.device_id {
+                        if device_id != &self.device_id && seen.insert(device_id.clone()) {
                             device_ids.push(device_id.clone());
                         }
                     }
@@ -2778,6 +2787,105 @@ mod tests {
                 .iter()
                 .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
             "expected queue entry to be removed after successful publish"
+        );
+    }
+
+    #[test]
+    fn queued_message_for_known_appkeys_device_flushes_without_new_appkeys_event() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_keys = Keys::generate();
+        let bob_pubkey = bob_keys.public_key();
+        let bob_device_id = bob_pubkey.to_hex();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(storage.clone()),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        // Learn recipient devices first (AppKeys known) but don't establish a session yet.
+        let mut app_keys = AppKeys::new(vec![]);
+        app_keys.add_device(DeviceEntry::new(bob_pubkey, 1));
+        let app_keys_event = app_keys
+            .get_event(bob_pubkey)
+            .sign_with_keys(&bob_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_event);
+        let _ = drain_events(&rx);
+
+        let (inner_id, published_ids) = manager
+            .send_text_with_inner_id(bob_pubkey, "queued with known appkeys".to_string(), None)
+            .unwrap();
+        assert!(
+            published_ids.is_empty(),
+            "without an active session, send should queue for later"
+        );
+
+        // TS parity: this should be queued directly per known device.
+        let queued_keys = storage.list("v1/message-queue/").unwrap();
+        assert!(
+            queued_keys
+                .iter()
+                .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
+            "expected recipient message queue entry when AppKeys are already known"
+        );
+
+        // Ensure we did not put this recipient message back into discovery queue.
+        let mut bob_discovery_count = 0usize;
+        for key in storage.list("v1/discovery-queue/").unwrap() {
+            let Some(raw) = storage.get(&key).unwrap() else {
+                continue;
+            };
+            let Ok(entry) = serde_json::from_str::<crate::QueueEntry>(&raw) else {
+                continue;
+            };
+            if entry.target_key == bob_pubkey.to_hex()
+                && entry.event.id.as_ref().map(|id| id.to_string()) == Some(inner_id.clone())
+            {
+                bob_discovery_count += 1;
+            }
+        }
+        assert_eq!(
+            bob_discovery_count, 0,
+            "recipient should not rely on discovery queue after AppKeys are known"
+        );
+
+        // Accept invite for that known device without sending another AppKeys event.
+        let invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None).unwrap();
+        let invite_event = invite
+            .get_event()
+            .unwrap()
+            .sign_with_keys(&bob_keys)
+            .unwrap();
+        manager.process_received_event(invite_event);
+
+        let events = drain_events(&rx);
+        assert!(
+            events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "expected queued message to flush immediately after session creation"
+        );
+
+        let remaining_keys = storage.list("v1/message-queue/").unwrap();
+        assert!(
+            !remaining_keys
+                .iter()
+                .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
+            "expected recipient queue entry removal after successful publish"
         );
     }
 
