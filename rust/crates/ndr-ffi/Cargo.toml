@@ -24,9 +24,12 @@ hex.workspace = true
 thiserror.workspace = true
 uniffi = { version = "0.28", features = ["cli"] }
 crossbeam-channel.workspace = true
+tokio.workspace = true
+nostr35 = { package = "nostr", version = "0.35", default-features = false, features = ["std", "nip44"] }
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }
 
 [dev-dependencies]
 uniffi = { version = "0.28", features = ["bindgen-tests"] }
+tempfile = "3"
