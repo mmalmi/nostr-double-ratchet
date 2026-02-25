@@ -82,6 +82,14 @@ Groups use a hybrid model:
 | TypeScript | [ts/](./ts) | [npm](https://www.npmjs.com/package/nostr-double-ratchet) |
 | Rust | [rust/](./rust) | [crates.io](https://crates.io/crates/nostr-double-ratchet) |
 
+## Mobile FFI (optional)
+
+For iOS/Android integration (for example Flutter/native apps), use:
+
+- [rust/crates/ndr-ffi](./rust/crates/ndr-ffi) - UniFFI bindings crate
+- [scripts/mobile/build-ios.sh](./scripts/mobile/build-ios.sh)
+- [scripts/mobile/build-android.sh](./scripts/mobile/build-android.sh)
+
 ## Repository Layout
 
 - `ts/`: TypeScript library
