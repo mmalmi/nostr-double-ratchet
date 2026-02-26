@@ -30,6 +30,7 @@ export interface GroupManagerErrorContext {
 export interface GroupManagerOptions {
   ourOwnerPubkey: string;
   ourDevicePubkey: string;
+  suppressLocalDeviceEcho?: boolean;
   storage?: StorageAdapter;
   oneToMany?: OneToManyChannel;
   nostrSubscribe?: NostrSubscribe;
@@ -100,6 +101,7 @@ export class GroupManager {
   private readonly nostrSubscribe?: NostrSubscribe;
   private readonly onDecryptedEvent?: (event: GroupDecryptedEvent) => void;
   private readonly onError?: (error: unknown, context: GroupManagerErrorContext) => void;
+  private readonly suppressLocalDeviceEcho: boolean;
 
   private readonly groups = new Map<string, Group>();
   private readonly senderEventToGroup = new Map<string, string>();
@@ -118,6 +120,7 @@ export class GroupManager {
     this.nostrSubscribe = opts.nostrSubscribe;
     this.onDecryptedEvent = opts.onDecryptedEvent;
     this.onError = opts.onError;
+    this.suppressLocalDeviceEcho = opts.suppressLocalDeviceEcho ?? true;
   }
 
   async upsertGroup(data: GroupData): Promise<void> {
@@ -348,7 +351,7 @@ export class GroupManager {
       await this.refreshGroupSenderMappings(groupId);
       await this.syncOuterSubscription();
 
-      const all = [...drainedFromGroup, ...drainedFromManagerQueue];
+      const all = this.routeIncomingEvents([...drainedFromGroup, ...drainedFromManagerQueue]);
       this.emitDecryptedEvents(all);
       return all;
     } catch (error) {
@@ -375,6 +378,9 @@ export class GroupManager {
 
     try {
       const decrypted = await group.handleOuterEvent(outer);
+      if (decrypted && this.shouldDropLocalEcho(decrypted)) {
+        return null;
+      }
       if (decrypted) {
         this.emitDecryptedEvents([decrypted]);
       }
@@ -393,7 +399,12 @@ export class GroupManager {
   async syncOuterSubscription(): Promise<void> {
     if (!this.nostrSubscribe) return;
 
-    const authors = Array.from(this.senderEventToGroup.keys()).sort();
+    let authors = Array.from(this.senderEventToGroup.keys());
+    if (this.suppressLocalDeviceEcho && authors.length > 0) {
+      const localSenderEvents = await this.listLocalSenderEventPubkeys();
+      authors = authors.filter((author) => !localSenderEvents.has(author));
+    }
+    authors.sort();
     const authorsKey = authors.join(",");
     if (authorsKey === this.outerAuthorsKey) return;
 
@@ -510,5 +521,27 @@ export class GroupManager {
 
   private reportError(error: unknown, context: GroupManagerErrorContext): void {
     this.onError?.(error, context);
+  }
+
+  private shouldDropLocalEcho(event: GroupDecryptedEvent): boolean {
+    return this.suppressLocalDeviceEcho && event.origin === "local-device";
+  }
+
+  private routeIncomingEvents(events: GroupDecryptedEvent[]): GroupDecryptedEvent[] {
+    if (!this.suppressLocalDeviceEcho) return events;
+    return events.filter((event) => !this.shouldDropLocalEcho(event));
+  }
+
+  private async listLocalSenderEventPubkeys(): Promise<Set<string>> {
+    const local = new Set<string>();
+    await Promise.allSettled(
+      Array.from(this.groups.values()).map(async (group) => {
+        const senderEventPubkey = await group.getSenderEventPubkeyForDevice(this.ourDevicePubkey);
+        if (senderEventPubkey) {
+          local.add(senderEventPubkey);
+        }
+      })
+    );
+    return local;
   }
 }

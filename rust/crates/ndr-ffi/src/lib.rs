@@ -1443,7 +1443,11 @@ mod tests {
         assert!(!send.inner_event_id.is_empty());
 
         let sender_event_pubkeys = manager.group_known_sender_event_pubkeys();
-        assert_eq!(sender_event_pubkeys.len(), 1);
+        assert_eq!(
+            sender_event_pubkeys.len(),
+            0,
+            "local sender-event pubkeys should be filtered from subscription lists"
+        );
     }
 
     #[test]

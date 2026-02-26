@@ -9,6 +9,7 @@ use crate::{
         build_group_metadata_content, create_group_data, GroupData, GROUP_METADATA_KIND,
         GROUP_SENDER_KEY_DISTRIBUTION_KIND,
     },
+    message_origin::{classify_message_origin, MessageOrigin},
     one_to_many::OneToManyChannel,
     sender_key::{SenderKeyDistribution, SenderKeyState},
     Error, InMemoryStorage, Result, StorageAdapter, CHAT_MESSAGE_KIND,
@@ -99,6 +100,7 @@ pub struct GroupManager {
     group_to_sender_events: HashMap<String, HashSet<PublicKey>>,
     pending_outer_by_sender_event: HashMap<PublicKey, Vec<Event>>,
     max_pending_per_sender_event: usize,
+    suppress_local_device_echo: bool,
 }
 
 impl GroupManager {
@@ -115,6 +117,7 @@ impl GroupManager {
             group_to_sender_events: HashMap::new(),
             pending_outer_by_sender_event: HashMap::new(),
             max_pending_per_sender_event: 128,
+            suppress_local_device_echo: true,
         }
     }
 
@@ -165,7 +168,21 @@ impl GroupManager {
             self.refresh_group_sender_mappings(&group_id);
         }
 
-        let mut values: Vec<PublicKey> = self.sender_event_to_group.keys().copied().collect();
+        let mut local_sender_events = HashSet::new();
+        for group in self.groups.values_mut() {
+            if let Ok(Some(sender_event_pubkey)) =
+                group.sender_event_pubkey_for_device(self.our_device_pubkey)
+            {
+                local_sender_events.insert(sender_event_pubkey);
+            }
+        }
+
+        let mut values: Vec<PublicKey> = self
+            .sender_event_to_group
+            .keys()
+            .copied()
+            .filter(|pubkey| !local_sender_events.contains(pubkey))
+            .collect();
         values.sort_by_key(|pk| pk.to_hex());
         values.dedup();
         values
@@ -360,7 +377,7 @@ impl GroupManager {
         }
 
         self.refresh_group_sender_mappings(&group_id);
-        drained
+        self.route_group_events(drained)
     }
 
     pub fn handle_outer_event(&mut self, outer: &Event) -> Option<GroupDecryptedEvent> {
@@ -383,7 +400,11 @@ impl GroupManager {
             return None;
         };
 
-        group.handle_outer_event(outer)
+        let decrypted = group.handle_outer_event(outer)?;
+        if self.should_drop_local_echo(&decrypted) {
+            return None;
+        }
+        Some(decrypted)
     }
 
     fn bind_sender_event_to_group(&mut self, group_id: &str, sender_event_pubkey: PublicKey) {
@@ -476,6 +497,31 @@ impl GroupManager {
         }
         decrypted
     }
+
+    fn route_group_events(&self, events: Vec<GroupDecryptedEvent>) -> Vec<GroupDecryptedEvent> {
+        if !self.suppress_local_device_echo {
+            return events;
+        }
+
+        events
+            .into_iter()
+            .filter(|event| !self.should_drop_local_echo(event))
+            .collect()
+    }
+
+    fn should_drop_local_echo(&self, event: &GroupDecryptedEvent) -> bool {
+        if !self.suppress_local_device_echo {
+            return false;
+        }
+
+        let origin = classify_message_origin(
+            self.our_owner_pubkey,
+            Some(self.our_device_pubkey),
+            event.sender_owner_pubkey,
+            Some(event.sender_device_pubkey),
+        );
+        origin == MessageOrigin::LocalDevice
+    }
 }
 
 struct GroupChannel {
@@ -545,6 +591,14 @@ impl GroupChannel {
             }
         }
         Ok(values)
+    }
+
+    fn sender_event_pubkey_for_device(
+        &mut self,
+        sender_device_pubkey: PublicKey,
+    ) -> Result<Option<PublicKey>> {
+        self.init()?;
+        Ok(self.sender_device_to_event.get(&sender_device_pubkey).copied())
     }
 
     fn rotate_sender_key<F>(

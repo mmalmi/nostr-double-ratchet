@@ -309,8 +309,11 @@ fn send_message_uses_device_pubkey_and_distributes_sender_key_once() {
     assert_eq!(pairwise_first[0].pubkey, alice_device);
     assert_eq!(published_first.len(), 1);
     let known_sender_events = manager.known_sender_event_pubkeys();
-    assert_eq!(known_sender_events.len(), 1);
-    assert_eq!(known_sender_events[0], published_first[0].pubkey);
+    assert_eq!(
+        known_sender_events.len(),
+        0,
+        "local sender-event pubkeys should not be surfaced for outer subscriptions"
+    );
 
     let mut pairwise_second: Vec<UnsignedEvent> = Vec::new();
     let mut published_second: Vec<Event> = Vec::new();
@@ -446,4 +449,49 @@ fn decrypts_typescript_outer_after_distribution_mapping() {
                 .as_deref()
                 .is_some_and(|content| content == decrypted.inner.content)
     );
+}
+
+#[test]
+fn suppresses_local_device_outer_echo_by_default() {
+    let group_id = "group-local-echo";
+
+    let alice_owner = Keys::generate().public_key();
+    let bob_owner = Keys::generate().public_key();
+    let alice_device = Keys::generate().public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let mut manager = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: alice_owner,
+        our_device_pubkey: alice_device,
+        storage: Some(storage),
+        one_to_many: None,
+    });
+    manager
+        .upsert_group(make_group(
+            group_id,
+            &[alice_owner, bob_owner],
+            &[alice_owner],
+        ))
+        .unwrap();
+
+    let mut outer: Option<Event> = None;
+    let mut send_pairwise = |_to: PublicKey, _rumor: &UnsignedEvent| Ok(());
+    let mut publish_outer = |event: &Event| {
+        outer = Some(event.clone());
+        Ok(())
+    };
+
+    let sent = manager
+        .send_message(
+            group_id,
+            "local-device-message",
+            &mut send_pairwise,
+            &mut publish_outer,
+            None,
+        )
+        .unwrap();
+    assert_eq!(sent.inner.pubkey, alice_device);
+
+    let decrypted = manager.handle_outer_event(outer.as_ref().expect("outer event"));
+    assert!(decrypted.is_none(), "local-device outer echo should be suppressed");
 }

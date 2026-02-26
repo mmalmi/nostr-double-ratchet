@@ -27,8 +27,21 @@ import {
 } from "./utils"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
 import { getEventHash } from "nostr-tools"
+import {
+  classifyMessageOrigin,
+  type MessageOrigin,
+  isCrossDeviceSelfOrigin,
+  isSelfOrigin,
+} from "./MessageOrigin"
 
-export type OnEventMeta = { fromDeviceId?: string }
+export type OnEventMeta = {
+  fromDeviceId?: string
+  senderOwnerPubkey?: string
+  senderDevicePubkey?: string
+  origin?: MessageOrigin
+  isSelf?: boolean
+  isCrossDeviceSelf?: boolean
+}
 export type OnEventCallback = (event: Rumor, from: string, meta?: OnEventMeta) => void
 
 /**
@@ -608,8 +621,24 @@ export class SessionManager {
 
       this.maybeAutoAdoptChatSettings(event, userPubkey)
 
+      const origin = classifyMessageOrigin({
+        ourOwnerPubkey: this.ownerPublicKey,
+        ourDevicePubkey: this.deviceId,
+        senderOwnerPubkey: userPubkey,
+        senderDevicePubkey: deviceRecord.deviceId,
+      })
+
+      const meta: OnEventMeta = {
+        fromDeviceId: deviceRecord.deviceId,
+        senderOwnerPubkey: userPubkey,
+        senderDevicePubkey: deviceRecord.deviceId,
+        origin,
+        isSelf: isSelfOrigin(origin),
+        isCrossDeviceSelf: isCrossDeviceSelfOrigin(origin),
+      }
+
       for (const cb of this.internalSubscriptions) {
-        cb(event, userPubkey, { fromDeviceId: deviceRecord.deviceId })
+        cb(event, userPubkey, meta)
       }
       promoteToActive(session)
       this.storeUserRecord(userPubkey).catch(() => {})

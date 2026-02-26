@@ -315,4 +315,38 @@ describe("GroupManager", () => {
     expect(filters[1]!.authors).toEqual([outerA!.pubkey, outerB!.pubkey].sort());
     expect(unsubscribeCalls).toBe(1);
   });
+
+  it("suppresses local-device one-to-many outer echoes by default", async () => {
+    const groupId = "group-local-echo";
+
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+
+    const received: string[] = [];
+    const manager = new GroupManager({
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+      onDecryptedEvent: (event) => {
+        received.push(event.inner.content);
+      },
+    });
+
+    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+
+    let outer: VerifiedEvent | null = null;
+    await manager.sendMessage(groupId, "local-device-message", {
+      sendPairwise: async () => {},
+      publishOuter: async (event) => {
+        outer = event;
+      },
+    });
+
+    expect(outer).not.toBeNull();
+
+    const decrypted = await manager.handleOuterEvent(outer!);
+    expect(decrypted).toBeNull();
+    expect(received).toEqual([]);
+  });
 });

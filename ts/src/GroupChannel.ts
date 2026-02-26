@@ -11,6 +11,12 @@ import {
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
   type GroupData,
 } from "./GroupMeta";
+import {
+  classifyMessageOrigin,
+  isCrossDeviceSelfOrigin,
+  isSelfOrigin,
+  type MessageOrigin,
+} from "./MessageOrigin";
 import { OneToManyChannel } from "./OneToManyChannel";
 import type { SenderKeyDistribution, SenderKeyStateSerialized } from "./SenderKey";
 import { SenderKeyState } from "./SenderKey";
@@ -35,6 +41,9 @@ export interface GroupDecryptedEvent {
   senderEventPubkey: string;
   senderDevicePubkey: string;
   senderOwnerPubkey?: string;
+  origin: MessageOrigin;
+  isSelf: boolean;
+  isCrossDeviceSelf: boolean;
   outerEventId: string;
   outerCreatedAt: number;
   keyId: number;
@@ -574,11 +583,21 @@ export class Group {
       (await this.storage.get<string>(this.senderOwnerPubkeyKey(senderDevicePubkey))) ||
       undefined;
 
+    const origin = classifyMessageOrigin({
+      ourOwnerPubkey: this.ourOwnerPubkey,
+      ourDevicePubkey: this.ourDevicePubkey,
+      senderOwnerPubkey,
+      senderDevicePubkey,
+    });
+
     return {
       groupId: this.groupId(),
       senderEventPubkey,
       senderDevicePubkey,
       senderOwnerPubkey,
+      origin,
+      isSelf: isSelfOrigin(origin),
+      isCrossDeviceSelf: isCrossDeviceSelfOrigin(origin),
       outerEventId: outer.id,
       outerCreatedAt: outer.created_at,
       keyId: parsed.keyId,
