@@ -1,7 +1,13 @@
-import type { VerifiedEvent } from "nostr-tools";
+import { getEventHash, type VerifiedEvent } from "nostr-tools";
 
 import { Group, type GroupDecryptedEvent, type PairwiseSend, type PublishOuter } from "./GroupChannel";
-import { GROUP_SENDER_KEY_DISTRIBUTION_KIND, type GroupData } from "./GroupMeta";
+import {
+  buildGroupMetadataContent,
+  createGroupData,
+  GROUP_METADATA_KIND,
+  GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+  type GroupData,
+} from "./GroupMeta";
 import { OneToManyChannel } from "./OneToManyChannel";
 import type { SenderKeyDistribution } from "./SenderKey";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
@@ -29,6 +35,36 @@ export interface GroupManagerOptions {
   nostrSubscribe?: NostrSubscribe;
   onDecryptedEvent?: (event: GroupDecryptedEvent) => void;
   onError?: (error: unknown, context: GroupManagerErrorContext) => void;
+}
+
+export interface CreateGroupOptions {
+  /**
+   * Sends metadata rumors to group members over pairwise sessions.
+   * Required when `fanoutMetadata` is true (default).
+   */
+  sendPairwise?: PairwiseSend;
+  /**
+   * Controls whether createGroup should immediately fanout metadata to members.
+   * Defaults to true.
+   */
+  fanoutMetadata?: boolean;
+  /**
+   * Optional timestamp override in milliseconds since epoch (for deterministic tests).
+   */
+  nowMs?: number;
+}
+
+export interface GroupMetadataFanoutResult {
+  enabled: boolean;
+  attempted: number;
+  succeeded: string[];
+  failed: string[];
+}
+
+export interface CreateGroupResult {
+  group: GroupData;
+  metadataRumor?: Rumor;
+  fanout: GroupMetadataFanoutResult;
 }
 
 function getFirstTagValue(tags: string[][] | undefined, key: string): string | undefined {
@@ -134,6 +170,85 @@ export class GroupManager {
     this.senderEventToGroup.clear();
     this.groupToSenderEvents.clear();
     this.pendingOuterBySenderEvent.clear();
+  }
+
+  /**
+   * High-level helper for app flows:
+   * - Creates local group data and stores it in this manager.
+   * - By default, fans out group metadata (kind 40) to members over pairwise sessions.
+   *
+   * Note: `createGroupData` remains pure/local-only. Use this method when you want
+   * creation + delivery in one step.
+   */
+  async createGroup(
+    name: string,
+    memberOwnerPubkeys: string[],
+    opts: CreateGroupOptions = {}
+  ): Promise<CreateGroupResult> {
+    const group = createGroupData(name, this.ourOwnerPubkey, memberOwnerPubkeys);
+    await this.upsertGroup(group);
+
+    const fanoutMetadata = opts.fanoutMetadata ?? true;
+    if (!fanoutMetadata) {
+      return {
+        group,
+        fanout: {
+          enabled: false,
+          attempted: 0,
+          succeeded: [],
+          failed: [],
+        },
+      };
+    }
+
+    if (!opts.sendPairwise) {
+      throw new Error("sendPairwise is required when fanoutMetadata is enabled");
+    }
+
+    const nowMs = opts.nowMs ?? Date.now();
+    const metadataRumor: Rumor = {
+      kind: GROUP_METADATA_KIND,
+      content: buildGroupMetadataContent(group),
+      created_at: Math.floor(nowMs / 1000),
+      tags: [
+        ["l", group.id],
+        ["ms", String(nowMs)],
+      ],
+      pubkey: this.ourDevicePubkey,
+      id: "",
+    };
+    metadataRumor.id = getEventHash(metadataRumor);
+
+    const recipients = group.members.filter((pubkey) => pubkey !== this.ourOwnerPubkey);
+    const deliveries = await Promise.allSettled(
+      recipients.map(async (recipient) => {
+        await opts.sendPairwise!(recipient, metadataRumor);
+        return recipient;
+      })
+    );
+
+    const succeeded: string[] = [];
+    const failed: string[] = [];
+    for (let i = 0; i < deliveries.length; i += 1) {
+      const result = deliveries[i]!;
+      const recipient = recipients[i]!;
+      if (result.status === "fulfilled") {
+        succeeded.push(recipient);
+      } else {
+        failed.push(recipient);
+      }
+    }
+
+    return {
+      group,
+      metadataRumor,
+      fanout: {
+        enabled: true,
+        attempted: recipients.length,
+        succeeded,
+        failed,
+      },
+    };
   }
 
   async sendMessage(

@@ -36,6 +36,12 @@ export function generateGroupSecret(): string {
   return bytesToHex(bytes);
 }
 
+/**
+ * Build local group state only (pure function).
+ *
+ * This does not perform any network I/O and does not send metadata to members.
+ * Use `GroupManager.createGroup(...)` when you want create + metadata fanout in one step.
+ */
 export function createGroupData(
   name: string,
   creatorPubkey: string,
@@ -184,4 +190,3 @@ export function removeGroupAdmin(
     admins: group.admins.filter((a) => a !== pubkey),
   };
 }
-

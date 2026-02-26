@@ -1,7 +1,8 @@
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    GroupData, GroupManager, GroupManagerOptions, InMemoryStorage, SenderKeyDistribution,
-    StorageAdapter, CHAT_MESSAGE_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+    parse_group_metadata, CreateGroupOptions, Error, GroupData, GroupManager, GroupManagerOptions,
+    InMemoryStorage, SenderKeyDistribution, StorageAdapter, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
+    GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 };
 use std::sync::Arc;
 
@@ -28,6 +29,160 @@ fn parse_group_tag(event: &UnsignedEvent) -> Option<String> {
             None
         }
     })
+}
+
+fn has_ms_tag(event: &UnsignedEvent) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.clone().to_vec();
+        parts.first().map(|s| s.as_str()) == Some("ms")
+    })
+}
+
+#[test]
+fn create_group_fans_out_metadata_by_default_and_returns_group_data() {
+    let alice_owner = Keys::generate().public_key();
+    let bob_owner = Keys::generate().public_key();
+    let carol_owner = Keys::generate().public_key();
+    let alice_device = Keys::generate().public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let mut manager = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: alice_owner,
+        our_device_pubkey: alice_device,
+        storage: Some(storage),
+        one_to_many: None,
+    });
+
+    let bob_hex = bob_owner.to_hex();
+    let carol_hex = carol_owner.to_hex();
+    let members = [bob_hex.as_str(), carol_hex.as_str()];
+
+    let mut sent: Vec<(PublicKey, UnsignedEvent)> = Vec::new();
+    let mut send_pairwise = |recipient: PublicKey, rumor: &UnsignedEvent| {
+        sent.push((recipient, rumor.clone()));
+        Ok(())
+    };
+
+    let result = manager
+        .create_group(
+            "Metadata Group",
+            &members,
+            CreateGroupOptions {
+                send_pairwise: Some(&mut send_pairwise),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.group.name, "Metadata Group");
+    assert_eq!(
+        result.group.members,
+        vec![
+            alice_owner.to_hex(),
+            bob_owner.to_hex(),
+            carol_owner.to_hex()
+        ]
+    );
+    assert!(result.fanout.enabled);
+    assert_eq!(result.fanout.attempted, 2);
+    assert_eq!(
+        result.fanout.succeeded,
+        vec![bob_owner.to_hex(), carol_owner.to_hex()]
+    );
+    assert_eq!(result.fanout.failed, Vec::<String>::new());
+
+    let metadata_rumor = result
+        .metadata_rumor
+        .expect("metadata rumor should be returned");
+    assert_eq!(
+        metadata_rumor.kind,
+        Kind::Custom(GROUP_METADATA_KIND as u16)
+    );
+    assert_eq!(metadata_rumor.pubkey, alice_device);
+    assert_eq!(
+        parse_group_tag(&metadata_rumor),
+        Some(result.group.id.clone())
+    );
+    assert!(has_ms_tag(&metadata_rumor));
+
+    let parsed = parse_group_metadata(&metadata_rumor.content).expect("metadata should parse");
+    assert_eq!(parsed.id, result.group.id);
+    assert_eq!(parsed.name, "Metadata Group");
+    assert_eq!(
+        parsed.members,
+        vec![
+            alice_owner.to_hex(),
+            bob_owner.to_hex(),
+            carol_owner.to_hex()
+        ]
+    );
+    assert_eq!(parsed.admins, vec![alice_owner.to_hex()]);
+
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].0, bob_owner);
+    assert_eq!(sent[1].0, carol_owner);
+    assert_eq!(sent[0].1.kind, Kind::Custom(GROUP_METADATA_KIND as u16));
+    assert_eq!(sent[1].1.kind, Kind::Custom(GROUP_METADATA_KIND as u16));
+}
+
+#[test]
+fn create_group_can_disable_metadata_fanout() {
+    let alice_owner = Keys::generate().public_key();
+    let bob_owner = Keys::generate().public_key();
+    let alice_device = Keys::generate().public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let mut manager = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: alice_owner,
+        our_device_pubkey: alice_device,
+        storage: Some(storage),
+        one_to_many: None,
+    });
+
+    let bob_hex = bob_owner.to_hex();
+    let members = [bob_hex.as_str()];
+    let result = manager
+        .create_group(
+            "Local Draft Group",
+            &members,
+            CreateGroupOptions {
+                fanout_metadata: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.group.name, "Local Draft Group");
+    assert!(!result.fanout.enabled);
+    assert_eq!(result.fanout.attempted, 0);
+    assert_eq!(result.fanout.succeeded, Vec::<String>::new());
+    assert_eq!(result.fanout.failed, Vec::<String>::new());
+    assert!(result.metadata_rumor.is_none());
+}
+
+#[test]
+fn create_group_requires_send_pairwise_when_fanout_enabled() {
+    let alice_owner = Keys::generate().public_key();
+    let bob_owner = Keys::generate().public_key();
+    let alice_device = Keys::generate().public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let mut manager = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: alice_owner,
+        our_device_pubkey: alice_device,
+        storage: Some(storage),
+        one_to_many: None,
+    });
+
+    let bob_hex = bob_owner.to_hex();
+    let members = [bob_hex.as_str()];
+    let result = manager.create_group("Needs Sender", &members, CreateGroupOptions::default());
+
+    assert!(
+        matches!(result, Err(Error::InvalidEvent(ref message)) if message.contains("send_pairwise")),
+        "expected missing send_pairwise error, got: {:?}",
+        result
+    );
 }
 
 #[test]

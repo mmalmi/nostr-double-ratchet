@@ -5,7 +5,10 @@ use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, SecretKey, Tag, Timestam
 use rand::random;
 
 use crate::{
-    group::{GroupData, GROUP_SENDER_KEY_DISTRIBUTION_KIND},
+    group::{
+        build_group_metadata_content, create_group_data, GroupData, GROUP_METADATA_KIND,
+        GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+    },
     one_to_many::OneToManyChannel,
     sender_key::{SenderKeyDistribution, SenderKeyState},
     Error, InMemoryStorage, Result, StorageAdapter, CHAT_MESSAGE_KIND,
@@ -52,6 +55,37 @@ pub struct GroupDecryptedEvent {
     pub key_id: u32,
     pub message_number: u32,
     pub inner: UnsignedEvent,
+}
+
+pub struct CreateGroupOptions<'a> {
+    pub send_pairwise: Option<&'a mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>>,
+    pub fanout_metadata: bool,
+    pub now_ms: Option<u64>,
+}
+
+impl<'a> Default for CreateGroupOptions<'a> {
+    fn default() -> Self {
+        Self {
+            send_pairwise: None,
+            fanout_metadata: true,
+            now_ms: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupMetadataFanoutResult {
+    pub enabled: bool,
+    pub attempted: usize,
+    pub succeeded: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateGroupResult {
+    pub group: GroupData,
+    pub metadata_rumor: Option<UnsignedEvent>,
+    pub fanout: GroupMetadataFanoutResult,
 }
 
 pub struct GroupManager {
@@ -135,6 +169,87 @@ impl GroupManager {
         values.sort_by_key(|pk| pk.to_hex());
         values.dedup();
         values
+    }
+
+    /// High-level helper:
+    /// - creates local group state
+    /// - and (by default) fans out metadata rumors to members over pairwise sessions.
+    ///
+    /// `create_group_data` stays pure/local-only; this method adds app-level delivery behavior.
+    pub fn create_group(
+        &mut self,
+        name: &str,
+        member_owner_pubkeys: &[&str],
+        mut opts: CreateGroupOptions<'_>,
+    ) -> Result<CreateGroupResult> {
+        let our_owner_hex = pubkey_to_hex(&self.our_owner_pubkey);
+        let group = create_group_data(name, &our_owner_hex, member_owner_pubkeys);
+        self.upsert_group(group.clone())?;
+
+        if !opts.fanout_metadata {
+            return Ok(CreateGroupResult {
+                group,
+                metadata_rumor: None,
+                fanout: GroupMetadataFanoutResult {
+                    enabled: false,
+                    attempted: 0,
+                    succeeded: Vec::new(),
+                    failed: Vec::new(),
+                },
+            });
+        }
+
+        let Some(send_pairwise) = opts.send_pairwise.as_mut() else {
+            return Err(Error::InvalidEvent(
+                "send_pairwise is required when fanout_metadata is enabled".to_string(),
+            ));
+        };
+
+        let now_ms = opts.now_ms.unwrap_or_else(now_millis);
+        let now_seconds = now_ms / 1000;
+        let metadata_content = build_group_metadata_content(&group, false);
+        let tags = vec![
+            parse_tag(&["l".to_string(), group.id.clone()])?,
+            parse_tag(&["ms".to_string(), now_ms.to_string()])?,
+        ];
+        let metadata_rumor =
+            EventBuilder::new(Kind::Custom(GROUP_METADATA_KIND as u16), metadata_content)
+                .tags(tags)
+                .custom_created_at(Timestamp::from(now_seconds))
+                .build(self.our_device_pubkey);
+
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+
+        for member_owner_hex in &group.members {
+            if member_owner_hex == &our_owner_hex {
+                continue;
+            }
+
+            let Some(member_owner_pubkey) = parse_pubkey_hex(member_owner_hex) else {
+                failed.push(member_owner_hex.clone());
+                continue;
+            };
+
+            if (*send_pairwise)(member_owner_pubkey, &metadata_rumor).is_ok() {
+                succeeded.push(member_owner_hex.clone());
+            } else {
+                failed.push(member_owner_hex.clone());
+            }
+        }
+
+        let attempted = succeeded.len() + failed.len();
+
+        Ok(CreateGroupResult {
+            group,
+            metadata_rumor: Some(metadata_rumor),
+            fanout: GroupMetadataFanoutResult {
+                enabled: true,
+                attempted,
+                succeeded,
+                failed,
+            },
+        })
     }
 
     pub fn send_message<F, G>(

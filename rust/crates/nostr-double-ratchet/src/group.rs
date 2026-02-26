@@ -64,6 +64,10 @@ pub fn generate_group_secret() -> String {
     hex::encode(bytes)
 }
 
+/// Build local group state only (pure function).
+///
+/// This does not perform network I/O and does not fan out metadata to members.
+/// Use `GroupManager::create_group(...)` when you want create + metadata fanout in one step.
 pub fn create_group_data(name: &str, creator_pubkey: &str, member_pubkeys: &[&str]) -> GroupData {
     let mut all_members = vec![creator_pubkey.to_string()];
     for pk in member_pubkeys {

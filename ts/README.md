@@ -76,6 +76,7 @@ await sessionManager.sendMessage(recipientPubkey, "Hello!")
 - Sender-key distributions are delivered pairwise over authenticated 1:1 sessions.
 - Group messages are published once as one-to-many outer events (per sender device key).
 - Receiver attribution for group payloads is derived from authenticated distribution/session context, not inner rumor `pubkey`.
+- `createGroupData(...)` is a pure local constructor. `GroupManager.createGroup(...)` is the app-level helper that creates local group state and, by default, fans out metadata (kind 40) to members.
 
 ## Disappearing Messages (Expiration)
 

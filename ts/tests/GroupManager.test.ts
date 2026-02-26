@@ -5,6 +5,7 @@ import { generateSecretKey, getPublicKey } from "nostr-tools";
 import {
   Group,
   GroupManager,
+  GROUP_METADATA_KIND,
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
   type GroupData,
 } from "../src/Group";
@@ -24,6 +25,87 @@ function makeGroup(groupId: string, members: string[], admins: string[]): GroupD
 }
 
 describe("GroupManager", () => {
+  it("createGroup fans out group metadata by default and returns group data", async () => {
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const carolOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+
+    const manager = new GroupManager({
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    const sent: Array<{ recipient: string; rumor: Rumor }> = [];
+    const created = await manager.createGroup("Metadata Group", [bobOwnerPk, carolOwnerPk], {
+      sendPairwise: async (recipient, rumor) => {
+        sent.push({ recipient, rumor });
+      },
+    });
+
+    expect(created.group.name).toBe("Metadata Group");
+    expect(created.group.members).toEqual([aliceOwnerPk, bobOwnerPk, carolOwnerPk]);
+    expect(created.fanout.enabled).toBe(true);
+    expect(created.fanout.attempted).toBe(2);
+    expect(created.fanout.succeeded.sort()).toEqual([bobOwnerPk, carolOwnerPk].sort());
+    expect(created.fanout.failed).toEqual([]);
+    expect(sent).toHaveLength(2);
+
+    for (const entry of sent) {
+      expect(entry.rumor.kind).toBe(GROUP_METADATA_KIND);
+      expect(entry.rumor.pubkey).toBe(aliceDevicePk);
+      expect(entry.rumor.tags.some((tag) => tag[0] === "l" && tag[1] === created.group.id)).toBe(true);
+      expect(entry.rumor.tags.some((tag) => tag[0] === "ms")).toBe(true);
+
+      const parsed = JSON.parse(entry.rumor.content) as {
+        id: string;
+        name: string;
+        members: string[];
+        admins: string[];
+      };
+      expect(parsed.id).toBe(created.group.id);
+      expect(parsed.name).toBe("Metadata Group");
+      expect(parsed.members).toEqual([aliceOwnerPk, bobOwnerPk, carolOwnerPk]);
+      expect(parsed.admins).toEqual([aliceOwnerPk]);
+    }
+  });
+
+  it("createGroup can disable metadata fanout", async () => {
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+
+    const manager = new GroupManager({
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    const created = await manager.createGroup("Local Draft Group", [bobOwnerPk], {
+      fanoutMetadata: false,
+    });
+
+    expect(created.group.name).toBe("Local Draft Group");
+    expect(created.fanout.enabled).toBe(false);
+    expect(created.fanout.attempted).toBe(0);
+    expect(created.fanout.succeeded).toEqual([]);
+    expect(created.fanout.failed).toEqual([]);
+    expect(created.metadataRumor).toBeUndefined();
+  });
+
+  it("createGroup requires sendPairwise when metadata fanout is enabled", async () => {
+    const manager = new GroupManager({
+      ourOwnerPubkey: getPublicKey(generateSecretKey()),
+      ourDevicePubkey: getPublicKey(generateSecretKey()),
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    await expect(
+      manager.createGroup("Needs Fanout Sender", [getPublicKey(generateSecretKey())])
+    ).rejects.toThrow("sendPairwise is required when fanoutMetadata is enabled");
+  });
+
   it("drains queued outer events after sender-key distribution and emits callbacks", async () => {
     const groupId = "group-manager-queue";
 
