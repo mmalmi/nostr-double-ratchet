@@ -8,9 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender};
 use nostr_double_ratchet::{
-    AppKeys, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent, GroupManager,
-    GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, Session, SessionManager,
-    SessionManagerEvent, SessionState, StorageAdapter,
+    AppKeys, CreateGroupOptions, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent,
+    GroupManager, GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, Session,
+    SessionManager, SessionManagerEvent, SessionState, StorageAdapter,
 };
 
 mod error;
@@ -92,6 +92,23 @@ pub struct GroupSendResult {
     pub inner_event_json: String,
     pub outer_event_id: String,
     pub inner_event_id: String,
+}
+
+/// Metadata fanout summary for group creation.
+#[derive(uniffi::Record)]
+pub struct GroupCreateFanout {
+    pub enabled: bool,
+    pub attempted: u64,
+    pub succeeded: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Result of creating a group through GroupManager.
+#[derive(uniffi::Record)]
+pub struct GroupCreateResult {
+    pub group: FfiGroupData,
+    pub metadata_rumor_json: Option<String>,
+    pub fanout: GroupCreateFanout,
 }
 
 /// Decrypted group event returned by GroupManager.
@@ -749,18 +766,57 @@ impl SessionManagerHandle {
     /// Upsert group metadata into the embedded GroupManager.
     pub fn group_upsert(&self, group: FfiGroupData) -> Result<(), NdrError> {
         let mut group_manager = self.group_manager.lock().unwrap();
-        group_manager.upsert_group(GroupData {
-            id: group.id,
-            name: group.name,
-            description: group.description,
-            picture: group.picture,
-            members: group.members,
-            admins: group.admins,
-            created_at: group.created_at_ms,
-            secret: group.secret,
-            accepted: group.accepted,
-        })?;
+        group_manager.upsert_group(ffi_group_data_to_group_data(group))?;
         Ok(())
+    }
+
+    /// Create a group through the embedded GroupManager, with optional metadata fanout.
+    pub fn group_create(
+        &self,
+        name: String,
+        member_owner_pubkeys: Vec<String>,
+        fanout_metadata: Option<bool>,
+        now_ms: Option<u64>,
+    ) -> Result<GroupCreateResult, NdrError> {
+        let member_refs: Vec<&str> = member_owner_pubkeys.iter().map(String::as_str).collect();
+        let should_fanout = fanout_metadata.unwrap_or(true);
+
+        let session_manager = self.inner.lock().unwrap();
+        let mut group_manager = self.group_manager.lock().unwrap();
+
+        let mut send_pairwise = |recipient_owner: nostr::PublicKey,
+                                 rumor: &nostr::UnsignedEvent|
+         -> nostr_double_ratchet::Result<()> {
+            session_manager.send_event(recipient_owner, rumor.clone())?;
+            Ok(())
+        };
+
+        let mut opts = CreateGroupOptions {
+            send_pairwise: None,
+            fanout_metadata: should_fanout,
+            now_ms,
+        };
+        if should_fanout {
+            opts.send_pairwise = Some(&mut send_pairwise);
+        }
+
+        let created = group_manager.create_group(&name, &member_refs, opts)?;
+        let metadata_rumor_json = created
+            .metadata_rumor
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
+        Ok(GroupCreateResult {
+            group: group_data_to_ffi_group_data(created.group),
+            metadata_rumor_json,
+            fanout: GroupCreateFanout {
+                enabled: created.fanout.enabled,
+                attempted: created.fanout.attempted as u64,
+                succeeded: created.fanout.succeeded,
+                failed: created.fanout.failed,
+            },
+        })
     }
 
     /// Remove a group from the embedded GroupManager.
@@ -1089,6 +1145,34 @@ fn parse_secret(hex_str: &str) -> Result<[u8; 32], NdrError> {
     Ok(arr)
 }
 
+fn ffi_group_data_to_group_data(group: FfiGroupData) -> GroupData {
+    GroupData {
+        id: group.id,
+        name: group.name,
+        description: group.description,
+        picture: group.picture,
+        members: group.members,
+        admins: group.admins,
+        created_at: group.created_at_ms,
+        secret: group.secret,
+        accepted: group.accepted,
+    }
+}
+
+fn group_data_to_ffi_group_data(group: GroupData) -> FfiGroupData {
+    FfiGroupData {
+        id: group.id,
+        name: group.name,
+        description: group.description,
+        picture: group.picture,
+        members: group.members,
+        admins: group.admins,
+        created_at_ms: group.created_at,
+        secret: group.secret,
+        accepted: group.accepted,
+    }
+}
+
 fn unsigned_event_id_string(event: &nostr::UnsignedEvent) -> String {
     event
         .id
@@ -1360,6 +1444,33 @@ mod tests {
 
         let sender_event_pubkeys = manager.group_known_sender_event_pubkeys();
         assert_eq!(sender_event_pubkeys.len(), 1);
+    }
+
+    #[test]
+    fn test_group_create_returns_group_and_metadata_rumor() {
+        let kp = generate_keypair();
+        let manager = SessionManagerHandle::new(
+            kp.public_key_hex.clone(),
+            kp.private_key_hex.clone(),
+            kp.public_key_hex.clone(),
+            None,
+        )
+        .unwrap();
+        manager.init().unwrap();
+
+        let created = manager
+            .group_create(
+                "ffi-created".to_string(),
+                vec![kp.public_key_hex.clone()],
+                Some(true),
+                Some(1_700_000_123_000),
+            )
+            .unwrap();
+
+        assert_eq!(created.group.name, "ffi-created");
+        assert!(created.group.members.contains(&kp.public_key_hex));
+        assert!(created.metadata_rumor_json.is_some());
+        assert!(created.fanout.enabled);
     }
 
     #[test]
