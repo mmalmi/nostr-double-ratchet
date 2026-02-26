@@ -2,8 +2,9 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
-    FileStorageAdapter, GroupManager, GroupManagerOptions, GroupSendEvent, Session, SessionManager,
-    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, REACTION_KIND,
+    CreateGroupOptions, FileStorageAdapter, GroupManager, GroupManagerOptions, GroupSendEvent,
+    Session, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
+    GROUP_METADATA_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -495,15 +496,65 @@ pub async fn create(
     output: &Output,
 ) -> Result<()> {
     // Group membership is expressed in *owner pubkeys* so it works with linked-device mode.
-    let my_pubkey = config.owner_public_key_hex()?;
+    let my_owner_pubkey = config.owner_public_key_hex()?;
     let member_refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
-    let group_data = nostr_double_ratchet::group::create_group_data(name, &my_pubkey, &member_refs);
 
-    let stored = StoredGroup { data: group_data };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let now_ms = now.as_millis() as u64;
+
+    let client = Client::default();
+    let relays = config.resolved_relays();
+    for relay in &relays {
+        client.add_relay(relay).await?;
+    }
+    client.connect().await;
+
+    let mut group_manager = build_group_manager(config, storage)?;
+    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let mut pairwise_events: Vec<nostr::Event> = Vec::new();
+    let mut send_pairwise = |recipient_owner: nostr::PublicKey,
+                             rumor: &nostr::UnsignedEvent|
+     -> nostr_double_ratchet::Result<()> {
+        let recipient_owner_hex = recipient_owner.to_hex();
+        let _ = queue_pairwise_session_events_for_recipient(
+            recipient_owner,
+            &recipient_owner_hex,
+            rumor,
+            &my_owner_pubkey,
+            storage,
+            &session_manager,
+            &session_manager_rx,
+            &mut pairwise_events,
+        );
+        Ok(())
+    };
+
+    let created = group_manager
+        .create_group(
+            name,
+            &member_refs,
+            CreateGroupOptions {
+                send_pairwise: Some(&mut send_pairwise),
+                fanout_metadata: true,
+                now_ms: Some(now_ms),
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create group: {}", e))?;
+
+    const MAX_DELIVERY_ATTEMPTS: usize = 20;
+    const DELIVERY_RETRY_MS: u64 = 100;
+    let _ = publish_events_with_retry(
+        &client,
+        &pairwise_events,
+        MAX_DELIVERY_ATTEMPTS,
+        DELIVERY_RETRY_MS,
+    )
+    .await;
+
+    let stored = StoredGroup {
+        data: created.group,
+    };
     storage.save_group(&stored)?;
-
-    // Fan-out metadata to members
-    let _ = fan_out_metadata(&stored.data, None, config, storage).await;
 
     output.success("group.create", GroupInfo::from(&stored.data));
     Ok(())
