@@ -1922,15 +1922,22 @@ impl SessionManager {
         }
 
         for entry in entries {
+            let mut expanded_for_all_devices = true;
             for device in devices {
                 let device_id = device.identity_pubkey.to_hex();
                 if device_id == self.device_id {
                     continue;
                 }
-                let _ = self.message_queue.add(&device_id, &entry.event);
+                if self.message_queue.add(&device_id, &entry.event).is_err() {
+                    expanded_for_all_devices = false;
+                }
             }
 
-            let _ = self.discovery_queue.remove(&entry.id);
+            // Keep discovery entry when any per-device queue write fails so the next
+            // AppKeys cycle can retry expansion without losing pending messages.
+            if expanded_for_all_devices {
+                let _ = self.discovery_queue.remove(&entry.id);
+            }
         }
 
         Ok(())
@@ -2315,7 +2322,73 @@ impl SessionManager {
 mod tests {
     use super::*;
     use nostr::Keys;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct FailFirstMessageQueuePutStorage {
+        inner: Arc<dyn StorageAdapter>,
+        failed: Arc<Mutex<bool>>,
+    }
+
+    impl FailFirstMessageQueuePutStorage {
+        fn new(inner: Arc<dyn StorageAdapter>) -> Self {
+            Self {
+                inner,
+                failed: Arc::new(Mutex::new(false)),
+            }
+        }
+    }
+
+    impl StorageAdapter for FailFirstMessageQueuePutStorage {
+        fn get(&self, key: &str) -> Result<Option<String>> {
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &str, value: String) -> Result<()> {
+            if key.starts_with("v1/message-queue/") {
+                let mut failed = self.failed.lock().unwrap();
+                if !*failed {
+                    *failed = true;
+                    return Err(crate::Error::Storage(
+                        "injected message-queue put failure".to_string(),
+                    ));
+                }
+            }
+            self.inner.put(key, value)
+        }
+
+        fn del(&self, key: &str) -> Result<()> {
+            self.inner.del(key)
+        }
+
+        fn list(&self, prefix: &str) -> Result<Vec<String>> {
+            self.inner.list(prefix)
+        }
+    }
+
+    fn count_queue_entries(
+        storage: &Arc<dyn StorageAdapter>,
+        prefix: &str,
+        target_key: &str,
+        event_id: &str,
+    ) -> usize {
+        let mut count = 0usize;
+        let keys = storage.list(prefix).unwrap();
+        for key in keys {
+            let Some(raw) = storage.get(&key).unwrap() else {
+                continue;
+            };
+            let Ok(entry) = serde_json::from_str::<crate::QueueEntry>(&raw) else {
+                continue;
+            };
+            if entry.target_key == target_key
+                && entry.event.id.as_ref().map(|id| id.to_string()) == Some(event_id.to_string())
+            {
+                count += 1;
+            }
+        }
+        count
+    }
 
     fn drain_events(
         rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
@@ -2886,6 +2959,104 @@ mod tests {
                 .iter()
                 .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
             "expected recipient queue entry removal after successful publish"
+        );
+    }
+
+    #[test]
+    fn discovery_entry_retained_when_discovery_expansion_partially_fails() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_keys = Keys::generate();
+        let bob_pubkey = bob_keys.public_key();
+        let bob_device_id = bob_pubkey.to_hex();
+
+        let base_storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let flaky_storage: Arc<dyn StorageAdapter> =
+            Arc::new(FailFirstMessageQueuePutStorage::new(base_storage.clone()));
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(flaky_storage.clone()),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        let (inner_id, published_ids) = manager
+            .send_text_with_inner_id(
+                bob_pubkey,
+                "retry after partial discovery expansion".to_string(),
+                None,
+            )
+            .unwrap();
+        assert!(published_ids.is_empty());
+
+        let discovery_count_before = count_queue_entries(
+            &flaky_storage,
+            "v1/discovery-queue/",
+            &bob_pubkey.to_hex(),
+            &inner_id,
+        );
+        assert!(
+            discovery_count_before > 0,
+            "expected discovery entry before appkeys expansion"
+        );
+
+        let mut app_keys = AppKeys::new(vec![]);
+        app_keys.add_device(DeviceEntry::new(bob_pubkey, 1));
+        let app_keys_event = app_keys
+            .get_event(bob_pubkey)
+            .sign_with_keys(&bob_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_event.clone());
+
+        let discovery_count_after_first = count_queue_entries(
+            &flaky_storage,
+            "v1/discovery-queue/",
+            &bob_pubkey.to_hex(),
+            &inner_id,
+        );
+        assert!(
+            discovery_count_after_first > 0,
+            "discovery entry should be retained when expansion only partially succeeds"
+        );
+
+        // Retry AppKeys processing; the injected one-time queue failure is now consumed.
+        manager.process_received_event(app_keys_event);
+        let queued_count_after_retry = count_queue_entries(
+            &flaky_storage,
+            "v1/message-queue/",
+            &bob_device_id,
+            &inner_id,
+        );
+        assert!(
+            queued_count_after_retry > 0,
+            "expected retry expansion to enqueue message per device"
+        );
+
+        let invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None).unwrap();
+        let invite_event = invite
+            .get_event()
+            .unwrap()
+            .sign_with_keys(&bob_keys)
+            .unwrap();
+        manager.process_received_event(invite_event);
+
+        let events = drain_events(&rx);
+        assert!(
+            events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "expected queued message to publish after retry and session creation"
         );
     }
 

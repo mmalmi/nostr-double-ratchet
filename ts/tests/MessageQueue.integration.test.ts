@@ -1,5 +1,43 @@
-import { describe, it } from "vitest"
+import { describe, it, expect } from "vitest"
+import { generateSecretKey, getPublicKey } from "nostr-tools"
 import { runControlledScenario } from "./helpers/controlledScenario"
+import { createMockSessionManager } from "./helpers/mockSessionManager"
+import { MockRelay } from "./helpers/mockRelay"
+import { InMemoryStorageAdapter, StorageAdapter } from "../src/StorageAdapter"
+
+type StoredQueueEntry = {
+  targetKey: string
+  event: { id?: string }
+}
+
+class FailFirstMessageQueuePutStorage extends InMemoryStorageAdapter {
+  private failed = false
+
+  async put<T = unknown>(key: string, value: T): Promise<void> {
+    if (!this.failed && key.startsWith("v1/message-queue/")) {
+      this.failed = true
+      throw new Error("injected message-queue put failure")
+    }
+    await super.put(key, value)
+  }
+}
+
+const countQueueEntries = async (
+  storage: StorageAdapter,
+  prefix: string,
+  targetKey: string,
+  eventId: string
+): Promise<number> => {
+  const keys = await storage.list(prefix)
+  let count = 0
+  for (const key of keys) {
+    const entry = await storage.get<StoredQueueEntry>(key)
+    if (entry?.targetKey === targetKey && entry.event?.id === eventId) {
+      count += 1
+    }
+  }
+  return count
+}
 
 /**
  * Tests that the persistent MessageQueue + DiscoveryQueue survive crash/restart
@@ -123,5 +161,45 @@ describe("MessageQueue crash recovery", () => {
         { type: "expect", actor: "bob", deviceId: "bob-main", message: "no-session-yet" },
       ],
     })
+  })
+
+  it("keeps discovery entries when expansion to message queue partially fails", async () => {
+    const relay = new MockRelay()
+    const aliceStorage = new FailFirstMessageQueuePutStorage()
+    const alice = await createMockSessionManager("alice-main", relay, undefined, aliceStorage)
+
+    const bobSecret = generateSecretKey()
+    const bobPubkey = getPublicKey(bobSecret)
+    const message = "retry-after-partial-expansion-failure"
+    const rumor = await alice.manager.sendMessage(bobPubkey, message)
+    const rumorId = rumor.id
+
+    expect(
+      await countQueueEntries(aliceStorage, "v1/discovery-queue/", bobPubkey, rumorId)
+    ).toBeGreaterThan(0)
+
+    const bob = await createMockSessionManager("bob-main", relay, bobSecret)
+    const bobReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("timed out waiting for retried delivery")),
+        5000
+      )
+      bob.manager.onEvent((event) => {
+        if (event.content === message) {
+          clearTimeout(timeout)
+          resolve()
+        }
+      })
+    })
+
+    // First expansion attempt consumes the injected storage failure.
+    await new Promise((r) => setTimeout(r, 250))
+    expect(
+      await countQueueEntries(aliceStorage, "v1/discovery-queue/", bobPubkey, rumorId)
+    ).toBeGreaterThan(0)
+
+    // Trigger a second AppKeys cycle to retry expansion and flush.
+    await bob.appKeysManager.publish()
+    await bobReceived
   })
 })

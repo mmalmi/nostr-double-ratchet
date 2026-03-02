@@ -788,14 +788,20 @@ export class SessionManager {
       const discoveryEntries = await this.discoveryQueue.getForTarget(userPubkey)
       if (discoveryEntries.length > 0) {
         for (const entry of discoveryEntries) {
-          try {
-            for (const device of devices) {
-              if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+          let expandedForAllDevices = true
+          for (const device of devices) {
+            if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+              try {
                 await this.messageQueue.add(device.identityPubkey, entry.event)
+              } catch {
+                expandedForAllDevices = false
               }
             }
-          } finally {
-            // Remove the discovery entry after expansion regardless of per-device add outcomes
+          }
+
+          // Only clear discovery after all per-device queue writes succeeded.
+          // If any write failed, keep discovery so a future AppKeys cycle can retry.
+          if (expandedForAllDevices) {
             await this.discoveryQueue.remove(entry.id).catch(() => {})
           }
         }
