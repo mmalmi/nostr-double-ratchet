@@ -98,7 +98,9 @@ jobs:
         java-version: '17'
 
     - name: Run TLA+ model checks
-      run: ./formal/session_manager_fanout/run_tlc.sh --mode ci
+      run: |
+        ./formal/session_manager_fanout/run_tlc.sh --mode ci
+        ./formal/group_sender_keys/run_tlc.sh --mode ci
 
   interop:
     name: Interop Tests
