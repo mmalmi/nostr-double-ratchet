@@ -5,6 +5,7 @@ import { AppKeys } from "../src/AppKeys"
 import { Invite } from "../src/Invite"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
+import { generateSecretKey, getPublicKey } from "nostr-tools"
 
 function extractInviteForOwner(relay: MockRelay, ownerPubkey: string): Invite {
   const events = relay.getAllEvents()
@@ -76,5 +77,60 @@ describe("SessionManager.acceptInvite", () => {
 
     await alice.manager.sendMessage(bob.publicKey, text)
     await bobReceived
+  })
+
+  it("accepts link invite for owner even before new device appears in owner AppKeys", async () => {
+    const relay = new MockRelay()
+
+    const owner = await createMockSessionManager("owner-device-1", relay)
+    const newDevicePubkey = getPublicKey(generateSecretKey())
+
+    const invite = Invite.createNew(newDevicePubkey, newDevicePubkey, 1, {
+      purpose: "link",
+      ownerPubkey: owner.publicKey,
+    })
+
+    const accepted = await owner.manager.acceptInvite(invite, {
+      ownerPublicKey: owner.publicKey,
+    })
+
+    expect(accepted.ownerPublicKey).toBe(owner.publicKey)
+    expect(accepted.deviceId).toBe(newDevicePubkey)
+
+    const ownerRecord = owner.manager.getUserRecords().get(owner.publicKey)
+    expect(ownerRecord).toBeDefined()
+    expect(Array.from(ownerRecord!.devices.keys())).toContain(newDevicePubkey)
+  })
+
+  it("falls back to inviter device identity when chat owner claim is not authorized by AppKeys", async () => {
+    const relay = new MockRelay()
+
+    const bob = await createMockSessionManager("bob-device-1", relay)
+    const alice = await createMockSessionManager("alice-device-1", relay)
+    const unknownBobDevicePubkey = getPublicKey(generateSecretKey())
+
+    const invite = Invite.createNew(unknownBobDevicePubkey, unknownBobDevicePubkey, 1, {
+      purpose: "chat",
+      ownerPubkey: bob.publicKey,
+    })
+
+    const accepted = await alice.manager.acceptInvite(invite, {
+      ownerPublicKey: bob.publicKey,
+    })
+
+    expect(accepted.ownerPublicKey).toBe(unknownBobDevicePubkey)
+    expect(accepted.deviceId).toBe(unknownBobDevicePubkey)
+
+    const bobRecord = alice.manager.getUserRecords().get(bob.publicKey)
+    const bobRecordHasUnknownDevice =
+      !!bobRecord &&
+      Array.from(bobRecord.devices.values()).some(
+        (device) => device.deviceId === unknownBobDevicePubkey
+      )
+    expect(bobRecordHasUnknownDevice).toBe(false)
+
+    const fallbackRecord = alice.manager.getUserRecords().get(unknownBobDevicePubkey)
+    expect(fallbackRecord).toBeDefined()
+    expect(Array.from(fallbackRecord!.devices.keys())).toContain(unknownBobDevicePubkey)
   })
 })

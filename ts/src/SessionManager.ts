@@ -1042,39 +1042,54 @@ export class SessionManager {
       throw new Error("Cannot accept invite from this device")
     }
 
-    const ownerPublicKey =
+    const claimedOwnerPublicKey =
       options.ownerPublicKey ||
       invite.ownerPubkey ||
       this.resolveToOwner(deviceId) ||
       deviceId
 
-    const userRecord = this.getOrCreateUserRecord(ownerPublicKey)
-    const existingRecord = userRecord.devices.get(deviceId)
-    if (existingRecord?.activeSession) {
-      return { ownerPublicKey, deviceId, session: existingRecord.activeSession }
-    }
+    let ownerPublicKey = claimedOwnerPublicKey
+    let preloadedAppKeys: AppKeys | null = null
 
     // When an invite claims delegate ownership, verify against AppKeys when available.
-    if (ownerPublicKey !== deviceId) {
-      const appKeys = await this.fetchAppKeys(ownerPublicKey).catch(() => null)
+    // If claim verification fails for chat invites, fall back to device-identity routing.
+    // For owner-side link flow, allow pre-registration acceptance and register via AppKeys afterward.
+    if (claimedOwnerPublicKey !== deviceId) {
+      const appKeys = await this.fetchAppKeys(claimedOwnerPublicKey).catch(() => null)
       if (appKeys) {
         const isAuthorized = appKeys
           .getAllDevices()
           .some((device) => device.identityPubkey === deviceId)
-        if (!isAuthorized) {
-          throw new Error("Invite device is not authorized by owner AppKeys")
+        if (isAuthorized) {
+          preloadedAppKeys = appKeys
+          this.updateDelegateMapping(claimedOwnerPublicKey, appKeys)
+        } else if (!(invite.purpose === "link" && claimedOwnerPublicKey === this.ownerPublicKey)) {
+          ownerPublicKey = deviceId
         }
-        this.updateDelegateMapping(ownerPublicKey, appKeys)
       } else {
-        const persistedAppKeys = this.userRecords.get(ownerPublicKey)?.appKeys
+        const persistedAppKeys = this.userRecords.get(claimedOwnerPublicKey)?.appKeys
         const isAuthorized =
           persistedAppKeys
             ?.getAllDevices()
             .some((device) => device.identityPubkey === deviceId) ?? false
-        if (persistedAppKeys && !isAuthorized) {
-          throw new Error("Invite device is not authorized by persisted AppKeys")
+        if (
+          persistedAppKeys &&
+          !isAuthorized &&
+          !(invite.purpose === "link" && claimedOwnerPublicKey === this.ownerPublicKey)
+        ) {
+          ownerPublicKey = deviceId
         }
       }
+    }
+
+    const userRecord = this.getOrCreateUserRecord(ownerPublicKey)
+    if (preloadedAppKeys && ownerPublicKey === claimedOwnerPublicKey) {
+      userRecord.appKeys = preloadedAppKeys
+    }
+
+    const existingRecord = userRecord.devices.get(deviceId)
+    if (existingRecord?.activeSession) {
+      return { ownerPublicKey, deviceId, session: existingRecord.activeSession }
     }
 
     const encryptor =
