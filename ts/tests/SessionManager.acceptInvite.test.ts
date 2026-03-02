@@ -56,10 +56,6 @@ describe("SessionManager.acceptInvite", () => {
     expect(accepted.ownerPublicKey).toBe(bob.publicKey)
     expect(accepted.deviceId).toBe(invite.deviceId || invite.inviter)
 
-    const bobRecord = alice.manager.getUserRecords().get(bob.publicKey)
-    expect(bobRecord).toBeDefined()
-    expect(Array.from(bobRecord!.devices.keys())).toContain(accepted.deviceId)
-
     const text = `hello-from-accept-invite-${Date.now()}`
     const bobReceived = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(

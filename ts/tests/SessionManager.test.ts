@@ -44,6 +44,35 @@ describe("SessionManager", () => {
     expect(bobReceivedMessage).toBe(true)
   })
 
+  it("should expose user setup readiness and status callbacks", async () => {
+    const sharedRelay = new MockRelay()
+
+    const { manager: alice } = await createMockSessionManager(
+      "alice-device-1",
+      sharedRelay
+    )
+    const { publicKey: bobPubkey } = await createMockSessionManager(
+      "bob-device-1",
+      sharedRelay
+    )
+
+    const seenStates: string[] = []
+    const unsubscribe = alice.onUserSetupStatus(bobPubkey, (status) => {
+      seenStates.push(status.state)
+    })
+
+    expect(alice.isUserReady(bobPubkey)).toBe(false)
+
+    const status = await alice.startUserSetup(bobPubkey)
+    expect(status.ownerPublicKey).toBe(bobPubkey)
+    expect(status.appKeysKnown).toBe(true)
+    expect(status.ready).toBe(true)
+    expect(alice.getUserSetupStatus(bobPubkey).ready).toBe(true)
+    expect(seenStates).toContain("ready")
+
+    unsubscribe()
+  })
+
   it("should sync messages across multiple devices", async () => {
     const sharedRelay = new MockRelay()
 

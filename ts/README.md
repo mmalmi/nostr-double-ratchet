@@ -44,6 +44,28 @@ sessionManager.onEvent((event, from) => {
 await sessionManager.sendMessage(recipientPubkey, "Hello!")
 ```
 
+## SessionManager API
+
+Use `SessionManager` as a small app-facing API:
+
+- `await init()`
+- `onEvent(handler)`
+- `await sendMessage(recipientPubkey, content, options?)`
+- `await acceptInvite(invite, options?)` (optional explicit flow)
+- `await deleteChat(peerPubkey)` (local state reset)
+- `await startUserSetup(peerPubkey)` (kick off AppKeys/session setup and get status)
+- `getUserSetupStatus(peerPubkey)` / `isUserReady(peerPubkey)` (readiness checks for UI)
+- `onUserSetupStatus(peerPubkey, callback)` (subscribe to setup state updates)
+- `close()`
+
+Optional helpers:
+
+- Expiration defaults: `setDefaultExpiration`, `setExpirationForPeer`, `setExpirationForGroup`
+- Chat settings: `sendChatSettings`, `setChatSettingsForPeer`, `setAutoAdoptChatSettings`
+- Presence/read helpers: `sendTyping`, `sendReceipt`
+
+You should not need to call internal setup or routing methods directly.
+
 ## Security Properties
 
 ### Confidentiality

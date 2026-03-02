@@ -74,6 +74,13 @@ async function craftInviteResponse(params: {
   return signed as unknown as VerifiedEvent
 }
 
+function internalUserRecords(manager: unknown): Map<string, { devices: Map<string, { deviceId: string }> }> {
+  const internal = manager as {
+    userRecords?: Map<string, { devices: Map<string, { deviceId: string }> }>
+  }
+  return internal.userRecords || new Map()
+}
+
 describe("Hostile invite acceptance", () => {
   it("rejects fraudulent owner claim when AppKeys exist", async () => {
     const relay = new MockRelay()
@@ -104,7 +111,7 @@ describe("Hostile invite acceptance", () => {
     await new Promise((r) => setTimeout(r, 500))
 
     // Eve's device should NOT appear under Alice's user record
-    const records = bob.manager.getUserRecords()
+    const records = internalUserRecords(bob.manager)
     const aliceRecord = records.get(alice.publicKey)
     const aliceDevices = aliceRecord ? Array.from(aliceRecord.devices.values()) : []
     expect(aliceDevices.some((d) => d.deviceId === evePublicKey)).toBe(false)
@@ -141,7 +148,7 @@ describe("Hostile invite acceptance", () => {
     // No AppKeys → fetchAppKeys times out at 2000ms
     await new Promise((r) => setTimeout(r, 2500))
 
-    const records = bob.manager.getUserRecords()
+    const records = internalUserRecords(bob.manager)
     const record = records.get(nonExistentPubkey)
     const hasEveDevice = record
       ? Array.from(record.devices.values()).some((d) => d.deviceId === evePublicKey)
@@ -177,7 +184,7 @@ describe("Hostile invite acceptance", () => {
     // No AppKeys for Carol → fetchAppKeys times out at 2000ms, then single-device check passes
     await new Promise((r) => setTimeout(r, 2500))
 
-    const records = bob.manager.getUserRecords()
+    const records = internalUserRecords(bob.manager)
     const carolRecord = records.get(carolPublicKey)
     expect(carolRecord).toBeDefined()
     const carolDevices = Array.from(carolRecord!.devices.values())
@@ -211,7 +218,7 @@ describe("Hostile invite acceptance", () => {
 
     await new Promise((r) => setTimeout(r, 2500))
 
-    const records = bob.manager.getUserRecords()
+    const records = internalUserRecords(bob.manager)
 
     // Eve's session is under her own pubkey
     const eveRecord = records.get(evePublicKey)

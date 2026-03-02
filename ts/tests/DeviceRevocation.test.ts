@@ -88,12 +88,19 @@ async function revokeAliceDevice2(alice2: Awaited<ReturnType<typeof createMockSe
   await new Promise((r) => setTimeout(r, 200))
 }
 
+function internalUserRecords(manager: unknown): Map<string, { devices: Map<string, { deviceId: string }> }> {
+  const internal = manager as {
+    userRecords?: Map<string, { devices: Map<string, { deviceId: string }> }>
+  }
+  return internal.userRecords || new Map()
+}
+
 describe("Device Revocation Enforcement", () => {
   it("should remove device record from peer after revocation", async () => {
     const { alice1, alice2, bob } = await setupMultiDeviceWithSessions()
 
     // Pre-assert: Bob has device records for both alice devices
-    const bobRecords = bob.manager.getUserRecords()
+    const bobRecords = internalUserRecords(bob.manager)
     const aliceRecord = bobRecords.get(alice1.publicKey)
     expect(aliceRecord).toBeDefined()
     expect(aliceRecord!.devices.size).toBeGreaterThanOrEqual(2)
@@ -106,13 +113,13 @@ describe("Device Revocation Enforcement", () => {
 
     // Bob's record for Alice should no longer have alice-d2
     await waitForCondition(() => {
-      const records = bob.manager.getUserRecords()
+      const records = internalUserRecords(bob.manager)
       const rec = records.get(alice1.publicKey)
       return rec !== undefined && !rec.devices.has(alice2DeviceId)
     }, 5000, "bob removes alice-d2 device record")
 
     // alice-d1 should still be present
-    const updatedRecord = bob.manager.getUserRecords().get(alice1.publicKey)!
+    const updatedRecord = internalUserRecords(bob.manager).get(alice1.publicKey)!
     const alice1DeviceId = alice1.manager.getDeviceId()
     expect(updatedRecord.devices.has(alice1DeviceId)).toBe(true)
   }, 30000)
