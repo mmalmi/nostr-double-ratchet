@@ -153,6 +153,8 @@ impl GroupManager {
                 {
                     self.sender_event_to_group.remove(sender_event_pubkey);
                 }
+                self.pending_outer_by_sender_event
+                    .remove(sender_event_pubkey);
             }
         }
         self.group_to_sender_events.remove(group_id);
@@ -442,6 +444,8 @@ impl GroupManager {
             {
                 self.sender_event_to_group.remove(sender_event_pubkey);
             }
+            self.pending_outer_by_sender_event
+                .remove(sender_event_pubkey);
         }
 
         for sender_event_pubkey in &next {
@@ -579,10 +583,12 @@ impl GroupChannel {
             .filter_map(|hex| parse_pubkey_hex(hex))
             .collect();
         self.data = data;
+        self.cleanup_inactive_senders();
     }
 
     fn list_sender_event_pubkeys(&mut self) -> Result<Vec<PublicKey>> {
         self.init()?;
+        self.cleanup_inactive_senders();
         let mut seen = HashSet::new();
         let mut values = Vec::new();
         for value in self.sender_device_to_event.values() {
@@ -598,7 +604,11 @@ impl GroupChannel {
         sender_device_pubkey: PublicKey,
     ) -> Result<Option<PublicKey>> {
         self.init()?;
-        Ok(self.sender_device_to_event.get(&sender_device_pubkey).copied())
+        self.cleanup_inactive_senders();
+        Ok(self
+            .sender_device_to_event
+            .get(&sender_device_pubkey)
+            .copied())
     }
 
     fn rotate_sender_key<F>(
@@ -759,6 +769,7 @@ impl GroupChannel {
         if self.init().is_err() {
             return None;
         }
+        self.cleanup_inactive_senders();
         if outer.kind != Kind::Custom(self.one_to_many.outer_kind() as u16) {
             return None;
         }
@@ -783,6 +794,10 @@ impl GroupChannel {
             self.queue_pending(sender_event_pubkey, parsed.key_id, outer.clone());
             return None;
         };
+        if !self.is_sender_device_active(sender_device_pubkey) {
+            self.cleanup_inactive_senders();
+            return None;
+        }
 
         let mut state = self
             .load_sender_key_state(sender_device_pubkey, parsed.key_id)
@@ -941,6 +956,72 @@ impl GroupChannel {
         }
         self.sender_event_to_device
             .insert(sender_event_pubkey, sender_device_pubkey);
+    }
+
+    fn is_member_owner(&self, owner_pubkey: PublicKey) -> bool {
+        self.member_owner_pubkeys.contains(&owner_pubkey)
+    }
+
+    fn is_sender_device_active(&self, sender_device_pubkey: PublicKey) -> bool {
+        if sender_device_pubkey == self.our_device_pubkey {
+            return self.is_member_owner(self.our_owner_pubkey);
+        }
+
+        self.sender_device_to_owner
+            .get(&sender_device_pubkey)
+            .is_some_and(|owner_pubkey| self.is_member_owner(*owner_pubkey))
+    }
+
+    fn cleanup_inactive_senders(&mut self) {
+        let mut candidates: HashSet<PublicKey> =
+            self.sender_device_to_event.keys().copied().collect();
+        candidates.extend(self.sender_device_to_owner.keys().copied());
+        candidates.extend(self.sender_event_to_device.values().copied());
+
+        let inactive_devices: Vec<PublicKey> = candidates
+            .into_iter()
+            .filter(|sender_device_pubkey| !self.is_sender_device_active(*sender_device_pubkey))
+            .collect();
+
+        for sender_device_pubkey in inactive_devices {
+            if let Some(sender_event_pubkey) =
+                self.sender_device_to_event.remove(&sender_device_pubkey)
+            {
+                self.sender_event_to_device.remove(&sender_event_pubkey);
+                self.pending_outer
+                    .retain(|(pending_sender_event_pubkey, _), _| {
+                        *pending_sender_event_pubkey != sender_event_pubkey
+                    });
+            }
+
+            let sender_events_for_device: Vec<PublicKey> = self
+                .sender_event_to_device
+                .iter()
+                .filter_map(|(sender_event_pubkey, mapped_device_pubkey)| {
+                    if *mapped_device_pubkey == sender_device_pubkey {
+                        Some(*sender_event_pubkey)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for sender_event_pubkey in sender_events_for_device {
+                self.sender_event_to_device.remove(&sender_event_pubkey);
+                self.pending_outer
+                    .retain(|(pending_sender_event_pubkey, _), _| {
+                        *pending_sender_event_pubkey != sender_event_pubkey
+                    });
+            }
+
+            self.sender_device_to_owner.remove(&sender_device_pubkey);
+
+            let sender_prefix = self.group_sender_prefix(sender_device_pubkey);
+            if let Ok(keys) = self.storage.list(&sender_prefix) {
+                for key in keys {
+                    let _ = self.storage.del(&key);
+                }
+            }
+        }
     }
 
     fn queue_pending(&mut self, sender_event_pubkey: PublicKey, key_id: u32, outer: Event) {

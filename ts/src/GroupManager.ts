@@ -153,6 +153,7 @@ export class GroupManager {
         if (mappedGroupId === groupId) {
           this.senderEventToGroup.delete(senderEventPubkey);
         }
+        this.pendingOuterBySenderEvent.delete(senderEventPubkey);
       }
     }
     this.groupToSenderEvents.delete(groupId);
@@ -474,6 +475,7 @@ export class GroupManager {
       if (mappedGroupId === groupId) {
         this.senderEventToGroup.delete(senderEventPubkey);
       }
+      this.pendingOuterBySenderEvent.delete(senderEventPubkey);
     }
 
     for (const senderEventPubkey of next) {

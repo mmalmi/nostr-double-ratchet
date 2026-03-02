@@ -493,5 +493,126 @@ fn suppresses_local_device_outer_echo_by_default() {
     assert_eq!(sent.inner.pubkey, alice_device);
 
     let decrypted = manager.handle_outer_event(outer.as_ref().expect("outer event"));
-    assert!(decrypted.is_none(), "local-device outer echo should be suppressed");
+    assert!(
+        decrypted.is_none(),
+        "local-device outer echo should be suppressed"
+    );
+}
+
+#[test]
+fn removing_member_purges_sender_mapping_and_blocks_future_delivery() {
+    let group_id = "group-manager-revocation";
+
+    let alice_owner = Keys::generate().public_key();
+    let bob_owner = Keys::generate().public_key();
+    let alice_device = Keys::generate().public_key();
+    let bob_device = Keys::generate().public_key();
+
+    let storage_alice: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let storage_bob: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+
+    let mut alice = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: alice_owner,
+        our_device_pubkey: alice_device,
+        storage: Some(storage_alice),
+        one_to_many: None,
+    });
+    let mut bob = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: bob_owner,
+        our_device_pubkey: bob_device,
+        storage: Some(storage_bob),
+        one_to_many: None,
+    });
+
+    let initial_group = make_group(group_id, &[alice_owner, bob_owner], &[alice_owner]);
+    alice.upsert_group(initial_group.clone()).unwrap();
+    bob.upsert_group(initial_group).unwrap();
+
+    let mut first_distribution: Option<UnsignedEvent> = None;
+    let mut first_outer: Option<Event> = None;
+    let mut send_pairwise_first = |_to: PublicKey, rumor: &UnsignedEvent| {
+        first_distribution = Some(rumor.clone());
+        Ok(())
+    };
+    let mut publish_outer_first = |event: &Event| {
+        first_outer = Some(event.clone());
+        Ok(())
+    };
+
+    alice
+        .send_message(
+            group_id,
+            "before-revocation",
+            &mut send_pairwise_first,
+            &mut publish_outer_first,
+            Some(1_700_000_300_000),
+        )
+        .unwrap();
+
+    let drained = bob.handle_incoming_session_event(
+        first_distribution.as_ref().unwrap(),
+        alice_owner,
+        Some(alice_device),
+    );
+    assert!(drained.is_empty());
+
+    let known_sender_events = bob.known_sender_event_pubkeys();
+    assert_eq!(known_sender_events.len(), 1);
+
+    let before = bob
+        .handle_outer_event(first_outer.as_ref().unwrap())
+        .expect("outer should decrypt before revocation");
+    assert_eq!(before.inner.content, "before-revocation");
+
+    bob.upsert_group(make_group(group_id, &[bob_owner], &[bob_owner]))
+        .unwrap();
+    assert_eq!(
+        bob.known_sender_event_pubkeys().len(),
+        0,
+        "removed member sender mapping should be purged"
+    );
+
+    let mut second_outer: Option<Event> = None;
+    let mut send_pairwise_second = |_to: PublicKey, _rumor: &UnsignedEvent| Ok(());
+    let mut publish_outer_second = |event: &Event| {
+        second_outer = Some(event.clone());
+        Ok(())
+    };
+
+    alice
+        .send_message(
+            group_id,
+            "after-revocation",
+            &mut send_pairwise_second,
+            &mut publish_outer_second,
+            Some(1_700_000_400_000),
+        )
+        .unwrap();
+
+    assert!(
+        bob.handle_outer_event(second_outer.as_ref().unwrap())
+            .is_none(),
+        "removed member outer message should not decrypt"
+    );
+
+    let mut rotate_distribution: Option<UnsignedEvent> = None;
+    let mut send_pairwise_rotate = |_to: PublicKey, rumor: &UnsignedEvent| {
+        rotate_distribution = Some(rumor.clone());
+        Ok(())
+    };
+    alice
+        .rotate_sender_key(group_id, &mut send_pairwise_rotate, Some(1_700_000_500_000))
+        .unwrap();
+
+    let drained_after_removal = bob.handle_incoming_session_event(
+        rotate_distribution.as_ref().unwrap(),
+        alice_owner,
+        Some(alice_device),
+    );
+    assert!(drained_after_removal.is_empty());
+    assert_eq!(
+        bob.known_sender_event_pubkeys().len(),
+        0,
+        "removed member distribution should not reintroduce sender mapping"
+    );
 }

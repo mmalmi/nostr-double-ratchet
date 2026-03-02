@@ -349,4 +349,90 @@ describe("GroupManager", () => {
     expect(decrypted).toBeNull();
     expect(received).toEqual([]);
   });
+
+  it("purges removed-member sender mappings and blocks future outer delivery", async () => {
+    const groupId = "group-manager-revocation";
+
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+    const bobDevicePk = getPublicKey(generateSecretKey());
+
+    const alice = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    const filters: Filter[] = [];
+    let unsubscribeCalls = 0;
+
+    const manager = new GroupManager({
+      ourOwnerPubkey: bobOwnerPk,
+      ourDevicePubkey: bobDevicePk,
+      storage: new InMemoryStorageAdapter(),
+      nostrSubscribe: ((filter, _onEvent) => {
+        filters.push(filter);
+        return () => {
+          unsubscribeCalls += 1;
+        };
+      }) as NostrSubscribe,
+    });
+
+    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+
+    let firstDistribution: Rumor | null = null;
+    let firstOuter: VerifiedEvent | null = null;
+    await alice.sendMessage("before-revocation", {
+      sendPairwise: async (_to, rumor) => {
+        firstDistribution = rumor;
+      },
+      publishOuter: async (outer) => {
+        firstOuter = outer;
+      },
+    });
+
+    const drained = await manager.handleIncomingSessionEvent(
+      firstDistribution!,
+      aliceOwnerPk,
+      aliceDevicePk
+    );
+    expect(drained).toEqual([]);
+    expect(filters).toHaveLength(1);
+    expect(filters[0]!.authors).toEqual([firstOuter!.pubkey]);
+
+    const before = await manager.handleOuterEvent(firstOuter!);
+    expect(before?.inner.content).toBe("before-revocation");
+
+    await manager.upsertGroup(makeGroup(groupId, [bobOwnerPk], [bobOwnerPk]));
+    expect(unsubscribeCalls).toBe(1);
+    expect(filters).toHaveLength(1);
+
+    let secondOuter: VerifiedEvent | null = null;
+    await alice.sendMessage("after-revocation", {
+      sendPairwise: async () => {},
+      publishOuter: async (outer) => {
+        secondOuter = outer;
+      },
+    });
+
+    const after = await manager.handleOuterEvent(secondOuter!);
+    expect(after).toBeNull();
+
+    let rotateDistribution: Rumor | null = null;
+    await alice.rotateSenderKey({
+      sendPairwise: async (_to, rumor) => {
+        rotateDistribution = rumor;
+      },
+    });
+
+    const drainedAfterRemoval = await manager.handleIncomingSessionEvent(
+      rotateDistribution!,
+      aliceOwnerPk,
+      aliceDevicePk
+    );
+    expect(drainedAfterRemoval).toEqual([]);
+    expect(filters).toHaveLength(1);
+  });
 });

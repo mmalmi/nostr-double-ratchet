@@ -146,6 +146,7 @@ export class Group {
 
   async listSenderEventPubkeys(): Promise<string[]> {
     await this.init();
+    await this.purgeInactiveSenders();
     return Array.from(new Set(this.senderDeviceToEvent.values()));
   }
 
@@ -153,6 +154,7 @@ export class Group {
     senderDevicePubkey: string
   ): Promise<string | undefined> {
     await this.init();
+    await this.purgeInactiveSenders();
     return this.senderDeviceToEvent.get(senderDevicePubkey);
   }
 
@@ -216,6 +218,69 @@ export class Group {
     }
     this.senderDeviceToEvent.set(senderDevicePubkey, senderEventPubkey);
     this.senderEventToDevice.set(senderEventPubkey, senderDevicePubkey);
+  }
+
+  private isMemberOwnerPubkey(ownerPubkey: string): boolean {
+    return this.memberOwnerPubkeys.includes(ownerPubkey);
+  }
+
+  private isSenderDeviceActive(senderDevicePubkey: string): boolean {
+    if (senderDevicePubkey === this.ourDevicePubkey) {
+      return this.isMemberOwnerPubkey(this.ourOwnerPubkey);
+    }
+
+    const ownerPubkey = this.senderDeviceToOwner.get(senderDevicePubkey);
+    return typeof ownerPubkey === "string" && this.isMemberOwnerPubkey(ownerPubkey);
+  }
+
+  private async removeSenderDeviceState(senderDevicePubkey: string): Promise<void> {
+    const senderEventPubkey = this.senderDeviceToEvent.get(senderDevicePubkey);
+    if (senderEventPubkey) {
+      this.senderDeviceToEvent.delete(senderDevicePubkey);
+      this.senderEventToDevice.delete(senderEventPubkey);
+      for (const pendingKey of Array.from(this.pendingOuter.keys())) {
+        if (pendingKey.startsWith(`${senderEventPubkey}:`)) {
+          this.pendingOuter.delete(pendingKey);
+        }
+      }
+    } else {
+      this.senderDeviceToEvent.delete(senderDevicePubkey);
+    }
+
+    for (const [mappedSenderEventPubkey, mappedSenderDevicePubkey] of Array.from(
+      this.senderEventToDevice.entries()
+    )) {
+      if (mappedSenderDevicePubkey !== senderDevicePubkey) {
+        continue;
+      }
+
+      this.senderEventToDevice.delete(mappedSenderEventPubkey);
+      for (const pendingKey of Array.from(this.pendingOuter.keys())) {
+        if (pendingKey.startsWith(`${mappedSenderEventPubkey}:`)) {
+          this.pendingOuter.delete(pendingKey);
+        }
+      }
+    }
+
+    this.senderDeviceToOwner.delete(senderDevicePubkey);
+
+    const senderPrefix = this.groupSenderPrefix(senderDevicePubkey);
+    const keys = await this.storage.list(senderPrefix);
+    await Promise.allSettled(keys.map((key) => this.storage.del(key)));
+  }
+
+  private async purgeInactiveSenders(): Promise<void> {
+    const candidates = new Set<string>([
+      ...this.senderDeviceToEvent.keys(),
+      ...this.senderDeviceToOwner.keys(),
+      ...this.senderEventToDevice.values(),
+    ]);
+
+    for (const senderDevicePubkey of candidates) {
+      if (!this.isSenderDeviceActive(senderDevicePubkey)) {
+        await this.removeSenderDeviceState(senderDevicePubkey);
+      }
+    }
   }
 
   private pendingKey(senderEventPubkey: string, keyId: number): string {
@@ -522,6 +587,7 @@ export class Group {
    */
   async handleOuterEvent(outer: VerifiedEvent): Promise<GroupDecryptedEvent | null> {
     await this.init();
+    await this.purgeInactiveSenders();
 
     if (outer.kind !== MESSAGE_EVENT_KIND) return null;
     if (!verifyEvent(outer)) return null;
@@ -538,6 +604,10 @@ export class Group {
     const senderDevicePubkey = this.senderEventToDevice.get(senderEventPubkey);
     if (!senderDevicePubkey) {
       this.queuePending(senderEventPubkey, parsed.keyId, outer);
+      return null;
+    }
+    if (!this.isSenderDeviceActive(senderDevicePubkey)) {
+      await this.removeSenderDeviceState(senderDevicePubkey);
       return null;
     }
 
