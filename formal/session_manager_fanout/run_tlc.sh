@@ -3,6 +3,42 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JAR_PATH="${ROOT_DIR}/.tools/tla2tools.jar"
+MODE="all"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./formal/session_manager_fanout/run_tlc.sh [--mode all|ci]
+
+Modes:
+  all  Run explanatory failing config first, then pass-expected configs.
+  ci   Run only pass-expected configs; fail on any error.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      MODE="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "${MODE}" != "all" && "${MODE}" != "ci" ]]; then
+  echo "Invalid mode: ${MODE}" >&2
+  usage
+  exit 1
+fi
 
 mkdir -p "${ROOT_DIR}/.tools"
 
@@ -24,5 +60,16 @@ run_cfg() {
 }
 
 cd "${ROOT_DIR}"
-run_cfg SessionManagerFanout.current.cfg || true
+
+if [[ "${MODE}" == "all" ]]; then
+  if run_cfg SessionManagerFanout.current.cfg; then
+    echo "Expected SessionManagerFanout.current.cfg to fail, but it passed." >&2
+    exit 1
+  else
+    echo "SessionManagerFanout.current.cfg failed as expected."
+  fi
+fi
+
 run_cfg SessionManagerFanout.fixed.cfg
+run_cfg SessionManagerFanout.revocation.pass.cfg
+run_cfg SessionManagerFanout.recovery.pass.cfg

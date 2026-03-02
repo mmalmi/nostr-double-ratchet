@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest"
-import { generateSecretKey, getPublicKey } from "nostr-tools"
+import { generateSecretKey, getPublicKey, finalizeEvent, VerifiedEvent } from "nostr-tools"
 import { runControlledScenario } from "./helpers/controlledScenario"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
+import { AppKeys } from "../src/AppKeys"
 import { InMemoryStorageAdapter, StorageAdapter } from "../src/StorageAdapter"
 
 type StoredQueueEntry = {
@@ -37,6 +38,24 @@ const countQueueEntries = async (
     }
   }
   return count
+}
+
+const publishAppKeys = (
+  relay: MockRelay,
+  ownerSecretKey: Uint8Array,
+  ownerPublicKey: string,
+  devicePubkeys: string[]
+) => {
+  const appKeys = new AppKeys(
+    devicePubkeys.map((identityPubkey, i) => ({
+      identityPubkey,
+      createdAt: i + 1,
+    }))
+  )
+  const event = appKeys.getEvent()
+  event.pubkey = ownerPublicKey
+  const signed = finalizeEvent(event, ownerSecretKey)
+  relay.storeAndDeliver(signed as unknown as VerifiedEvent)
 }
 
 /**
@@ -201,5 +220,82 @@ describe("MessageQueue crash recovery", () => {
     // Trigger a second AppKeys cycle to retry expansion and flush.
     await bob.appKeysManager.publish()
     await bobReceived
+  })
+
+  it("revocation replacement purges queued entries for removed devices", async () => {
+    const relay = new MockRelay()
+    const storage = new InMemoryStorageAdapter()
+    const alice = await createMockSessionManager("alice-main", relay, undefined, storage)
+
+    const bobOwnerSecret = generateSecretKey()
+    const bobOwnerPubkey = getPublicKey(bobOwnerSecret)
+    const bobDevice1 = getPublicKey(generateSecretKey())
+    const bobDevice2 = getPublicKey(generateSecretKey())
+
+    const rumor = await alice.manager.sendMessage(
+      bobOwnerPubkey,
+      "queued-pre-revoke-known-appkeys"
+    )
+    const rumorId = rumor.id
+
+    expect(
+      await countQueueEntries(storage, "v1/discovery-queue/", bobOwnerPubkey, rumorId)
+    ).toBeGreaterThan(0)
+
+    publishAppKeys(relay, bobOwnerSecret, bobOwnerPubkey, [bobDevice1, bobDevice2])
+    await new Promise((r) => setTimeout(r, 120))
+
+    expect(
+      await countQueueEntries(storage, "v1/message-queue/", bobDevice1, rumorId)
+    ).toBeGreaterThan(0)
+    expect(
+      await countQueueEntries(storage, "v1/message-queue/", bobDevice2, rumorId)
+    ).toBeGreaterThan(0)
+
+    publishAppKeys(relay, bobOwnerSecret, bobOwnerPubkey, [bobDevice1])
+    await new Promise((r) => setTimeout(r, 120))
+
+    expect(await countQueueEntries(storage, "v1/message-queue/", bobDevice2, rumorId)).toBe(0)
+    expect(
+      await countQueueEntries(storage, "v1/message-queue/", bobDevice1, rumorId)
+    ).toBeGreaterThan(0)
+  })
+
+  it("transient expansion failure then revocation keeps retry path only for authorized devices", async () => {
+    const relay = new MockRelay()
+    const aliceStorage = new FailFirstMessageQueuePutStorage()
+    const alice = await createMockSessionManager("alice-main", relay, undefined, aliceStorage)
+
+    const bobOwnerSecret = generateSecretKey()
+    const bobOwnerPubkey = getPublicKey(bobOwnerSecret)
+    const bobDevice1 = getPublicKey(generateSecretKey())
+    const bobDevice2 = getPublicKey(generateSecretKey())
+
+    const rumor = await alice.manager.sendMessage(
+      bobOwnerPubkey,
+      "queued-before-revocation-during-retry"
+    )
+    const rumorId = rumor.id
+
+    expect(
+      await countQueueEntries(aliceStorage, "v1/discovery-queue/", bobOwnerPubkey, rumorId)
+    ).toBeGreaterThan(0)
+
+    publishAppKeys(relay, bobOwnerSecret, bobOwnerPubkey, [bobDevice1, bobDevice2])
+    await new Promise((r) => setTimeout(r, 120))
+
+    expect(
+      await countQueueEntries(aliceStorage, "v1/discovery-queue/", bobOwnerPubkey, rumorId)
+    ).toBeGreaterThan(0)
+
+    publishAppKeys(relay, bobOwnerSecret, bobOwnerPubkey, [bobDevice1])
+    await new Promise((r) => setTimeout(r, 120))
+    publishAppKeys(relay, bobOwnerSecret, bobOwnerPubkey, [bobDevice1])
+    await new Promise((r) => setTimeout(r, 120))
+
+    expect(await countQueueEntries(aliceStorage, "v1/message-queue/", bobDevice2, rumorId)).toBe(0)
+    expect(
+      await countQueueEntries(aliceStorage, "v1/message-queue/", bobDevice1, rumorId)
+    ).toBeGreaterThan(0)
   })
 })

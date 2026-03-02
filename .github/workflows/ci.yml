@@ -84,10 +84,26 @@ jobs:
     - name: Run clippy
       run: cargo clippy -- -D warnings
 
+  formal:
+    name: Formal
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Run TLA+ model checks
+      run: ./formal/session_manager_fanout/run_tlc.sh --mode ci
+
   interop:
     name: Interop Tests
     runs-on: ubuntu-latest
-    needs: [test-ts, test-rust]
+    needs: [test-ts, test-rust, formal]
 
     steps:
     - uses: actions/checkout@v4

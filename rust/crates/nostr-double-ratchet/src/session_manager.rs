@@ -1670,6 +1670,7 @@ impl SessionManager {
                 if let Ok(pk) = crate::utils::pubkey_from_hex(identity_hex) {
                     self.delegate_to_owner.lock().unwrap().remove(&pk);
                 }
+                let _ = self.message_queue.remove_for_target(identity_hex);
             }
         }
 
@@ -1995,6 +1996,8 @@ impl SessionManager {
         if let Ok(device_pk) = crate::utils::pubkey_from_hex(device_id) {
             self.delegate_to_owner.lock().unwrap().remove(&device_pk);
         }
+
+        let _ = self.message_queue.remove_for_target(device_id);
 
         drop(records);
         let _ = self.store_user_record(&owner_pubkey);
@@ -3057,6 +3060,210 @@ mod tests {
                 )
             }),
             "expected queued message to publish after retry and session creation"
+        );
+    }
+
+    #[test]
+    fn appkeys_replacement_cleans_revoked_device_queue_entries() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_owner_keys = Keys::generate();
+        let bob_owner_pubkey = bob_owner_keys.public_key();
+        let bob_device1_keys = Keys::generate();
+        let bob_device2_keys = Keys::generate();
+        let bob_device1_id = bob_device1_keys.public_key().to_hex();
+        let bob_device2_id = bob_device2_keys.public_key().to_hex();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(storage.clone()),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        // Learn two recipient devices first; no sessions yet.
+        let mut app_keys_two = AppKeys::new(vec![]);
+        app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
+        app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
+        let app_keys_two_event = app_keys_two
+            .get_event(bob_owner_pubkey)
+            .sign_with_keys(&bob_owner_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_two_event);
+        let _ = drain_events(&rx);
+
+        let (inner_id, published_ids) = manager
+            .send_text_with_inner_id(
+                bob_owner_pubkey,
+                "queued for two devices pre-revoke".to_string(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            published_ids.is_empty(),
+            "without sessions, message should queue per known device"
+        );
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device1_id, &inner_id),
+            1
+        );
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device2_id, &inner_id),
+            1
+        );
+
+        // Replace AppKeys with only device1 (device2 revoked).
+        let mut app_keys_one = AppKeys::new(vec![]);
+        app_keys_one.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 3));
+        let app_keys_one_event = app_keys_one
+            .get_event(bob_owner_pubkey)
+            .sign_with_keys(&bob_owner_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_one_event);
+
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device2_id, &inner_id),
+            0,
+            "revoked device queue entries should be purged on appkeys replacement"
+        );
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device1_id, &inner_id),
+            1,
+            "still-authorized device queue entries should remain"
+        );
+
+        // Authorized sibling can still establish session and receive flush.
+        let invite = Invite::create_new(
+            bob_device1_keys.public_key(),
+            Some(bob_device1_id.clone()),
+            None,
+        )
+        .unwrap();
+        let invite_event = invite
+            .get_event()
+            .unwrap()
+            .sign_with_keys(&bob_device1_keys)
+            .unwrap();
+        manager.process_received_event(invite_event);
+        let events = drain_events(&rx);
+        assert!(
+            events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "expected queued message to publish for still-authorized device"
+        );
+    }
+
+    #[test]
+    fn transient_expansion_failure_then_revocation_keeps_only_authorized_retry_path() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_owner_keys = Keys::generate();
+        let bob_owner_pubkey = bob_owner_keys.public_key();
+        let bob_device1_keys = Keys::generate();
+        let bob_device2_keys = Keys::generate();
+        let bob_device1_id = bob_device1_keys.public_key().to_hex();
+        let bob_device2_id = bob_device2_keys.public_key().to_hex();
+
+        let base_storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let flaky_storage: Arc<dyn StorageAdapter> =
+            Arc::new(FailFirstMessageQueuePutStorage::new(base_storage.clone()));
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(flaky_storage.clone()),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        // Queue in discovery first (unknown recipient devices).
+        let (inner_id, published_ids) = manager
+            .send_text_with_inner_id(
+                bob_owner_pubkey,
+                "queued before appkeys/revocation".to_string(),
+                None,
+            )
+            .unwrap();
+        assert!(published_ids.is_empty());
+
+        // AppKeys with two devices: first expansion attempt will partially fail.
+        let mut app_keys_two = AppKeys::new(vec![]);
+        app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
+        app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
+        let app_keys_two_event = app_keys_two
+            .get_event(bob_owner_pubkey)
+            .sign_with_keys(&bob_owner_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_two_event);
+        assert!(
+            count_queue_entries(
+                &flaky_storage,
+                "v1/discovery-queue/",
+                &bob_owner_pubkey.to_hex(),
+                &inner_id
+            ) > 0,
+            "discovery entry should survive partial expansion failure"
+        );
+
+        // Revoke device2 by AppKeys replacement. Retry path should keep only device1.
+        let mut app_keys_one = AppKeys::new(vec![]);
+        app_keys_one.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 3));
+        let app_keys_one_event = app_keys_one
+            .get_event(bob_owner_pubkey)
+            .sign_with_keys(&bob_owner_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_one_event.clone());
+        manager.process_received_event(app_keys_one_event);
+
+        assert_eq!(
+            count_queue_entries(&flaky_storage, "v1/message-queue/", &bob_device2_id, &inner_id),
+            0,
+            "revoked device should not keep retryable queue entries"
+        );
+        assert!(
+            count_queue_entries(&flaky_storage, "v1/message-queue/", &bob_device1_id, &inner_id) > 0,
+            "authorized sibling should retain retryable queue entry"
+        );
+
+        let invite = Invite::create_new(
+            bob_device1_keys.public_key(),
+            Some(bob_device1_id.clone()),
+            None,
+        )
+        .unwrap();
+        let invite_event = invite
+            .get_event()
+            .unwrap()
+            .sign_with_keys(&bob_device1_keys)
+            .unwrap();
+        manager.process_received_event(invite_event);
+        let events = drain_events(&rx);
+        assert!(
+            events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "authorized device should receive queued message after retry path"
         );
     }
 

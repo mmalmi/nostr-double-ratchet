@@ -486,6 +486,7 @@ export class SessionManager {
     for (const identity of oldIdentities) {
       if (!newDeviceIdentities.has(identity)) {
         this.delegateToOwner.delete(identity)
+        this.messageQueue.removeForTarget(identity).catch(() => {})
       }
     }
 
@@ -1407,6 +1408,9 @@ export class SessionManager {
 
     // Remove delegate mapping
     this.delegateToOwner.delete(deviceId)
+
+    // Purge pending queued messages for revoked device.
+    await this.messageQueue.removeForTarget(deviceId).catch(() => {})
 
     // Delete the device record entirely
     userRecord.devices.delete(deviceId)
