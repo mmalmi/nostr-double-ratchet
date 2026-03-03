@@ -101,6 +101,8 @@ jobs:
       run: |
         ./formal/session_manager_fanout/run_tlc.sh --mode ci
         ./formal/group_sender_keys/run_tlc.sh --mode ci
+        ./formal/invite_handshake/run_tlc.sh --mode ci
+        ./formal/session_lifecycle/run_tlc.sh --mode ci
 
   interop:
     name: Interop Tests
