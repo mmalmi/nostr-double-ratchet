@@ -3233,12 +3233,22 @@ mod tests {
         manager.process_received_event(app_keys_one_event);
 
         assert_eq!(
-            count_queue_entries(&flaky_storage, "v1/message-queue/", &bob_device2_id, &inner_id),
+            count_queue_entries(
+                &flaky_storage,
+                "v1/message-queue/",
+                &bob_device2_id,
+                &inner_id
+            ),
             0,
             "revoked device should not keep retryable queue entries"
         );
         assert!(
-            count_queue_entries(&flaky_storage, "v1/message-queue/", &bob_device1_id, &inner_id) > 0,
+            count_queue_entries(
+                &flaky_storage,
+                "v1/message-queue/",
+                &bob_device1_id,
+                &inner_id
+            ) > 0,
             "authorized sibling should retain retryable queue entry"
         );
 
