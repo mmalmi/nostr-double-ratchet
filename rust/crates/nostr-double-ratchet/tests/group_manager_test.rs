@@ -1,8 +1,8 @@
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    parse_group_metadata, CreateGroupOptions, Error, GroupData, GroupManager, GroupManagerOptions,
-    InMemoryStorage, SenderKeyDistribution, StorageAdapter, CHAT_MESSAGE_KIND, GROUP_METADATA_KIND,
-    GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+    parse_group_metadata, CreateGroupOptions, Error, FanoutGroupMetadataOptions, GroupData,
+    GroupManager, GroupManagerOptions, InMemoryStorage, SenderKeyDistribution, StorageAdapter,
+    CHAT_MESSAGE_KIND, GROUP_METADATA_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 };
 use std::sync::Arc;
 
@@ -183,6 +183,76 @@ fn create_group_requires_send_pairwise_when_fanout_enabled() {
         "expected missing send_pairwise error, got: {:?}",
         result
     );
+}
+
+#[test]
+fn fan_out_group_metadata_redacts_secret_for_removed_member() {
+    let alice_owner = Keys::generate().public_key();
+    let bob_owner = Keys::generate().public_key();
+    let carol_owner = Keys::generate().public_key();
+    let alice_device = Keys::generate().public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let mut manager = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: alice_owner,
+        our_device_pubkey: alice_device,
+        storage: Some(storage),
+        one_to_many: None,
+    });
+
+    let updated_group = make_group(
+        "group-metadata-update",
+        &[alice_owner, bob_owner],
+        &[alice_owner],
+    );
+    let removed_member_hex = carol_owner.to_hex();
+
+    let mut sent: Vec<(PublicKey, UnsignedEvent)> = Vec::new();
+    let mut send_pairwise = |recipient: PublicKey, rumor: &UnsignedEvent| {
+        sent.push((recipient, rumor.clone()));
+        Ok(())
+    };
+
+    let result = manager
+        .fan_out_group_metadata(
+            updated_group.clone(),
+            FanoutGroupMetadataOptions {
+                send_pairwise: &mut send_pairwise,
+                exclude_secret_for: Some(removed_member_hex.as_str()),
+                now_ms: Some(1_700_000_000_000),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.group, updated_group);
+    assert_eq!(result.fanout.attempted, 2);
+    assert_eq!(
+        result.fanout.succeeded,
+        vec![bob_owner.to_hex(), removed_member_hex.clone()]
+    );
+    assert_eq!(result.fanout.failed, Vec::<String>::new());
+
+    let full_metadata = parse_group_metadata(&result.metadata_rumor.content).unwrap();
+    assert_eq!(full_metadata.secret, updated_group.secret);
+
+    let redacted_metadata = parse_group_metadata(
+        &result
+            .redacted_metadata_rumor
+            .as_ref()
+            .expect("removed member should receive redacted metadata")
+            .content,
+    )
+    .unwrap();
+    assert_eq!(redacted_metadata.secret, None);
+
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].0, bob_owner);
+    assert_eq!(sent[1].0, carol_owner);
+
+    let bob_metadata = parse_group_metadata(&sent[0].1.content).unwrap();
+    assert_eq!(bob_metadata.secret, updated_group.secret);
+    let carol_metadata = parse_group_metadata(&sent[1].1.content).unwrap();
+    assert_eq!(carol_metadata.secret, None);
 }
 
 #[test]

@@ -58,8 +58,10 @@ pub struct GroupDecryptedEvent {
     pub inner: UnsignedEvent,
 }
 
+type SendPairwise<'a> = &'a mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>;
+
 pub struct CreateGroupOptions<'a> {
-    pub send_pairwise: Option<&'a mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>>,
+    pub send_pairwise: Option<SendPairwise<'a>>,
     pub fanout_metadata: bool,
     pub now_ms: Option<u64>,
 }
@@ -86,6 +88,20 @@ pub struct GroupMetadataFanoutResult {
 pub struct CreateGroupResult {
     pub group: GroupData,
     pub metadata_rumor: Option<UnsignedEvent>,
+    pub fanout: GroupMetadataFanoutResult,
+}
+
+pub struct FanoutGroupMetadataOptions<'a> {
+    pub send_pairwise: SendPairwise<'a>,
+    pub exclude_secret_for: Option<&'a str>,
+    pub now_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FanoutGroupMetadataResult {
+    pub group: GroupData,
+    pub metadata_rumor: UnsignedEvent,
+    pub redacted_metadata_rumor: Option<UnsignedEvent>,
     pub fanout: GroupMetadataFanoutResult,
 }
 
@@ -203,9 +219,9 @@ impl GroupManager {
     ) -> Result<CreateGroupResult> {
         let our_owner_hex = pubkey_to_hex(&self.our_owner_pubkey);
         let group = create_group_data(name, &our_owner_hex, member_owner_pubkeys);
-        self.upsert_group(group.clone())?;
 
         if !opts.fanout_metadata {
+            self.upsert_group(group.clone())?;
             return Ok(CreateGroupResult {
                 group,
                 metadata_rumor: None,
@@ -224,50 +240,48 @@ impl GroupManager {
             ));
         };
 
-        let now_ms = opts.now_ms.unwrap_or_else(now_millis);
-        let now_seconds = now_ms / 1000;
-        let metadata_content = build_group_metadata_content(&group, false);
-        let tags = vec![
-            parse_tag(&["l".to_string(), group.id.clone()])?,
-            parse_tag(&["ms".to_string(), now_ms.to_string()])?,
-        ];
-        let metadata_rumor =
-            EventBuilder::new(Kind::Custom(GROUP_METADATA_KIND as u16), metadata_content)
-                .tags(tags)
-                .custom_created_at(Timestamp::from(now_seconds))
-                .build(self.our_device_pubkey);
-
-        let mut succeeded = Vec::new();
-        let mut failed = Vec::new();
-
-        for member_owner_hex in &group.members {
-            if member_owner_hex == &our_owner_hex {
-                continue;
-            }
-
-            let Some(member_owner_pubkey) = parse_pubkey_hex(member_owner_hex) else {
-                failed.push(member_owner_hex.clone());
-                continue;
-            };
-
-            if (*send_pairwise)(member_owner_pubkey, &metadata_rumor).is_ok() {
-                succeeded.push(member_owner_hex.clone());
-            } else {
-                failed.push(member_owner_hex.clone());
-            }
-        }
-
-        let attempted = succeeded.len() + failed.len();
+        let result = self.fan_out_group_metadata(
+            group.clone(),
+            FanoutGroupMetadataOptions {
+                send_pairwise,
+                exclude_secret_for: None,
+                now_ms: opts.now_ms,
+            },
+        )?;
 
         Ok(CreateGroupResult {
             group,
-            metadata_rumor: Some(metadata_rumor),
-            fanout: GroupMetadataFanoutResult {
-                enabled: true,
-                attempted,
-                succeeded,
-                failed,
-            },
+            metadata_rumor: Some(result.metadata_rumor),
+            fanout: result.fanout,
+        })
+    }
+
+    pub fn fan_out_group_metadata(
+        &mut self,
+        group: GroupData,
+        opts: FanoutGroupMetadataOptions<'_>,
+    ) -> Result<FanoutGroupMetadataResult> {
+        self.upsert_group(group.clone())?;
+
+        let now_ms = opts.now_ms.unwrap_or_else(now_millis);
+        let metadata_rumor = self.build_group_metadata_rumor(&group, false, now_ms)?;
+        let redacted_metadata_rumor = opts
+            .exclude_secret_for
+            .map(|_| self.build_group_metadata_rumor(&group, true, now_ms))
+            .transpose()?;
+        let fanout = self.deliver_group_metadata(
+            &group,
+            &metadata_rumor,
+            redacted_metadata_rumor.as_ref(),
+            opts.exclude_secret_for,
+            opts.send_pairwise,
+        );
+
+        Ok(FanoutGroupMetadataResult {
+            group,
+            metadata_rumor,
+            redacted_metadata_rumor,
+            fanout,
         })
     }
 
@@ -416,6 +430,89 @@ impl GroupManager {
             .entry(group_id.to_string())
             .or_default()
             .insert(sender_event_pubkey);
+    }
+
+    fn build_group_metadata_rumor(
+        &self,
+        group: &GroupData,
+        exclude_secret: bool,
+        now_ms: u64,
+    ) -> Result<UnsignedEvent> {
+        let now_seconds = now_ms / 1000;
+        let metadata_content = build_group_metadata_content(group, exclude_secret);
+        let tags = vec![
+            parse_tag(&["l".to_string(), group.id.clone()])?,
+            parse_tag(&["ms".to_string(), now_ms.to_string()])?,
+        ];
+
+        Ok(
+            EventBuilder::new(Kind::Custom(GROUP_METADATA_KIND as u16), metadata_content)
+                .tags(tags)
+                .custom_created_at(Timestamp::from(now_seconds))
+                .build(self.our_device_pubkey),
+        )
+    }
+
+    fn deliver_group_metadata(
+        &self,
+        group: &GroupData,
+        metadata_rumor: &UnsignedEvent,
+        redacted_metadata_rumor: Option<&UnsignedEvent>,
+        exclude_secret_for: Option<&str>,
+        send_pairwise: &mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
+    ) -> GroupMetadataFanoutResult {
+        let our_owner_hex = pubkey_to_hex(&self.our_owner_pubkey);
+        let mut delivered = HashSet::new();
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+
+        for member_owner_hex in &group.members {
+            if member_owner_hex == &our_owner_hex {
+                continue;
+            }
+            if !delivered.insert(member_owner_hex.clone()) {
+                continue;
+            }
+
+            let rumor = if exclude_secret_for == Some(member_owner_hex.as_str()) {
+                redacted_metadata_rumor.unwrap_or(metadata_rumor)
+            } else {
+                metadata_rumor
+            };
+
+            match parse_pubkey_hex(member_owner_hex) {
+                Some(member_owner_pubkey) if send_pairwise(member_owner_pubkey, rumor).is_ok() => {
+                    succeeded.push(member_owner_hex.clone());
+                }
+                Some(_) | None => failed.push(member_owner_hex.clone()),
+            }
+        }
+
+        if let Some(excluded_member_hex) = exclude_secret_for {
+            if excluded_member_hex != our_owner_hex
+                && delivered.insert(excluded_member_hex.to_string())
+            {
+                match (
+                    parse_pubkey_hex(excluded_member_hex),
+                    redacted_metadata_rumor,
+                ) {
+                    (Some(member_owner_pubkey), Some(rumor))
+                        if send_pairwise(member_owner_pubkey, rumor).is_ok() =>
+                    {
+                        succeeded.push(excluded_member_hex.to_string());
+                    }
+                    _ => failed.push(excluded_member_hex.to_string()),
+                }
+            }
+        }
+
+        let attempted = succeeded.len() + failed.len();
+        GroupMetadataFanoutResult {
+            enabled: true,
+            attempted,
+            succeeded,
+            failed,
+        }
     }
 
     fn refresh_group_sender_mappings(&mut self, group_id: &str) {

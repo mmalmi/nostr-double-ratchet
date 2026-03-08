@@ -2,9 +2,9 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
-    CreateGroupOptions, FileStorageAdapter, GroupManager, GroupManagerOptions, GroupSendEvent,
-    Session, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
-    GROUP_METADATA_KIND, REACTION_KIND,
+    CreateGroupOptions, FanoutGroupMetadataOptions, FileStorageAdapter, GroupManager,
+    GroupManagerOptions, GroupSendEvent, Session, SessionManager, SessionManagerEvent,
+    StorageAdapter, CHAT_MESSAGE_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -257,32 +257,6 @@ async fn publish_events_with_retry(
     false
 }
 
-/// Fan-out group metadata to members after a mutation.
-fn build_group_metadata_rumor(
-    group: &nostr_double_ratchet::group::GroupData,
-    exclude_secret: bool,
-    signer_pubkey: nostr::PublicKey,
-    now_ms: u64,
-) -> Result<nostr::UnsignedEvent> {
-    let metadata_content =
-        nostr_double_ratchet::group::build_group_metadata_content(group, exclude_secret);
-    let tags: Vec<Vec<String>> = vec![
-        vec!["l".to_string(), group.id.clone()],
-        vec!["ms".to_string(), now_ms.to_string()],
-    ];
-    let nostr_tags: Vec<nostr::Tag> = tags
-        .iter()
-        .filter_map(|t| nostr::Tag::parse(t).ok())
-        .collect();
-
-    Ok(nostr::EventBuilder::new(
-        nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
-        &metadata_content,
-    )
-    .tags(nostr_tags)
-    .build(signer_pubkey))
-}
-
 async fn fan_out_metadata(
     group: &nostr_double_ratchet::group::GroupData,
     excluded_member: Option<&str>,
@@ -290,14 +264,10 @@ async fn fan_out_metadata(
     storage: &Storage,
 ) -> Result<ControlStamp> {
     let my_owner_pubkey = config.owner_public_key_hex()?;
-    let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;
-    let full_secret_unsigned = build_group_metadata_rumor(group, false, my_pk, now_ms)?;
-    let stamp = extract_control_stamp_from_unsigned(&full_secret_unsigned)
-        .ok_or_else(|| anyhow::anyhow!("group metadata rumor missing control stamp"))?;
 
     let client = Client::default();
     let relays = config.resolved_relays();
@@ -306,92 +276,47 @@ async fn fan_out_metadata(
     }
     client.connect().await;
 
+    let mut group_manager = build_group_manager(config, storage)?;
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let mut pairwise_events: Vec<nostr::Event> = Vec::new();
+    let mut send_pairwise = |recipient_owner: nostr::PublicKey,
+                             rumor: &nostr::UnsignedEvent|
+     -> nostr_double_ratchet::Result<()> {
+        let recipient_owner_hex = recipient_owner.to_hex();
+        let _ = queue_pairwise_session_events_for_recipient(
+            recipient_owner,
+            &recipient_owner_hex,
+            rumor,
+            &my_owner_pubkey,
+            storage,
+            &session_manager,
+            &session_manager_rx,
+            &mut pairwise_events,
+        );
+        Ok(())
+    };
+    let fanout = group_manager
+        .fan_out_group_metadata(
+            group.clone(),
+            FanoutGroupMetadataOptions {
+                send_pairwise: &mut send_pairwise,
+                exclude_secret_for: excluded_member,
+                now_ms: Some(now_ms),
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to fan out group metadata: {}", e))?;
+    let stamp = extract_control_stamp_from_unsigned(&fanout.metadata_rumor)
+        .ok_or_else(|| anyhow::anyhow!("group metadata rumor missing control stamp"))?;
+
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
-
-    for member in &group.members {
-        if member == &my_owner_pubkey {
-            continue;
-        }
-
-        let exclude_secret = excluded_member.map(|e| e == member).unwrap_or(false);
-        let recipient_owner = match nostr::PublicKey::from_hex(member) {
-            Ok(pk) => pk,
-            Err(_) => continue,
-        };
-        let unsigned = if exclude_secret {
-            build_group_metadata_rumor(group, true, my_pk, now_ms)?
-        } else {
-            full_secret_unsigned.clone()
-        };
-
-        let mut message_events: Vec<nostr::Event> = Vec::new();
-        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
-            import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
-            let event_ids = session_manager
-                .send_event_recipient_only(recipient_owner, unsigned.clone())
-                .unwrap_or_default();
-            let drained = drain_session_manager_message_events(&session_manager_rx);
-            sync_member_chats_from_session_manager(storage, &session_manager, member)?;
-
-            if !drained.is_empty() && !event_ids.is_empty() {
-                message_events = drained;
-                break;
-            }
-
-            if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
-                tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
-            }
-        }
-
-        let published = publish_events_with_retry(
-            &client,
-            &message_events,
-            MAX_DELIVERY_ATTEMPTS,
-            DELIVERY_RETRY_MS,
-        )
-        .await;
-        if published {
-            continue;
-        }
-    }
-
-    // Also fan-out without secret to the removed member
-    if let Some(removed) = excluded_member {
-        let recipient_owner = match nostr::PublicKey::from_hex(removed) {
-            Ok(pk) => pk,
-            Err(_) => return Ok(stamp),
-        };
-        let unsigned = build_group_metadata_rumor(group, true, my_pk, now_ms)?;
-
-        let mut message_events: Vec<nostr::Event> = Vec::new();
-        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
-            import_chats_into_session_manager(storage, &session_manager, &my_owner_pubkey)?;
-            let event_ids = session_manager
-                .send_event_recipient_only(recipient_owner, unsigned.clone())
-                .unwrap_or_default();
-            let drained = drain_session_manager_message_events(&session_manager_rx);
-            sync_member_chats_from_session_manager(storage, &session_manager, removed)?;
-
-            if !drained.is_empty() && !event_ids.is_empty() {
-                message_events = drained;
-                break;
-            }
-
-            if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
-                tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_RETRY_MS)).await;
-            }
-        }
-
-        let _ = publish_events_with_retry(
-            &client,
-            &message_events,
-            MAX_DELIVERY_ATTEMPTS,
-            DELIVERY_RETRY_MS,
-        )
-        .await;
-    }
+    let _ = publish_events_with_retry(
+        &client,
+        &pairwise_events,
+        MAX_DELIVERY_ATTEMPTS,
+        DELIVERY_RETRY_MS,
+    )
+    .await;
 
     Ok(stamp)
 }
