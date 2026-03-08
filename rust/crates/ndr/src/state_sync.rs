@@ -91,10 +91,17 @@ pub fn extract_control_stamp_from_value(
 }
 
 pub fn select_canonical_session(
+    owner_pubkey_hex: &str,
     sessions: &[(String, nostr_double_ratchet::SessionState)],
 ) -> Option<(String, nostr_double_ratchet::SessionState)> {
     let mut sorted: Vec<(String, nostr_double_ratchet::SessionState)> = sessions.to_vec();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted.sort_by(|a, b| {
+        let a_is_owner_device = a.0 == owner_pubkey_hex;
+        let b_is_owner_device = b.0 == owner_pubkey_hex;
+        b_is_owner_device
+            .cmp(&a_is_owner_device)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     sorted.into_iter().next()
 }
 
@@ -291,11 +298,23 @@ mod tests {
         let a = ("bbbb".to_string(), session.clone());
         let b = ("aaaa".to_string(), session);
 
-        let first = select_canonical_session(&[a.clone(), b.clone()]).expect("session");
-        let second = select_canonical_session(&[b, a]).expect("session");
+        let first = select_canonical_session("zzzz", &[a.clone(), b.clone()]).expect("session");
+        let second = select_canonical_session("zzzz", &[b, a]).expect("session");
 
         assert_eq!(first.0, "aaaa");
         assert_eq!(second.0, "aaaa");
+    }
+
+    #[test]
+    fn select_canonical_session_prefers_owner_device() {
+        let session = dummy_session_state();
+        let owner = ("owner".to_string(), session.clone());
+        let linked = ("linked-device".to_string(), session);
+
+        let selected =
+            select_canonical_session("owner", &[linked, owner.clone()]).expect("session");
+
+        assert_eq!(selected.0, owner.0);
     }
 
     #[test]

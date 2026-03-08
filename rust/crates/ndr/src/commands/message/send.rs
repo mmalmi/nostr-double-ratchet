@@ -169,7 +169,8 @@ fn sync_chats_from_session_manager(
 
     for (owner_hex, mut owner_sessions) in sessions_by_owner {
         owner_sessions.sort_by(|a, b| a.0.cmp(&b.0));
-        let Some((selected_device_id, selected_state)) = select_canonical_session(&owner_sessions)
+        let Some((selected_device_id, selected_state)) =
+            select_canonical_session(&owner_hex, &owner_sessions)
         else {
             continue;
         };

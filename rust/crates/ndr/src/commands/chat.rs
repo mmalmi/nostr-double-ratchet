@@ -315,7 +315,9 @@ pub async fn ttl(
         .map(|(_, device_id, state)| (device_id, state))
         .collect();
     sessions.sort_by(|a, b| a.0.cmp(&b.0));
-    if let Some((selected_device_id, selected_state)) = select_canonical_session(&sessions) {
+    if let Some((selected_device_id, selected_state)) =
+        select_canonical_session(&chat.their_pubkey, &sessions)
+    {
         chat.device_id = Some(selected_device_id);
         chat.session_state = serde_json::to_string(&selected_state)?;
         storage.save_chat(&chat)?;

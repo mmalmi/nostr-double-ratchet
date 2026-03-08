@@ -103,6 +103,32 @@ async fn start_ndr_listen(
     (child, stdout)
 }
 
+async fn wait_for_listen_ready(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    label: &str,
+) -> bool {
+    let timeout_instant = std::time::Instant::now();
+    while timeout_instant.elapsed() < Duration::from_secs(5) {
+        let mut line = String::new();
+        let read_result =
+            tokio::time::timeout(Duration::from_millis(100), reader.read_line(&mut line)).await;
+
+        if let Ok(Ok(n)) = read_result {
+            if n > 0 {
+                let trimmed = line.trim();
+                println!("[{} listen] {}", label, trimmed);
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if json["command"] == "listen" && json["status"] == "ok" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
 async fn send_with_retry(
     data_dir: &std::path::Path,
     chat_id: &str,
@@ -179,9 +205,10 @@ async fn test_ndr_to_ndr_session() {
     // Start Alice's ndr listen to receive the invite response
     let (mut alice_listen_child, mut alice_listen_reader) =
         start_ndr_listen(alice_dir.path(), None).await;
-
-    // Give Alice's listener time to connect
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wait_for_listen_ready(&mut alice_listen_reader, "Alice").await,
+        "Alice listener did not become ready"
+    );
 
     // Bob joins via the invite URL (ndr chat join now publishes response to relay automatically)
     let result = run_ndr(bob_dir.path(), &["chat", "join", &invite_url]).await;
@@ -233,7 +260,10 @@ async fn test_ndr_to_ndr_session() {
     // Start Alice's listener for messages
     let (mut alice_listen_child, mut alice_listen_reader) =
         start_ndr_listen(alice_dir.path(), Some(&alice_chat_id)).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wait_for_listen_ready(&mut alice_listen_reader, "Alice").await,
+        "Alice listener did not become ready"
+    );
 
     // Bob sends a message (ndr send now publishes to relay automatically)
     let result = run_ndr(bob_dir.path(), &["send", &bob_chat_id, "Hello from Bob!"]).await;
@@ -274,7 +304,10 @@ async fn test_ndr_to_ndr_session() {
     // Start Bob's listener
     let (mut bob_listen_child, mut bob_listen_reader) =
         start_ndr_listen(bob_dir.path(), Some(&bob_chat_id)).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wait_for_listen_ready(&mut bob_listen_reader, "Bob").await,
+        "Bob listener did not become ready"
+    );
 
     // Alice sends a message (ndr send now publishes to relay automatically)
     let result = send_with_retry(alice_dir.path(), &alice_chat_id, "Hello from Alice!").await;
@@ -378,7 +411,10 @@ async fn test_ndr_long_conversation() {
     // Start Alice's listener for invite response
     let (mut alice_listen_child, mut alice_listen_reader) =
         start_ndr_listen(alice_dir.path(), None).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wait_for_listen_ready(&mut alice_listen_reader, "Alice").await,
+        "Alice listener did not become ready"
+    );
 
     // Bob joins
     let result = run_ndr(bob_dir.path(), &["chat", "join", &invite_url]).await;
@@ -417,7 +453,14 @@ async fn test_ndr_long_conversation() {
         start_ndr_listen(alice_dir.path(), Some(&alice_chat_id)).await;
     let (mut bob_listen_child, mut bob_listen_reader) =
         start_ndr_listen(bob_dir.path(), Some(&bob_chat_id)).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wait_for_listen_ready(&mut alice_listen_reader, "Alice").await,
+        "Alice listener did not become ready"
+    );
+    assert!(
+        wait_for_listen_ready(&mut bob_listen_reader, "Bob").await,
+        "Bob listener did not become ready"
+    );
 
     // Round 1: Bob -> Alice
     println!("\n--- Round 1: Bob -> Alice ---");

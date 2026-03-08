@@ -149,7 +149,8 @@ fn sync_member_chats_from_session_manager(
     let mut owner_sessions: Vec<(String, nostr_double_ratchet::SessionState)> =
         sessions_by_device.into_iter().collect();
     owner_sessions.sort_by(|a, b| a.0.cmp(&b.0));
-    let Some((selected_device_id, selected_state)) = select_canonical_session(&owner_sessions)
+    let Some((selected_device_id, selected_state)) =
+        select_canonical_session(member_owner_pubkey_hex, &owner_sessions)
     else {
         return Ok(());
     };
