@@ -281,16 +281,14 @@ impl LocalRelay {
 
             let has_matching_p = event_tags.unwrap().iter().any(|tag| {
                 if let Some(tag_arr) = tag.as_array() {
-                    if tag_arr.len() >= 2 {
-                        if tag_arr[0].as_str() == Some("p") {
-                            let tag_value = tag_arr[1].as_str().unwrap_or("");
-                            return p_values.iter().any(|p| {
-                                let filter_p = p.as_str().unwrap_or("");
-                                tag_value == filter_p
-                                    || tag_value.starts_with(filter_p)
-                                    || filter_p.starts_with(tag_value)
-                            });
-                        }
+                    if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("p") {
+                        let tag_value = tag_arr[1].as_str().unwrap_or("");
+                        return p_values.iter().any(|p| {
+                            let filter_p = p.as_str().unwrap_or("");
+                            tag_value == filter_p
+                                || tag_value.starts_with(filter_p)
+                                || filter_p.starts_with(tag_value)
+                        });
                     }
                 }
                 false

@@ -666,9 +666,7 @@ impl SessionManager {
         peer_pubkey: PublicKey,
     ) -> Result<Option<crate::SessionState>> {
         Ok(self.with_user_records(move |records| {
-            let Some(user_record) = records.get_mut(&peer_pubkey) else {
-                return None;
-            };
+            let user_record = records.get_mut(&peer_pubkey)?;
 
             let mut sessions = user_record.get_active_sessions_mut();
             sessions.first_mut().map(|session| session.state.clone())
@@ -773,12 +771,12 @@ impl SessionManager {
                 .get(&owner_pubkey)
                 .cloned();
             if let Some(app_keys) = cached_app_keys {
-                if app_keys.get_device(&inviter_device_pubkey).is_none() {
-                    if !is_owner_side_link_invite {
-                        return Err(crate::Error::Invite(
-                            "Invite device is not authorized by cached AppKeys".to_string(),
-                        ));
-                    }
+                if app_keys.get_device(&inviter_device_pubkey).is_none()
+                    && !is_owner_side_link_invite
+                {
+                    return Err(crate::Error::Invite(
+                        "Invite device is not authorized by cached AppKeys".to_string(),
+                    ));
                 }
                 self.update_delegate_mapping(owner_pubkey, &app_keys);
             } else {
@@ -790,12 +788,12 @@ impl SessionManager {
                 });
                 if !known_device_identities.is_empty() {
                     let inviter_hex = inviter_device_pubkey.to_hex();
-                    if !known_device_identities.iter().any(|id| id == &inviter_hex) {
-                        if !is_owner_side_link_invite {
-                            return Err(crate::Error::Invite(
-                                "Invite device is not authorized by stored AppKeys".to_string(),
-                            ));
-                        }
+                    if !known_device_identities.iter().any(|id| id == &inviter_hex)
+                        && !is_owner_side_link_invite
+                    {
+                        return Err(crate::Error::Invite(
+                            "Invite device is not authorized by stored AppKeys".to_string(),
+                        ));
                     }
                 }
             }
@@ -2756,7 +2754,7 @@ mod tests {
         };
         let dist1_rumor = nostr::EventBuilder::new(
             nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
-            &serde_json::to_string(&dist1).unwrap(),
+            serde_json::to_string(&dist1).unwrap(),
         )
         .tag(Tag::parse(&["l".to_string(), group_id.clone()]).unwrap())
         .custom_created_at(nostr::Timestamp::from(1))
@@ -2810,7 +2808,7 @@ mod tests {
         };
         let dist2_rumor = nostr::EventBuilder::new(
             nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
-            &serde_json::to_string(&dist2).unwrap(),
+            serde_json::to_string(&dist2).unwrap(),
         )
         .tag(Tag::parse(&["l".to_string(), group_id.clone()]).unwrap())
         .custom_created_at(nostr::Timestamp::from(2))
@@ -2872,7 +2870,7 @@ mod tests {
             };
             let dist_rumor = nostr::EventBuilder::new(
                 nostr::Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
-                &serde_json::to_string(&dist).unwrap(),
+                serde_json::to_string(&dist).unwrap(),
             )
             .tag(Tag::parse(&["l".to_string(), dist.group_id.clone()]).unwrap())
             .custom_created_at(nostr::Timestamp::from(1))

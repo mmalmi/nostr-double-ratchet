@@ -14,10 +14,10 @@ fn recv_signed_event(rx: &Receiver<SessionManagerEvent>) -> nostr::Event {
         if start.elapsed() > Duration::from_secs(2) {
             panic!("Timed out waiting for PublishSigned event");
         }
-        if let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) {
-            if let SessionManagerEvent::PublishSigned(signed) = event {
-                return signed;
-            }
+        if let Ok(SessionManagerEvent::PublishSigned(signed)) =
+            rx.recv_timeout(Duration::from_millis(200))
+        {
+            return signed;
         }
     }
 }
@@ -60,12 +60,12 @@ fn test_accept_invite_routes_session_under_claimed_owner() -> Result<()> {
     let mut saw_response = false;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(2) {
-        if let Ok(event) = rx.recv_timeout(Duration::from_millis(100)) {
-            if let SessionManagerEvent::PublishSigned(signed) = event {
-                if signed.kind.as_u16() == nostr_double_ratchet::INVITE_RESPONSE_KIND as u16 {
-                    saw_response = true;
-                    break;
-                }
+        if let Ok(SessionManagerEvent::PublishSigned(signed)) =
+            rx.recv_timeout(Duration::from_millis(100))
+        {
+            if signed.kind.as_u16() == nostr_double_ratchet::INVITE_RESPONSE_KIND as u16 {
+                saw_response = true;
+                break;
             }
         }
     }
@@ -177,11 +177,11 @@ fn test_multi_device_self_fanout() -> Result<()> {
     let mut decrypted = None;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(1) {
-        if let Ok(event) = rx2.recv_timeout(Duration::from_millis(50)) {
-            if let SessionManagerEvent::DecryptedMessage { content, .. } = event {
-                decrypted = Some(content);
-                break;
-            }
+        if let Ok(SessionManagerEvent::DecryptedMessage { content, .. }) =
+            rx2.recv_timeout(Duration::from_millis(50))
+        {
+            decrypted = Some(content);
+            break;
         }
     }
 
@@ -293,11 +293,11 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
     let mut decrypted = None;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(1) {
-        if let Ok(event) = rx2.recv_timeout(Duration::from_millis(50)) {
-            if let SessionManagerEvent::DecryptedMessage { content, .. } = event {
-                decrypted = Some(content);
-                break;
-            }
+        if let Ok(SessionManagerEvent::DecryptedMessage { content, .. }) =
+            rx2.recv_timeout(Duration::from_millis(50))
+        {
+            decrypted = Some(content);
+            break;
         }
     }
 

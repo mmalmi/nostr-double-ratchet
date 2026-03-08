@@ -73,6 +73,14 @@ struct GroupMessageList {
     messages: Vec<GroupMessageInfo>,
 }
 
+struct PairwiseSessionEventQueue<'a> {
+    my_owner_pubkey_hex: &'a str,
+    storage: &'a Storage,
+    session_manager: &'a SessionManager,
+    session_manager_rx: &'a Receiver<SessionManagerEvent>,
+    queued_events: &'a mut Vec<nostr::Event>,
+}
+
 fn import_chats_into_session_manager(
     storage: &Storage,
     manager: &SessionManager,
@@ -199,12 +207,7 @@ fn build_session_manager(
 
     // Drop any initial SessionManager events (device invite publication, subscribe requests, etc).
     // Group commands only care about publishing ratchet message events that they explicitly send.
-    loop {
-        match rx.try_recv() {
-            Ok(_) => continue,
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-        }
-    }
+    while rx.try_recv().is_ok() {}
     Ok((manager, rx))
 }
 
@@ -279,6 +282,13 @@ async fn fan_out_metadata(
     let mut group_manager = build_group_manager(config, storage)?;
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
+    let mut pairwise_queue = PairwiseSessionEventQueue {
+        my_owner_pubkey_hex: &my_owner_pubkey,
+        storage,
+        session_manager: &session_manager,
+        session_manager_rx: &session_manager_rx,
+        queued_events: &mut pairwise_events,
+    };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                              rumor: &nostr::UnsignedEvent|
      -> nostr_double_ratchet::Result<()> {
@@ -287,11 +297,7 @@ async fn fan_out_metadata(
             recipient_owner,
             &recipient_owner_hex,
             rumor,
-            &my_owner_pubkey,
-            storage,
-            &session_manager,
-            &session_manager_rx,
-            &mut pairwise_events,
+            &mut pairwise_queue,
         );
         Ok(())
     };
@@ -354,23 +360,28 @@ fn queue_pairwise_session_events_for_recipient(
     recipient_owner: nostr::PublicKey,
     recipient_owner_hex: &str,
     rumor: &nostr::UnsignedEvent,
-    my_owner_pubkey_hex: &str,
-    storage: &Storage,
-    session_manager: &SessionManager,
-    session_manager_rx: &Receiver<SessionManagerEvent>,
-    queued_events: &mut Vec<nostr::Event>,
+    queue: &mut PairwiseSessionEventQueue<'_>,
 ) -> Result<()> {
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
 
     let mut message_events: Vec<nostr::Event> = Vec::new();
     for attempt in 0..MAX_DELIVERY_ATTEMPTS {
-        import_chats_into_session_manager(storage, session_manager, my_owner_pubkey_hex)?;
-        let event_ids = session_manager
+        import_chats_into_session_manager(
+            queue.storage,
+            queue.session_manager,
+            queue.my_owner_pubkey_hex,
+        )?;
+        let event_ids = queue
+            .session_manager
             .send_event_recipient_only(recipient_owner, rumor.clone())
             .unwrap_or_default();
-        let drained = drain_session_manager_message_events(session_manager_rx);
-        sync_member_chats_from_session_manager(storage, session_manager, recipient_owner_hex)?;
+        let drained = drain_session_manager_message_events(queue.session_manager_rx);
+        sync_member_chats_from_session_manager(
+            queue.storage,
+            queue.session_manager,
+            recipient_owner_hex,
+        )?;
 
         if !drained.is_empty() && !event_ids.is_empty() {
             message_events = drained;
@@ -383,11 +394,12 @@ fn queue_pairwise_session_events_for_recipient(
     }
 
     if !message_events.is_empty() {
-        queued_events.extend(message_events);
+        queue.queued_events.extend(message_events);
         return Ok(());
     }
 
-    let member_chats: Vec<_> = storage
+    let member_chats: Vec<_> = queue
+        .storage
         .list_chats()?
         .into_iter()
         .filter(|c| c.their_pubkey == recipient_owner_hex)
@@ -408,9 +420,9 @@ fn queue_pairwise_session_events_for_recipient(
 
         let mut updated_chat = chat.clone();
         updated_chat.session_state = serde_json::to_string(&session.state)?;
-        storage.save_chat(&updated_chat)?;
+        queue.storage.save_chat(&updated_chat)?;
 
-        queued_events.push(encrypted);
+        queue.queued_events.push(encrypted);
         break;
     }
 
@@ -441,6 +453,13 @@ pub async fn create(
     let mut group_manager = build_group_manager(config, storage)?;
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
+    let mut pairwise_queue = PairwiseSessionEventQueue {
+        my_owner_pubkey_hex: &my_owner_pubkey,
+        storage,
+        session_manager: &session_manager,
+        session_manager_rx: &session_manager_rx,
+        queued_events: &mut pairwise_events,
+    };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                              rumor: &nostr::UnsignedEvent|
      -> nostr_double_ratchet::Result<()> {
@@ -449,11 +468,7 @@ pub async fn create(
             recipient_owner,
             &recipient_owner_hex,
             rumor,
-            &my_owner_pubkey,
-            storage,
-            &session_manager,
-            &session_manager_rx,
-            &mut pairwise_events,
+            &mut pairwise_queue,
         );
         Ok(())
     };
@@ -737,6 +752,13 @@ pub async fn send_message(
 
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
+    let mut pairwise_queue = PairwiseSessionEventQueue {
+        my_owner_pubkey_hex: &my_owner_pubkey,
+        storage,
+        session_manager: &session_manager,
+        session_manager_rx: &session_manager_rx,
+        queued_events: &mut pairwise_events,
+    };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                              rumor: &nostr::UnsignedEvent|
      -> nostr_double_ratchet::Result<()> {
@@ -745,11 +767,7 @@ pub async fn send_message(
             recipient_owner,
             &recipient_owner_hex,
             rumor,
-            &my_owner_pubkey,
-            storage,
-            &session_manager,
-            &session_manager_rx,
-            &mut pairwise_events,
+            &mut pairwise_queue,
         );
         Ok(())
     };
@@ -851,6 +869,13 @@ pub async fn react(
 
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
+    let mut pairwise_queue = PairwiseSessionEventQueue {
+        my_owner_pubkey_hex: &my_owner_pubkey,
+        storage,
+        session_manager: &session_manager,
+        session_manager_rx: &session_manager_rx,
+        queued_events: &mut pairwise_events,
+    };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                              rumor: &nostr::UnsignedEvent|
      -> nostr_double_ratchet::Result<()> {
@@ -859,11 +884,7 @@ pub async fn react(
             recipient_owner,
             &recipient_owner_hex,
             rumor,
-            &my_owner_pubkey,
-            storage,
-            &session_manager,
-            &session_manager_rx,
-            &mut pairwise_events,
+            &mut pairwise_queue,
         );
         Ok(())
     };
@@ -946,6 +967,13 @@ pub async fn rotate_sender_key(
 
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
+    let mut pairwise_queue = PairwiseSessionEventQueue {
+        my_owner_pubkey_hex: &my_owner_pubkey,
+        storage,
+        session_manager: &session_manager,
+        session_manager_rx: &session_manager_rx,
+        queued_events: &mut pairwise_events,
+    };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                              rumor: &nostr::UnsignedEvent|
      -> nostr_double_ratchet::Result<()> {
@@ -954,11 +982,7 @@ pub async fn rotate_sender_key(
             recipient_owner,
             &recipient_owner_hex,
             rumor,
-            &my_owner_pubkey,
-            storage,
-            &session_manager,
-            &session_manager_rx,
-            &mut pairwise_events,
+            &mut pairwise_queue,
         );
         Ok(())
     };

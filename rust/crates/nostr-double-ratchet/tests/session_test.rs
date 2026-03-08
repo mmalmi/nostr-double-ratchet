@@ -75,7 +75,7 @@ fn test_session_send_message() -> Result<()> {
 
     assert_eq!(event.kind.as_u16(), 1060);
     assert!(!event.content.is_empty());
-    assert!(event.tags.len() > 0);
+    assert!(!event.tags.is_empty());
 
     // Check for header tag
     let has_header = event.tags.iter().any(|t| {

@@ -21,10 +21,10 @@ fn recv_decrypted_message(rx: &Receiver<SessionManagerEvent>) -> String {
         if start.elapsed() > Duration::from_secs(2) {
             panic!("Timed out waiting for DecryptedMessage event");
         }
-        if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
-            if let SessionManagerEvent::DecryptedMessage { content, .. } = ev {
-                return content;
-            }
+        if let Ok(SessionManagerEvent::DecryptedMessage { content, .. }) =
+            rx.recv_timeout(Duration::from_millis(200))
+        {
+            return content;
         }
     }
 }
@@ -69,7 +69,7 @@ fn craft_outer_from_plaintext(session: &mut Session, plaintext: &str, now_s: u64
     let encrypted_header = nip44::encrypt(
         &our_sk,
         &their_pk,
-        &serde_json::to_string(&header).unwrap(),
+        serde_json::to_string(&header).unwrap(),
         Version::V2,
     )
     .unwrap();

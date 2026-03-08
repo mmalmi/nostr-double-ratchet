@@ -145,8 +145,8 @@ mod tests {
         let event1 = make_rumor("first", 1);
         let event2 = make_rumor("second", 2);
 
-        let id_late = format!("{}/{}", event2.id.as_ref().unwrap(), "device-a".to_string());
-        let id_early = format!("{}/{}", event1.id.as_ref().unwrap(), "device-a".to_string());
+        let id_late = format!("{}/{}", event2.id.as_ref().unwrap(), "device-a");
+        let id_early = format!("{}/{}", event1.id.as_ref().unwrap(), "device-a");
         storage
             .put(
                 &format!("v1/test-queue/{}", id_late),

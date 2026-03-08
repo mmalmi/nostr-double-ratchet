@@ -138,14 +138,14 @@ fn test_invite_event_conversion() -> Result<()> {
 
     let has_d_tag = unsigned_event.tags.iter().any(|t| {
         let v = t.clone().to_vec();
-        v.get(0).map(|s| s.as_str()) == Some("d")
+        v.first().map(|s| s.as_str()) == Some("d")
             && v.get(1).map(|s| s.as_str()) == Some("double-ratchet/invites/test-device")
     });
     assert!(has_d_tag);
 
     let has_l_tag = unsigned_event.tags.iter().any(|t| {
         let v = t.clone().to_vec();
-        v.get(0).map(|s| s.as_str()) == Some("l")
+        v.first().map(|s| s.as_str()) == Some("l")
             && v.get(1).map(|s| s.as_str()) == Some("double-ratchet/invites")
     });
     assert!(has_l_tag);
@@ -186,7 +186,7 @@ fn test_invite_accept_creates_session() -> Result<()> {
 
     let has_p_tag = event.tags.iter().any(|t| {
         let v = t.clone().to_vec();
-        v.get(0).map(|s| s.as_str()) == Some("p")
+        v.first().map(|s| s.as_str()) == Some("p")
             && v.get(1).map(|s| s.as_str())
                 == Some(&hex::encode(invite.inviter_ephemeral_public_key.to_bytes()))
     });

@@ -199,6 +199,14 @@ struct SessionManagerDecrypted {
     event_id: Option<String>,
 }
 
+type SessionGroupDecrypt = (
+    nostr::PublicKey,
+    Option<nostr::PublicKey>,
+    String,
+    Option<String>,
+    u64,
+);
+
 fn extract_group_id_tag(decrypted_event: &serde_json::Value) -> Option<String> {
     decrypted_event["tags"].as_array().and_then(|tags| {
         tags.iter().find_map(|t| {
@@ -924,13 +932,7 @@ pub async fn listen(
                 &mut subscribed_manager_filters,
             )
             .await?;
-            let session_group_decrypts: Vec<(
-                nostr::PublicKey,
-                Option<nostr::PublicKey>,
-                String,
-                Option<String>,
-                u64,
-            )> = decrypted_events
+            let session_group_decrypts: Vec<SessionGroupDecrypt> = decrypted_events
                 .iter()
                 .filter_map(|decrypted| {
                     if !decrypted_content_is_group_routed(&decrypted.content) {
