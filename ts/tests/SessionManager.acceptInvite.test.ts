@@ -1,11 +1,19 @@
-import { describe, expect, it } from "vitest"
-import type { VerifiedEvent } from "nostr-tools"
+import { describe, expect, it, vi } from "vitest"
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+  type UnsignedEvent,
+  type VerifiedEvent,
+} from "nostr-tools"
 import { APP_KEYS_EVENT_KIND } from "../src/types"
 import { AppKeys } from "../src/AppKeys"
 import { Invite } from "../src/Invite"
+import { generateEphemeralKeypair, generateSharedSecret, decryptInviteResponse } from "../src/inviteUtils"
+import { InMemoryStorageAdapter } from "../src/StorageAdapter"
+import { SessionManager } from "../src/SessionManager"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
-import { generateSecretKey, getPublicKey } from "nostr-tools"
 
 function extractInviteForOwner(relay: MockRelay, ownerPubkey: string): Invite {
   const events = relay.getAllEvents()
@@ -42,6 +50,22 @@ function extractInviteForOwner(relay: MockRelay, ownerPubkey: string): Invite {
 }
 
 describe("SessionManager.acceptInvite", () => {
+  const createRelaySubscribe = (relay: MockRelay) => (filter: Parameters<MockRelay["subscribe"]>[0], onEvent: Parameters<MockRelay["subscribe"]>[1]) => {
+    const handle = relay.subscribe(filter, onEvent)
+    return handle.close
+  }
+
+  const createRelayPublish =
+    (relay: MockRelay, signerSecretKey: Uint8Array) =>
+    vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
+      const signedEvent =
+        "sig" in event && event.sig
+          ? (event as VerifiedEvent)
+          : (finalizeEvent(event as UnsignedEvent, signerSecretKey) as VerifiedEvent)
+      relay.storeAndDeliver(signedEvent)
+      return signedEvent as never
+    })
+
   it("establishes manager session from invite and routes under owner pubkey", async () => {
     const relay = new MockRelay()
 
@@ -132,5 +156,84 @@ describe("SessionManager.acceptInvite", () => {
     const fallbackRecord = alice.manager.getUserRecords().get(unknownBobDevicePubkey)
     expect(fallbackRecord).toBeDefined()
     expect(Array.from(fallbackRecord!.devices.keys())).toContain(unknownBobDevicePubkey)
+  })
+
+  it("omits our owner claim in invite responses until this device is authorized in AppKeys", async () => {
+    const relay = new MockRelay()
+
+    const bob = await createMockSessionManager("bob-device-1", relay)
+    const invite = Invite.createNew(bob.publicKey, bob.publicKey, 1)
+
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const deviceSecretKey = generateSecretKey()
+    const devicePublicKey = getPublicKey(deviceSecretKey)
+
+    const alice = new SessionManager(
+      devicePublicKey,
+      deviceSecretKey,
+      devicePublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, deviceSecretKey),
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter()
+    )
+    await alice.init()
+
+    await alice.acceptInvite(invite, {
+      ownerPublicKey: bob.publicKey,
+    })
+
+    const responseEvent = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059)
+      .at(-1)
+    expect(responseEvent).toBeDefined()
+
+    const decrypted = await decryptInviteResponse({
+      envelopeContent: responseEvent!.content,
+      envelopeSenderPubkey: responseEvent!.pubkey,
+      inviterEphemeralPrivateKey: invite.inviterEphemeralPrivateKey!,
+      inviterPrivateKey: bob.secretKey,
+      sharedSecret: invite.sharedSecret,
+    })
+
+    expect(decrypted.inviteeIdentity).toBe(devicePublicKey)
+    expect(decrypted.ownerPublicKey).toBeUndefined()
+  })
+
+  it("includes our owner claim in invite responses once this device is authorized in AppKeys", async () => {
+    const relay = new MockRelay()
+
+    const bob = await createMockSessionManager("bob-device-1", relay)
+    const alice = await createMockSessionManager("alice-device-1", relay)
+    const invite = Invite.createNew(bob.publicKey, bob.publicKey, 1)
+
+    await alice.manager.acceptInvite(invite, {
+      ownerPublicKey: bob.publicKey,
+    })
+
+    const responseEvent = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059)
+      .at(-1)
+    expect(responseEvent).toBeDefined()
+
+    const decrypted = await decryptInviteResponse({
+      envelopeContent: responseEvent!.content,
+      envelopeSenderPubkey: responseEvent!.pubkey,
+      inviterEphemeralPrivateKey: invite.inviterEphemeralPrivateKey!,
+      inviterPrivateKey: bob.secretKey,
+      sharedSecret: invite.sharedSecret,
+    })
+
+    const aliceDeviceIdentity = alice.appKeysManager.getOwnDevices()[0]?.identityPubkey
+    expect(aliceDeviceIdentity).toBeTruthy()
+    expect(decrypted.inviteeIdentity).toBe(aliceDeviceIdentity)
+    expect(decrypted.ownerPublicKey).toBe(alice.publicKey)
   })
 })

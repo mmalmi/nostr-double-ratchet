@@ -1094,11 +1094,12 @@ export class SessionManager {
 
     const encryptor =
       this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
+    const inviteeOwnerClaim = await this.resolveInviteeOwnerClaim()
     const { session, event } = await invite.accept(
       this.nostrSubscribe,
       this.ourPublicKey,
       encryptor,
-      this.ownerPublicKey
+      inviteeOwnerClaim
     )
     await this.nostrPublish(event)
 
@@ -1110,6 +1111,29 @@ export class SessionManager {
     await this.storeUserRecord(ownerPublicKey).catch(() => {})
 
     return { ownerPublicKey, deviceId, session }
+  }
+
+  private async resolveInviteeOwnerClaim(): Promise<string | undefined> {
+    if (this.deviceId === this.ownerPublicKey) {
+      return this.ownerPublicKey
+    }
+
+    if (this.isDeviceAuthorized(this.ownerPublicKey, this.deviceId)) {
+      return this.ownerPublicKey
+    }
+
+    const fetchedAppKeys = await this.fetchAppKeys(this.ownerPublicKey, 1000).catch(() => null)
+    if (!fetchedAppKeys) {
+      return undefined
+    }
+
+    this.updateDelegateMapping(this.ownerPublicKey, fetchedAppKeys)
+
+    return fetchedAppKeys
+      .getAllDevices()
+      .some((device) => device.identityPubkey === this.deviceId)
+      ? this.ownerPublicKey
+      : undefined
   }
 
   async sendEvent(
