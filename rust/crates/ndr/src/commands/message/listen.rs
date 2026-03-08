@@ -10,9 +10,12 @@ use crate::commands::owner_claim::{fetch_latest_app_keys, resolve_verified_owner
 use crate::config::Config;
 use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
+use crate::state_sync::{
+    apply_chat_settings, apply_group_metadata, extract_control_stamp_from_value,
+    select_canonical_session, GroupMetadataApplyOutcome,
+};
 use crate::storage::{
-    Storage, StoredChat, StoredGroup, StoredGroupMessage, StoredGroupSender, StoredMessage,
-    StoredReaction,
+    Storage, StoredChat, StoredGroupMessage, StoredGroupSender, StoredMessage, StoredReaction,
 };
 
 use super::common::{
@@ -144,21 +147,18 @@ fn sync_chats_from_session_manager(
 
     for (owner_hex, mut owner_sessions) in sessions_by_owner {
         owner_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+        let Some((selected_device_id, selected_state)) = select_canonical_session(&owner_sessions)
+        else {
+            continue;
+        };
 
         if let Some(idx) = chats.iter().position(|chat| chat.their_pubkey == owner_hex) {
             let mut changed = false;
             let mut chat = chats[idx].clone();
-
-            let selected_idx = chat
-                .device_id
-                .as_ref()
-                .and_then(|current| owner_sessions.iter().position(|(d, _)| d == current))
-                .unwrap_or(0);
-            let (selected_device_id, selected_state) = owner_sessions[selected_idx].clone();
             let state_json = serde_json::to_string(&selected_state)?;
 
             if chat.device_id.as_deref() != Some(selected_device_id.as_str()) {
-                chat.device_id = Some(selected_device_id);
+                chat.device_id = Some(selected_device_id.clone());
                 changed = true;
             }
             if chat.session_state != state_json {
@@ -173,7 +173,6 @@ fn sync_chats_from_session_manager(
             continue;
         }
 
-        let (selected_device_id, selected_state) = owner_sessions[0].clone();
         let state_json = serde_json::to_string(&selected_state)?;
         let chat = crate::storage::StoredChat {
             id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
@@ -310,7 +309,11 @@ pub(super) fn apply_session_manager_one_to_one_decrypted(
 
     if rumor_kind == CHAT_SETTINGS_KIND {
         if let Some(ttl) = parse_chat_settings_ttl_seconds(&content) {
-            updated_chat.message_ttl_seconds = ttl;
+            if let Some(stamp) =
+                extract_control_stamp_from_value(&decrypted_event, event_id, timestamp)
+            {
+                let _ = apply_chat_settings(storage, &mut updated_chat, ttl, &stamp)?;
+            }
             storage.save_chat(&updated_chat)?;
             output.event(
                 "chat_settings",
@@ -1595,81 +1598,76 @@ pub async fn listen(
                                     {
                                         let my_device_pubkey = config.public_key()?;
                                         let my_owner_pubkey = config.owner_public_key_hex()?;
-                                        let existing = storage.get_group(gid)?;
+                                        let stamp = extract_control_stamp_from_value(
+                                            &decrypted_event,
+                                            None,
+                                            timestamp,
+                                        );
 
-                                        match existing {
-                                            Some(existing_group) => {
-                                                let validation = nostr_double_ratchet::group::validate_metadata_update(
-                                                    &existing_group.data,
-                                                    &metadata,
-                                                    &from_pubkey_hex,
-                                                    &my_owner_pubkey,
-                                                );
-                                                match validation {
-                                                    nostr_double_ratchet::group::MetadataValidation::Accept => {
-                                                        let old_secret = existing_group.data.secret.clone();
-                                                        let updated = nostr_double_ratchet::group::apply_metadata_update(
-                                                            &existing_group.data,
-                                                            &metadata,
-                                                        );
-                                                        storage.save_group(&StoredGroup { data: updated.clone() })?;
+                                        if let Some(stamp) = stamp {
+                                            match apply_group_metadata(
+                                                storage,
+                                                gid,
+                                                &from_pubkey_hex,
+                                                metadata,
+                                                stamp,
+                                                timestamp * 1000,
+                                                &my_owner_pubkey,
+                                            )? {
+                                                GroupMetadataApplyOutcome::Updated {
+                                                    previous_secret,
+                                                    group: updated,
+                                                } => {
+                                                    // If the group's shared-channel secret rotated (e.g. membership changed),
+                                                    // force *our* sender key to rotate too so newly-added members can decrypt.
+                                                    if updated.secret != previous_secret {
+                                                        let _ = storage.delete_group_sender_keys(
+                                                            gid,
+                                                            &my_device_pubkey,
+                                                        )?;
+                                                    }
 
-                                                        // If the group's shared-channel secret rotated (e.g. membership changed),
-                                                        // force *our* sender key to rotate too so newly-added members can decrypt.
-                                                        if updated.secret != old_secret {
-                                                            let _ = storage.delete_group_sender_keys(gid, &my_device_pubkey)?;
-                                                        }
-
-                                                        storage.save_chat(&updated_chat)?;
-                                                        output.event("group_metadata", serde_json::json!({
+                                                    storage.save_chat(&updated_chat)?;
+                                                    output.event(
+                                                        "group_metadata",
+                                                        serde_json::json!({
                                                             "group_id": gid,
                                                             "action": "updated",
                                                             "sender_pubkey": from_pubkey_hex,
                                                             "name": updated.name,
                                                             "members": updated.members,
                                                             "admins": updated.admins,
-                                                        }));
-                                                    }
-                                                    nostr_double_ratchet::group::MetadataValidation::Removed => {
-                                                        storage.delete_group(gid)?;
-                                                        storage.save_chat(&updated_chat)?;
-                                                        output.event("group_metadata", serde_json::json!({
+                                                        }),
+                                                    );
+                                                }
+                                                GroupMetadataApplyOutcome::Removed => {
+                                                    storage.save_chat(&updated_chat)?;
+                                                    output.event(
+                                                        "group_metadata",
+                                                        serde_json::json!({
                                                             "group_id": gid,
                                                             "action": "removed",
                                                             "sender_pubkey": from_pubkey_hex,
-                                                        }));
-                                                    }
-                                                    nostr_double_ratchet::group::MetadataValidation::Reject => {}
+                                                        }),
+                                                    );
                                                 }
-                                            }
-                                            None => {
-                                                // New group creation
-                                                if nostr_double_ratchet::group::validate_metadata_creation(
-                                                    &metadata,
-                                                    &from_pubkey_hex,
-                                                    &my_owner_pubkey,
-                                                ) {
-                                                    let group_data = nostr_double_ratchet::group::GroupData {
-                                                        id: metadata.id.clone(),
-                                                        name: metadata.name.clone(),
-                                                        description: metadata.description,
-                                                        picture: metadata.picture,
-                                                        members: metadata.members.clone(),
-                                                        admins: metadata.admins.clone(),
-                                                        created_at: timestamp * 1000,
-                                                        secret: metadata.secret,
-                                                        accepted: None,
-                                                    };
-                                                    storage.save_group(&StoredGroup { data: group_data })?;
+                                                GroupMetadataApplyOutcome::Created(group_data) => {
                                                     storage.save_chat(&updated_chat)?;
-                                                    output.event("group_metadata", serde_json::json!({
-                                                        "group_id": gid,
-                                                        "action": "created",
-                                                        "sender_pubkey": from_pubkey_hex,
-                                                        "name": metadata.name,
-                                                        "members": metadata.members,
-                                                        "admins": metadata.admins,
-                                                    }));
+                                                    output.event(
+                                                        "group_metadata",
+                                                        serde_json::json!({
+                                                            "group_id": gid,
+                                                            "action": "created",
+                                                            "sender_pubkey": from_pubkey_hex,
+                                                            "name": group_data.name,
+                                                            "members": group_data.members,
+                                                            "admins": group_data.admins,
+                                                        }),
+                                                    );
+                                                }
+                                                GroupMetadataApplyOutcome::Ignored
+                                                | GroupMetadataApplyOutcome::Rejected => {
+                                                    storage.save_chat(&updated_chat)?;
                                                 }
                                             }
                                         }
@@ -2296,94 +2294,62 @@ pub async fn listen(
                             if let Some(metadata) =
                                 nostr_double_ratchet::group::parse_group_metadata(&content)
                             {
-                                let my_device_pubkey = config.public_key()?;
                                 let my_owner_pubkey = config.owner_public_key_hex()?;
-                                let existing = storage.get_group(&gid)?;
-
-                                match existing {
-                                    Some(existing_group) => {
-                                        let validation =
-                                            nostr_double_ratchet::group::validate_metadata_update(
-                                                &existing_group.data,
-                                                &metadata,
-                                                &from_pubkey_hex,
-                                                &my_owner_pubkey,
+                                if let Some(stamp) = extract_control_stamp_from_value(
+                                    &decrypted_event,
+                                    None,
+                                    timestamp,
+                                ) {
+                                    match apply_group_metadata(
+                                        storage,
+                                        &gid,
+                                        &from_pubkey_hex,
+                                        metadata,
+                                        stamp,
+                                        timestamp * 1000,
+                                        &my_owner_pubkey,
+                                    )? {
+                                        GroupMetadataApplyOutcome::Updated {
+                                            group: updated,
+                                            ..
+                                        } => {
+                                            output.event(
+                                                "group_metadata",
+                                                serde_json::json!({
+                                                    "group_id": gid,
+                                                    "action": "updated",
+                                                    "sender_pubkey": from_pubkey_hex,
+                                                    "name": updated.name,
+                                                    "members": updated.members,
+                                                    "admins": updated.admins,
+                                                }),
                                             );
-                                        match validation {
-                                            nostr_double_ratchet::group::MetadataValidation::Accept => {
-                                                let old_secret = existing_group.data.secret.clone();
-                                                let updated =
-                                                    nostr_double_ratchet::group::apply_metadata_update(
-                                                        &existing_group.data,
-                                                        &metadata,
-                                                    );
-                                                storage.save_group(&StoredGroup {
-                                                    data: updated.clone(),
-                                                })?;
-                                                if updated.secret != old_secret {
-                                                    let _ = storage.delete_group_sender_keys(
-                                                        &gid,
-                                                        &my_device_pubkey,
-                                                    )?;
-                                                }
-                                                output.event(
-                                                    "group_metadata",
-                                                    serde_json::json!({
-                                                        "group_id": gid,
-                                                        "action": "updated",
-                                                        "sender_pubkey": from_pubkey_hex,
-                                                        "name": updated.name,
-                                                        "members": updated.members,
-                                                        "admins": updated.admins,
-                                                    }),
-                                                );
-                                            }
-                                            nostr_double_ratchet::group::MetadataValidation::Removed => {
-                                                storage.delete_group(&gid)?;
-                                                output.event(
-                                                    "group_metadata",
-                                                    serde_json::json!({
-                                                        "group_id": gid,
-                                                        "action": "removed",
-                                                        "sender_pubkey": from_pubkey_hex,
-                                                    }),
-                                                );
-                                            }
-                                            nostr_double_ratchet::group::MetadataValidation::Reject => {}
                                         }
-                                    }
-                                    None => {
-                                        if nostr_double_ratchet::group::validate_metadata_creation(
-                                            &metadata,
-                                            &from_pubkey_hex,
-                                            &my_owner_pubkey,
-                                        ) {
-                                            let group_data =
-                                                nostr_double_ratchet::group::GroupData {
-                                                    id: metadata.id.clone(),
-                                                    name: metadata.name.clone(),
-                                                    description: metadata.description,
-                                                    picture: metadata.picture,
-                                                    members: metadata.members.clone(),
-                                                    admins: metadata.admins.clone(),
-                                                    created_at: timestamp * 1000,
-                                                    secret: metadata.secret,
-                                                    accepted: None,
-                                                };
-                                            storage
-                                                .save_group(&StoredGroup { data: group_data })?;
+                                        GroupMetadataApplyOutcome::Removed => {
+                                            output.event(
+                                                "group_metadata",
+                                                serde_json::json!({
+                                                    "group_id": gid,
+                                                    "action": "removed",
+                                                    "sender_pubkey": from_pubkey_hex,
+                                                }),
+                                            );
+                                        }
+                                        GroupMetadataApplyOutcome::Created(group_data) => {
                                             output.event(
                                                 "group_metadata",
                                                 serde_json::json!({
                                                     "group_id": gid,
                                                     "action": "created",
                                                     "sender_pubkey": from_pubkey_hex,
-                                                    "name": metadata.name,
-                                                    "members": metadata.members,
-                                                    "admins": metadata.admins,
+                                                    "name": group_data.name,
+                                                    "members": group_data.members,
+                                                    "admins": group_data.admins,
                                                 }),
                                             );
                                         }
+                                        GroupMetadataApplyOutcome::Ignored
+                                        | GroupMetadataApplyOutcome::Rejected => {}
                                     }
                                 }
                             }

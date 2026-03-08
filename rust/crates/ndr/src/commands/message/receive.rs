@@ -5,6 +5,7 @@ use nostr_double_ratchet::{
 };
 
 use crate::output::Output;
+use crate::state_sync::{apply_chat_settings, extract_control_stamp_from_value};
 use crate::storage::{Storage, StoredGroupMessage, StoredMessage, StoredReaction};
 
 use super::common::{
@@ -79,7 +80,13 @@ pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Re
                 // Encrypted 1:1 chat settings (disappearing-message signaling).
                 if rumor_kind == CHAT_SETTINGS_KIND {
                     if let Some(ttl) = parse_chat_settings_ttl_seconds(&content) {
-                        updated_chat.message_ttl_seconds = ttl;
+                        if let Some(stamp) = extract_control_stamp_from_value(
+                            &decrypted_event,
+                            Some(&msg_id),
+                            timestamp,
+                        ) {
+                            let _ = apply_chat_settings(storage, &mut updated_chat, ttl, &stamp)?;
+                        }
                         storage.save_chat(&updated_chat)?;
                         output.success(
                             "receive",

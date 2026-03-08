@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
+use crate::state_sync::{select_canonical_session, ControlStamp};
 use crate::storage::Storage;
 
 #[derive(Serialize)]
@@ -221,6 +222,16 @@ pub async fn ttl(
 
     chat.message_ttl_seconds = ttl_seconds;
     storage.save_chat(&chat)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    storage.save_chat_settings_stamp(
+        &chat.id,
+        &ControlStamp {
+            ms: now_ms,
+            event_id: "0".repeat(64),
+        },
+    )?;
 
     if local_only {
         output.success(
@@ -304,13 +315,7 @@ pub async fn ttl(
         .map(|(_, device_id, state)| (device_id, state))
         .collect();
     sessions.sort_by(|a, b| a.0.cmp(&b.0));
-    if !sessions.is_empty() {
-        let selected_idx = chat
-            .device_id
-            .as_ref()
-            .and_then(|current| sessions.iter().position(|(d, _)| d == current))
-            .unwrap_or(0);
-        let (selected_device_id, selected_state) = sessions[selected_idx].clone();
+    if let Some((selected_device_id, selected_state)) = select_canonical_session(&sessions) {
         chat.device_id = Some(selected_device_id);
         chat.session_state = serde_json::to_string(&selected_state)?;
         storage.save_chat(&chat)?;

@@ -9,6 +9,7 @@ use nostr_double_ratchet::{
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
+use crate::state_sync::select_canonical_session;
 use crate::storage::{Storage, StoredChat, StoredMessage, StoredReaction};
 
 use super::common::resolve_target_pubkey;
@@ -168,21 +169,18 @@ fn sync_chats_from_session_manager(
 
     for (owner_hex, mut owner_sessions) in sessions_by_owner {
         owner_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+        let Some((selected_device_id, selected_state)) = select_canonical_session(&owner_sessions)
+        else {
+            continue;
+        };
 
         if let Some(idx) = chats.iter().position(|chat| chat.their_pubkey == owner_hex) {
             let mut changed = false;
             let mut chat = chats[idx].clone();
-
-            let selected_idx = chat
-                .device_id
-                .as_ref()
-                .and_then(|current| owner_sessions.iter().position(|(d, _)| d == current))
-                .unwrap_or(0);
-            let (selected_device_id, selected_state) = owner_sessions[selected_idx].clone();
             let state_json = serde_json::to_string(&selected_state)?;
 
             if chat.device_id.as_deref() != Some(selected_device_id.as_str()) {
-                chat.device_id = Some(selected_device_id);
+                chat.device_id = Some(selected_device_id.clone());
                 changed = true;
             }
             if chat.session_state != state_json {
@@ -197,7 +195,6 @@ fn sync_chats_from_session_manager(
             continue;
         }
 
-        let (selected_device_id, selected_state) = owner_sessions[0].clone();
         let chat = StoredChat {
             id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
             their_pubkey: owner_hex,

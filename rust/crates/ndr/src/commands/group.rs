@@ -13,6 +13,9 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
+use crate::state_sync::{
+    extract_control_stamp_from_unsigned, select_canonical_session, ControlStamp,
+};
 use crate::storage::{Storage, StoredGroup, StoredGroupMessage};
 
 #[derive(Serialize)]
@@ -135,24 +138,27 @@ fn sync_member_chats_from_session_manager(
         return Ok(());
     }
 
+    let mut owner_sessions: Vec<(String, nostr_double_ratchet::SessionState)> =
+        sessions_by_device.into_iter().collect();
+    owner_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+    let Some((selected_device_id, selected_state)) = select_canonical_session(&owner_sessions)
+    else {
+        return Ok(());
+    };
+    let state_json = serde_json::to_string(&selected_state)?;
+
     for mut chat in storage
         .list_chats()?
         .into_iter()
         .filter(|c| c.their_pubkey == member_owner_pubkey_hex)
     {
-        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
-        let Some(state) = sessions_by_device.get(&device_id) else {
-            continue;
-        };
-        let state_json = serde_json::to_string(state)?;
-
         let mut changed = false;
-        if chat.device_id.as_deref() != Some(device_id.as_str()) {
-            chat.device_id = Some(device_id);
+        if chat.device_id.as_deref() != Some(selected_device_id.as_str()) {
+            chat.device_id = Some(selected_device_id.clone());
             changed = true;
         }
         if chat.session_state != state_json {
-            chat.session_state = state_json;
+            chat.session_state = state_json.clone();
             changed = true;
         }
 
@@ -252,17 +258,46 @@ async fn publish_events_with_retry(
 }
 
 /// Fan-out group metadata to members after a mutation.
+fn build_group_metadata_rumor(
+    group: &nostr_double_ratchet::group::GroupData,
+    exclude_secret: bool,
+    signer_pubkey: nostr::PublicKey,
+    now_ms: u64,
+) -> Result<nostr::UnsignedEvent> {
+    let metadata_content =
+        nostr_double_ratchet::group::build_group_metadata_content(group, exclude_secret);
+    let tags: Vec<Vec<String>> = vec![
+        vec!["l".to_string(), group.id.clone()],
+        vec!["ms".to_string(), now_ms.to_string()],
+    ];
+    let nostr_tags: Vec<nostr::Tag> = tags
+        .iter()
+        .filter_map(|t| nostr::Tag::parse(t).ok())
+        .collect();
+
+    Ok(nostr::EventBuilder::new(
+        nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
+        &metadata_content,
+    )
+    .tags(nostr_tags)
+    .build(signer_pubkey))
+}
+
 async fn fan_out_metadata(
     group: &nostr_double_ratchet::group::GroupData,
     excluded_member: Option<&str>,
     config: &Config,
     storage: &Storage,
-) -> Result<()> {
+) -> Result<ControlStamp> {
     let my_owner_pubkey = config.owner_public_key_hex()?;
+    let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;
+    let full_secret_unsigned = build_group_metadata_rumor(group, false, my_pk, now_ms)?;
+    let stamp = extract_control_stamp_from_unsigned(&full_secret_unsigned)
+        .ok_or_else(|| anyhow::anyhow!("group metadata rumor missing control stamp"))?;
 
     let client = Client::default();
     let relays = config.resolved_relays();
@@ -281,29 +316,15 @@ async fn fan_out_metadata(
         }
 
         let exclude_secret = excluded_member.map(|e| e == member).unwrap_or(false);
-        let metadata_content =
-            nostr_double_ratchet::group::build_group_metadata_content(group, exclude_secret);
         let recipient_owner = match nostr::PublicKey::from_hex(member) {
             Ok(pk) => pk,
             Err(_) => continue,
         };
-
-        let tags: Vec<Vec<String>> = vec![
-            vec!["l".to_string(), group.id.clone()],
-            vec!["ms".to_string(), now_ms.to_string()],
-        ];
-        let nostr_tags: Vec<nostr::Tag> = tags
-            .iter()
-            .filter_map(|t| nostr::Tag::parse(t).ok())
-            .collect();
-
-        let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
-        let unsigned = nostr::EventBuilder::new(
-            nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
-            &metadata_content,
-        )
-        .tags(nostr_tags)
-        .build(my_pk);
+        let unsigned = if exclude_secret {
+            build_group_metadata_rumor(group, true, my_pk, now_ms)?
+        } else {
+            full_secret_unsigned.clone()
+        };
 
         let mut message_events: Vec<nostr::Event> = Vec::new();
         for attempt in 0..MAX_DELIVERY_ATTEMPTS {
@@ -338,28 +359,11 @@ async fn fan_out_metadata(
 
     // Also fan-out without secret to the removed member
     if let Some(removed) = excluded_member {
-        let metadata_content =
-            nostr_double_ratchet::group::build_group_metadata_content(group, true);
         let recipient_owner = match nostr::PublicKey::from_hex(removed) {
             Ok(pk) => pk,
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(stamp),
         };
-
-        let tags: Vec<Vec<String>> = vec![
-            vec!["l".to_string(), group.id.clone()],
-            vec!["ms".to_string(), now_ms.to_string()],
-        ];
-        let nostr_tags: Vec<nostr::Tag> = tags
-            .iter()
-            .filter_map(|t| nostr::Tag::parse(t).ok())
-            .collect();
-        let my_pk = nostr::PublicKey::from_hex(&my_owner_pubkey)?;
-        let unsigned = nostr::EventBuilder::new(
-            nostr::Kind::Custom(GROUP_METADATA_KIND as u16),
-            &metadata_content,
-        )
-        .tags(nostr_tags)
-        .build(my_pk);
+        let unsigned = build_group_metadata_rumor(group, true, my_pk, now_ms)?;
 
         let mut message_events: Vec<nostr::Event> = Vec::new();
         for attempt in 0..MAX_DELIVERY_ATTEMPTS {
@@ -389,7 +393,7 @@ async fn fan_out_metadata(
         .await;
     }
 
-    Ok(())
+    Ok(stamp)
 }
 
 fn build_group_manager(config: &Config, storage: &Storage) -> Result<GroupManager> {
@@ -555,6 +559,12 @@ pub async fn create(
         data: created.group,
     };
     storage.save_group(&stored)?;
+    if let Some(ref rumor) = created.metadata_rumor {
+        if let Some(stamp) = extract_control_stamp_from_unsigned(rumor) {
+            storage.save_group_control_stamp(&stored.data.id, &stamp)?;
+            let _ = storage.delete_group_tombstone(&stored.data.id)?;
+        }
+    }
 
     output.success("group.create", GroupInfo::from(&stored.data));
     Ok(())
@@ -611,7 +621,10 @@ pub async fn update(
     storage.save_group(&stored)?;
 
     // Fan-out metadata
-    let _ = fan_out_metadata(&stored.data, None, config, storage).await;
+    if let Ok(stamp) = fan_out_metadata(&stored.data, None, config, storage).await {
+        storage.save_group_control_stamp(&stored.data.id, &stamp)?;
+        let _ = storage.delete_group_tombstone(&stored.data.id)?;
+    }
 
     output.success("group.update", GroupInfo::from(&stored.data));
     Ok(())
@@ -646,7 +659,10 @@ pub async fn add_member(
     }
 
     // Fan-out metadata to all members including new one
-    let _ = fan_out_metadata(&stored.data, None, config, storage).await;
+    if let Ok(stamp) = fan_out_metadata(&stored.data, None, config, storage).await {
+        storage.save_group_control_stamp(&stored.data.id, &stamp)?;
+        let _ = storage.delete_group_tombstone(&stored.data.id)?;
+    }
 
     output.success("group.add-member", GroupInfo::from(&stored.data));
     Ok(())
@@ -683,7 +699,10 @@ pub async fn remove_member(
     }
 
     // Fan-out with secret to remaining, without secret to removed
-    let _ = fan_out_metadata(&stored.data, Some(pubkey), config, storage).await;
+    if let Ok(stamp) = fan_out_metadata(&stored.data, Some(pubkey), config, storage).await {
+        storage.save_group_control_stamp(&stored.data.id, &stamp)?;
+        let _ = storage.delete_group_tombstone(&stored.data.id)?;
+    }
 
     output.success("group.remove-member", GroupInfo::from(&stored.data));
     Ok(())
@@ -710,7 +729,10 @@ pub async fn add_admin(
     storage.save_group(&stored)?;
 
     // Fan-out metadata
-    let _ = fan_out_metadata(&stored.data, None, config, storage).await;
+    if let Ok(stamp) = fan_out_metadata(&stored.data, None, config, storage).await {
+        storage.save_group_control_stamp(&stored.data.id, &stamp)?;
+        let _ = storage.delete_group_tombstone(&stored.data.id)?;
+    }
 
     output.success("group.add-admin", GroupInfo::from(&stored.data));
     Ok(())
@@ -739,7 +761,10 @@ pub async fn remove_admin(
     storage.save_group(&stored)?;
 
     // Fan-out metadata
-    let _ = fan_out_metadata(&stored.data, None, config, storage).await;
+    if let Ok(stamp) = fan_out_metadata(&stored.data, None, config, storage).await {
+        storage.save_group_control_stamp(&stored.data.id, &stamp)?;
+        let _ = storage.delete_group_tombstone(&stored.data.id)?;
+    }
 
     output.success("group.remove-admin", GroupInfo::from(&stored.data));
     Ok(())

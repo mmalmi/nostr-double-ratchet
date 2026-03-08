@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::state_sync::ControlStamp;
+
 fn temp_path_for(path: &Path) -> PathBuf {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.is_empty() {
@@ -134,6 +136,9 @@ pub struct Storage {
     group_messages_dir: PathBuf,
     group_sender_keys_dir: PathBuf,
     group_senders_dir: PathBuf,
+    group_control_dir: PathBuf,
+    group_tombstones_dir: PathBuf,
+    chat_settings_dir: PathBuf,
 }
 
 impl Storage {
@@ -148,6 +153,9 @@ impl Storage {
         let group_messages_dir = base_dir.join("group_messages");
         let group_sender_keys_dir = base_dir.join("group_sender_keys");
         let group_senders_dir = base_dir.join("group_senders");
+        let group_control_dir = base_dir.join("group_control");
+        let group_tombstones_dir = base_dir.join("group_tombstones");
+        let chat_settings_dir = base_dir.join("chat_settings");
 
         fs::create_dir_all(&invites_dir)?;
         fs::create_dir_all(&chats_dir)?;
@@ -157,6 +165,9 @@ impl Storage {
         fs::create_dir_all(&group_messages_dir)?;
         fs::create_dir_all(&group_sender_keys_dir)?;
         fs::create_dir_all(&group_senders_dir)?;
+        fs::create_dir_all(&group_control_dir)?;
+        fs::create_dir_all(&group_tombstones_dir)?;
+        fs::create_dir_all(&chat_settings_dir)?;
 
         Ok(Self {
             base_dir,
@@ -168,6 +179,9 @@ impl Storage {
             group_messages_dir,
             group_sender_keys_dir,
             group_senders_dir,
+            group_control_dir,
+            group_tombstones_dir,
+            chat_settings_dir,
         })
     }
 
@@ -285,6 +299,7 @@ impl Storage {
     pub fn delete_chat(&self, id: &str) -> Result<bool> {
         let chat_path = self.chats_dir.join(format!("{}.json", id));
         let messages_path = self.messages_dir.join(id);
+        let chat_settings_path = self.chat_settings_dir.join(format!("{}.json", id));
 
         let existed = chat_path.exists();
 
@@ -294,6 +309,9 @@ impl Storage {
 
         if messages_path.exists() {
             fs::remove_dir_all(messages_path)?;
+        }
+        if chat_settings_path.exists() {
+            fs::remove_file(chat_settings_path)?;
         }
 
         Ok(existed)
@@ -627,6 +645,8 @@ impl Storage {
         let messages_path = self.group_messages_dir.join(id);
         let sender_keys_path = self.group_sender_keys_dir.join(id);
         let senders_path = self.group_senders_dir.join(id);
+        let control_path = self.group_control_dir.join(format!("{}.json", id));
+        let tombstone_path = self.group_tombstones_dir.join(format!("{}.json", id));
         let existed = path.exists();
 
         if path.exists() {
@@ -640,6 +660,12 @@ impl Storage {
         }
         if senders_path.exists() {
             fs::remove_dir_all(senders_path)?;
+        }
+        if control_path.exists() {
+            fs::remove_file(control_path)?;
+        }
+        if tombstone_path.exists() {
+            fs::remove_file(tombstone_path)?;
         }
 
         Ok(existed)
@@ -671,6 +697,15 @@ impl Storage {
         if self.group_senders_dir.exists() {
             fs::remove_dir_all(&self.group_senders_dir)?;
         }
+        if self.group_control_dir.exists() {
+            fs::remove_dir_all(&self.group_control_dir)?;
+        }
+        if self.group_tombstones_dir.exists() {
+            fs::remove_dir_all(&self.group_tombstones_dir)?;
+        }
+        if self.chat_settings_dir.exists() {
+            fs::remove_dir_all(&self.chat_settings_dir)?;
+        }
 
         // Recreate dirs
         fs::create_dir_all(&self.invites_dir)?;
@@ -681,8 +716,71 @@ impl Storage {
         fs::create_dir_all(&self.group_messages_dir)?;
         fs::create_dir_all(&self.group_sender_keys_dir)?;
         fs::create_dir_all(&self.group_senders_dir)?;
+        fs::create_dir_all(&self.group_control_dir)?;
+        fs::create_dir_all(&self.group_tombstones_dir)?;
+        fs::create_dir_all(&self.chat_settings_dir)?;
 
         Ok(())
+    }
+
+    fn group_control_path(&self, id: &str) -> PathBuf {
+        self.group_control_dir.join(format!("{}.json", id))
+    }
+
+    pub fn save_group_control_stamp(&self, id: &str, stamp: &ControlStamp) -> Result<()> {
+        write_json_pretty_atomic(&self.group_control_path(id), stamp)
+    }
+
+    pub fn get_group_control_stamp(&self, id: &str) -> Result<Option<ControlStamp>> {
+        let path = self.group_control_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&content)?))
+    }
+
+    fn group_tombstone_path(&self, id: &str) -> PathBuf {
+        self.group_tombstones_dir.join(format!("{}.json", id))
+    }
+
+    pub fn save_group_tombstone(&self, id: &str, stamp: &ControlStamp) -> Result<()> {
+        write_json_pretty_atomic(&self.group_tombstone_path(id), stamp)
+    }
+
+    pub fn get_group_tombstone(&self, id: &str) -> Result<Option<ControlStamp>> {
+        let path = self.group_tombstone_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&content)?))
+    }
+
+    pub fn delete_group_tombstone(&self, id: &str) -> Result<bool> {
+        let path = self.group_tombstone_path(id);
+        if path.exists() {
+            fs::remove_file(path)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn chat_settings_path(&self, id: &str) -> PathBuf {
+        self.chat_settings_dir.join(format!("{}.json", id))
+    }
+
+    pub fn save_chat_settings_stamp(&self, id: &str, stamp: &ControlStamp) -> Result<()> {
+        write_json_pretty_atomic(&self.chat_settings_path(id), stamp)
+    }
+
+    pub fn get_chat_settings_stamp(&self, id: &str) -> Result<Option<ControlStamp>> {
+        let path = self.chat_settings_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&content)?))
     }
 
     // === Group sender (outer pubkey) operations ===

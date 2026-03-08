@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod nostr_client;
 mod output;
+mod state_sync;
 mod storage;
 
 use output::Output;
