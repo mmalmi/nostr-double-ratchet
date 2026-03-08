@@ -695,6 +695,8 @@ impl SessionManager {
         let owner_pubkey = owner_pubkey_hint
             .or(invite.owner_public_key)
             .unwrap_or_else(|| self.resolve_to_owner(&inviter_device_pubkey));
+        let is_owner_side_link_invite =
+            invite.purpose.as_deref() == Some("link") && owner_pubkey == self.owner_public_key;
 
         if owner_pubkey != inviter_device_pubkey {
             let cached_app_keys = self
@@ -705,9 +707,11 @@ impl SessionManager {
                 .cloned();
             if let Some(app_keys) = cached_app_keys {
                 if app_keys.get_device(&inviter_device_pubkey).is_none() {
-                    return Err(crate::Error::Invite(
-                        "Invite device is not authorized by cached AppKeys".to_string(),
-                    ));
+                    if !is_owner_side_link_invite {
+                        return Err(crate::Error::Invite(
+                            "Invite device is not authorized by cached AppKeys".to_string(),
+                        ));
+                    }
                 }
                 self.update_delegate_mapping(owner_pubkey, &app_keys);
             } else {
@@ -721,9 +725,11 @@ impl SessionManager {
                 if !known_device_identities.is_empty() {
                     let inviter_hex = inviter_device_pubkey.to_hex();
                     if !known_device_identities.iter().any(|id| id == &inviter_hex) {
-                        return Err(crate::Error::Invite(
-                            "Invite device is not authorized by stored AppKeys".to_string(),
-                        ));
+                        if !is_owner_side_link_invite {
+                            return Err(crate::Error::Invite(
+                                "Invite device is not authorized by stored AppKeys".to_string(),
+                            ));
+                        }
                     }
                 }
             }
@@ -2963,6 +2969,113 @@ mod tests {
                 .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
             "expected recipient queue entry removal after successful publish"
         );
+    }
+
+    #[test]
+    fn owner_side_link_invite_accepts_new_device_not_yet_in_cached_appkeys() {
+        let owner_keys = Keys::generate();
+        let owner_pubkey = owner_keys.public_key();
+        let known_device_keys = Keys::generate();
+        let known_device_pubkey = known_device_keys.public_key();
+        let new_device_keys = Keys::generate();
+        let new_device_pubkey = new_device_keys.public_key();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            owner_pubkey,
+            owner_keys.secret_key().to_secret_bytes(),
+            owner_pubkey.to_hex(),
+            owner_pubkey,
+            tx,
+            Some(storage),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        let mut app_keys = AppKeys::new(vec![]);
+        app_keys.add_device(DeviceEntry::new(owner_pubkey, 1));
+        app_keys.add_device(DeviceEntry::new(known_device_pubkey, 2));
+        let app_keys_event = app_keys
+            .get_event(owner_pubkey)
+            .sign_with_keys(&owner_keys)
+            .unwrap();
+        manager.process_received_event(app_keys_event);
+
+        let mut link_invite =
+            Invite::create_new(new_device_pubkey, Some(new_device_pubkey.to_hex()), Some(1))
+                .unwrap();
+        link_invite.purpose = Some("link".to_string());
+        link_invite.owner_public_key = Some(owner_pubkey);
+
+        let accepted = manager.accept_invite(&link_invite, Some(owner_pubkey));
+        assert!(
+            accepted.is_ok(),
+            "owner-side link invite should allow pre-registration acceptance"
+        );
+        assert!(accepted.unwrap().created_new_session);
+    }
+
+    #[test]
+    fn owner_side_link_invite_accepts_new_device_not_yet_in_stored_appkeys_after_restart() {
+        let owner_keys = Keys::generate();
+        let owner_pubkey = owner_keys.public_key();
+        let known_device_keys = Keys::generate();
+        let known_device_pubkey = known_device_keys.public_key();
+        let new_device_keys = Keys::generate();
+        let new_device_pubkey = new_device_keys.public_key();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx1, rx1) = crossbeam_channel::unbounded();
+        let manager1 = SessionManager::new(
+            owner_pubkey,
+            owner_keys.secret_key().to_secret_bytes(),
+            owner_pubkey.to_hex(),
+            owner_pubkey,
+            tx1,
+            Some(storage.clone()),
+            None,
+        );
+        manager1.init().unwrap();
+        let _ = drain_events(&rx1);
+
+        let mut app_keys = AppKeys::new(vec![]);
+        app_keys.add_device(DeviceEntry::new(owner_pubkey, 1));
+        app_keys.add_device(DeviceEntry::new(known_device_pubkey, 2));
+        let app_keys_event = app_keys
+            .get_event(owner_pubkey)
+            .sign_with_keys(&owner_keys)
+            .unwrap();
+        manager1.process_received_event(app_keys_event);
+
+        drop(manager1);
+
+        let (tx2, rx2) = crossbeam_channel::unbounded();
+        let manager2 = SessionManager::new(
+            owner_pubkey,
+            owner_keys.secret_key().to_secret_bytes(),
+            owner_pubkey.to_hex(),
+            owner_pubkey,
+            tx2,
+            Some(storage),
+            None,
+        );
+        manager2.init().unwrap();
+        let _ = drain_events(&rx2);
+
+        let mut link_invite =
+            Invite::create_new(new_device_pubkey, Some(new_device_pubkey.to_hex()), Some(1))
+                .unwrap();
+        link_invite.purpose = Some("link".to_string());
+        link_invite.owner_public_key = Some(owner_pubkey);
+
+        let accepted = manager2.accept_invite(&link_invite, Some(owner_pubkey));
+        assert!(
+            accepted.is_ok(),
+            "owner-side link invite should allow pre-registration acceptance after restart"
+        );
+        assert!(accepted.unwrap().created_new_session);
     }
 
     #[test]
