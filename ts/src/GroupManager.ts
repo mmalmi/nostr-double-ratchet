@@ -226,7 +226,12 @@ export class GroupManager {
     const recipients = group.members.filter((pubkey) => pubkey !== this.ourOwnerPubkey);
     const deliveries = await Promise.allSettled(
       recipients.map(async (recipient) => {
-        await opts.sendPairwise!(recipient, metadataRumor);
+        const rumorForRecipient: Rumor = {
+          ...metadataRumor,
+          tags: [...metadataRumor.tags, ["p", recipient]],
+        };
+        rumorForRecipient.id = getEventHash(rumorForRecipient);
+        await opts.sendPairwise!(recipient, rumorForRecipient);
         return recipient;
       })
     );

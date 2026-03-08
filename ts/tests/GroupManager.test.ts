@@ -57,6 +57,7 @@ describe("GroupManager", () => {
       expect(entry.rumor.pubkey).toBe(aliceDevicePk);
       expect(entry.rumor.tags.some((tag) => tag[0] === "l" && tag[1] === created.group.id)).toBe(true);
       expect(entry.rumor.tags.some((tag) => tag[0] === "ms")).toBe(true);
+      expect(entry.rumor.tags.some((tag) => tag[0] === "p" && tag[1] === entry.recipient)).toBe(true);
 
       const parsed = JSON.parse(entry.rumor.content) as {
         id: string;
