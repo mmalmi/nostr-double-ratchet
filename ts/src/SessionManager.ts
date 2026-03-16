@@ -741,8 +741,9 @@ export class SessionManager {
     }
 
     const existingRecord = userRecord.devices.get(deviceId)
-    if (existingRecord?.hasEstablishedActiveSession()) {
-      return { ownerPublicKey, deviceId, session: existingRecord.activeSession }
+    const existingSession = existingRecord?.activeSession
+    if (existingRecord?.hasEstablishedActiveSession() && existingSession) {
+      return { ownerPublicKey, deviceId, session: existingSession }
     }
 
     const encryptor =
