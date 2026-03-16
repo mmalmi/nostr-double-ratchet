@@ -1224,6 +1224,48 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         "\"content\":\"after restart reaches linked receiver\"",
     );
     assert!(after_restart.contains("\"content\":\"after restart reaches linked receiver\""));
+    drain_events(&alice_linked_restarted_rx);
+    drain_events(&alice_owner_rx);
+    drain_events(&bob_owner_rx);
+    drain_events(&bob_linked_rx);
+
+    alice_linked_restarted_mgr.send_text(
+        bob_owner_pubkey,
+        "after restart linked sender keeps multi-device fanout".to_string(),
+        None,
+    )?;
+    let post_restart_fanout = recv_message_events(&alice_linked_restarted_rx, 3);
+    assert_eq!(post_restart_fanout.len(), 3);
+    for event in &post_restart_fanout {
+        alice_owner_mgr.process_received_event(event.clone());
+        bob_owner_mgr.process_received_event(event.clone());
+        bob_linked_mgr.process_received_event(event.clone());
+    }
+
+    let alice_owner_self_sync = recv_decrypted_containing(
+        &alice_owner_rx,
+        "\"content\":\"after restart linked sender keeps multi-device fanout\"",
+    );
+    let bob_owner_received = recv_decrypted_containing(
+        &bob_owner_rx,
+        "\"content\":\"after restart linked sender keeps multi-device fanout\"",
+    );
+    let bob_linked_received = recv_decrypted_containing(
+        &bob_linked_rx,
+        "\"content\":\"after restart linked sender keeps multi-device fanout\"",
+    );
+    assert!(
+        alice_owner_self_sync
+            .contains("\"content\":\"after restart linked sender keeps multi-device fanout\"")
+    );
+    assert!(
+        bob_owner_received
+            .contains("\"content\":\"after restart linked sender keeps multi-device fanout\"")
+    );
+    assert!(
+        bob_linked_received
+            .contains("\"content\":\"after restart linked sender keeps multi-device fanout\"")
+    );
 
     Ok(())
 }
