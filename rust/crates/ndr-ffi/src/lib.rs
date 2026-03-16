@@ -583,6 +583,15 @@ impl SessionManagerHandle {
         Ok(())
     }
 
+    /// Subscribe to a user's AppKeys/device-invite streams and converge sessions.
+    pub fn setup_user(&self, user_pubkey_hex: String) -> Result<(), NdrError> {
+        let user_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&user_pubkey_hex)?;
+        let manager = self.inner.lock().unwrap();
+        manager.init()?;
+        manager.setup_user(user_pubkey);
+        Ok(())
+    }
+
     /// Accept an invite URL using SessionManager's owner-aware routing/auth checks.
     ///
     /// This flow also emits the signed invite response via SessionManager pubsub events,
