@@ -741,7 +741,7 @@ export class SessionManager {
     }
 
     const existingRecord = userRecord.devices.get(deviceId)
-    if (existingRecord?.activeSession) {
+    if (existingRecord?.hasEstablishedActiveSession()) {
       return { ownerPublicKey, deviceId, session: existingRecord.activeSession }
     }
 
@@ -758,7 +758,7 @@ export class SessionManager {
 
     const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
     this.delegateToOwner.set(deviceId, ownerPublicKey)
-    deviceRecord.installSession(session)
+    deviceRecord.installSession(session, false, { preferActive: true })
     if (invite.purpose === "link" && ownerPublicKey === this.ownerPublicKey) {
       await this.sendLinkBootstrap(ownerPublicKey, deviceId)
     }

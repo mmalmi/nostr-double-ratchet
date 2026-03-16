@@ -29,6 +29,8 @@ Rust library implementing Double Ratchet messaging for Nostr, including multi-de
 - Outer Nostr events are signature-verified.
 - Identity attribution is based on authenticated session context and owner/device mapping.
 - For multi-device owner claims, AppKeys are used to verify device authorization.
+- The latest AppKeys set is authoritative for device authorization; removing a device from AppKeys revokes it for future routing and owner-claim validation.
+- Applications must not publish a reduced AppKeys set implicitly during startup/reopen. Publishing fewer devices should only happen for explicit device revocation or first-device bootstrap.
 - Inner rumor `pubkey` is not treated as a trusted sender identity source.
 
 ### Plausible Deniability

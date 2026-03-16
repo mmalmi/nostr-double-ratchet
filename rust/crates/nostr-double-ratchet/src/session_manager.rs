@@ -126,6 +126,12 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    fn session_can_receive(session: &crate::Session) -> bool {
+        session.state.receiving_chain_key.is_some()
+            || session.state.their_current_nostr_public_key.is_some()
+            || session.state.receiving_chain_message_number > 0
+    }
+
     fn with_user_records<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut HashMap<PublicKey, UserRecord>) -> R + Send + 'static,
@@ -805,17 +811,69 @@ impl SessionManager {
             .clone()
             .unwrap_or_else(|| hex::encode(inviter_device_pubkey.to_bytes()));
 
-        let already_has_session = self.with_user_records({
+        let existing_device_session_info = self.with_user_records({
             let device_id = device_id.clone();
             move |records| {
-                records
+                let device_record = records
                     .get(&owner_pubkey)
                     .and_then(|r| r.device_records.get(&device_id))
-                    .and_then(|d| d.active_session.as_ref())
-                    .is_some()
+                    ?;
+
+                let active_session = device_record.active_session.as_ref().map(|session| {
+                    (
+                        session.can_send(),
+                        SessionManager::session_can_receive(session),
+                        session.state.sending_chain_message_number,
+                        session.state.receiving_chain_message_number,
+                    )
+                });
+
+                let mut any_send_capable = active_session
+                    .as_ref()
+                    .is_some_and(|(can_send, _, _, _)| *can_send);
+                let mut any_receive_capable = active_session
+                    .as_ref()
+                    .is_some_and(|(_, can_receive, _, _)| *can_receive);
+                let mut any_session_has_activity = active_session
+                    .as_ref()
+                    .is_some_and(|(_, _, sent_messages, received_messages)| {
+                        *sent_messages > 0 || *received_messages > 0
+                    });
+
+                for session in &device_record.inactive_sessions {
+                    if session.can_send() {
+                        any_send_capable = true;
+                    }
+                    if SessionManager::session_can_receive(session) {
+                        any_receive_capable = true;
+                    }
+                    if session.state.sending_chain_message_number > 0
+                        || session.state.receiving_chain_message_number > 0
+                    {
+                        any_session_has_activity = true;
+                    }
+                }
+
+                Some((
+                    active_session,
+                    any_send_capable,
+                    any_receive_capable,
+                    any_session_has_activity,
+                ))
             }
         });
-        if already_has_session {
+        let self_owner_authorized_device_replay = owner_pubkey == self.owner_public_key
+            && inviter_device_pubkey != self.our_public_key
+            && existing_device_session_info.is_some()
+            && self.is_device_authorized(owner_pubkey, inviter_device_pubkey);
+
+        if self_owner_authorized_device_replay
+            || existing_device_session_info.is_some_and(
+                |(_, any_send_capable, any_receive_capable, any_session_has_activity)| {
+                    any_send_capable && (any_receive_capable || any_session_has_activity)
+                },
+            )
+        {
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             return Ok(AcceptInviteResult {
                 owner_pubkey,
@@ -824,6 +882,34 @@ impl SessionManager {
                 created_new_session: false,
             });
         }
+        let replace_existing_active_session = existing_device_session_info.is_some_and(
+            |(active_session, _, _, any_session_has_activity)| {
+                active_session.is_some_and(
+                    |(can_send, can_receive, sent_messages, received_messages)| {
+                        can_send
+                            && !can_receive
+                            && sent_messages == 0
+                            && received_messages == 0
+                            && !any_session_has_activity
+                    },
+                )
+            },
+        );
+        let replace_receive_only_active_session = existing_device_session_info.is_some_and(
+            |(active_session, _, _, _)| {
+                active_session.is_some_and(
+                    |(can_send, can_receive, sent_messages, received_messages)| {
+                        !can_send
+                            && can_receive
+                            && sent_messages == 0
+                            && received_messages == 0
+                    },
+                )
+            },
+        );
+
+        let replace_existing_active_session =
+            replace_existing_active_session || replace_receive_only_active_session;
 
         {
             let mut pending = self.pending_acceptances.lock().unwrap();
@@ -854,26 +940,34 @@ impl SessionManager {
                     let user_record = records
                         .entry(owner_pubkey)
                         .or_insert_with(|| UserRecord::new(hex::encode(owner_pubkey.to_bytes())));
-                    if !user_record.device_records.contains_key(&device_id) {
+                    SessionManager::upsert_device_record(user_record, &device_id);
+
+                    if replace_existing_active_session {
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
                             .as_secs();
-                        user_record.device_records.insert(
-                            device_id.clone(),
-                            crate::DeviceRecord {
-                                device_id: device_id.clone(),
-                                public_key: String::new(),
-                                active_session: None,
-                                inactive_sessions: Vec::new(),
-                                created_at: now,
-                                is_stale: false,
-                                stale_timestamp: None,
-                                last_activity: Some(now),
-                            },
-                        );
+                        let device_record = user_record
+                            .device_records
+                            .get_mut(&device_id)
+                            .expect("device record should exist");
+
+                        if let Some(active) = device_record.active_session.take() {
+                            device_record.inactive_sessions.insert(0, active);
+                        }
+                        device_record.active_session = Some(session);
+                        crate::UserRecord::compact_duplicate_sessions(device_record);
+
+                        const MAX_INACTIVE: usize = 10;
+                        if device_record.inactive_sessions.len() > MAX_INACTIVE {
+                            device_record.inactive_sessions.truncate(MAX_INACTIVE);
+                        }
+                        device_record.last_activity = Some(now);
+                    } else {
+                        // Preserve an already-used active session so repeated invite replays
+                        // don't clobber the established sending/receiving path for this device.
+                        user_record.upsert_session(Some(&device_id), session);
                     }
-                    user_record.upsert_session(Some(&device_id), session);
                 }
             });
 

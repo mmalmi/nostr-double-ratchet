@@ -81,18 +81,18 @@ impl UserRecord {
             return;
         }
 
-        // Prefer sendable sessions as active
-        let new_can_send = session.can_send();
-        let old_can_send = device
+        let new_priority = Self::session_priority(&session);
+        let old_priority = device
             .active_session
             .as_ref()
-            .map(|s| s.can_send())
-            .unwrap_or(false);
+            .map(Self::session_priority)
+            .unwrap_or((0, 0, 0));
 
         if let Some(old_session) = device.active_session.take() {
-            // If new session can send but old can't, replace
-            // If old session can send but new can't, keep old as active, new as inactive
-            if old_can_send && !new_can_send {
+            // Keep the richer session active for this device. In practice this avoids
+            // clobbering a bidirectional session with a newer one-way bootstrap/import
+            // session that can send but cannot yet receive.
+            if old_priority >= new_priority {
                 device.inactive_sessions.push(session);
                 device.active_session = Some(old_session);
             } else {
@@ -116,6 +116,26 @@ impl UserRecord {
                 .unwrap()
                 .as_secs(),
         );
+    }
+
+    fn session_priority(session: &Session) -> (u8, u32, u32) {
+        let can_send = session.can_send();
+        let can_receive = session.state.receiving_chain_key.is_some()
+            || session.state.their_current_nostr_public_key.is_some()
+            || session.state.receiving_chain_message_number > 0;
+
+        let directionality = match (can_send, can_receive) {
+            (true, true) => 3,
+            (true, false) => 2,
+            (false, true) => 1,
+            (false, false) => 0,
+        };
+
+        (
+            directionality,
+            session.state.receiving_chain_message_number,
+            session.state.sending_chain_message_number,
+        )
     }
 
     fn device_contains_session_state(device: &DeviceRecord, state: &SessionState) -> bool {
@@ -187,14 +207,7 @@ impl UserRecord {
             .collect();
 
         sessions.sort_by(|a, b| {
-            let a_can_send = a.can_send();
-            let b_can_send = b.can_send();
-
-            match (a_can_send, b_can_send) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            }
+            Self::session_priority(b).cmp(&Self::session_priority(a))
         });
 
         sessions
@@ -243,4 +256,109 @@ pub struct StoredUserRecord {
     pub devices: Vec<StoredDeviceRecord>,
     #[serde(default)]
     pub known_device_identities: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SerializableKeyPair;
+    use nostr::Keys;
+
+    fn make_session(
+        can_send: bool,
+        can_receive: bool,
+        receiving_chain_message_number: u32,
+        sending_chain_message_number: u32,
+    ) -> Session {
+        let our_current = Keys::generate();
+        let our_next = Keys::generate();
+        let their_current = Keys::generate();
+        let their_next = Keys::generate();
+
+        Session::new(
+            SessionState {
+                root_key: [1u8; 32],
+                their_current_nostr_public_key: can_receive
+                    .then(|| their_current.public_key()),
+                their_next_nostr_public_key: can_send
+                    .then(|| their_next.public_key())
+                    .or_else(|| can_receive.then(|| their_current.public_key())),
+                our_current_nostr_key: can_send.then(|| SerializableKeyPair {
+                    public_key: our_current.public_key(),
+                    private_key: our_current.secret_key().to_secret_bytes(),
+                }),
+                our_next_nostr_key: SerializableKeyPair {
+                    public_key: our_next.public_key(),
+                    private_key: our_next.secret_key().to_secret_bytes(),
+                },
+                receiving_chain_key: can_receive.then_some([2u8; 32]),
+                sending_chain_key: can_send.then_some([3u8; 32]),
+                sending_chain_message_number: sending_chain_message_number,
+                receiving_chain_message_number: receiving_chain_message_number,
+                previous_sending_chain_message_count: 0,
+                skipped_keys: HashMap::new(),
+            },
+            "test".to_string(),
+        )
+    }
+
+    #[test]
+    fn upsert_session_keeps_bidirectional_session_active_over_send_only() {
+        let mut user = UserRecord::new("peer".to_string());
+        let bidirectional = make_session(
+            true,
+            true,
+            1,
+            0,
+        );
+        let bidirectional_state = bidirectional.state.clone();
+        let send_only = make_session(
+            true,
+            false,
+            0,
+            0,
+        );
+        let send_only_state = send_only.state.clone();
+
+        user.upsert_session(Some("device-a"), bidirectional);
+        user.upsert_session(Some("device-a"), send_only);
+
+        let device = user.device_records.get("device-a").expect("device");
+        assert_eq!(
+            device.active_session.as_ref().map(|session| session.state.clone()),
+            Some(bidirectional_state),
+        );
+        assert_eq!(device.inactive_sessions.len(), 1);
+        assert_eq!(device.inactive_sessions[0].state, send_only_state);
+    }
+
+    #[test]
+    fn upsert_session_promotes_bidirectional_session_over_send_only() {
+        let mut user = UserRecord::new("peer".to_string());
+        let send_only = make_session(
+            true,
+            false,
+            0,
+            0,
+        );
+        let send_only_state = send_only.state.clone();
+        let bidirectional = make_session(
+            true,
+            true,
+            2,
+            1,
+        );
+        let bidirectional_state = bidirectional.state.clone();
+
+        user.upsert_session(Some("device-a"), send_only);
+        user.upsert_session(Some("device-a"), bidirectional);
+
+        let device = user.device_records.get("device-a").expect("device");
+        assert_eq!(
+            device.active_session.as_ref().map(|session| session.state.clone()),
+            Some(bidirectional_state),
+        );
+        assert_eq!(device.inactive_sessions.len(), 1);
+        assert_eq!(device.inactive_sessions[0].state, send_only_state);
+    }
 }

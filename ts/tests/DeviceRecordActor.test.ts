@@ -2,11 +2,12 @@ import { describe, expect, it, vi } from "vitest"
 import { finalizeEvent, generateSecretKey, getPublicKey, type UnsignedEvent, type VerifiedEvent } from "nostr-tools"
 import { Invite } from "../src/Invite"
 import { MessageQueue } from "../src/MessageQueue"
+import { Session } from "../src/Session"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
 import { DeviceRecordActor } from "../src/session-manager/DeviceRecordActor"
 import { createSessionFromAccept, decryptInviteResponse } from "../src/inviteUtils"
 import type { NostrFacade, DeviceRecordUserHooks } from "../src/session-manager/types"
-import type { NostrSubscribe, Rumor } from "../src/types"
+import type { NostrSubscribe, Rumor, SessionState } from "../src/types"
 import { MockRelay } from "./helpers/mockRelay"
 
 function createSubscribe(relay: MockRelay): NostrSubscribe {
@@ -14,6 +15,54 @@ function createSubscribe(relay: MockRelay): NostrSubscribe {
     const handle = relay.subscribe(filter, onEvent)
     return handle.close
   }
+}
+
+function makeSession(
+  name: string,
+  {
+    canSend,
+    canReceive,
+    sendingChainMessageNumber = 0,
+    receivingChainMessageNumber = 0,
+  }: {
+    canSend: boolean
+    canReceive: boolean
+    sendingChainMessageNumber?: number
+    receivingChainMessageNumber?: number
+  },
+): Session {
+  const ourCurrentPrivateKey = generateSecretKey()
+  const ourNextPrivateKey = generateSecretKey()
+  const theirCurrentPrivateKey = generateSecretKey()
+  const theirNextPrivateKey = generateSecretKey()
+
+  const state: SessionState = {
+    rootKey: new Uint8Array(32).fill(1),
+    theirCurrentNostrPublicKey: canReceive ? getPublicKey(theirCurrentPrivateKey) : undefined,
+    theirNextNostrPublicKey: canSend
+      ? getPublicKey(theirNextPrivateKey)
+      : getPublicKey(theirCurrentPrivateKey),
+    ourCurrentNostrKey: canSend
+      ? {
+          publicKey: getPublicKey(ourCurrentPrivateKey),
+          privateKey: ourCurrentPrivateKey,
+        }
+      : undefined,
+    ourNextNostrKey: {
+      publicKey: getPublicKey(ourNextPrivateKey),
+      privateKey: ourNextPrivateKey,
+    },
+    receivingChainKey: canReceive ? new Uint8Array(32).fill(2) : undefined,
+    sendingChainKey: canSend ? new Uint8Array(32).fill(3) : undefined,
+    sendingChainMessageNumber,
+    receivingChainMessageNumber,
+    previousSendingChainMessageCount: 0,
+    skippedKeys: {},
+  }
+
+  const session = new Session(() => () => {}, state)
+  session.name = name
+  return session
 }
 
 async function waitForSessionMessage(
@@ -39,6 +88,50 @@ async function waitForSessionMessage(
 }
 
 describe("DeviceRecordActor", () => {
+  it("keeps a bidirectional session active when a newer send-only session is installed", () => {
+    const messageQueue = new MessageQueue(
+      new InMemoryStorageAdapter(),
+      "v1/device-record-priority-test/",
+    )
+
+    const userHooks: DeviceRecordUserHooks = {
+      isDeviceAuthorized: vi.fn(() => true),
+      onDeviceRumor: vi.fn(),
+      onDeviceDirty: vi.fn(),
+    }
+
+    const nostr: NostrFacade = {
+      subscribe: () => () => {},
+      publish: vi.fn(async () => undefined as never),
+    }
+
+    const actor = new DeviceRecordActor("device-a", {
+      ownerPubkey: "owner-a",
+      user: userHooks,
+      nostr,
+      messageQueue,
+      ourDeviceId: "our-device",
+      ourOwnerPubkey: "our-owner",
+      identityKey: generateSecretKey(),
+    })
+
+    const bidirectional = makeSession("bidirectional", {
+      canSend: true,
+      canReceive: true,
+      receivingChainMessageNumber: 1,
+    })
+    const sendOnly = makeSession("send-only", {
+      canSend: true,
+      canReceive: false,
+    })
+
+    actor.installSession(bidirectional)
+    actor.installSession(sendOnly)
+
+    expect(actor.activeSession).toBe(bidirectional)
+    expect(actor.inactiveSessions).toContain(sendOnly)
+  })
+
   it("flushes queued messages after the first inbound event makes a passive session sendable", async () => {
     const relay = new MockRelay()
     const passiveSideSecretKey = generateSecretKey()

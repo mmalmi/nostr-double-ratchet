@@ -163,6 +163,85 @@ describe("SessionManager.acceptInvite", () => {
     expect(Array.from(fallbackRecord!.devices.keys())).toContain(unknownBobDevicePubkey)
   })
 
+  it("refreshes an unused send-only session when the same invite is replayed", async () => {
+    const relay = new MockRelay()
+
+    const alice = await createMockSessionManager("alice-device-1", relay)
+    const bob = await createMockSessionManager("bob-device-1", relay)
+
+    const invite = extractInviteForOwner(relay, alice.publicKey)
+
+    const firstAccepted = await bob.manager.acceptInvite(invite, {
+      ownerPublicKey: alice.publicKey,
+    })
+    const deviceRecord = bob.manager
+      .getUserRecords()
+      .get(alice.publicKey)
+      ?.devices
+      .get(firstAccepted.deviceId)
+    expect(deviceRecord?.activeSession).toBe(firstAccepted.session)
+
+    const inviteResponsesBeforeReplay = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059).length
+
+    const replayedAccepted = await bob.manager.acceptInvite(invite, {
+      ownerPublicKey: alice.publicKey,
+    })
+
+    const inviteResponsesAfterReplay = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059).length
+    expect(inviteResponsesAfterReplay).toBe(inviteResponsesBeforeReplay + 1)
+    expect(replayedAccepted.session).not.toBe(firstAccepted.session)
+    expect(deviceRecord?.activeSession).toBe(replayedAccepted.session)
+    expect(deviceRecord?.inactiveSessions).toContain(firstAccepted.session)
+  })
+
+  it("ignores a replayed invite after the send-only session has been used", async () => {
+    const relay = new MockRelay()
+
+    const alice = await createMockSessionManager("alice-device-1", relay)
+    const bob = await createMockSessionManager("bob-device-1", relay)
+
+    const invite = extractInviteForOwner(relay, alice.publicKey)
+
+    const firstAccepted = await bob.manager.acceptInvite(invite, {
+      ownerPublicKey: alice.publicKey,
+    })
+
+    const text = `replayed-invite-ignore-${Date.now()}`
+    const aliceReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for Alice to receive used-session message")),
+        10_000,
+      )
+      const unsubscribe = alice.manager.onEvent((event) => {
+        if (event.content !== text) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await bob.manager.sendMessage(alice.publicKey, text)
+    await aliceReceived
+
+    const inviteResponsesBeforeReplay = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059).length
+
+    const replayedAccepted = await bob.manager.acceptInvite(invite, {
+      ownerPublicKey: alice.publicKey,
+    })
+
+    const inviteResponsesAfterReplay = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059).length
+    expect(inviteResponsesAfterReplay).toBe(inviteResponsesBeforeReplay)
+    expect(replayedAccepted.session).toBe(firstAccepted.session)
+  })
+
   it("omits our owner claim in invite responses until this device is authorized in AppKeys", async () => {
     const relay = new MockRelay()
 

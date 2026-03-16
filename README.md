@@ -44,6 +44,8 @@ For Windows/manual install options, see [Releases](https://github.com/mmalmi/nos
 - Outer Nostr events are signature-verified.
 - Session/identity attribution is bound to authenticated session context and owner/device mappings.
 - `ownerPubkey` claims are verified against AppKeys for multi-device identities.
+- The latest AppKeys set is authoritative for device authorization; removing a device from AppKeys revokes it for future routing and owner-claim validation.
+- Applications must not publish a reduced AppKeys set implicitly during startup/reopen. Publishing fewer devices should only happen for explicit device revocation or first-device bootstrap.
 - Inner rumor `pubkey` is not trusted for sender identity decisions.
 - Shared-channel group invite bootstrap requires signed inner payloads and owner/device consistency checks.
 

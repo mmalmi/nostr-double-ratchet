@@ -27,6 +27,55 @@ export class DeviceRecordActor implements DeviceRecordShape {
     this.createdAt = deps.createdAt ?? Date.now()
   }
 
+  private static sessionCanSend(session: Session): boolean {
+    return Boolean(session.state.theirNextNostrPublicKey && session.state.ourCurrentNostrKey)
+  }
+
+  private static sessionCanReceive(session: Session): boolean {
+    return Boolean(
+      session.state.receivingChainKey ||
+      session.state.theirCurrentNostrPublicKey ||
+      session.state.receivingChainMessageNumber > 0
+    )
+  }
+
+  private static sessionHasActivity(session: Session): boolean {
+    return (
+      session.state.sendingChainMessageNumber > 0 ||
+      session.state.receivingChainMessageNumber > 0
+    )
+  }
+
+  private static sessionPriority(session: Session): [number, number, number] {
+    const canSend = DeviceRecordActor.sessionCanSend(session)
+    const canReceive = DeviceRecordActor.sessionCanReceive(session)
+    const directionality =
+      canSend && canReceive ? 3
+      : canSend ? 2
+      : canReceive ? 1
+      : 0
+
+    return [
+      directionality,
+      session.state.receivingChainMessageNumber,
+      session.state.sendingChainMessageNumber,
+    ]
+  }
+
+  hasEstablishedActiveSession(): boolean {
+    if (!this.activeSession) {
+      return false
+    }
+
+    return (
+      DeviceRecordActor.sessionCanSend(this.activeSession) &&
+      (
+        DeviceRecordActor.sessionCanReceive(this.activeSession) ||
+        DeviceRecordActor.sessionHasActivity(this.activeSession)
+      )
+    )
+  }
+
   ensureSetup(): Promise<void> {
     if (this.state === "revoked") {
       return Promise.resolve()
@@ -85,8 +134,8 @@ export class DeviceRecordActor implements DeviceRecordShape {
       return Promise.reject(new Error("Invite does not target this device"))
     }
 
-    if (this.activeSession) {
-      return Promise.resolve(this.activeSession)
+    if (this.hasEstablishedActiveSession()) {
+      return Promise.resolve(this.activeSession!)
     }
 
     if (this.inviteAcceptancePromise) {
@@ -114,7 +163,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
         this.deps.ourOwnerPubkey
       )
       await this.deps.nostr.publish(event)
-      this.installSession(session, false)
+      this.installSession(session, false, { preferActive: true })
       this.state = "session-ready"
       await this.flushMessageQueue()
       return session
@@ -127,9 +176,9 @@ export class DeviceRecordActor implements DeviceRecordShape {
   installSession(
     session: Session,
     inactive = false,
-    options: { persist?: boolean } = {}
+    options: { persist?: boolean; preferActive?: boolean } = {}
   ): void {
-    const { persist = true } = options
+    const { persist = true, preferActive = false } = options
     const promoteToActive = (nextSession: Session) => {
       const current = this.activeSession
       if (current === nextSession || current?.name === nextSession.name) {
@@ -140,11 +189,27 @@ export class DeviceRecordActor implements DeviceRecordShape {
         (s) => s !== nextSession && s.name !== nextSession.name
       )
 
-      if (current) {
-        this.inactiveSessions.unshift(current)
-      }
+      const shouldReplaceUnestablishedActive =
+        preferActive &&
+        current &&
+        !this.hasEstablishedActiveSession()
 
-      this.activeSession = nextSession
+      if (shouldReplaceUnestablishedActive) {
+        this.inactiveSessions.unshift(current)
+        this.activeSession = nextSession
+      } else if (
+        current &&
+        DeviceRecordActor.sessionPriority(current) >=
+          DeviceRecordActor.sessionPriority(nextSession)
+      ) {
+        this.inactiveSessions.unshift(nextSession)
+        this.activeSession = current
+      } else {
+        if (current) {
+          this.inactiveSessions.unshift(current)
+        }
+        this.activeSession = nextSession
+      }
       this.trimInactiveSessions()
     }
 

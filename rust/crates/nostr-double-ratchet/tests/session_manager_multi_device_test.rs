@@ -4,9 +4,39 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 use nostr::{JsonUtil, Keys, PublicKey, UnsignedEvent};
 use nostr_double_ratchet::{
-    AppKeys, DeviceEntry, InMemoryStorage, Invite, Result, SendOptions, Session, SessionManager,
-    SessionManagerEvent, MESSAGE_EVENT_KIND,
+    AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage, Invite, Result, SendOptions,
+    Session, SessionManager, SessionManagerEvent, StorageAdapter, MESSAGE_EVENT_KIND,
 };
+
+fn load_stored_user_record(
+    storage_root: &std::path::Path,
+    owner_pubkey: PublicKey,
+) -> nostr_double_ratchet::StoredUserRecord {
+    let path = storage_root.join(format!("user_{}.json", owner_pubkey.to_hex()));
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+}
+
+fn device_has_receiving_session(
+    stored: &nostr_double_ratchet::StoredUserRecord,
+    device_id: &str,
+) -> bool {
+    let Some(device) = stored.devices.iter().find(|device| device.device_id == device_id) else {
+        return false;
+    };
+
+    device
+        .active_session
+        .iter()
+        .chain(device.inactive_sessions.iter())
+        .any(|session| {
+            session.receiving_chain_key.is_some()
+                || session.their_current_nostr_public_key.is_some()
+                || session.receiving_chain_message_number > 0
+        })
+}
 
 fn recv_signed_event(rx: &Receiver<SessionManagerEvent>) -> nostr::Event {
     let start = std::time::Instant::now();
@@ -143,6 +173,16 @@ fn new_link_invite(
     Ok(invite)
 }
 
+fn new_public_invite(
+    device_pubkey: PublicKey,
+    device_id: String,
+    owner_pubkey: PublicKey,
+) -> Result<Invite> {
+    let mut invite = Invite::create_new(device_pubkey, Some(device_id), None)?;
+    invite.owner_public_key = Some(owner_pubkey);
+    Ok(invite)
+}
+
 #[test]
 fn test_accept_invite_routes_session_under_claimed_owner() -> Result<()> {
     let alice_keys = Keys::generate();
@@ -196,6 +236,265 @@ fn test_accept_invite_routes_session_under_claimed_owner() -> Result<()> {
         exported.is_some(),
         "expected active session under owner/device"
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_repeated_invite_refreshes_send_only_device_session() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let alice_device_id = alice_pubkey.to_hex();
+
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+    let bob_device_id = bob_pubkey.to_hex();
+
+    let invite = Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None)?;
+
+    let (alice_tx, alice_rx) = crossbeam_channel::unbounded();
+    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
+
+    let alice_mgr = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_device_id.clone(),
+        alice_pubkey,
+        alice_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+    let bob_mgr = SessionManager::new(
+        bob_pubkey,
+        bob_keys.secret_key().to_secret_bytes(),
+        bob_device_id.clone(),
+        bob_pubkey,
+        bob_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+
+    alice_mgr.init()?;
+    bob_mgr.init()?;
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    let first_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    assert!(first_accept.created_new_session);
+    let _first_response =
+        recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    drain_events(&bob_rx);
+
+    let refreshed_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    assert!(
+        refreshed_accept.created_new_session,
+        "replayed invite should refresh an existing send-only device session",
+    );
+
+    let refreshed_response =
+        recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (peer_pubkey, remote_device_id) = import_session_from_response(
+        &invite,
+        alice_keys.secret_key().to_secret_bytes(),
+        &alice_mgr,
+        &refreshed_response,
+    )?;
+    assert_eq!(peer_pubkey, bob_pubkey);
+    assert_eq!(remote_device_id, bob_device_id);
+
+    bob_mgr.send_text(alice_pubkey, "fresh response can decrypt".to_string(), None)?;
+    let sent = recv_message_events(&bob_rx, 1);
+    alice_mgr.process_received_event(sent[0].clone());
+
+    let decrypted = recv_decrypted_containing(
+        &alice_rx,
+        "\"content\":\"fresh response can decrypt\"",
+    );
+    assert!(decrypted.contains("\"content\":\"fresh response can decrypt\""));
+
+    Ok(())
+}
+
+#[test]
+fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let alice_device_id = alice_pubkey.to_hex();
+
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+    let bob_device_id = bob_pubkey.to_hex();
+
+    let invite = Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None)?;
+
+    let (alice_tx, alice_rx) = crossbeam_channel::unbounded();
+    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
+
+    let alice_mgr = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_device_id.clone(),
+        alice_pubkey,
+        alice_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+    let bob_mgr = SessionManager::new(
+        bob_pubkey,
+        bob_keys.secret_key().to_secret_bytes(),
+        bob_device_id.clone(),
+        bob_pubkey,
+        bob_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+
+    alice_mgr.init()?;
+    bob_mgr.init()?;
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    let first_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    assert!(first_accept.created_new_session);
+    let first_response =
+        recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (peer_pubkey, remote_device_id) = import_session_from_response(
+        &invite,
+        alice_keys.secret_key().to_secret_bytes(),
+        &alice_mgr,
+        &first_response,
+    )?;
+    assert_eq!(peer_pubkey, bob_pubkey);
+    assert_eq!(remote_device_id, bob_device_id);
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    bob_mgr.send_text(alice_pubkey, "first send establishes path".to_string(), None)?;
+    let first_message = recv_message_events(&bob_rx, 1);
+    alice_mgr.process_received_event(first_message[0].clone());
+    let decrypted = recv_decrypted_containing(
+        &alice_rx,
+        "\"content\":\"first send establishes path\"",
+    );
+    assert!(decrypted.contains("\"content\":\"first send establishes path\""));
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    let replayed_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    assert!(
+        !replayed_accept.created_new_session,
+        "used send-only session should ignore replayed invite refreshes",
+    );
+
+    bob_mgr.send_text(alice_pubkey, "replayed invite did not churn path".to_string(), None)?;
+    let second_message = recv_message_events(&bob_rx, 1);
+    alice_mgr.process_received_event(second_message[0].clone());
+    let decrypted = recv_decrypted_containing(
+        &alice_rx,
+        "\"content\":\"replayed invite did not churn path\"",
+    );
+    assert!(decrypted.contains("\"content\":\"replayed invite did not churn path\""));
+
+    Ok(())
+}
+
+#[test]
+fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let alice_device_id = alice_pubkey.to_hex();
+
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+    let bob_device_id = bob_pubkey.to_hex();
+
+    let alice_public_invite =
+        Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None)?;
+    let bob_public_invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None)?;
+
+    let (alice_tx, alice_rx) = crossbeam_channel::unbounded();
+    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
+
+    let alice_mgr = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_device_id.clone(),
+        alice_pubkey,
+        alice_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+    let bob_mgr = SessionManager::new(
+        bob_pubkey,
+        bob_keys.secret_key().to_secret_bytes(),
+        bob_device_id.clone(),
+        bob_pubkey,
+        bob_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+
+    alice_mgr.init()?;
+    bob_mgr.init()?;
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    let accepted = bob_mgr.accept_invite(&alice_public_invite, Some(alice_pubkey))?;
+    assert!(accepted.created_new_session);
+    let alice_public_response =
+        recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (peer_pubkey, remote_device_id) = import_session_from_response(
+        &alice_public_invite,
+        alice_keys.secret_key().to_secret_bytes(),
+        &alice_mgr,
+        &alice_public_response,
+    )?;
+    assert_eq!(peer_pubkey, bob_pubkey);
+    assert_eq!(remote_device_id, bob_device_id);
+
+    let imported_sendable = alice_mgr
+        .export_active_sessions()
+        .into_iter()
+        .find(|(owner, device_id, _)| *owner == bob_pubkey && device_id == &bob_device_id)
+        .map(|(_, _, state)| Session::new(state, "debug".to_string()).can_send())
+        .unwrap_or(false);
+    assert!(
+        !imported_sendable,
+        "response import alone should not already be send-capable",
+    );
+
+    alice_mgr.process_received_event(bob_public_invite.get_event()?.sign_with_keys(&bob_keys)?);
+    let bob_public_response =
+        recv_signed_event_of_kind(&alice_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (alice_peer_pubkey, alice_remote_device_id) = import_session_from_response(
+        &bob_public_invite,
+        bob_keys.secret_key().to_secret_bytes(),
+        &bob_mgr,
+        &bob_public_response,
+    )?;
+    assert_eq!(alice_peer_pubkey, alice_pubkey);
+    assert_eq!(alice_remote_device_id, alice_device_id);
+
+    let upgraded_sendable = alice_mgr
+        .export_active_sessions()
+        .into_iter()
+        .find(|(owner, device_id, _)| *owner == bob_pubkey && device_id == &bob_device_id)
+        .map(|(_, _, state)| Session::new(state, "debug".to_string()).can_send())
+        .unwrap_or(false);
+    assert!(
+        upgraded_sendable,
+        "processing the peer public invite should upgrade the device to a send-capable session",
+    );
+
+    alice_mgr.send_text(bob_pubkey, "public invite refresh makes reply sendable".to_string(), None)?;
+    let sent = recv_message_events(&alice_rx, 1);
+    bob_mgr.process_received_event(sent[0].clone());
+
+    let decrypted = recv_decrypted_containing(
+        &bob_rx,
+        "\"content\":\"public invite refresh makes reply sendable\"",
+    );
+    assert!(decrypted.contains("\"content\":\"public invite refresh makes reply sendable\""));
 
     Ok(())
 }
@@ -671,11 +970,11 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let bob_owner_public_invite =
         Invite::create_new(bob_owner_pubkey, Some(bob_owner_device_id.clone()), None)?;
     let bob_linked_public_invite =
-        Invite::create_new(bob_linked_pubkey, Some(bob_linked_device_id.clone()), None)?;
-    let alice_linked_public_invite = Invite::create_new(
+        new_public_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+    let alice_linked_public_invite = new_public_invite(
         alice_new_device_pubkey,
-        Some(alice_new_device_id.clone()),
-        None,
+        alice_new_device_id.clone(),
+        alice_owner_pubkey,
     )?;
 
     let alice_owner_storage =
@@ -794,8 +1093,9 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let alice_app_keys_event = alice_app_keys
         .get_event(alice_owner_pubkey)
         .sign_with_keys(&alice_owner_keys)?;
+    alice_linked_mgr.process_received_event(alice_app_keys_event.clone());
     bob_owner_mgr.process_received_event(alice_app_keys_event.clone());
-    bob_linked_mgr.process_received_event(alice_app_keys_event);
+    bob_linked_mgr.process_received_event(alice_app_keys_event.clone());
 
     let bob_app_keys = AppKeys::new(vec![
         DeviceEntry::new(bob_owner_pubkey, 1),
@@ -804,7 +1104,14 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let bob_app_keys_event = bob_app_keys
         .get_event(bob_owner_pubkey)
         .sign_with_keys(&bob_owner_keys)?;
-    alice_owner_mgr.process_received_event(bob_app_keys_event);
+    alice_linked_mgr.process_received_event(bob_app_keys_event.clone());
+    alice_owner_mgr.process_received_event(bob_app_keys_event.clone());
+    let accepted =
+        alice_linked_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?;
+    assert!(
+        accepted.created_new_session,
+        "expected linked sender to create a direct bob-owner session from the public invite",
+    );
     drain_events(&alice_owner_rx);
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
@@ -812,7 +1119,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let bob_linked_public_invite_event = bob_linked_public_invite
         .get_event()?
         .sign_with_keys(&bob_linked_keys)?;
-    alice_owner_mgr.process_received_event(bob_linked_public_invite_event);
+    alice_owner_mgr.process_received_event(bob_linked_public_invite_event.clone());
     let bob_linked_public_response =
         recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (bob_linked_peer, bob_linked_remote_device_id) = import_session_from_response(
@@ -922,6 +1229,313 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
 }
 
 #[test]
+fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() -> Result<()> {
+    let alice_owner_keys = Keys::generate();
+    let alice_owner_pubkey = alice_owner_keys.public_key();
+    let alice_owner_device_id = alice_owner_pubkey.to_hex();
+
+    let alice_new_device_keys = Keys::generate();
+    let alice_new_device_pubkey = alice_new_device_keys.public_key();
+    let alice_new_device_id = alice_new_device_pubkey.to_hex();
+
+    let bob_owner_keys = Keys::generate();
+    let bob_owner_pubkey = bob_owner_keys.public_key();
+    let bob_owner_device_id = bob_owner_pubkey.to_hex();
+
+    let bob_linked_keys = Keys::generate();
+    let bob_linked_pubkey = bob_linked_keys.public_key();
+    let bob_linked_device_id = bob_linked_pubkey.to_hex();
+
+    let alice_linked_link_invite = new_link_invite(
+        alice_new_device_pubkey,
+        alice_new_device_id.clone(),
+        alice_owner_pubkey,
+    )?;
+    let bob_linked_link_invite =
+        new_link_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+
+    let bob_owner_public_invite =
+        Invite::create_new(bob_owner_pubkey, Some(bob_owner_device_id.clone()), None)?;
+    let bob_linked_public_invite =
+        new_public_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+    let alice_linked_public_invite = new_public_invite(
+        alice_new_device_pubkey,
+        alice_new_device_id.clone(),
+        alice_owner_pubkey,
+    )?;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let base = temp_dir.path();
+
+    let alice_owner_storage: Arc<dyn StorageAdapter> =
+        Arc::new(FileStorageAdapter::new(base.join("alice-owner"))?);
+    let alice_linked_storage: Arc<dyn StorageAdapter> =
+        Arc::new(FileStorageAdapter::new(base.join("alice-linked"))?);
+    let bob_owner_storage: Arc<dyn StorageAdapter> =
+        Arc::new(FileStorageAdapter::new(base.join("bob-owner"))?);
+    let bob_linked_storage: Arc<dyn StorageAdapter> =
+        Arc::new(FileStorageAdapter::new(base.join("bob-linked"))?);
+
+    let (alice_owner_tx, alice_owner_rx) = crossbeam_channel::unbounded();
+    let (alice_linked_tx, alice_linked_rx) = crossbeam_channel::unbounded();
+    let (bob_owner_tx, bob_owner_rx) = crossbeam_channel::unbounded();
+    let (bob_linked_tx, bob_linked_rx) = crossbeam_channel::unbounded();
+
+    let alice_owner_mgr = SessionManager::new(
+        alice_owner_pubkey,
+        alice_owner_keys.secret_key().to_secret_bytes(),
+        alice_owner_device_id.clone(),
+        alice_owner_pubkey,
+        alice_owner_tx,
+        Some(alice_owner_storage),
+        None,
+    );
+    let alice_linked_mgr = SessionManager::new(
+        alice_new_device_pubkey,
+        alice_new_device_keys.secret_key().to_secret_bytes(),
+        alice_new_device_id.clone(),
+        alice_owner_pubkey,
+        alice_linked_tx,
+        Some(alice_linked_storage),
+        None,
+    );
+    let bob_owner_mgr = SessionManager::new(
+        bob_owner_pubkey,
+        bob_owner_keys.secret_key().to_secret_bytes(),
+        bob_owner_device_id.clone(),
+        bob_owner_pubkey,
+        bob_owner_tx,
+        Some(bob_owner_storage),
+        None,
+    );
+    let bob_linked_mgr = SessionManager::new(
+        bob_linked_pubkey,
+        bob_linked_keys.secret_key().to_secret_bytes(),
+        bob_linked_device_id.clone(),
+        bob_owner_pubkey,
+        bob_linked_tx,
+        Some(bob_linked_storage),
+        None,
+    );
+
+    alice_owner_mgr.init()?;
+    alice_linked_mgr.init()?;
+    bob_owner_mgr.init()?;
+    bob_linked_mgr.init()?;
+    drain_events(&alice_owner_rx);
+    drain_events(&alice_linked_rx);
+    drain_events(&bob_owner_rx);
+    drain_events(&bob_linked_rx);
+
+    let accepted =
+        alice_owner_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?;
+    assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
+    let bob_owner_response =
+        recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (bob_owner_peer, bob_owner_remote_device_id) = import_session_from_response(
+        &bob_owner_public_invite,
+        bob_owner_keys.secret_key().to_secret_bytes(),
+        &bob_owner_mgr,
+        &bob_owner_response,
+    )?;
+    assert_eq!(bob_owner_peer, alice_owner_pubkey);
+    assert_eq!(bob_owner_remote_device_id, alice_owner_device_id);
+    drain_events(&alice_owner_rx);
+    drain_events(&bob_owner_rx);
+
+    let accepted =
+        alice_owner_mgr.accept_invite(&alice_linked_link_invite, Some(alice_owner_pubkey))?;
+    assert_eq!(accepted.owner_pubkey, alice_owner_pubkey);
+    let (alice_link_response, alice_link_bootstrap) =
+        recv_invite_response_and_message_event(&alice_owner_rx);
+    let (alice_link_peer, alice_link_remote_device_id) = import_session_from_response(
+        &alice_linked_link_invite,
+        alice_new_device_keys.secret_key().to_secret_bytes(),
+        &alice_linked_mgr,
+        &alice_link_response,
+    )?;
+    assert_eq!(alice_link_peer, alice_owner_pubkey);
+    assert_eq!(alice_link_remote_device_id, alice_owner_device_id);
+    alice_linked_mgr.process_received_event(alice_link_bootstrap);
+    drain_events(&alice_owner_rx);
+    drain_events(&alice_linked_rx);
+
+    let accepted = bob_owner_mgr.accept_invite(&bob_linked_link_invite, Some(bob_owner_pubkey))?;
+    assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
+    let (bob_link_response, bob_link_bootstrap) =
+        recv_invite_response_and_message_event(&bob_owner_rx);
+    let (bob_link_peer, bob_link_remote_device_id) = import_session_from_response(
+        &bob_linked_link_invite,
+        bob_linked_keys.secret_key().to_secret_bytes(),
+        &bob_linked_mgr,
+        &bob_link_response,
+    )?;
+    assert_eq!(bob_link_peer, bob_owner_pubkey);
+    assert_eq!(bob_link_remote_device_id, bob_owner_device_id);
+    bob_linked_mgr.process_received_event(bob_link_bootstrap);
+    drain_events(&bob_owner_rx);
+    drain_events(&bob_linked_rx);
+
+    let alice_app_keys = AppKeys::new(vec![
+        DeviceEntry::new(alice_owner_pubkey, 1),
+        DeviceEntry::new(alice_new_device_pubkey, 2),
+    ]);
+    let alice_app_keys_event = alice_app_keys
+        .get_event(alice_owner_pubkey)
+        .sign_with_keys(&alice_owner_keys)?;
+    bob_owner_mgr.process_received_event(alice_app_keys_event.clone());
+    bob_linked_mgr.process_received_event(alice_app_keys_event.clone());
+
+    let bob_app_keys = AppKeys::new(vec![
+        DeviceEntry::new(bob_owner_pubkey, 1),
+        DeviceEntry::new(bob_linked_pubkey, 2),
+    ]);
+    let bob_app_keys_event = bob_app_keys
+        .get_event(bob_owner_pubkey)
+        .sign_with_keys(&bob_owner_keys)?;
+    alice_owner_mgr.process_received_event(bob_app_keys_event.clone());
+    drain_events(&alice_owner_rx);
+    drain_events(&bob_owner_rx);
+    drain_events(&bob_linked_rx);
+
+    let bob_linked_public_invite_event = bob_linked_public_invite
+        .get_event()?
+        .sign_with_keys(&bob_linked_keys)?;
+    alice_owner_mgr.process_received_event(bob_linked_public_invite_event.clone());
+    let bob_linked_public_response =
+        recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (bob_linked_peer, bob_linked_remote_device_id) = import_session_from_response(
+        &bob_linked_public_invite,
+        bob_linked_keys.secret_key().to_secret_bytes(),
+        &bob_linked_mgr,
+        &bob_linked_public_response,
+    )?;
+    assert_eq!(bob_linked_peer, alice_owner_pubkey);
+    assert_eq!(bob_linked_remote_device_id, alice_owner_device_id);
+    drain_events(&alice_owner_rx);
+    drain_events(&bob_linked_rx);
+
+    let alice_linked_public_invite_event = alice_linked_public_invite
+        .get_event()?
+        .sign_with_keys(&alice_new_device_keys)?;
+    bob_linked_mgr.process_received_event(alice_linked_public_invite_event);
+    let alice_linked_public_response =
+        recv_signed_event_of_kind(&bob_linked_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (alice_linked_peer, alice_linked_remote_device_id) = import_session_from_response(
+        &alice_linked_public_invite,
+        alice_new_device_keys.secret_key().to_secret_bytes(),
+        &alice_linked_mgr,
+        &alice_linked_public_response,
+    )?;
+    assert_eq!(alice_linked_peer, bob_owner_pubkey);
+    assert_eq!(alice_linked_remote_device_id, bob_linked_device_id);
+    drain_events(&alice_linked_rx);
+    drain_events(&bob_linked_rx);
+
+    alice_owner_mgr.send_text(bob_owner_pubkey, "seed existing chat".to_string(), None)?;
+    let seed_messages = recv_message_events(&alice_owner_rx, 3);
+    for event in &seed_messages {
+        alice_linked_mgr.process_received_event(event.clone());
+        bob_owner_mgr.process_received_event(event.clone());
+        bob_linked_mgr.process_received_event(event.clone());
+    }
+
+    let alice_self_seed =
+        recv_decrypted_containing(&alice_linked_rx, "\"content\":\"seed existing chat\"");
+    let owner_seed = recv_decrypted_containing(&bob_owner_rx, "\"content\":\"seed existing chat\"");
+    let linked_seed =
+        recv_decrypted_containing(&bob_linked_rx, "\"content\":\"seed existing chat\"");
+    assert!(alice_self_seed.contains("\"content\":\"seed existing chat\""));
+    assert!(owner_seed.contains("\"content\":\"seed existing chat\""));
+    assert!(linked_seed.contains("\"content\":\"seed existing chat\""));
+    drain_events(&alice_linked_rx);
+    drain_events(&bob_owner_rx);
+    drain_events(&bob_linked_rx);
+
+    bob_linked_mgr.send_text(
+        alice_owner_pubkey,
+        "before restart reaches linked receiver".to_string(),
+        None,
+    )?;
+    let before_restart_messages = recv_message_events(&bob_linked_rx, 3);
+    for event in &before_restart_messages {
+        alice_owner_mgr.process_received_event(event.clone());
+        alice_linked_mgr.process_received_event(event.clone());
+        bob_owner_mgr.process_received_event(event.clone());
+    }
+
+    let before_restart = recv_decrypted_containing(
+        &alice_linked_rx,
+        "\"content\":\"before restart reaches linked receiver\"",
+    );
+    assert!(before_restart.contains("\"content\":\"before restart reaches linked receiver\""));
+    drain_events(&alice_linked_rx);
+    drain_events(&alice_owner_rx);
+    drain_events(&bob_owner_rx);
+
+    let stored_before_restart =
+        load_stored_user_record(&base.join("alice-linked"), bob_owner_pubkey);
+    assert!(
+        device_has_receiving_session(&stored_before_restart, &bob_linked_device_id),
+        "expected alice-linked to persist a receive-capable Bob-linked session before restart",
+    );
+
+    let (alice_linked_restarted_tx, alice_linked_restarted_rx) = crossbeam_channel::unbounded();
+    let alice_linked_restarted_storage: Arc<dyn StorageAdapter> =
+        Arc::new(FileStorageAdapter::new(base.join("alice-linked"))?);
+    let alice_linked_restarted_mgr = SessionManager::new(
+        alice_new_device_pubkey,
+        alice_new_device_keys.secret_key().to_secret_bytes(),
+        alice_new_device_id.clone(),
+        alice_owner_pubkey,
+        alice_linked_restarted_tx,
+        Some(alice_linked_restarted_storage),
+        None,
+    );
+    alice_linked_restarted_mgr.init()?;
+    drain_events(&alice_linked_restarted_rx);
+    alice_linked_restarted_mgr.setup_user(bob_owner_pubkey);
+    alice_linked_restarted_mgr.setup_user(alice_owner_pubkey);
+    drain_events(&alice_linked_restarted_rx);
+
+    alice_linked_restarted_mgr.process_received_event(bob_app_keys_event.clone());
+    alice_linked_restarted_mgr.process_received_event(alice_app_keys_event.clone());
+    alice_linked_restarted_mgr.process_received_event(
+        bob_owner_public_invite.get_event()?.sign_with_keys(&bob_owner_keys)?,
+    );
+    alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone());
+    alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone());
+    drain_events(&alice_linked_restarted_rx);
+
+    let stored_after_replay =
+        load_stored_user_record(&base.join("alice-linked"), bob_owner_pubkey);
+    assert!(
+        device_has_receiving_session(&stored_after_replay, &bob_linked_device_id),
+        "expected replayed AppKeys/invites to preserve Bob-linked receive state after restart",
+    );
+
+    bob_linked_mgr.send_text(
+        alice_owner_pubkey,
+        "after restart reaches linked receiver".to_string(),
+        None,
+    )?;
+    let after_restart_messages = recv_message_events(&bob_linked_rx, 3);
+    for event in &after_restart_messages {
+        alice_owner_mgr.process_received_event(event.clone());
+        alice_linked_restarted_mgr.process_received_event(event.clone());
+        bob_owner_mgr.process_received_event(event.clone());
+    }
+
+    let after_restart = recv_decrypted_containing(
+        &alice_linked_restarted_rx,
+        "\"content\":\"after restart reaches linked receiver\"",
+    );
+    assert!(after_restart.contains("\"content\":\"after restart reaches linked receiver\""));
+
+    Ok(())
+}
+
+#[test]
 fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     let alice_owner_keys = Keys::generate();
     let alice_owner_pubkey = alice_owner_keys.public_key();
@@ -942,16 +1556,16 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     let bob_owner_public_invite =
         Invite::create_new(bob_owner_pubkey, Some(bob_owner_device_id.clone()), None)?;
     let bob_linked_public_invite =
-        Invite::create_new(bob_linked_pubkey, Some(bob_linked_device_id.clone()), None)?;
+        new_public_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
     let bob_linked_link_invite = new_link_invite(
         bob_linked_pubkey,
         bob_linked_device_id.clone(),
         bob_owner_pubkey,
     )?;
-    let alice_linked_public_invite = Invite::create_new(
+    let alice_linked_public_invite = new_public_invite(
         alice_new_device_pubkey,
-        Some(alice_new_device_id.clone()),
-        None,
+        alice_new_device_id.clone(),
+        alice_owner_pubkey,
     )?;
     let alice_linked_link_invite = new_link_invite(
         alice_new_device_pubkey,

@@ -61,6 +61,8 @@ await sessionManager.sendMessage(recipientPubkey, "Hello!")
 - Outer events are signature-verified.
 - Sender owner/device attribution comes from authenticated session context and AppKeys mappings.
 - Multi-device owner claims are verified against AppKeys (not accepted blindly).
+- The latest AppKeys set is authoritative for device authorization; removing a device from AppKeys revokes it for future routing and owner-claim validation.
+- Applications must not publish a reduced AppKeys set implicitly during startup/reopen. Publishing fewer devices should only happen for explicit device revocation or first-device bootstrap.
 - Inner rumor `pubkey` should be treated as untrusted for identity decisions.
 
 ### Plausible Deniability
