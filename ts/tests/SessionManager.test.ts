@@ -113,6 +113,41 @@ describe("SessionManager", () => {
     })
   })
 
+  it("should fan out a linked sender's first reply to a peer's newly linked device", async () => {
+    await runScenario({
+      steps: [
+        { type: "addDevice", actor: "alice", deviceId: "alice-device-1" },
+        { type: "addDevice", actor: "bob", deviceId: "bob-device-1" },
+        {
+          type: "send",
+          from: { actor: "alice", deviceId: "alice-device-1" },
+          to: "bob",
+          message: "seed existing chat",
+          waitOn: "all-recipient-devices",
+        },
+        { type: "addDevice", actor: "alice", deviceId: "alice-device-2" },
+        { type: "addDevice", actor: "bob", deviceId: "bob-device-2" },
+        {
+          type: "send",
+          from: { actor: "alice", deviceId: "alice-device-1" },
+          to: "bob",
+          message: "bootstrap newly linked devices",
+          waitOn: "all-recipient-devices",
+        },
+        {
+          type: "send",
+          from: { actor: "bob", deviceId: "bob-device-2" },
+          to: "alice",
+          message: "linked first reply",
+          waitOn: "all-recipient-devices",
+        },
+        { type: "expect", actor: "bob", deviceId: "bob-device-1", message: "linked first reply" },
+        { type: "expect", actor: "alice", deviceId: "alice-device-1", message: "linked first reply" },
+        { type: "expect", actor: "alice", deviceId: "alice-device-2", message: "linked first reply" },
+      ],
+    })
+  })
+
   it("should deliver self-sent messages to other online devices", async () => {
     await runScenario({
       steps: [

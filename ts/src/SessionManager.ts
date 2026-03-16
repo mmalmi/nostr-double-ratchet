@@ -507,8 +507,14 @@ export class SessionManager {
     return appKeys.getAllDevices().some(d => d.identityPubkey === deviceId)
   }
 
-  setupUser(userPubkey: string) {
-    this.getOrCreateUserRecord(userPubkey).ensureSetup().catch(() => {})
+  async setupUser(userPubkey: string): Promise<void> {
+    const userRecord = this.getOrCreateUserRecord(userPubkey)
+    await userRecord.ensureSetup().catch(() => {})
+
+    const latestAppKeys = await this.fetchAppKeys(userPubkey).catch(() => null)
+    if (latestAppKeys) {
+      await userRecord.onAppKeys(latestAppKeys).catch(() => {})
+    }
   }
 
   onEvent(callback: OnEventCallback) {
@@ -791,6 +797,11 @@ export class SessionManager {
   ): Promise<Rumor | undefined> {
     await this.init()
 
+    await Promise.allSettled([
+      this.setupUser(recipientIdentityKey),
+      this.setupUser(this.ownerPublicKey),
+    ])
+
     // Queue event for devices that don't have sessions yet
     const completeEvent = event as Rumor
     const targets = new Set([recipientIdentityKey, this.ownerPublicKey])
@@ -815,10 +826,6 @@ export class SessionManager {
     const userRecord = this.getOrCreateUserRecord(recipientIdentityKey)
     // Use ownerPublicKey to find sibling devices (important for delegates)
     const ourUserRecord = this.getOrCreateUserRecord(this.ownerPublicKey)
-
-    this.setupUser(recipientIdentityKey)
-    // Use ownerPublicKey to setup sessions with sibling devices
-    this.setupUser(this.ownerPublicKey)
 
     const recipientDevices = Array.from(userRecord.devices.values())
     const ownDevices = Array.from(ourUserRecord.devices.values())
