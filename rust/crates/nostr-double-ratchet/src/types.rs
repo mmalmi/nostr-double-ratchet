@@ -62,7 +62,7 @@ pub struct KeyPair {
     pub private_key: [u8; 32],
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionState {
     #[serde(with = "serde_bytes_array")]
     pub root_key: [u8; 32],
@@ -89,7 +89,7 @@ pub struct SessionState {
     pub skipped_keys: HashMap<PublicKey, SkippedKeysEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerializableKeyPair {
     #[serde(with = "serde_pubkey")]
     pub public_key: PublicKey,
@@ -97,7 +97,7 @@ pub struct SerializableKeyPair {
     pub private_key: [u8; 32],
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkippedKeysEntry {
     #[serde(with = "serde_vec_bytes_array")]
     pub header_keys: Vec<[u8; 32]>,

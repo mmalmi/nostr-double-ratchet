@@ -133,31 +133,35 @@ impl Session {
     pub fn subscribe_to_messages(&mut self) -> Result<()> {
         if let Some(ref pubsub) = self.pubsub {
             if let Some(current_pk) = self.state.their_current_nostr_public_key {
-                let filter = build_filter()
-                    .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
-                    .authors(vec![current_pk])
-                    .build();
+                let mut current_key_subid = self.current_key_subid.lock().unwrap();
+                if current_key_subid.is_none() {
+                    let filter = build_filter()
+                        .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
+                        .authors(vec![current_pk])
+                        .build();
 
-                let filter_json = serde_json::to_string(&filter)?;
-                let subid = format!("session-current-{}", uuid::Uuid::new_v4());
+                    let filter_json = serde_json::to_string(&filter)?;
+                    let subid = format!("session-current-{}", uuid::Uuid::new_v4());
 
-                pubsub.subscribe(subid.clone(), filter_json)?;
-
-                *self.current_key_subid.lock().unwrap() = Some(subid);
+                    pubsub.subscribe(subid.clone(), filter_json)?;
+                    *current_key_subid = Some(subid);
+                }
             }
 
             if let Some(next_pk) = self.state.their_next_nostr_public_key {
-                let filter = build_filter()
-                    .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
-                    .authors(vec![next_pk])
-                    .build();
+                let mut next_key_subid = self.next_key_subid.lock().unwrap();
+                if next_key_subid.is_none() {
+                    let filter = build_filter()
+                        .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
+                        .authors(vec![next_pk])
+                        .build();
 
-                let filter_json = serde_json::to_string(&filter)?;
-                let subid = format!("session-next-{}", uuid::Uuid::new_v4());
+                    let filter_json = serde_json::to_string(&filter)?;
+                    let subid = format!("session-next-{}", uuid::Uuid::new_v4());
 
-                pubsub.subscribe(subid.clone(), filter_json)?;
-
-                *self.next_key_subid.lock().unwrap() = Some(subid);
+                    pubsub.subscribe(subid.clone(), filter_json)?;
+                    *next_key_subid = Some(subid);
+                }
             }
         }
 
@@ -707,6 +711,7 @@ fn prune_skipped_message_keys(map: &mut HashMap<u32, [u8; 32]>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionManagerEvent;
 
     #[test]
     fn skip_message_keys_prunes_to_max_skip() {
@@ -750,5 +755,56 @@ mod tests {
         assert!(entry
             .message_keys
             .contains_key(&((MAX_SKIP * 2 - 1) as u32)));
+    }
+
+    #[test]
+    fn subscribe_to_messages_is_idempotent_until_close() {
+        let their_current = Keys::generate().public_key();
+        let their_next = Keys::generate().public_key();
+        let our_current = Keys::generate();
+        let our_next = Keys::generate();
+
+        let mut session = Session::new(
+            SessionState {
+                root_key: [0u8; 32],
+                their_current_nostr_public_key: Some(their_current),
+                their_next_nostr_public_key: Some(their_next),
+                our_current_nostr_key: Some(SerializableKeyPair {
+                    public_key: our_current.public_key(),
+                    private_key: our_current.secret_key().to_secret_bytes(),
+                }),
+                our_next_nostr_key: SerializableKeyPair {
+                    public_key: our_next.public_key(),
+                    private_key: our_next.secret_key().to_secret_bytes(),
+                },
+                receiving_chain_key: Some([1u8; 32]),
+                sending_chain_key: Some([2u8; 32]),
+                sending_chain_message_number: 0,
+                receiving_chain_message_number: 0,
+                previous_sending_chain_message_count: 0,
+                skipped_keys: HashMap::new(),
+            },
+            "test".to_string(),
+        );
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        session.set_event_tx(tx);
+
+        session.subscribe_to_messages().unwrap();
+        session.subscribe_to_messages().unwrap();
+
+        let subscribe_count = rx
+            .try_iter()
+            .filter(|event| matches!(event, SessionManagerEvent::Subscribe { .. }))
+            .count();
+        assert_eq!(subscribe_count, 2);
+
+        session.close();
+
+        let unsubscribe_count = rx
+            .try_iter()
+            .filter(|event| matches!(event, SessionManagerEvent::Unsubscribe(_)))
+            .count();
+        assert_eq!(unsubscribe_count, 2);
     }
 }

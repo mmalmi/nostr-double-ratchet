@@ -69,6 +69,18 @@ impl UserRecord {
                 ),
             });
 
+        if Self::device_contains_session_state(device, &session.state) {
+            session.close();
+            Self::compact_duplicate_sessions(device);
+            device.last_activity = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+            return;
+        }
+
         // Prefer sendable sessions as active
         let new_can_send = session.can_send();
         let old_can_send = device
@@ -91,6 +103,8 @@ impl UserRecord {
             device.active_session = Some(session);
         }
 
+        Self::compact_duplicate_sessions(device);
+
         const MAX_INACTIVE: usize = 10;
         if device.inactive_sessions.len() > MAX_INACTIVE {
             device.inactive_sessions.truncate(MAX_INACTIVE);
@@ -102,6 +116,45 @@ impl UserRecord {
                 .unwrap()
                 .as_secs(),
         );
+    }
+
+    fn device_contains_session_state(device: &DeviceRecord, state: &SessionState) -> bool {
+        device
+            .active_session
+            .as_ref()
+            .is_some_and(|session| session.state == *state)
+            || device
+                .inactive_sessions
+                .iter()
+                .any(|session| session.state == *state)
+    }
+
+    pub(crate) fn compact_duplicate_sessions(device: &mut DeviceRecord) {
+        let active_state = device
+            .active_session
+            .as_ref()
+            .map(|session| session.state.clone());
+        let mut unique_states = Vec::new();
+        let mut inactive_sessions = Vec::with_capacity(device.inactive_sessions.len());
+
+        for session in device.inactive_sessions.drain(..) {
+            let is_duplicate = active_state
+                .as_ref()
+                .is_some_and(|state| *state == session.state)
+                || unique_states
+                    .iter()
+                    .any(|state: &SessionState| *state == session.state);
+
+            if is_duplicate {
+                session.close();
+                continue;
+            }
+
+            unique_states.push(session.state.clone());
+            inactive_sessions.push(session);
+        }
+
+        device.inactive_sessions = inactive_sessions;
     }
 
     pub fn get_all_sessions_mut(&mut self) -> Vec<&mut Session> {

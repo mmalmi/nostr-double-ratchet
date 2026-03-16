@@ -1,4 +1,6 @@
 use nostr::{Filter, Kind, PublicKey};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::{Error, Result, SessionManagerEvent};
 
@@ -110,6 +112,136 @@ impl NostrPubSub for ChannelPubSub {
 
     fn received_event(&self, event: nostr::Event) -> Result<()> {
         self.tx.received_event(event)
+    }
+}
+
+struct FilterSubscription {
+    canonical_subid: String,
+    refcount: usize,
+}
+
+#[derive(Default)]
+struct SubscriptionState {
+    by_subid: HashMap<String, String>,
+    by_filter: HashMap<String, FilterSubscription>,
+}
+
+/// Wrapper that coalesces identical filters so duplicate sessions do not fan out
+/// redundant relay subscriptions.
+#[derive(Clone)]
+pub struct DedupingPubSub {
+    inner: Arc<dyn NostrPubSub>,
+    subscriptions: Arc<Mutex<SubscriptionState>>,
+}
+
+impl DedupingPubSub {
+    pub fn new(inner: Arc<dyn NostrPubSub>) -> Self {
+        Self {
+            inner,
+            subscriptions: Arc::new(Mutex::new(SubscriptionState::default())),
+        }
+    }
+}
+
+impl NostrPubSub for DedupingPubSub {
+    fn publish(&self, event: nostr::UnsignedEvent) -> Result<()> {
+        self.inner.publish(event)
+    }
+
+    fn publish_signed(&self, event: nostr::Event) -> Result<()> {
+        self.inner.publish_signed(event)
+    }
+
+    fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
+        let mut subscriptions = self.subscriptions.lock().unwrap();
+
+        if subscriptions
+            .by_subid
+            .get(&subid)
+            .is_some_and(|existing| existing == &filter_json)
+        {
+            return Ok(());
+        }
+
+        if let Some(existing_filter) = subscriptions.by_subid.remove(&subid) {
+            let mut unsubscribe_subid = None;
+            let mut remove_filter = false;
+            if let Some(entry) = subscriptions.by_filter.get_mut(&existing_filter) {
+                if entry.refcount > 1 {
+                    entry.refcount -= 1;
+                } else {
+                    unsubscribe_subid = Some(entry.canonical_subid.clone());
+                    remove_filter = true;
+                }
+            }
+            if remove_filter {
+                subscriptions.by_filter.remove(&existing_filter);
+            }
+
+            if let Some(unsubscribe_subid) = unsubscribe_subid {
+                self.inner.unsubscribe(unsubscribe_subid)?;
+            }
+        }
+
+        if let Some(entry) = subscriptions.by_filter.get_mut(&filter_json) {
+            entry.refcount += 1;
+            subscriptions.by_subid.insert(subid, filter_json);
+            return Ok(());
+        }
+
+        self.inner.subscribe(subid.clone(), filter_json.clone())?;
+        subscriptions.by_filter.insert(
+            filter_json.clone(),
+            FilterSubscription {
+                canonical_subid: subid.clone(),
+                refcount: 1,
+            },
+        );
+        subscriptions.by_subid.insert(subid, filter_json);
+        Ok(())
+    }
+
+    fn unsubscribe(&self, subid: String) -> Result<()> {
+        let mut subscriptions = self.subscriptions.lock().unwrap();
+
+        let Some(filter_json) = subscriptions.by_subid.remove(&subid) else {
+            return self.inner.unsubscribe(subid);
+        };
+
+        let mut unsubscribe_subid = None;
+        let mut remove_filter = false;
+        if let Some(entry) = subscriptions.by_filter.get_mut(&filter_json) {
+            if entry.refcount > 1 {
+                entry.refcount -= 1;
+            } else {
+                unsubscribe_subid = Some(entry.canonical_subid.clone());
+                remove_filter = true;
+            }
+        }
+        if remove_filter {
+            subscriptions.by_filter.remove(&filter_json);
+        }
+
+        if let Some(unsubscribe_subid) = unsubscribe_subid {
+            self.inner.unsubscribe(unsubscribe_subid)?;
+        }
+
+        Ok(())
+    }
+
+    fn decrypted_message(
+        &self,
+        sender: PublicKey,
+        sender_device: Option<PublicKey>,
+        content: String,
+        event_id: Option<String>,
+    ) -> Result<()> {
+        self.inner
+            .decrypted_message(sender, sender_device, content, event_id)
+    }
+
+    fn received_event(&self, event: nostr::Event) -> Result<()> {
+        self.inner.received_event(event)
     }
 }
 
@@ -242,5 +374,76 @@ pub mod test_utils {
                 }
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingPubSub {
+        subscribes: Mutex<Vec<(String, String)>>,
+        unsubscribes: Mutex<Vec<String>>,
+    }
+
+    impl NostrPubSub for RecordingPubSub {
+        fn publish(&self, _event: nostr::UnsignedEvent) -> Result<()> {
+            Ok(())
+        }
+
+        fn publish_signed(&self, _event: nostr::Event) -> Result<()> {
+            Ok(())
+        }
+
+        fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
+            self.subscribes.lock().unwrap().push((subid, filter_json));
+            Ok(())
+        }
+
+        fn unsubscribe(&self, subid: String) -> Result<()> {
+            self.unsubscribes.lock().unwrap().push(subid);
+            Ok(())
+        }
+
+        fn decrypted_message(
+            &self,
+            _sender: PublicKey,
+            _sender_device: Option<PublicKey>,
+            _content: String,
+            _event_id: Option<String>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn received_event(&self, _event: nostr::Event) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn deduping_pubsub_coalesces_identical_filters_until_last_unsubscribe() {
+        let inner = Arc::new(RecordingPubSub::default());
+        let pubsub = DedupingPubSub::new(inner.clone());
+        let filter_json = "{\"authors\":[\"abc\"],\"kinds\":[1060]}".to_string();
+
+        pubsub
+            .subscribe("session-a".to_string(), filter_json.clone())
+            .unwrap();
+        pubsub
+            .subscribe("session-b".to_string(), filter_json)
+            .unwrap();
+
+        let subscribes = inner.subscribes.lock().unwrap();
+        assert_eq!(subscribes.len(), 1);
+        assert_eq!(subscribes[0].0, "session-a");
+        drop(subscribes);
+
+        pubsub.unsubscribe("session-b".to_string()).unwrap();
+        assert!(inner.unsubscribes.lock().unwrap().is_empty());
+
+        pubsub.unsubscribe("session-a".to_string()).unwrap();
+        let unsubscribes = inner.unsubscribes.lock().unwrap();
+        assert_eq!(unsubscribes.as_slice(), ["session-a"]);
     }
 }

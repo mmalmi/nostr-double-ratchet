@@ -237,6 +237,7 @@ impl SessionManager {
         storage: Option<Arc<dyn StorageAdapter>>,
         invite: Option<Invite>,
     ) -> Self {
+        let pubsub: Arc<dyn NostrPubSub> = Arc::new(crate::pubsub::DedupingPubSub::new(pubsub));
         let storage = storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
         let message_queue = MessageQueue::new(storage.clone(), "v1/message-queue/");
         let discovery_queue = MessageQueue::new(storage.clone(), "v1/discovery-queue/");
@@ -2285,6 +2286,7 @@ impl SessionManager {
                     device_record.inactive_sessions.push(session);
                 }
 
+                crate::UserRecord::compact_duplicate_sessions(&mut device_record);
                 user_record
                     .device_records
                     .insert(device.device_id.clone(), device_record);
@@ -2577,6 +2579,33 @@ mod tests {
         out
     }
 
+    fn test_session_state() -> crate::SessionState {
+        let their_current = Keys::generate().public_key();
+        let their_next = Keys::generate().public_key();
+        let our_current = Keys::generate();
+        let our_next = Keys::generate();
+
+        crate::SessionState {
+            root_key: [0u8; 32],
+            their_current_nostr_public_key: Some(their_current),
+            their_next_nostr_public_key: Some(their_next),
+            our_current_nostr_key: Some(crate::SerializableKeyPair {
+                public_key: our_current.public_key(),
+                private_key: our_current.secret_key().to_secret_bytes(),
+            }),
+            our_next_nostr_key: crate::SerializableKeyPair {
+                public_key: our_next.public_key(),
+                private_key: our_next.secret_key().to_secret_bytes(),
+            },
+            receiving_chain_key: Some([1u8; 32]),
+            sending_chain_key: Some([2u8; 32]),
+            sending_chain_message_number: 0,
+            receiving_chain_message_number: 0,
+            previous_sending_chain_message_count: 0,
+            skipped_keys: HashMap::new(),
+        }
+    }
+
     #[test]
     fn test_session_manager_new() {
         let keys = Keys::generate();
@@ -2631,6 +2660,72 @@ mod tests {
 
         let history = manager.message_history.lock().unwrap();
         assert!(history.is_empty());
+    }
+
+    #[test]
+    fn init_compacts_duplicate_stored_sessions_and_only_subscribes_once_per_filter() {
+        let our_keys = Keys::generate();
+        let peer = Keys::generate().public_key();
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+
+        let state = test_session_state();
+        let stored = crate::StoredUserRecord {
+            user_id: hex::encode(peer.to_bytes()),
+            devices: vec![crate::StoredDeviceRecord {
+                device_id: "peer-device".to_string(),
+                active_session: Some(state.clone()),
+                inactive_sessions: vec![state.clone(), state],
+                created_at: 1,
+                is_stale: false,
+                stale_timestamp: None,
+                last_activity: Some(1),
+            }],
+            known_device_identities: Vec::new(),
+        };
+
+        storage
+            .put(
+                &format!("user/{}", hex::encode(peer.to_bytes())),
+                serde_json::to_string(&stored).unwrap(),
+            )
+            .unwrap();
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            our_keys.public_key(),
+            our_keys.secret_key().to_secret_bytes(),
+            "test-device".to_string(),
+            our_keys.public_key(),
+            tx,
+            Some(storage),
+            None,
+        );
+
+        manager.init().unwrap();
+
+        let subscribe_count = drain_events(&rx)
+            .into_iter()
+            .filter(|event| {
+                matches!(event, SessionManagerEvent::Subscribe { subid, .. } if subid.starts_with("session-"))
+            })
+            .count();
+        assert_eq!(subscribe_count, 2);
+
+        let (active_count, inactive_count) = manager.with_user_records({
+            let peer = peer;
+            move |records| {
+                let device_record = records
+                    .get(&peer)
+                    .and_then(|record| record.device_records.get("peer-device"))
+                    .unwrap();
+                (
+                    usize::from(device_record.active_session.is_some()),
+                    device_record.inactive_sessions.len(),
+                )
+            }
+        });
+        assert_eq!(active_count, 1);
+        assert_eq!(inactive_count, 0);
     }
 
     #[test]
