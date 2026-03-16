@@ -110,6 +110,7 @@ pub struct SessionManager {
     cached_app_keys: Arc<Mutex<HashMap<PublicKey, AppKeys>>>,
     processed_invite_responses: Arc<Mutex<HashSet<String>>>,
     message_history: Arc<Mutex<HashMap<PublicKey, Vec<UnsignedEvent>>>>,
+    latest_app_keys_created_at: Arc<Mutex<HashMap<PublicKey, u64>>>,
     message_queue: MessageQueue,
     discovery_queue: MessageQueue,
     invite_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
@@ -262,6 +263,7 @@ impl SessionManager {
             cached_app_keys: Arc::new(Mutex::new(HashMap::new())),
             processed_invite_responses: Arc::new(Mutex::new(HashSet::new())),
             message_history: Arc::new(Mutex::new(HashMap::new())),
+            latest_app_keys_created_at: Arc::new(Mutex::new(HashMap::new())),
             message_queue,
             discovery_queue,
             invite_subscriptions: Arc::new(Mutex::new(HashSet::new())),
@@ -816,8 +818,7 @@ impl SessionManager {
             move |records| {
                 let device_record = records
                     .get(&owner_pubkey)
-                    .and_then(|r| r.device_records.get(&device_id))
-                    ?;
+                    .and_then(|r| r.device_records.get(&device_id))?;
 
                 let active_session = device_record.active_session.as_ref().map(|session| {
                     (
@@ -834,11 +835,11 @@ impl SessionManager {
                 let mut any_receive_capable = active_session
                     .as_ref()
                     .is_some_and(|(_, can_receive, _, _)| *can_receive);
-                let mut any_session_has_activity = active_session
-                    .as_ref()
-                    .is_some_and(|(_, _, sent_messages, received_messages)| {
+                let mut any_session_has_activity = active_session.as_ref().is_some_and(
+                    |(_, _, sent_messages, received_messages)| {
                         *sent_messages > 0 || *received_messages > 0
-                    });
+                    },
+                );
 
                 for session in &device_record.inactive_sessions {
                     if session.can_send() {
@@ -895,18 +896,14 @@ impl SessionManager {
                 )
             },
         );
-        let replace_receive_only_active_session = existing_device_session_info.is_some_and(
-            |(active_session, _, _, _)| {
+        let replace_receive_only_active_session =
+            existing_device_session_info.is_some_and(|(active_session, _, _, _)| {
                 active_session.is_some_and(
                     |(can_send, can_receive, sent_messages, received_messages)| {
-                        !can_send
-                            && can_receive
-                            && sent_messages == 0
-                            && received_messages == 0
+                        !can_send && can_receive && sent_messages == 0 && received_messages == 0
                     },
                 )
-            },
-        );
+            });
 
         let replace_existing_active_session =
             replace_existing_active_session || replace_receive_only_active_session;
@@ -1267,6 +1264,10 @@ impl SessionManager {
             .retain(|pk| self.resolve_to_owner(pk) != owner_pubkey);
 
         self.cached_app_keys.lock().unwrap().remove(&owner_pubkey);
+        self.latest_app_keys_created_at
+            .lock()
+            .unwrap()
+            .remove(&owner_pubkey);
         self.peer_send_options.lock().unwrap().remove(&owner_pubkey);
         self.message_history.lock().unwrap().remove(&owner_pubkey);
 
@@ -2256,10 +2257,35 @@ impl SessionManager {
         let _ = self.store_user_record(&owner_pubkey);
     }
 
-    fn handle_app_keys_event(&self, owner_pubkey: PublicKey, app_keys: AppKeys) {
-        self.update_delegate_mapping(owner_pubkey, &app_keys);
+    fn handle_app_keys_event(&self, owner_pubkey: PublicKey, app_keys: AppKeys, created_at: u64) {
+        let effective_app_keys = {
+            let existing = self
+                .cached_app_keys
+                .lock()
+                .unwrap()
+                .get(&owner_pubkey)
+                .cloned();
 
-        let devices = app_keys.get_all_devices();
+            let mut latest = self.latest_app_keys_created_at.lock().unwrap();
+            let latest_created_at = latest.get(&owner_pubkey).copied().unwrap_or(0);
+            if created_at < latest_created_at {
+                return;
+            }
+            latest.insert(owner_pubkey, created_at);
+            if created_at == latest_created_at {
+                if let Some(existing) = existing {
+                    existing.merge(&app_keys)
+                } else {
+                    app_keys.clone()
+                }
+            } else {
+                app_keys.clone()
+            }
+        };
+
+        self.update_delegate_mapping(owner_pubkey, &effective_app_keys);
+
+        let devices = effective_app_keys.get_all_devices();
         let _ = self.expand_discovery_queue(owner_pubkey, &devices);
         let active_ids: HashSet<String> = devices
             .iter()
@@ -2435,7 +2461,7 @@ impl SessionManager {
     pub fn process_received_event(&self, event: nostr::Event) {
         if is_app_keys_event(&event) {
             if let Ok(app_keys) = AppKeys::from_event(&event) {
-                self.handle_app_keys_event(event.pubkey, app_keys);
+                self.handle_app_keys_event(event.pubkey, app_keys, event.created_at.as_u64());
             }
             return;
         }
@@ -3632,6 +3658,201 @@ mod tests {
                 )
             }),
             "expected queued message to publish for still-authorized device"
+        );
+    }
+
+    #[test]
+    fn stale_appkeys_replay_does_not_remove_newer_devices() {
+        fn sign_app_keys_event(
+            app_keys: &AppKeys,
+            owner_pubkey: PublicKey,
+            owner_keys: &Keys,
+            created_at: u64,
+        ) -> nostr::Event {
+            let mut tags = Vec::new();
+            tags.push(
+                nostr::Tag::parse(&["d".to_string(), "double-ratchet/app-keys".to_string()])
+                    .unwrap(),
+            );
+            tags.push(nostr::Tag::parse(&["version".to_string(), "1".to_string()]).unwrap());
+            for device in app_keys.get_all_devices() {
+                tags.push(
+                    nostr::Tag::parse(&[
+                        "device".to_string(),
+                        hex::encode(device.identity_pubkey.to_bytes()),
+                        device.created_at.to_string(),
+                    ])
+                    .unwrap(),
+                );
+            }
+
+            nostr::EventBuilder::new(nostr::Kind::from(crate::APP_KEYS_EVENT_KIND as u16), "")
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .build(owner_pubkey)
+                .sign_with_keys(owner_keys)
+                .unwrap()
+        }
+
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_owner_keys = Keys::generate();
+        let bob_owner_pubkey = bob_owner_keys.public_key();
+        let bob_device1_keys = Keys::generate();
+        let bob_device2_keys = Keys::generate();
+        let bob_device1_id = bob_device1_keys.public_key().to_hex();
+        let bob_device2_id = bob_device2_keys.public_key().to_hex();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(storage.clone()),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        let mut app_keys_two = AppKeys::new(vec![]);
+        app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
+        app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
+        manager.process_received_event(sign_app_keys_event(
+            &app_keys_two,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            2,
+        ));
+        let _ = drain_events(&rx);
+
+        let mut stale_one_device = AppKeys::new(vec![]);
+        stale_one_device.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
+        manager.process_received_event(sign_app_keys_event(
+            &stale_one_device,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            1,
+        ));
+        let _ = drain_events(&rx);
+
+        let (inner_id, published_ids) = manager
+            .send_text_with_inner_id(
+                bob_owner_pubkey,
+                "stale appkeys replay should not collapse fanout".to_string(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            published_ids.is_empty(),
+            "without established sessions, message should queue per known device"
+        );
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device1_id, &inner_id),
+            1
+        );
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device2_id, &inner_id),
+            1,
+            "older appkeys replay must not revoke the newer second device"
+        );
+    }
+
+    #[test]
+    fn same_timestamp_appkeys_replay_preserves_known_devices() {
+        fn sign_app_keys_event(
+            app_keys: &AppKeys,
+            owner_pubkey: PublicKey,
+            owner_keys: &Keys,
+            created_at: u64,
+        ) -> nostr::Event {
+            let mut tags = Vec::new();
+            tags.push(
+                nostr::Tag::parse(&["d".to_string(), "double-ratchet/app-keys".to_string()])
+                    .unwrap(),
+            );
+            tags.push(nostr::Tag::parse(&["version".to_string(), "1".to_string()]).unwrap());
+            for device in app_keys.get_all_devices() {
+                tags.push(
+                    nostr::Tag::parse(&[
+                        "device".to_string(),
+                        hex::encode(device.identity_pubkey.to_bytes()),
+                        device.created_at.to_string(),
+                    ])
+                    .unwrap(),
+                );
+            }
+
+            nostr::EventBuilder::new(nostr::Kind::from(crate::APP_KEYS_EVENT_KIND as u16), "")
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .build(owner_pubkey)
+                .sign_with_keys(owner_keys)
+                .unwrap()
+        }
+
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_owner_keys = Keys::generate();
+        let bob_owner_pubkey = bob_owner_keys.public_key();
+        let bob_device1_keys = Keys::generate();
+        let bob_device2_keys = Keys::generate();
+        let bob_device1_id = bob_device1_keys.public_key().to_hex();
+        let bob_device2_id = bob_device2_keys.public_key().to_hex();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(storage.clone()),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        let mut app_keys_two = AppKeys::new(vec![]);
+        app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
+        app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
+        manager.process_received_event(sign_app_keys_event(
+            &app_keys_two,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            5,
+        ));
+        let _ = drain_events(&rx);
+
+        let mut same_second_subset = AppKeys::new(vec![]);
+        same_second_subset.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
+        manager.process_received_event(sign_app_keys_event(
+            &same_second_subset,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            5,
+        ));
+        let _ = drain_events(&rx);
+
+        let (inner_id, published_ids) = manager
+            .send_text_with_inner_id(
+                bob_owner_pubkey,
+                "same-second replay should not collapse fanout".to_string(),
+                None,
+            )
+            .unwrap();
+        assert!(published_ids.is_empty());
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device1_id, &inner_id),
+            1
+        );
+        assert_eq!(
+            count_queue_entries(&storage, "v1/message-queue/", &bob_device2_id, &inner_id),
+            1,
+            "same-second appkeys replay should preserve previously known devices"
         );
     }
 

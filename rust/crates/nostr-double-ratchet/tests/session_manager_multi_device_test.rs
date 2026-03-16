@@ -15,15 +15,18 @@ fn load_stored_user_record(
     let path = storage_root.join(format!("user_{}.json", owner_pubkey.to_hex()));
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
 }
 
 fn device_has_receiving_session(
     stored: &nostr_double_ratchet::StoredUserRecord,
     device_id: &str,
 ) -> bool {
-    let Some(device) = stored.devices.iter().find(|device| device.device_id == device_id) else {
+    let Some(device) = stored
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+    else {
         return false;
     };
 
@@ -306,10 +309,8 @@ fn test_repeated_invite_refreshes_send_only_device_session() -> Result<()> {
     let sent = recv_message_events(&bob_rx, 1);
     alice_mgr.process_received_event(sent[0].clone());
 
-    let decrypted = recv_decrypted_containing(
-        &alice_rx,
-        "\"content\":\"fresh response can decrypt\"",
-    );
+    let decrypted =
+        recv_decrypted_containing(&alice_rx, "\"content\":\"fresh response can decrypt\"");
     assert!(decrypted.contains("\"content\":\"fresh response can decrypt\""));
 
     Ok(())
@@ -369,13 +370,15 @@ fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> 
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
-    bob_mgr.send_text(alice_pubkey, "first send establishes path".to_string(), None)?;
+    bob_mgr.send_text(
+        alice_pubkey,
+        "first send establishes path".to_string(),
+        None,
+    )?;
     let first_message = recv_message_events(&bob_rx, 1);
     alice_mgr.process_received_event(first_message[0].clone());
-    let decrypted = recv_decrypted_containing(
-        &alice_rx,
-        "\"content\":\"first send establishes path\"",
-    );
+    let decrypted =
+        recv_decrypted_containing(&alice_rx, "\"content\":\"first send establishes path\"");
     assert!(decrypted.contains("\"content\":\"first send establishes path\""));
     drain_events(&alice_rx);
     drain_events(&bob_rx);
@@ -386,7 +389,11 @@ fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> 
         "used send-only session should ignore replayed invite refreshes",
     );
 
-    bob_mgr.send_text(alice_pubkey, "replayed invite did not churn path".to_string(), None)?;
+    bob_mgr.send_text(
+        alice_pubkey,
+        "replayed invite did not churn path".to_string(),
+        None,
+    )?;
     let second_message = recv_message_events(&bob_rx, 1);
     alice_mgr.process_received_event(second_message[0].clone());
     let decrypted = recv_decrypted_containing(
@@ -486,7 +493,11 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         "processing the peer public invite should upgrade the device to a send-capable session",
     );
 
-    alice_mgr.send_text(bob_pubkey, "public invite refresh makes reply sendable".to_string(), None)?;
+    alice_mgr.send_text(
+        bob_pubkey,
+        "public invite refresh makes reply sendable".to_string(),
+        None,
+    )?;
     let sent = recv_message_events(&alice_rx, 1);
     bob_mgr.process_received_event(sent[0].clone());
 
@@ -964,13 +975,19 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         alice_new_device_id.clone(),
         alice_owner_pubkey,
     )?;
-    let bob_linked_link_invite =
-        new_link_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+    let bob_linked_link_invite = new_link_invite(
+        bob_linked_pubkey,
+        bob_linked_device_id.clone(),
+        bob_owner_pubkey,
+    )?;
 
     let bob_owner_public_invite =
         Invite::create_new(bob_owner_pubkey, Some(bob_owner_device_id.clone()), None)?;
-    let bob_linked_public_invite =
-        new_public_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+    let bob_linked_public_invite = new_public_invite(
+        bob_linked_pubkey,
+        bob_linked_device_id.clone(),
+        bob_owner_pubkey,
+    )?;
     let alice_linked_public_invite = new_public_invite(
         alice_new_device_pubkey,
         alice_new_device_id.clone(),
@@ -1206,6 +1223,29 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     alice_linked_restarted_mgr.setup_user(bob_owner_pubkey);
     alice_linked_restarted_mgr.setup_user(alice_owner_pubkey);
     drain_events(&alice_linked_restarted_rx);
+    alice_linked_restarted_mgr.process_received_event(bob_app_keys_event.clone());
+    alice_linked_restarted_mgr.process_received_event(alice_app_keys_event.clone());
+    alice_linked_restarted_mgr.process_received_event(
+        bob_owner_public_invite
+            .get_event()?
+            .sign_with_keys(&bob_owner_keys)?,
+    );
+    let restarted_bob_owner_response = recv_signed_event_of_kind(
+        &alice_linked_restarted_rx,
+        nostr_double_ratchet::INVITE_RESPONSE_KIND,
+    );
+    let (restarted_bob_owner_peer, restarted_bob_owner_device_id) = import_session_from_response(
+        &bob_owner_public_invite,
+        bob_owner_keys.secret_key().to_secret_bytes(),
+        &bob_owner_mgr,
+        &restarted_bob_owner_response,
+    )?;
+    assert_eq!(restarted_bob_owner_peer, alice_owner_pubkey);
+    assert_eq!(restarted_bob_owner_device_id, alice_new_device_id);
+    alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone());
+    alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone());
+    drain_events(&alice_linked_restarted_rx);
+    drain_events(&bob_owner_rx);
 
     bob_linked_mgr.send_text(
         alice_owner_pubkey,
@@ -1254,18 +1294,12 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         &bob_linked_rx,
         "\"content\":\"after restart linked sender keeps multi-device fanout\"",
     );
-    assert!(
-        alice_owner_self_sync
-            .contains("\"content\":\"after restart linked sender keeps multi-device fanout\"")
-    );
-    assert!(
-        bob_owner_received
-            .contains("\"content\":\"after restart linked sender keeps multi-device fanout\"")
-    );
-    assert!(
-        bob_linked_received
-            .contains("\"content\":\"after restart linked sender keeps multi-device fanout\"")
-    );
+    assert!(alice_owner_self_sync
+        .contains("\"content\":\"after restart linked sender keeps multi-device fanout\""));
+    assert!(bob_owner_received
+        .contains("\"content\":\"after restart linked sender keeps multi-device fanout\""));
+    assert!(bob_linked_received
+        .contains("\"content\":\"after restart linked sender keeps multi-device fanout\""));
 
     Ok(())
 }
@@ -1293,13 +1327,19 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         alice_new_device_id.clone(),
         alice_owner_pubkey,
     )?;
-    let bob_linked_link_invite =
-        new_link_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+    let bob_linked_link_invite = new_link_invite(
+        bob_linked_pubkey,
+        bob_linked_device_id.clone(),
+        bob_owner_pubkey,
+    )?;
 
     let bob_owner_public_invite =
         Invite::create_new(bob_owner_pubkey, Some(bob_owner_device_id.clone()), None)?;
-    let bob_linked_public_invite =
-        new_public_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+    let bob_linked_public_invite = new_public_invite(
+        bob_linked_pubkey,
+        bob_linked_device_id.clone(),
+        bob_owner_pubkey,
+    )?;
     let alice_linked_public_invite = new_public_invite(
         alice_new_device_pubkey,
         alice_new_device_id.clone(),
@@ -1543,14 +1583,15 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     alice_linked_restarted_mgr.process_received_event(bob_app_keys_event.clone());
     alice_linked_restarted_mgr.process_received_event(alice_app_keys_event.clone());
     alice_linked_restarted_mgr.process_received_event(
-        bob_owner_public_invite.get_event()?.sign_with_keys(&bob_owner_keys)?,
+        bob_owner_public_invite
+            .get_event()?
+            .sign_with_keys(&bob_owner_keys)?,
     );
     alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone());
     alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone());
     drain_events(&alice_linked_restarted_rx);
 
-    let stored_after_replay =
-        load_stored_user_record(&base.join("alice-linked"), bob_owner_pubkey);
+    let stored_after_replay = load_stored_user_record(&base.join("alice-linked"), bob_owner_pubkey);
     assert!(
         device_has_receiving_session(&stored_after_replay, &bob_linked_device_id),
         "expected replayed AppKeys/invites to preserve Bob-linked receive state after restart",
@@ -1597,8 +1638,11 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
 
     let bob_owner_public_invite =
         Invite::create_new(bob_owner_pubkey, Some(bob_owner_device_id.clone()), None)?;
-    let bob_linked_public_invite =
-        new_public_invite(bob_linked_pubkey, bob_linked_device_id.clone(), bob_owner_pubkey)?;
+    let bob_linked_public_invite = new_public_invite(
+        bob_linked_pubkey,
+        bob_linked_device_id.clone(),
+        bob_owner_pubkey,
+    )?;
     let bob_linked_link_invite = new_link_invite(
         bob_linked_pubkey,
         bob_linked_device_id.clone(),

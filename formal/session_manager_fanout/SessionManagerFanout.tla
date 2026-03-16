@@ -8,6 +8,8 @@ CONSTANTS
     MaxRelayCopies,
     InitialAuthorized,
     DiscoveredAuthorized,
+    StaleReplayAuthorized,
+    SameVersionReplayAuthorized,
     ReplacementAuthorized
 
 ASSUME Devices # {}
@@ -15,6 +17,8 @@ ASSUME FailBudgetInit \subseteq Devices
 ASSUME MaxRelayCopies \in Nat \ {0}
 ASSUME InitialAuthorized \subseteq Devices
 ASSUME DiscoveredAuthorized \subseteq Devices
+ASSUME StaleReplayAuthorized \subseteq DiscoveredAuthorized
+ASSUME SameVersionReplayAuthorized \subseteq DiscoveredAuthorized
 ASSUME ReplacementAuthorized \subseteq Devices
 
 VARIABLES
@@ -22,6 +26,7 @@ VARIABLES
     discovery,
     discovered,
     replaced,
+    latestAppKeysCreatedAt,
     authorized,
     revoked,
     cleanupDone,
@@ -34,7 +39,7 @@ VARIABLES
     failBudget
 
 vars ==
-    <<sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
+    <<sent, discovery, discovered, replaced, latestAppKeysCreatedAt, authorized, revoked, cleanupDone,
       msgQ, sessions, relayUp, relayBag, delivered, deliveredWhileRevoked, failBudget>>
 
 ZeroBag ==
@@ -51,6 +56,7 @@ Init ==
     /\ discovery = FALSE
     /\ discovered = FALSE
     /\ replaced = FALSE
+    /\ latestAppKeysCreatedAt = 0
     /\ authorized = InitialAuthorized
     /\ revoked = {}
     /\ cleanupDone = {}
@@ -72,21 +78,52 @@ Send ==
                /\ msgQ' = msgQ \cup authorized
     /\ UNCHANGED <<
         discovered, replaced, authorized, revoked, cleanupDone,
-        sessions, relayUp, relayBag, delivered, deliveredWhileRevoked, failBudget
+        sessions, relayUp, relayBag, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
-ApplyAppKeys(newAuthorized) ==
-    LET removed == authorized \ newAuthorized IN
-        /\ authorized' = newAuthorized
-        /\ revoked' = (revoked \cup removed) \ newAuthorized
-        /\ cleanupDone' = cleanupDone \ newAuthorized
+NextAppKeysCreatedAt(nextCreatedAt) ==
+    IF nextCreatedAt > latestAppKeysCreatedAt THEN nextCreatedAt ELSE latestAppKeysCreatedAt
+
+ApplyAppKeys(newAuthorized, nextCreatedAt) ==
+    LET effectiveAuthorized ==
+            IF nextCreatedAt < latestAppKeysCreatedAt
+                THEN authorized
+                ELSE IF nextCreatedAt = latestAppKeysCreatedAt
+                    THEN authorized \cup newAuthorized
+                    ELSE newAuthorized
+        removed == authorized \ effectiveAuthorized IN
+        /\ latestAppKeysCreatedAt' = NextAppKeysCreatedAt(nextCreatedAt)
+        /\ authorized' = effectiveAuthorized
+        /\ revoked' = (revoked \cup removed) \ effectiveAuthorized
+        /\ cleanupDone' = cleanupDone \ effectiveAuthorized
 
 AppKeysDiscover ==
     /\ ~discovered
     /\ discovered' = TRUE
-    /\ ApplyAppKeys(DiscoveredAuthorized)
+    /\ ApplyAppKeys(DiscoveredAuthorized, 2)
     /\ UNCHANGED <<
         sent, discovery, replaced, msgQ, sessions,
+        relayUp, relayBag,
+        delivered, deliveredWhileRevoked, failBudget
+      >>
+
+AppKeysReplayStale ==
+    /\ discovered
+    /\ ~replaced
+    /\ ApplyAppKeys(StaleReplayAuthorized, 1)
+    /\ UNCHANGED <<
+        sent, discovery, discovered, replaced, msgQ, sessions,
+        relayUp, relayBag,
+        delivered, deliveredWhileRevoked, failBudget
+      >>
+
+AppKeysReplaySameVersion ==
+    /\ discovered
+    /\ ~replaced
+    /\ ApplyAppKeys(SameVersionReplayAuthorized, 2)
+    /\ UNCHANGED <<
+        sent, discovery, discovered, replaced, msgQ, sessions,
         relayUp, relayBag,
         delivered, deliveredWhileRevoked, failBudget
       >>
@@ -96,7 +133,7 @@ AppKeysRevoke ==
     /\ ~replaced
     /\ ReplacementAuthorized # authorized
     /\ replaced' = TRUE
-    /\ ApplyAppKeys(ReplacementAuthorized)
+    /\ ApplyAppKeys(ReplacementAuthorized, 3)
     /\ UNCHANGED <<
         sent, discovery, discovered, msgQ, sessions,
         relayUp, relayBag,
@@ -116,7 +153,8 @@ ExpandDiscovery ==
                     ELSE fail # {}
     /\ UNCHANGED <<
         sent, discovered, replaced, authorized, revoked, cleanupDone,
-        sessions, relayUp, relayBag, delivered, deliveredWhileRevoked
+        sessions, relayUp, relayBag, delivered, deliveredWhileRevoked,
+        latestAppKeysCreatedAt
       >>
 
 EstablishSession(d) ==
@@ -126,7 +164,8 @@ EstablishSession(d) ==
     /\ sessions' = sessions \cup {d}
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
-        msgQ, relayUp, relayBag, delivered, deliveredWhileRevoked, failBudget
+        msgQ, relayUp, relayBag, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
 CleanupRevokedDevice(d) ==
@@ -138,7 +177,8 @@ CleanupRevokedDevice(d) ==
     /\ cleanupDone' = cleanupDone \cup {d}
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked,
-        relayUp, delivered, deliveredWhileRevoked, failBudget
+        relayUp, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
 Flush(d) ==
@@ -151,7 +191,8 @@ Flush(d) ==
     /\ relayBag' = BagAdd(relayBag, d)
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
-        msgQ, sessions, relayUp, delivered, deliveredWhileRevoked, failBudget
+        msgQ, sessions, relayUp, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
 RelayDeliver(d) ==
@@ -168,7 +209,7 @@ RelayDeliver(d) ==
             ELSE deliveredWhileRevoked
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
-        sessions, relayUp, failBudget
+        sessions, relayUp, failBudget, latestAppKeysCreatedAt
       >>
 
 RelayDrop(d) ==
@@ -176,7 +217,8 @@ RelayDrop(d) ==
     /\ relayBag' = BagDec(relayBag, d)
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
-        msgQ, sessions, relayUp, delivered, deliveredWhileRevoked, failBudget
+        msgQ, sessions, relayUp, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
 RelayDuplicate(d) ==
@@ -185,7 +227,8 @@ RelayDuplicate(d) ==
     /\ relayBag' = BagAdd(relayBag, d)
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
-        msgQ, sessions, relayUp, delivered, deliveredWhileRevoked, failBudget
+        msgQ, sessions, relayUp, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
 RelayPartition ==
@@ -193,7 +236,8 @@ RelayPartition ==
     /\ relayUp' = FALSE
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
-        msgQ, sessions, relayBag, delivered, deliveredWhileRevoked, failBudget
+        msgQ, sessions, relayBag, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
 RelayRecover ==
@@ -201,7 +245,8 @@ RelayRecover ==
     /\ relayUp' = TRUE
     /\ UNCHANGED <<
         sent, discovery, discovered, replaced, authorized, revoked, cleanupDone,
-        msgQ, sessions, relayBag, delivered, deliveredWhileRevoked, failBudget
+        msgQ, sessions, relayBag, delivered, deliveredWhileRevoked, failBudget,
+        latestAppKeysCreatedAt
       >>
 
 \* Explicit delay step when transport has in-flight packets.
@@ -217,6 +262,8 @@ RelayEventuallyRecovers ==
 Next ==
     \/ Send
     \/ AppKeysDiscover
+    \/ AppKeysReplayStale
+    \/ AppKeysReplaySameVersion
     \/ AppKeysRevoke
     \/ ExpandDiscovery
     \/ \E d \in Devices: EstablishSession(d)
@@ -235,6 +282,8 @@ Spec ==
     /\ [][Next]_vars
     /\ WF_vars(Send)
     /\ WF_vars(AppKeysDiscover)
+    /\ WF_vars(AppKeysReplayStale)
+    /\ WF_vars(AppKeysReplaySameVersion)
     /\ WF_vars(AppKeysRevoke)
     /\ WF_vars(ExpandDiscovery)
     /\ \A d \in Devices: WF_vars(CleanupRevokedDevice(d))
@@ -264,6 +313,11 @@ NoQueueForRevokedAfterCleanup ==
 \* Cleanup also purges in-flight local transport attempts for revoked devices.
 NoRelayInflightForRevokedAfterCleanup ==
     \A d \in cleanupDone: relayBag[d] = 0
+
+\* Older AppKeys replays must not revoke devices from a newer set, and same-version
+\* replays must merge rather than shrink the currently authorized set.
+NoReplayCollapseBeforeReplacement ==
+    discovered /\ ~replaced => DiscoveredAuthorized \subseteq authorized
 
 \* Liveness goal under weak fairness:
 \* if a device remains authorized after send, then it is eventually delivered.
