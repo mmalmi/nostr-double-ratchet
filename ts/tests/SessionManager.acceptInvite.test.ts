@@ -124,6 +124,11 @@ describe("SessionManager.acceptInvite", () => {
     const ownerRecord = owner.manager.getUserRecords().get(owner.publicKey)
     expect(ownerRecord).toBeDefined()
     expect(Array.from(ownerRecord!.devices.keys())).toContain(newDevicePubkey)
+
+    const bootstrapEvents = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1060)
+    expect(bootstrapEvents.length).toBeGreaterThan(0)
   })
 
   it("falls back to inviter device identity when chat owner claim is not authorized by AppKeys", async () => {

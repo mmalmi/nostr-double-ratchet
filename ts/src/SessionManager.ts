@@ -653,6 +653,27 @@ export class SessionManager {
     await this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
+  private async sendLinkBootstrap(
+    ownerPublicKey: string,
+    deviceId: string,
+  ): Promise<void> {
+    const userRecord = this.userRecords.get(ownerPublicKey)
+    const session = userRecord?.devices.get(deviceId)?.activeSession
+    if (!session) {
+      return
+    }
+
+    try {
+      const { event } = session.sendTyping({
+        expiresAt: Math.floor(Date.now() / 1000),
+      })
+      await this.nostrPublish(event)
+      await this.storeUserRecord(ownerPublicKey).catch(() => {})
+    } catch {
+      // Ignore bootstrap send failures; the next valid inbound event will retry queue flush.
+    }
+  }
+
   async acceptInvite(
     invite: Invite,
     options: AcceptInviteOptions = {}
@@ -732,6 +753,9 @@ export class SessionManager {
     const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
     this.delegateToOwner.set(deviceId, ownerPublicKey)
     deviceRecord.installSession(session)
+    if (invite.purpose === "link" && ownerPublicKey === this.ownerPublicKey) {
+      await this.sendLinkBootstrap(ownerPublicKey, deviceId)
+    }
     await this.flushMessageQueue(deviceId).catch(() => {})
     await this.storeUserRecord(ownerPublicKey).catch(() => {})
 

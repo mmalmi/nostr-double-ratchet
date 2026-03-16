@@ -174,6 +174,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
         this.deps.user.onDeviceRumor(this.deviceId, event)
         promoteToActive(session)
         this.state = "session-ready"
+        this.flushMessageQueue().catch(() => {})
         this.deps.user.onDeviceDirty()
       })
       this.sessionSubscriptions.set(session.name, unsub)

@@ -879,6 +879,9 @@ impl SessionManager {
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             let _ = self.store_user_record(&owner_pubkey);
             self.send_message_history(owner_pubkey, &device_id);
+            if is_owner_side_link_invite {
+                self.send_link_bootstrap(owner_pubkey, &device_id);
+            }
             let _ = self.flush_message_queue(&device_id);
 
             Ok(AcceptInviteResult {
@@ -2083,6 +2086,47 @@ impl SessionManager {
         let _ = self.store_user_record(&owner_pubkey);
     }
 
+    fn send_link_bootstrap(&self, owner_pubkey: PublicKey, device_id: &str) {
+        let now_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expiration = match Tag::parse(&[crate::EXPIRATION_TAG.to_string(), now_s.to_string()]) {
+            Ok(tag) => tag,
+            Err(_) => return,
+        };
+        let bootstrap = match self.build_message_event(
+            owner_pubkey,
+            crate::TYPING_KIND,
+            "typing".to_string(),
+            vec![expiration],
+        ) {
+            Ok(event) => event,
+            Err(_) => return,
+        };
+
+        let signed_bootstrap = self.with_user_records({
+            let device_id = device_id.to_string();
+            move |records| {
+                let Some(user_record) = records.get_mut(&owner_pubkey) else {
+                    return None;
+                };
+                let Some(device_record) = user_record.device_records.get_mut(&device_id) else {
+                    return None;
+                };
+                let Some(session) = device_record.active_session.as_mut() else {
+                    return None;
+                };
+                session.send_event(bootstrap).ok()
+            }
+        });
+
+        if let Some(signed_bootstrap) = signed_bootstrap {
+            let _ = self.pubsub.publish_signed(signed_bootstrap);
+            let _ = self.store_user_record(&owner_pubkey);
+        }
+    }
+
     fn cleanup_device(&self, owner_pubkey: PublicKey, device_id: &str) {
         let removed = self.with_user_records({
             let device_id = device_id.to_string();
@@ -2439,6 +2483,7 @@ impl SessionManager {
                     self.pubsub
                         .decrypted_message(owner_pubkey, sender_device, plaintext, event_id);
                 let _ = self.store_user_record(&owner_pubkey);
+                let _ = self.flush_message_queue(&device_id);
             } else if let Some((sender, sender_device, plaintext, event_id)) =
                 self.try_decrypt_group_sender_key_outer(&event, None)
             {
