@@ -5,6 +5,7 @@ import { INVITE_EVENT_KIND, INVITE_RESPONSE_KIND } from '../src/types'
 import { Session } from '../src/Session'
 import { createEventStream } from '../src/utils'
 import { serializeSessionState, deserializeSessionState } from '../src/utils'
+import { MockRelay } from './helpers/mockRelay'
 
 describe('Invite', () => {
   const dummySubscribe = vi.fn()
@@ -169,6 +170,67 @@ describe('Invite', () => {
     expect(parsedInvite.inviterEphemeralPublicKey).toBe(invite.inviterEphemeralPublicKey)
     expect(parsedInvite.sharedSecret).toBe(invite.sharedSecret)
     expect(parsedInvite.inviter).toBe(alicePublicKey)
+  })
+
+  it('treats public-addressed invite events as belonging to the inviter device', () => {
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const invite = Invite.createNew(alicePublicKey, 'public')
+
+    const event = invite.getEvent()
+    expect(event.tags).toContainEqual(['d', 'double-ratchet/invites/public'])
+
+    const finalizedEvent = finalizeEvent(event, alicePrivateKey)
+    const parsedInvite = Invite.fromEvent(finalizedEvent)
+
+    expect(parsedInvite.deviceId).toBeUndefined()
+    expect(parsedInvite.inviter).toBe(alicePublicKey)
+  })
+
+  it('waitFor prefers the canonical public invite over device-scoped invites', async () => {
+    const relay = new MockRelay()
+    const subscribe = (filter: any, onEvent: (event: any) => void) => relay.subscribe(filter, onEvent).close
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+
+    const deviceInvite = Invite.createNew(alicePublicKey, alicePublicKey, 1)
+    deviceInvite.createdAt = 10
+    relay.storeAndDeliver(finalizeEvent(deviceInvite.getEvent(), alicePrivateKey))
+
+    const publicInvite = Invite.createNew(alicePublicKey, 'public')
+    publicInvite.createdAt = 11
+    relay.storeAndDeliver(finalizeEvent(publicInvite.getEvent(), alicePrivateKey))
+
+    const preferred = await Invite.waitFor(alicePublicKey, subscribe, 50)
+
+    expect(preferred).not.toBeNull()
+    expect(preferred?.deviceId).toBeUndefined()
+    expect(preferred?.inviter).toBe(alicePublicKey)
+  })
+
+  it('fromUser emits the preferred public invite once both invite types are visible', async () => {
+    const relay = new MockRelay()
+    const subscribe = (filter: any, onEvent: (event: any) => void) => relay.subscribe(filter, onEvent).close
+    const alicePrivateKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(alicePrivateKey)
+    const onInvite = vi.fn()
+
+    const unsubscribe = Invite.fromUser(alicePublicKey, subscribe, onInvite)
+
+    const deviceInvite = Invite.createNew(alicePublicKey, alicePublicKey, 1)
+    deviceInvite.createdAt = 10
+    relay.storeAndDeliver(finalizeEvent(deviceInvite.getEvent(), alicePrivateKey))
+
+    const publicInvite = Invite.createNew(alicePublicKey, 'public')
+    publicInvite.createdAt = 11
+    relay.storeAndDeliver(finalizeEvent(publicInvite.getEvent(), alicePrivateKey))
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    unsubscribe()
+
+    expect(onInvite).toHaveBeenCalledTimes(1)
+    expect(onInvite.mock.calls[0][0]?.deviceId).toBeUndefined()
+    expect(onInvite.mock.calls[0][0]?.inviter).toBe(alicePublicKey)
   })
 
   it('should handle session reinitialization with serialization after invite acceptance', async () => {

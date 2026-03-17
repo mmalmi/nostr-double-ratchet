@@ -4,6 +4,8 @@ import { createControlledMockSessionManager } from "./helpers/controlledMockSess
 import { MockRelay } from "./helpers/mockRelay"
 import { ControlledMockRelay } from "./helpers/ControlledMockRelay"
 import { runScenario } from "./helpers/scenario"
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools"
+import { APP_KEYS_EVENT_KIND } from "../src/types"
 
 type DeviceRecordSnapshot = { inactiveSessions: unknown[] }
 
@@ -146,6 +148,197 @@ describe("SessionManager", () => {
         { type: "expect", actor: "alice", deviceId: "alice-device-2", message: "linked first reply" },
       ],
     })
+  })
+
+  it("should self-sync an existing peer chat to a newly linked sibling after link", async () => {
+    await runScenario({
+      steps: [
+        { type: "addDevice", actor: "alice", deviceId: "alice-device-1" },
+        { type: "addDevice", actor: "bob", deviceId: "bob-device-1" },
+        {
+          type: "send",
+          from: { actor: "alice", deviceId: "alice-device-1" },
+          to: "bob",
+          message: "seed existing chat",
+          waitOn: "all-recipient-devices",
+        },
+        { type: "addDevice", actor: "bob", deviceId: "bob-device-2" },
+        {
+          type: "send",
+          from: { actor: "bob", deviceId: "bob-device-1" },
+          to: "alice",
+          message: "owner reply after link",
+          waitOn: "all-recipient-devices",
+        },
+        { type: "expect", actor: "bob", deviceId: "bob-device-2", message: "owner reply after link" },
+      ],
+    })
+  })
+
+  it("should fan out from an existing sibling sender after the peer links a new device", async () => {
+    await runScenario({
+      steps: [
+        { type: "addDevice", actor: "alice", deviceId: "alice-device-1" },
+        { type: "addDevice", actor: "alice", deviceId: "alice-device-2" },
+        { type: "addDevice", actor: "bob", deviceId: "bob-device-1" },
+        {
+          type: "send",
+          from: { actor: "alice", deviceId: "alice-device-1" },
+          to: "bob",
+          message: "seed existing chat",
+          waitOn: "all-recipient-devices",
+        },
+        { type: "addDevice", actor: "bob", deviceId: "bob-device-2" },
+        {
+          type: "send",
+          from: { actor: "alice", deviceId: "alice-device-2" },
+          to: "bob",
+          message: "existing sibling sender after peer link",
+          waitOn: "all-recipient-devices",
+        },
+        {
+          type: "expect",
+          actor: "bob",
+          deviceId: "bob-device-2",
+          message: "existing sibling sender after peer link",
+        },
+      ],
+    })
+  })
+
+  it("fetchAppKeys preserves same-second device additions even when an older snapshot arrives later", async () => {
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const baseDeviceSecret = generateSecretKey()
+    const baseDevicePubkey = getPublicKey(baseDeviceSecret)
+    const linkedDeviceSecret = generateSecretKey()
+    const linkedDevicePubkey = getPublicKey(linkedDeviceSecret)
+    const createdAt = Math.floor(Date.now() / 1000)
+
+    const oldEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: createdAt,
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", baseDevicePubkey, String(createdAt)],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    )
+
+    const newEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: createdAt,
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", baseDevicePubkey, String(createdAt)],
+          ["device", linkedDevicePubkey, String(createdAt)],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    )
+
+    const subscribe = (_filter: unknown, onEvent: (event: typeof oldEvent) => void) => {
+      setTimeout(() => onEvent(newEvent), 0)
+      setTimeout(() => onEvent(oldEvent), 1)
+      return () => {}
+    }
+
+    const manager = new (await import("../src/SessionManager")).SessionManager(
+      ownerPublicKey,
+      ownerSecretKey,
+      ownerPublicKey,
+      subscribe as never,
+      async (event) => event as never,
+      ownerPublicKey,
+      {
+        ephemeralKeypair: {
+          publicKey: getPublicKey(generateSecretKey()),
+          privateKey: generateSecretKey(),
+        },
+        sharedSecret: "0".repeat(64),
+      }
+    )
+
+    const fetched = await (manager as any).fetchAppKeys(ownerPublicKey, 20)
+    const devicePubkeys = fetched?.getAllDevices().map((device: {identityPubkey: string}) => device.identityPubkey) ?? []
+
+    expect(devicePubkeys).toContain(baseDevicePubkey)
+    expect(devicePubkeys).toContain(linkedDevicePubkey)
+  })
+
+  it("fetchAppKeys prefers the newest distinct-timestamp snapshot when older AppKeys arrive later", async () => {
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const baseDeviceSecret = generateSecretKey()
+    const baseDevicePubkey = getPublicKey(baseDeviceSecret)
+    const linkedDeviceSecret = generateSecretKey()
+    const linkedDevicePubkey = getPublicKey(linkedDeviceSecret)
+    const createdAt = Math.floor(Date.now() / 1000)
+
+    const oldEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: createdAt,
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", baseDevicePubkey, String(createdAt)],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    )
+
+    const newEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: createdAt + 1,
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", baseDevicePubkey, String(createdAt)],
+          ["device", linkedDevicePubkey, String(createdAt + 1)],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    )
+
+    const subscribe = (_filter: unknown, onEvent: (event: typeof oldEvent) => void) => {
+      setTimeout(() => onEvent(newEvent), 0)
+      setTimeout(() => onEvent(oldEvent), 1)
+      return () => {}
+    }
+
+    const manager = new (await import("../src/SessionManager")).SessionManager(
+      ownerPublicKey,
+      ownerSecretKey,
+      ownerPublicKey,
+      subscribe as never,
+      async (event) => event as never,
+      ownerPublicKey,
+      {
+        ephemeralKeypair: {
+          publicKey: getPublicKey(generateSecretKey()),
+          privateKey: generateSecretKey(),
+        },
+        sharedSecret: "0".repeat(64),
+      }
+    )
+
+    const fetched = await (manager as any).fetchAppKeys(ownerPublicKey, 20)
+    const devicePubkeys =
+      fetched?.getAllDevices().map((device: { identityPubkey: string }) => device.identityPubkey) ?? []
+
+    expect(devicePubkeys).toContain(baseDevicePubkey)
+    expect(devicePubkeys).toContain(linkedDevicePubkey)
   })
 
   it("should deliver self-sent messages to other online devices", async () => {
@@ -446,13 +639,20 @@ describe("SessionManager (Controlled Relay)", () => {
 
       await alice.sendMessage(bobPubkey, "test msg")
 
-      // Wait for async session establishment and message delivery
-      await new Promise(resolve => setTimeout(resolve, 200))
+      const waitForDeliveredMessageEvent = async () => {
+        for (let attempt = 0; attempt < 15; attempt++) {
+          const candidate = sharedRelay
+            .getAllEvents()
+            .find((event) => event.kind === 1060 && sharedRelay.getDeliveryCount(event.id) > 0)
+          if (candidate) {
+            return candidate
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        return null
+      }
 
-      const allEvents = sharedRelay.getAllEvents()
-      // Find the encrypted message event (kind 1060 is ratchet session message)
-      // Messages are encrypted, so we look for the outer envelope, not the inner rumor
-      const msgEvent = allEvents.find(e => e.kind === 1060)
+      const msgEvent = await waitForDeliveredMessageEvent()
 
       // If session wasn't established in time, skip this test
       // This can happen with async two-step discovery under load

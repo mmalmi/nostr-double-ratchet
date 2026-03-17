@@ -57,6 +57,15 @@ export type {
   UserRecord,
 } from "./session-manager/types"
 
+type PendingInviteResponse = {
+  eventId: string
+  ownerPublicKey: string
+  deviceId: string
+  inviteeSessionPublicKey: string
+  ephemeralPrivateKey: Uint8Array
+  sharedSecret: string
+}
+
 export class SessionManager {
   // Versioning
   private readonly storageVersion = "1"
@@ -84,6 +93,7 @@ export class SessionManager {
   private delegateToOwner: Map<string, string> = new Map()
   // Track processed InviteResponse event IDs to prevent replay
   private processedInviteResponses: Set<string> = new Set()
+  private pendingInviteResponses: Map<string, PendingInviteResponse> = new Map()
   // Expiration defaults (persisted)
   private defaultExpiration: ExpirationOptions | undefined
   private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
@@ -260,10 +270,12 @@ export class SessionManager {
       },
       async (event) => {
         // Skip already processed InviteResponses (prevents replay issues on restart)
-        if (this.processedInviteResponses.has(event.id)) {
+        if (
+          this.processedInviteResponses.has(event.id) ||
+          this.pendingInviteResponses.has(event.id)
+        ) {
           return
         }
-        this.processedInviteResponses.add(event.id)
 
         try {
           const decrypted = await decryptInviteResponse({
@@ -285,46 +297,33 @@ export class SessionManager {
           // Get owner pubkey from response (required for proper chat routing)
           // If not present (old client), fall back to resolveToOwner
           const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
+          const pendingResponse: PendingInviteResponse = {
+            eventId: event.id,
+            ownerPublicKey: claimedOwner,
+            deviceId: decrypted.inviteeIdentity,
+            inviteeSessionPublicKey: decrypted.inviteeSessionPublicKey,
+            ephemeralPrivateKey: ephemeralPrivkey,
+            sharedSecret,
+          }
 
           // Verify the device is authorized by fetching owner's AppKeys
           const appKeys = await this.fetchAppKeys(claimedOwner)
 
           if (appKeys) {
-            const deviceInList = appKeys.getAllDevices().some(
-              d => d.identityPubkey === decrypted.inviteeIdentity
-            )
-            if (!deviceInList) {
-              return
-            }
             this.updateDelegateMapping(claimedOwner, appKeys)
-          } else {
-            // No AppKeys from relay - check persisted AppKeys or single-device case
-            const persistedAppKeys = this.userRecords.get(claimedOwner)?.appKeys
-            const isCached = persistedAppKeys?.getAllDevices().some(
-              d => d.identityPubkey === decrypted.inviteeIdentity
-            ) ?? false
-            const isSingleDevice = decrypted.inviteeIdentity === claimedOwner
-            if (!isCached && !isSingleDevice) {
+            if (this.installInviteResponseSession(pendingResponse, appKeys)) {
               return
             }
           }
 
-          const ownerPubkey = claimedOwner
-          const userRecord = this.getOrCreateUserRecord(ownerPubkey)
-          // inviteeIdentity serves as the device ID
-          const deviceRecord = this.upsertDeviceRecord(userRecord, decrypted.inviteeIdentity)
+          // No AppKeys from relay or an older snapshot may arrive before the fresh one.
+          // Keep the decrypted response pending and retry it when AppKeys are updated later.
+          const persistedAppKeys = this.userRecords.get(claimedOwner)?.appKeys
+          if (this.installInviteResponseSession(pendingResponse, persistedAppKeys)) {
+            return
+          }
 
-          const session = createSessionFromAccept({
-            nostrSubscribe: this.nostrSubscribe,
-            theirPublicKey: decrypted.inviteeSessionPublicKey,
-            ourSessionPrivateKey: ephemeralPrivkey,
-            sharedSecret,
-            isSender: false,
-            name: event.id,
-          })
-
-          deviceRecord.installSession(session, true)
-          this.storeUserRecord(ownerPubkey).catch(() => {})
+          this.queuePendingInviteResponse(pendingResponse)
         } catch {
         }
       }
@@ -361,10 +360,13 @@ export class SessionManager {
           if (resolved) return
           try {
             const appKeys = AppKeys.fromEvent(event)
-            // Use >= to prefer later-delivered events when timestamps are equal
-            // This handles replaceable events created within the same second
-            if (!latestEvent || event.created_at >= latestEvent.created_at) {
+            if (!latestEvent || event.created_at > latestEvent.created_at) {
               latestEvent = { created_at: event.created_at, appKeys }
+            } else if (event.created_at === latestEvent.created_at) {
+              latestEvent = {
+                created_at: event.created_at,
+                appKeys: latestEvent.appKeys.merge(appKeys),
+              }
             }
             // Resolve quickly after receiving an event (allow for more events to arrive)
             clearTimeout(timeout)
@@ -411,6 +413,25 @@ export class SessionManager {
   }
 
   private handleDeviceRumor(ownerPubkey: string, deviceId: string, event: Rumor): void {
+    const userRecord = this.userRecords.get(ownerPubkey)
+    const knownDevice =
+      ownerPubkey === deviceId ||
+      userRecord?.appKeys?.getAllDevices().some((device) => device.identityPubkey === deviceId) ||
+      false
+
+    if (
+      ownerPubkey !== this.ownerPublicKey &&
+      (!userRecord?.appKeys || !knownDevice)
+    ) {
+      this.fetchAppKeys(ownerPubkey)
+        .then((appKeys) => {
+          if (appKeys) {
+            userRecord?.onAppKeys(appKeys).catch(() => {})
+          }
+        })
+        .catch(() => {})
+    }
+
     this.maybeAutoAdoptChatSettings(event, ownerPubkey)
 
     const origin = classifyMessageOrigin({
@@ -493,8 +514,71 @@ export class SessionManager {
       this.delegateToOwner.set(identity, ownerPubkey)
     }
 
+    this.retryPendingInviteResponses(ownerPubkey, appKeys)
+
     // Persist
     this.storeUserRecord(ownerPubkey).catch(() => {})
+  }
+
+  private queuePendingInviteResponse(response: PendingInviteResponse): void {
+    if (this.pendingInviteResponses.has(response.eventId)) {
+      return
+    }
+
+    if (this.pendingInviteResponses.size >= 1000) {
+      const oldest = this.pendingInviteResponses.keys().next().value
+      if (oldest) {
+        this.pendingInviteResponses.delete(oldest)
+      }
+    }
+
+    this.pendingInviteResponses.set(response.eventId, response)
+  }
+
+  private installInviteResponseSession(
+    response: PendingInviteResponse,
+    appKeys?: AppKeys | null,
+  ): boolean {
+    const isSingleDevice = response.deviceId === response.ownerPublicKey
+    const isAuthorized =
+      isSingleDevice ||
+      (
+        appKeys?.getAllDevices().some(
+          (device) => device.identityPubkey === response.deviceId
+        ) ?? false
+      )
+
+    if (!isAuthorized) {
+      return false
+    }
+
+    const userRecord = this.getOrCreateUserRecord(response.ownerPublicKey)
+    const deviceRecord = this.upsertDeviceRecord(userRecord, response.deviceId)
+
+    const session = createSessionFromAccept({
+      nostrSubscribe: this.nostrSubscribe,
+      theirPublicKey: response.inviteeSessionPublicKey,
+      ourSessionPrivateKey: response.ephemeralPrivateKey,
+      sharedSecret: response.sharedSecret,
+      isSender: false,
+      name: response.eventId,
+    })
+
+    deviceRecord.installSession(session, true)
+    this.pendingInviteResponses.delete(response.eventId)
+    this.processedInviteResponses.add(response.eventId)
+    this.storeUserRecord(response.ownerPublicKey).catch(() => {})
+    return true
+  }
+
+  private retryPendingInviteResponses(ownerPubkey: string, appKeys?: AppKeys): void {
+    for (const response of this.pendingInviteResponses.values()) {
+      if (response.ownerPublicKey !== ownerPubkey) {
+        continue
+      }
+
+      this.installInviteResponseSession(response, appKeys)
+    }
   }
 
   /**
@@ -680,6 +764,17 @@ export class SessionManager {
     }
   }
 
+  private async sendInviteBootstrap(session: Session): Promise<void> {
+    try {
+      const { event } = session.sendTyping({
+        expiresAt: Math.floor(Date.now() / 1000),
+      })
+      await this.nostrPublish(event)
+    } catch {
+      // The session is still established even if the bootstrap publish fails.
+    }
+  }
+
   async acceptInvite(
     invite: Invite,
     options: AcceptInviteOptions = {}
@@ -760,6 +855,7 @@ export class SessionManager {
     const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
     this.delegateToOwner.set(deviceId, ownerPublicKey)
     deviceRecord.installSession(session, false, { preferActive: true })
+    await this.sendInviteBootstrap(session)
     if (invite.purpose === "link" && ownerPublicKey === this.ownerPublicKey) {
       await this.sendLinkBootstrap(ownerPublicKey, deviceId)
     }
@@ -850,7 +946,9 @@ export class SessionManager {
     const sentDeviceIds: string[] = []
     for (const device of devices) {
       const { activeSession } = device
-      if (!activeSession) continue
+      if (!activeSession) {
+        continue
+      }
 
       // Check if device is still authorized
       const deviceOwner = this.resolveToOwner(device.deviceId)

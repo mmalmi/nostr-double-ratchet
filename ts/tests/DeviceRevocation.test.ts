@@ -20,6 +20,13 @@ async function waitForCondition(
   throw new Error(`Timed out waiting for ${label} after ${timeoutMs}ms`)
 }
 
+async function waitForNextCreatedAtSecond(): Promise<void> {
+  const currentSecond = Math.floor(Date.now() / 1000)
+  while (Math.floor(Date.now() / 1000) === currentSecond) {
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
 /**
  * Create Alice (2 devices) + Bob (1 device) with established bidirectional sessions.
  * Returns all actors, message tracking arrays, and the shared relay.
@@ -83,6 +90,7 @@ async function setupMultiDeviceWithSessions() {
  */
 async function revokeAliceDevice2(alice2: Awaited<ReturnType<typeof createMockSessionManager>>) {
   alice2.appKeysManager.revokeDevice(alice2.manager.getDeviceId())
+  await waitForNextCreatedAtSecond()
   await alice2.appKeysManager.publish()
   // Allow propagation — relay delivers synchronously but AppKeys processing triggers async work
   await new Promise((r) => setTimeout(r, 200))

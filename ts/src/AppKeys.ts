@@ -195,10 +195,18 @@ export class AppKeys {
           if (event.pubkey !== user) return
           try {
             const list = AppKeys.fromEvent(event)
-            // Use >= to prefer later-delivered events when timestamps are equal
-            // This handles replaceable events created within the same second
-            if (!latest || event.created_at >= latest.createdAt) {
+            if (
+              !latest ||
+              event.created_at > latest.createdAt
+            ) {
               latest = { list, createdAt: event.created_at }
+            } else if (event.created_at === latest.createdAt) {
+              // Same-second replaceable replays can arrive out of order on real relays.
+              // Preserve the monotonic superset instead of shrinking back to an older snapshot.
+              latest = {
+                list: latest.list.merge(list),
+                createdAt: event.created_at,
+              }
             }
           } catch {
             // Invalid event

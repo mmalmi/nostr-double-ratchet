@@ -87,6 +87,26 @@ async function waitForSessionMessage(
   })
 }
 
+async function waitForSpyCall(
+  assertion: () => void,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: unknown
+
+  while (Date.now() < deadline) {
+    try {
+      assertion()
+      return
+    } catch (error) {
+      lastError = error
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Timed out waiting for assertion")
+}
+
 describe("DeviceRecordActor", () => {
   it("keeps a bidirectional session active when a newer send-only session is installed", () => {
     const messageQueue = new MessageQueue(
@@ -225,5 +245,178 @@ describe("DeviceRecordActor", () => {
     const after = await messageQueue.getForTarget(passiveSidePublicKey)
     expect(after).toHaveLength(0)
     expect(nostr.publish).toHaveBeenCalled()
+  })
+
+  it("promotes a decrypting inactive session and forwards its rumor before AppKeys catch up", async () => {
+    const relay = new MockRelay()
+    const subscribe = createSubscribe(relay)
+
+    const deviceSecretKey = generateSecretKey()
+    const devicePublicKey = getPublicKey(deviceSecretKey)
+    const senderSecretKey = generateSecretKey()
+    const senderPublicKey = getPublicKey(senderSecretKey)
+
+    const invite = Invite.createNew(devicePublicKey, devicePublicKey, 1, {
+      purpose: "chat",
+      ownerPubkey: getPublicKey(generateSecretKey()),
+    })
+
+    const { session: senderSession, event: responseEvent } = await invite.accept(
+      subscribe,
+      senderPublicKey,
+      senderSecretKey,
+      senderPublicKey,
+    )
+
+    const decrypted = await decryptInviteResponse({
+      envelopeContent: responseEvent.content,
+      envelopeSenderPubkey: responseEvent.pubkey,
+      inviterEphemeralPrivateKey: invite.inviterEphemeralPrivateKey!,
+      inviterPrivateKey: deviceSecretKey,
+      sharedSecret: invite.sharedSecret,
+    })
+
+    const decryptingInactiveSession = createSessionFromAccept({
+      nostrSubscribe: subscribe,
+      theirPublicKey: decrypted.inviteeSessionPublicKey,
+      ourSessionPrivateKey: invite.inviterEphemeralPrivateKey!,
+      sharedSecret: invite.sharedSecret,
+      isSender: false,
+      name: responseEvent.id,
+    })
+
+    const establishedActiveSession = makeSession("established-active", {
+      canSend: true,
+      canReceive: true,
+      sendingChainMessageNumber: 1,
+      receivingChainMessageNumber: 1,
+    })
+
+    const messageQueue = new MessageQueue(
+      new InMemoryStorageAdapter(),
+      "v1/device-record-inactive-forward-test/",
+    )
+
+    const userHooks: DeviceRecordUserHooks = {
+      isDeviceAuthorized: vi.fn(() => false),
+      onDeviceRumor: vi.fn(),
+      onDeviceDirty: vi.fn(),
+    }
+
+    const nostr: NostrFacade = {
+      subscribe,
+      publish: vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
+        relay.storeAndDeliver(event as VerifiedEvent)
+      }),
+    }
+
+    const actor = new DeviceRecordActor(devicePublicKey, {
+      ownerPubkey: getPublicKey(generateSecretKey()),
+      user: userHooks,
+      nostr,
+      messageQueue,
+      ourDeviceId: senderPublicKey,
+      ourOwnerPubkey: getPublicKey(generateSecretKey()),
+      identityKey: senderSecretKey,
+    })
+
+    actor.installSession(establishedActiveSession)
+    actor.installSession(decryptingInactiveSession, true)
+
+    expect(actor.activeSession).toBe(establishedActiveSession)
+    expect(actor.inactiveSessions).toContain(decryptingInactiveSession)
+
+    const text = `inactive-session-forward-${Date.now()}`
+    const { event } = senderSession.send(text)
+    relay.storeAndDeliver(event)
+
+    await waitForSpyCall(() => {
+      expect(userHooks.onDeviceRumor).toHaveBeenCalledWith(
+        devicePublicKey,
+        expect.objectContaining({ content: text }),
+      )
+    })
+    expect(actor.activeSession).toBe(decryptingInactiveSession)
+  })
+
+  it("closes underlying session relay subscriptions when the device record is closed", async () => {
+    const relay = new MockRelay()
+    let activeSubscriptions = 0
+    const subscribe: NostrSubscribe = (filter, onEvent) => {
+      const handle = relay.subscribe(filter, onEvent)
+      activeSubscriptions += 1
+      return () => {
+        activeSubscriptions -= 1
+        handle.close()
+      }
+    }
+
+    const passiveSideSecretKey = generateSecretKey()
+    const passiveSidePublicKey = getPublicKey(passiveSideSecretKey)
+    const activeSideSecretKey = generateSecretKey()
+    const activeSidePublicKey = getPublicKey(activeSideSecretKey)
+
+    const invite = Invite.createNew(passiveSidePublicKey, passiveSidePublicKey, 1, {
+      purpose: "link",
+      ownerPubkey: passiveSidePublicKey,
+    })
+
+    const { event: responseEvent } = await invite.accept(
+      subscribe,
+      activeSidePublicKey,
+      activeSideSecretKey,
+      activeSidePublicKey,
+    )
+
+    const decrypted = await decryptInviteResponse({
+      envelopeContent: responseEvent.content,
+      envelopeSenderPubkey: responseEvent.pubkey,
+      inviterEphemeralPrivateKey: invite.inviterEphemeralPrivateKey!,
+      inviterPrivateKey: passiveSideSecretKey,
+      sharedSecret: invite.sharedSecret,
+    })
+
+    const passiveSession = createSessionFromAccept({
+      nostrSubscribe: subscribe,
+      theirPublicKey: decrypted.inviteeSessionPublicKey,
+      ourSessionPrivateKey: invite.inviterEphemeralPrivateKey!,
+      sharedSecret: invite.sharedSecret,
+      isSender: false,
+      name: responseEvent.id,
+    })
+
+    const messageQueue = new MessageQueue(
+      new InMemoryStorageAdapter(),
+      "v1/device-record-close-test/",
+    )
+
+    const userHooks: DeviceRecordUserHooks = {
+      isDeviceAuthorized: vi.fn(() => true),
+      onDeviceRumor: vi.fn(),
+      onDeviceDirty: vi.fn(),
+    }
+
+    const nostr: NostrFacade = {
+      subscribe,
+      publish: vi.fn(async () => undefined as never),
+    }
+
+    const actor = new DeviceRecordActor(passiveSidePublicKey, {
+      ownerPubkey: passiveSidePublicKey,
+      user: userHooks,
+      nostr,
+      messageQueue,
+      ourDeviceId: activeSidePublicKey,
+      ourOwnerPubkey: activeSidePublicKey,
+      identityKey: activeSideSecretKey,
+    })
+
+    actor.installSession(passiveSession)
+
+    expect(activeSubscriptions).toBeGreaterThan(0)
+
+    actor.close()
+
+    expect(activeSubscriptions).toBe(0)
   })
 })

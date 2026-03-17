@@ -31,7 +31,7 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
 }
 
 #[tokio::test]
-async fn test_chat_join_accepts_npub_link_and_creates_chat_without_sending_message() {
+async fn test_chat_join_accepts_npub_link_and_creates_chat_without_storing_a_message() {
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -81,19 +81,28 @@ async fn test_chat_join_accepts_npub_link_and_creates_chat_without_sending_messa
 
     sleep(Duration::from_millis(200)).await;
 
-    // Verify relay saw invite + response, but no message.
+    // Verify relay saw invite + response. Invite acceptance now emits a one-shot bootstrap
+    // typing event, so the relay may also see a single encrypted message-kind event here.
     let events = relay.events().await;
     assert!(events.iter().any(|e| e.kind == INVITE_EVENT_KIND));
     assert!(events.iter().any(|e| e.kind == INVITE_RESPONSE_KIND));
+    let message_event_count = events.iter().filter(|e| e.kind == MESSAGE_EVENT_KIND).count();
     assert!(
-        !events.iter().any(|e| e.kind == MESSAGE_EVENT_KIND),
-        "Expected no message events when only joining"
+        message_event_count <= 1,
+        "Expected at most one bootstrap message event when only joining, got {}",
+        message_event_count
     );
 
-    // Verify Alice stored the chat.
+    // Verify Alice stored the chat but did not persist any user-visible messages.
     let storage = ndr::storage::Storage::open(alice_dir.path()).unwrap();
-    let chat = storage.get_chat_by_pubkey(&bob_pubkey_hex).unwrap();
-    assert!(chat.is_some(), "Expected chat to be created");
+    let chat = storage
+        .get_chat_by_pubkey(&bob_pubkey_hex)
+        .unwrap()
+        .expect("Expected chat to be created");
+    assert!(
+        storage.get_messages(&chat.id, 10).unwrap().is_empty(),
+        "Expected no persisted chat messages when only joining"
+    );
 
     relay.stop().await;
 }

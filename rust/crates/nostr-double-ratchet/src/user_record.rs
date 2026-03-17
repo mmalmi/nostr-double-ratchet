@@ -206,9 +206,7 @@ impl UserRecord {
             .filter_map(|d| d.active_session.as_mut())
             .collect();
 
-        sessions.sort_by(|a, b| {
-            Self::session_priority(b).cmp(&Self::session_priority(a))
-        });
+        sessions.sort_by(|a, b| Self::session_priority(b).cmp(&Self::session_priority(a)));
 
         sessions
     }
@@ -278,8 +276,7 @@ mod tests {
         Session::new(
             SessionState {
                 root_key: [1u8; 32],
-                their_current_nostr_public_key: can_receive
-                    .then(|| their_current.public_key()),
+                their_current_nostr_public_key: can_receive.then(|| their_current.public_key()),
                 their_next_nostr_public_key: can_send
                     .then(|| their_next.public_key())
                     .or_else(|| can_receive.then(|| their_current.public_key())),
@@ -305,19 +302,9 @@ mod tests {
     #[test]
     fn upsert_session_keeps_bidirectional_session_active_over_send_only() {
         let mut user = UserRecord::new("peer".to_string());
-        let bidirectional = make_session(
-            true,
-            true,
-            1,
-            0,
-        );
+        let bidirectional = make_session(true, true, 1, 0);
         let bidirectional_state = bidirectional.state.clone();
-        let send_only = make_session(
-            true,
-            false,
-            0,
-            0,
-        );
+        let send_only = make_session(true, false, 0, 0);
         let send_only_state = send_only.state.clone();
 
         user.upsert_session(Some("device-a"), bidirectional);
@@ -325,7 +312,10 @@ mod tests {
 
         let device = user.device_records.get("device-a").expect("device");
         assert_eq!(
-            device.active_session.as_ref().map(|session| session.state.clone()),
+            device
+                .active_session
+                .as_ref()
+                .map(|session| session.state.clone()),
             Some(bidirectional_state),
         );
         assert_eq!(device.inactive_sessions.len(), 1);
@@ -335,19 +325,9 @@ mod tests {
     #[test]
     fn upsert_session_promotes_bidirectional_session_over_send_only() {
         let mut user = UserRecord::new("peer".to_string());
-        let send_only = make_session(
-            true,
-            false,
-            0,
-            0,
-        );
+        let send_only = make_session(true, false, 0, 0);
         let send_only_state = send_only.state.clone();
-        let bidirectional = make_session(
-            true,
-            true,
-            2,
-            1,
-        );
+        let bidirectional = make_session(true, true, 2, 1);
         let bidirectional_state = bidirectional.state.clone();
 
         user.upsert_session(Some("device-a"), send_only);
@@ -355,7 +335,10 @@ mod tests {
 
         let device = user.device_records.get("device-a").expect("device");
         assert_eq!(
-            device.active_session.as_ref().map(|session| session.state.clone()),
+            device
+                .active_session
+                .as_ref()
+                .map(|session| session.state.clone()),
             Some(bidirectional_state),
         );
         assert_eq!(device.inactive_sessions.len(), 1);

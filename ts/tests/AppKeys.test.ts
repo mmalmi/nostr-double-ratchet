@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
 import { AppKeys, DeviceEntry } from '../src/AppKeys'
 import { APP_KEYS_EVENT_KIND } from '../src/types'
+import type { NostrSubscribe } from '../src/types'
 
 describe('AppKeys', () => {
   /**
@@ -273,6 +274,57 @@ describe('AppKeys', () => {
       const merged = list1.merge(list2)
 
       expect(merged.getDevice(identityPubkey)?.createdAt).toBe(1000)
+    })
+  })
+
+  describe('waitFor', () => {
+    it('preserves the larger same-second AppKeys snapshot when events arrive out of order', async () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const firstDevice = createTestDevice()
+      const secondDevice = createTestDevice()
+      const createdAt = Math.floor(Date.now() / 1000)
+
+      const oldEvent = finalizeEvent(
+        {
+          kind: APP_KEYS_EVENT_KIND,
+          created_at: createdAt,
+          tags: [
+            ['d', 'double-ratchet/app-keys'],
+            ['version', '1'],
+            ['device', firstDevice.identityPubkey, String(firstDevice.createdAt)],
+          ],
+          content: '',
+        },
+        ownerPrivateKey
+      )
+
+      const newEvent = finalizeEvent(
+        {
+          kind: APP_KEYS_EVENT_KIND,
+          created_at: createdAt,
+          tags: [
+            ['d', 'double-ratchet/app-keys'],
+            ['version', '1'],
+            ['device', firstDevice.identityPubkey, String(firstDevice.createdAt)],
+            ['device', secondDevice.identityPubkey, String(secondDevice.createdAt)],
+          ],
+          content: '',
+        },
+        ownerPrivateKey
+      )
+
+      const nostrSubscribe: NostrSubscribe = (_filter, onEvent) => {
+        setTimeout(() => onEvent(newEvent), 0)
+        setTimeout(() => onEvent(oldEvent), 1)
+        return () => {}
+      }
+
+      const result = await AppKeys.waitFor(ownerPublicKey, nostrSubscribe, 20)
+      const devicePubkeys = result?.getAllDevices().map((device) => device.identityPubkey) ?? []
+
+      expect(devicePubkeys).toContain(firstDevice.identityPubkey)
+      expect(devicePubkeys).toContain(secondDevice.identityPubkey)
     })
   })
 

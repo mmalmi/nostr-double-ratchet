@@ -103,6 +103,120 @@ describe("SessionManager.acceptInvite", () => {
     await bobReceived
   })
 
+  it("publishes a bootstrap event after accepting an invite", async () => {
+    const relay = new MockRelay()
+
+    const bob = await createMockSessionManager("bob-device-1", relay)
+    const alice = await createMockSessionManager("alice-device-1", relay)
+
+    const invite = extractInviteForOwner(relay, bob.publicKey)
+    const messageEventCountBefore = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1060).length
+
+    await alice.manager.acceptInvite(invite, {
+      ownerPublicKey: bob.publicKey,
+    })
+
+    const messageEventsAfter = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1060)
+
+    expect(messageEventsAfter.length).toBeGreaterThan(messageEventCountBefore)
+  })
+
+  it("lets an unregistered same-owner device receive the inviter reply after sending first", async () => {
+    const relay = new MockRelay()
+
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const invite = Invite.createNew(ownerPublicKey, ownerPublicKey, 1, {
+      ownerPubkey: ownerPublicKey,
+    })
+
+    const ownerPublish = createRelayPublish(relay, ownerSecretKey)
+    const ownerManager = new SessionManager(
+      ownerPublicKey,
+      ownerSecretKey,
+      ownerPublicKey,
+      createRelaySubscribe(relay),
+      ownerPublish,
+      ownerPublicKey,
+      {
+        ephemeralKeypair: {
+          publicKey: invite.inviterEphemeralPublicKey,
+          privateKey: invite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: invite.sharedSecret,
+      },
+      new InMemoryStorageAdapter()
+    )
+    await ownerManager.init()
+
+    const ownerAppKeys = new AppKeys()
+    ownerAppKeys.addDevice({ identityPubkey: ownerPublicKey, createdAt: Math.floor(Date.now() / 1000) })
+    relay.storeAndDeliver(
+      finalizeEvent(ownerAppKeys.getEvent(ownerPublicKey), ownerSecretKey) as VerifiedEvent
+    )
+
+    const webDeviceSecretKey = generateSecretKey()
+    const webDevicePublicKey = getPublicKey(webDeviceSecretKey)
+    const webManager = new SessionManager(
+      webDevicePublicKey,
+      webDeviceSecretKey,
+      webDevicePublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, webDeviceSecretKey),
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter()
+    )
+    await webManager.init()
+
+    const accepted = await webManager.acceptInvite(invite, {
+      ownerPublicKey,
+    })
+    expect(accepted.ownerPublicKey).toBe(ownerPublicKey)
+    expect(accepted.deviceId).toBe(ownerPublicKey)
+
+    const firstMessage = `first-from-unregistered-${Date.now()}`
+    const ownerReceivedFrom = new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for owner to receive first self-chat message")),
+        10_000
+      )
+      const unsubscribe = ownerManager.onEvent((event, fromPubkey) => {
+        if (event.content !== firstMessage) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve(fromPubkey)
+      })
+    })
+
+    await webManager.sendMessage(ownerPublicKey, firstMessage)
+    const replyTarget = await ownerReceivedFrom
+
+    const replyMessage = `reply-to-unregistered-${Date.now()}`
+    const webReceivedReply = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for unregistered device to receive inviter reply")),
+        10_000
+      )
+      const unsubscribe = webManager.onEvent((event) => {
+        if (event.content !== replyMessage) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await ownerManager.sendMessage(replyTarget, replyMessage)
+    await webReceivedReply
+  })
+
   it("accepts link invite for owner even before new device appears in owner AppKeys", async () => {
     const relay = new MockRelay()
 
@@ -163,7 +277,7 @@ describe("SessionManager.acceptInvite", () => {
     expect(Array.from(fallbackRecord!.devices.keys())).toContain(unknownBobDevicePubkey)
   })
 
-  it("refreshes an unused send-only session when the same invite is replayed", async () => {
+  it("ignores a replayed invite once the initial accept bootstrap has used the session", async () => {
     const relay = new MockRelay()
 
     const alice = await createMockSessionManager("alice-device-1", relay)
@@ -192,10 +306,9 @@ describe("SessionManager.acceptInvite", () => {
     const inviteResponsesAfterReplay = relay
       .getAllEvents()
       .filter((event) => event.kind === 1059).length
-    expect(inviteResponsesAfterReplay).toBe(inviteResponsesBeforeReplay + 1)
-    expect(replayedAccepted.session).not.toBe(firstAccepted.session)
-    expect(deviceRecord?.activeSession).toBe(replayedAccepted.session)
-    expect(deviceRecord?.inactiveSessions).toContain(firstAccepted.session)
+    expect(inviteResponsesAfterReplay).toBe(inviteResponsesBeforeReplay)
+    expect(replayedAccepted.session).toBe(firstAccepted.session)
+    expect(deviceRecord?.activeSession).toBe(firstAccepted.session)
   })
 
   it("ignores a replayed invite after the send-only session has been used", async () => {
@@ -320,4 +433,49 @@ describe("SessionManager.acceptInvite", () => {
     expect(decrypted.inviteeIdentity).toBe(aliceDeviceIdentity)
     expect(decrypted.ownerPublicKey).toBe(alice.publicKey)
   })
+
+  it("installs a deferred invite response once the sender AppKeys become available", async () => {
+    const relay = new MockRelay()
+
+    const bob = await createMockSessionManager("bob-device-1", relay)
+    const aliceOwner = await createMockSessionManager("alice-device-1", relay)
+    const aliceLinked = await createMockSessionManager(
+      "alice-device-2",
+      relay,
+      aliceOwner.secretKey
+    )
+
+    const invite = extractInviteForOwner(relay, bob.publicKey)
+
+    // Simulate a real race where the invite response arrives before the sender's AppKeys
+    // are fetchable from the relay.
+    relay.clearEvents()
+
+    await aliceLinked.manager.acceptInvite(invite, {
+      ownerPublicKey: bob.publicKey,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 2200))
+
+    const aliceLinkedIdentity = aliceLinked.appKeysManager
+      .getOwnDevices()
+      .at(-1)
+      ?.identityPubkey
+    expect(aliceLinkedIdentity).toBeTruthy()
+
+    const bobRecordBeforeRetry = bob.manager.getUserRecords().get(aliceOwner.publicKey)
+    expect(bobRecordBeforeRetry?.devices.has(aliceLinkedIdentity!)).not.toBe(true)
+
+    await aliceLinked.appKeysManager.publish()
+    await bob.manager.setupUser(aliceOwner.publicKey)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    const bobRecordAfterRetry = bob.manager.getUserRecords().get(aliceOwner.publicKey)
+    expect(bobRecordAfterRetry).toBeDefined()
+    const retriedDeviceRecord = bobRecordAfterRetry?.devices.get(aliceLinkedIdentity!)
+    expect(retriedDeviceRecord).toBeDefined()
+    expect(
+      Boolean(retriedDeviceRecord?.activeSession) ||
+      (retriedDeviceRecord?.inactiveSessions.length ?? 0) > 0
+    ).toBe(true)
+  }, 15_000)
 })

@@ -10,6 +10,15 @@ import {
 } from "./inviteUtils";
 
 const now = () => Math.round(Date.now() / 1000)
+const PUBLIC_INVITE_D_TAG = "double-ratchet/invites/public"
+
+function getInviteDTag(event: VerifiedEvent): string | undefined {
+    return event.tags.find(([key]) => key === 'd')?.[1]
+}
+
+function isPublicInviteEvent(event: VerifiedEvent): boolean {
+    return getInviteDTag(event) === PUBLIC_INVITE_D_TAG
+}
 
 export type InvitePurpose = "chat" | "link"
 
@@ -161,7 +170,8 @@ export class Invite {
 
         // Extract deviceId from the "d" tag (format: double-ratchet/invites/<deviceId>)
         const deviceTag = tags.find(([key]) => key === 'd')?.[1]
-        const deviceId = deviceTag?.split('/')?.[2]
+        const rawDeviceId = deviceTag?.split('/')?.[2]
+        const deviceId = rawDeviceId === 'public' ? undefined : rawDeviceId
 
         if (!inviterEphemeralPublicKey || !sharedSecret) {
             throw new Error("Invalid invite event: missing session key or sharedSecret");
@@ -183,18 +193,103 @@ export class Invite {
             "#l": ["double-ratchet/invites"]
         };
         const seenIds = new Set<string>()
+        let latestPublic: { invite: Invite; createdAt: number; eventId: string } | null = null
+        let latestOther: { invite: Invite; createdAt: number; eventId: string } | null = null
+        let emittedEventId: string | null = null
+        let settleTimer: ReturnType<typeof setTimeout> | null = null
+
+        const preferredInvite = () => latestPublic ?? latestOther
+        const scheduleEmit = () => {
+            if (settleTimer) {
+                clearTimeout(settleTimer)
+            }
+            settleTimer = setTimeout(() => {
+                settleTimer = null
+                const next = preferredInvite()
+                if (!next || next.eventId === emittedEventId) {
+                    return
+                }
+                emittedEventId = next.eventId
+                onInvite(next.invite)
+            }, 100)
+        }
+
         const unsub = subscribe(filter, (event) => {
             if (event.pubkey !== user) return;
             if (seenIds.has(event.id)) return
             seenIds.add(event.id)
             try {
                 const inviteLink = Invite.fromEvent(event);
-                onInvite(inviteLink);
+                const candidate = {
+                    invite: inviteLink,
+                    createdAt: event.created_at,
+                    eventId: event.id,
+                }
+                if (isPublicInviteEvent(event)) {
+                    if (!latestPublic || event.created_at >= latestPublic.createdAt) {
+                        latestPublic = candidate
+                    }
+                } else if (!latestOther || event.created_at >= latestOther.createdAt) {
+                    latestOther = candidate
+                }
+                scheduleEmit()
             } catch {
             }
         });
 
-        return unsub;
+        return () => {
+            if (settleTimer) {
+                clearTimeout(settleTimer)
+                settleTimer = null
+            }
+            unsub()
+        };
+    }
+
+    static waitFor(
+        user: string,
+        subscribe: NostrSubscribe,
+        timeoutMs = 500
+    ): Promise<Invite | null> {
+        return new Promise((resolve) => {
+            let latestPublic: { invite: Invite; createdAt: number } | null = null
+            let latestOther: { invite: Invite; createdAt: number } | null = null
+            const preferredInvite = () => latestPublic?.invite ?? latestOther?.invite ?? null
+
+            const timeout = setTimeout(() => {
+                unsubscribe()
+                resolve(preferredInvite())
+            }, timeoutMs)
+
+            const unsubscribe = subscribe(
+                {
+                    kinds: [INVITE_EVENT_KIND],
+                    authors: [user],
+                    "#l": ["double-ratchet/invites"],
+                },
+                (event) => {
+                    if (event.pubkey !== user) return
+                    try {
+                        const invite = Invite.fromEvent(event)
+                        if (isPublicInviteEvent(event)) {
+                            if (!latestPublic || event.created_at >= latestPublic.createdAt) {
+                                latestPublic = { invite, createdAt: event.created_at }
+                            }
+                        } else if (!latestOther || event.created_at >= latestOther.createdAt) {
+                            latestOther = { invite, createdAt: event.created_at }
+                        }
+                    } catch {
+                        // Ignore invalid or tombstoned invites.
+                    }
+
+                    clearTimeout(timeout)
+                    setTimeout(() => {
+                        unsubscribe()
+                        resolve(preferredInvite())
+                    }, 100)
+                }
+            )
+        })
     }
 
     /**

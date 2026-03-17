@@ -928,6 +928,25 @@ impl SessionManager {
 
             self.pubsub.publish_signed(response_event)?;
 
+            let invite_bootstrap = {
+                let now_s = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let expiration =
+                    Tag::parse(&[crate::EXPIRATION_TAG.to_string(), now_s.to_string()]).ok();
+                expiration.and_then(|expiration| {
+                    self.build_message_event(
+                        owner_pubkey,
+                        crate::TYPING_KIND,
+                        "typing".to_string(),
+                        vec![expiration],
+                    )
+                    .ok()
+                    .and_then(|bootstrap| session.send_event(bootstrap).ok())
+                })
+            };
+
             session.set_pubsub(self.pubsub.clone());
             let _ = session.subscribe_to_messages();
 
@@ -971,6 +990,9 @@ impl SessionManager {
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             let _ = self.store_user_record(&owner_pubkey);
             self.send_message_history(owner_pubkey, &device_id);
+            if let Some(invite_bootstrap) = invite_bootstrap {
+                let _ = self.pubsub.publish_signed(invite_bootstrap);
+            }
             if is_owner_side_link_invite {
                 self.send_link_bootstrap(owner_pubkey, &device_id);
             }
@@ -2699,6 +2721,36 @@ mod tests {
         out
     }
 
+    fn sign_app_keys_event_with_created_at(
+        app_keys: &AppKeys,
+        owner_pubkey: PublicKey,
+        owner_keys: &Keys,
+        created_at: u64,
+    ) -> nostr::Event {
+        let mut tags = Vec::new();
+        tags.push(
+            nostr::Tag::parse(&["d".to_string(), "double-ratchet/app-keys".to_string()]).unwrap(),
+        );
+        tags.push(nostr::Tag::parse(&["version".to_string(), "1".to_string()]).unwrap());
+        for device in app_keys.get_all_devices() {
+            tags.push(
+                nostr::Tag::parse(&[
+                    "device".to_string(),
+                    hex::encode(device.identity_pubkey.to_bytes()),
+                    device.created_at.to_string(),
+                ])
+                .unwrap(),
+            );
+        }
+
+        nostr::EventBuilder::new(nostr::Kind::from(crate::APP_KEYS_EVENT_KIND as u16), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .build(owner_pubkey)
+            .sign_with_keys(owner_keys)
+            .unwrap()
+    }
+
     fn test_session_state() -> crate::SessionState {
         let their_current = Keys::generate().public_key();
         let their_next = Keys::generate().public_key();
@@ -3401,6 +3453,44 @@ mod tests {
     }
 
     #[test]
+    fn accept_invite_publishes_bootstrap_message_event() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_keys = Keys::generate();
+        let bob_pubkey = bob_keys.public_key();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(storage),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        let invite = Invite::create_new(bob_pubkey, Some(bob_pubkey.to_hex()), Some(1)).unwrap();
+        let accepted = manager.accept_invite(&invite, Some(bob_pubkey));
+        assert!(accepted.is_ok(), "accept_invite should succeed for single-device peer");
+
+        let events = drain_events(&rx);
+        assert!(
+            events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "expected a bootstrap message event after invite acceptance"
+        );
+    }
+
+    #[test]
     fn owner_side_link_invite_accepts_new_device_not_yet_in_stored_appkeys_after_restart() {
         let owner_keys = Keys::generate();
         let owner_pubkey = owner_keys.public_key();
@@ -3588,10 +3678,12 @@ mod tests {
         let mut app_keys_two = AppKeys::new(vec![]);
         app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
         app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
-        let app_keys_two_event = app_keys_two
-            .get_event(bob_owner_pubkey)
-            .sign_with_keys(&bob_owner_keys)
-            .unwrap();
+        let app_keys_two_event = sign_app_keys_event_with_created_at(
+            &app_keys_two,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            1,
+        );
         manager.process_received_event(app_keys_two_event);
         let _ = drain_events(&rx);
 
@@ -3618,10 +3710,12 @@ mod tests {
         // Replace AppKeys with only device1 (device2 revoked).
         let mut app_keys_one = AppKeys::new(vec![]);
         app_keys_one.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 3));
-        let app_keys_one_event = app_keys_one
-            .get_event(bob_owner_pubkey)
-            .sign_with_keys(&bob_owner_keys)
-            .unwrap();
+        let app_keys_one_event = sign_app_keys_event_with_created_at(
+            &app_keys_one,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            2,
+        );
         manager.process_received_event(app_keys_one_event);
 
         assert_eq!(
@@ -3898,10 +3992,12 @@ mod tests {
         let mut app_keys_two = AppKeys::new(vec![]);
         app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
         app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
-        let app_keys_two_event = app_keys_two
-            .get_event(bob_owner_pubkey)
-            .sign_with_keys(&bob_owner_keys)
-            .unwrap();
+        let app_keys_two_event = sign_app_keys_event_with_created_at(
+            &app_keys_two,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            1,
+        );
         manager.process_received_event(app_keys_two_event);
         assert!(
             count_queue_entries(
@@ -3916,10 +4012,12 @@ mod tests {
         // Revoke device2 by AppKeys replacement. Retry path should keep only device1.
         let mut app_keys_one = AppKeys::new(vec![]);
         app_keys_one.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 3));
-        let app_keys_one_event = app_keys_one
-            .get_event(bob_owner_pubkey)
-            .sign_with_keys(&bob_owner_keys)
-            .unwrap();
+        let app_keys_one_event = sign_app_keys_event_with_created_at(
+            &app_keys_one,
+            bob_owner_pubkey,
+            &bob_owner_keys,
+            2,
+        );
         manager.process_received_event(app_keys_one_event.clone());
         manager.process_received_event(app_keys_one_event);
 

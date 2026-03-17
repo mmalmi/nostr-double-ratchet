@@ -17,8 +17,10 @@ export class DeviceRecordActor implements DeviceRecordShape {
 
   private ensurePromise?: Promise<void>
   private inviteSubscription?: Unsubscribe
-  private sessionSubscriptions: Map<string, Unsubscribe> = new Map()
+  private sessionSubscriptions: Map<string, { session: Session; unsubscribe: Unsubscribe }> = new Map()
   private inviteAcceptancePromise?: Promise<Session>
+  private inviteBackfillPromise?: Promise<void>
+  private hasAttemptedInviteBackfill = false
 
   constructor(
     public readonly deviceId: string,
@@ -62,6 +64,40 @@ export class DeviceRecordActor implements DeviceRecordShape {
     ]
   }
 
+  private detachSession(session: Session): void {
+    const existing = this.sessionSubscriptions.get(session.name)
+    if (existing?.session === session) {
+      existing.unsubscribe()
+      this.sessionSubscriptions.delete(session.name)
+    }
+    session.close()
+  }
+
+  private pruneDuplicateSessions(session: Session): void {
+    if (this.activeSession && this.activeSession !== session && this.activeSession.name === session.name) {
+      const staleActive = this.activeSession
+      this.activeSession = undefined
+      this.detachSession(staleActive)
+    }
+
+    const staleInactive = this.inactiveSessions.filter(
+      (candidate) => candidate !== session && candidate.name === session.name
+    )
+    this.inactiveSessions = this.inactiveSessions.filter(
+      (candidate) => candidate === session || candidate.name !== session.name
+    )
+    for (const staleSession of staleInactive) {
+      this.detachSession(staleSession)
+    }
+
+    const existingSubscription = this.sessionSubscriptions.get(session.name)
+    if (existingSubscription && existingSubscription.session !== session) {
+      existingSubscription.unsubscribe()
+      existingSubscription.session.close()
+      this.sessionSubscriptions.delete(session.name)
+    }
+  }
+
   hasEstablishedActiveSession(): boolean {
     if (!this.activeSession) {
       return false
@@ -102,11 +138,23 @@ export class DeviceRecordActor implements DeviceRecordShape {
       return
     }
 
+    if (this.inactiveSessions.length > 0) {
+      this.ensureInviteSubscription()
+      this.state = "waiting-for-invite"
+      return
+    }
+
     if (this.deviceId === this.deps.ourDeviceId) {
       return
     }
 
     this.ensureInviteSubscription()
+    await this.ensureInviteBackfill()
+    if (this.activeSession) {
+      this.state = "session-ready"
+      await this.flushMessageQueue()
+      return
+    }
     this.state = "waiting-for-invite"
   }
 
@@ -124,6 +172,30 @@ export class DeviceRecordActor implements DeviceRecordShape {
     )
   }
 
+  private ensureInviteBackfill(): Promise<void> {
+    if (this.state === "revoked" || this.hasAttemptedInviteBackfill) {
+      return Promise.resolve()
+    }
+    if (this.inviteBackfillPromise) {
+      return this.inviteBackfillPromise
+    }
+
+    this.hasAttemptedInviteBackfill = true
+    this.inviteBackfillPromise = this.doInviteBackfill().finally(() => {
+      this.inviteBackfillPromise = undefined
+    })
+    return this.inviteBackfillPromise
+  }
+
+  private async doInviteBackfill(): Promise<void> {
+    const invite = await Invite.waitFor(this.deviceId, this.deps.nostr.subscribe, 1000).catch(() => null)
+    if (!invite) {
+      return
+    }
+
+    await this.acceptInvite(invite).catch(() => {})
+  }
+
   acceptInvite(invite: Invite): Promise<Session> {
     if (this.state === "revoked") {
       return Promise.reject(new Error("Device is revoked"))
@@ -135,6 +207,10 @@ export class DeviceRecordActor implements DeviceRecordShape {
     }
 
     if (this.hasEstablishedActiveSession()) {
+      return Promise.resolve(this.activeSession!)
+    }
+
+    if (this.activeSession && DeviceRecordActor.sessionCanSend(this.activeSession)) {
       return Promise.resolve(this.activeSession!)
     }
 
@@ -164,6 +240,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
       )
       await this.deps.nostr.publish(event)
       this.installSession(session, false, { preferActive: true })
+      await this.publishInviteBootstrap(session)
       this.state = "session-ready"
       await this.flushMessageQueue()
       return session
@@ -173,21 +250,52 @@ export class DeviceRecordActor implements DeviceRecordShape {
     }
   }
 
+  private async publishInviteBootstrap(session: Session): Promise<void> {
+    try {
+      const { event } = session.sendTyping({
+        expiresAt: Math.floor(Date.now() / 1000),
+      })
+      await this.deps.nostr.publish(event)
+    } catch {
+      // Invite acceptance itself already established the session. If the bootstrap
+      // cannot be published, queued messages will still flush on the next inbound event.
+    }
+  }
+
   installSession(
     session: Session,
     inactive = false,
     options: { persist?: boolean; preferActive?: boolean } = {}
   ): void {
     const { persist = true, preferActive = false } = options
-    const promoteToActive = (nextSession: Session) => {
+    this.pruneDuplicateSessions(session)
+
+    const promoteToActive = (
+      nextSession: Session,
+      promotionOptions: { force?: boolean } = {}
+    ) => {
+      const { force = false } = promotionOptions
       const current = this.activeSession
       if (current === nextSession || current?.name === nextSession.name) {
+        this.activeSession = nextSession
+        this.inactiveSessions = this.inactiveSessions.filter(
+          (s) => s !== nextSession && s.name !== nextSession.name
+        )
         return
       }
 
       this.inactiveSessions = this.inactiveSessions.filter(
         (s) => s !== nextSession && s.name !== nextSession.name
       )
+
+      if (force) {
+        if (current) {
+          this.inactiveSessions.unshift(current)
+        }
+        this.activeSession = nextSession
+        this.trimInactiveSessions()
+        return
+      }
 
       const shouldReplaceUnestablishedActive =
         preferActive &&
@@ -228,21 +336,26 @@ export class DeviceRecordActor implements DeviceRecordShape {
     if (!this.sessionSubscriptions.has(session.name)) {
       const unsub = session.onEvent((event) => {
         const owner = this.deps.ownerPubkey
+        const isKnownInstalledSession =
+          this.activeSession?.name === session.name ||
+          this.inactiveSessions.some((s) => s === session || s.name === session.name)
         const isAuthorizedDevice =
           owner === this.deviceId ||
           this.deps.user.isDeviceAuthorized(this.deviceId) ||
-          this.activeSession?.name === session.name
+          isKnownInstalledSession
         if (!isAuthorizedDevice) {
           return
         }
 
+        // A session that successfully decrypts a rumor is the live session, even if
+        // AppKeys propagation or previous priority ordering has not caught up yet.
+        promoteToActive(session, { force: true })
         this.deps.user.onDeviceRumor(this.deviceId, event)
-        promoteToActive(session)
         this.state = "session-ready"
         this.flushMessageQueue().catch(() => {})
         this.deps.user.onDeviceDirty()
       })
-      this.sessionSubscriptions.set(session.name, unsub)
+      this.sessionSubscriptions.set(session.name, { session, unsubscribe: unsub })
     }
 
     if (this.activeSession) {
@@ -260,11 +373,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
     }
     const removed = this.inactiveSessions.splice(DeviceRecordActor.MAX_INACTIVE_SESSIONS)
     for (const session of removed) {
-      const unsub = this.sessionSubscriptions.get(session.name)
-      if (unsub) {
-        unsub()
-        this.sessionSubscriptions.delete(session.name)
-      }
+      this.detachSession(session)
     }
   }
 
@@ -312,9 +421,20 @@ export class DeviceRecordActor implements DeviceRecordShape {
     this.inviteSubscription?.()
     this.inviteSubscription = undefined
 
-    for (const unsubscribe of this.sessionSubscriptions.values()) {
-      unsubscribe()
+    const sessions = new Set<Session>()
+    if (this.activeSession) {
+      sessions.add(this.activeSession)
     }
+    for (const session of this.inactiveSessions) {
+      sessions.add(session)
+    }
+    for (const binding of this.sessionSubscriptions.values()) {
+      sessions.add(binding.session)
+    }
+    for (const session of sessions) {
+      this.detachSession(session)
+    }
+
     this.sessionSubscriptions.clear()
   }
 }

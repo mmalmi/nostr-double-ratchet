@@ -23,7 +23,7 @@ import {
   createSessionFromAccept,
   decryptInviteResponse,
 } from "../src/inviteUtils";
-import { INVITE_RESPONSE_KIND } from "../src/types";
+import { INVITE_RESPONSE_KIND, TYPING_KIND } from "../src/types";
 
 // Force flush stdout for each line
 const log = (msg: string) => {
@@ -136,6 +136,11 @@ async function main() {
 
     // Listen for messages on this session
     session.onEvent((msg) => {
+      if (msg.kind === TYPING_KIND) {
+        log(`E2E_TYPING_RECEIVED:${msg.content}`);
+        return;
+      }
+
       log(`E2E_MESSAGE_RECEIVED:${msg.content}`);
       receivedMessages.push(msg.content);
 

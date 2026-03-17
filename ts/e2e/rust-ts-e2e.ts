@@ -16,6 +16,7 @@ import WebSocket from "ws";
 
 import { Invite } from "../src/Invite";
 import { Session } from "../src/Session";
+import { TYPING_KIND } from "../src/types";
 
 const log = (msg: string) => {
   process.stdout.write(msg + "\n");
@@ -133,6 +134,11 @@ async function main() {
   // Listen for messages from ndr
   const receivedMessages: string[] = [];
   session.onEvent((msg) => {
+    if (msg.kind === TYPING_KIND) {
+      log(`E2E_TYPING_RECEIVED:${msg.content}`);
+      return;
+    }
+
     log(`E2E_MESSAGE_RECEIVED:${msg.content}`);
     receivedMessages.push(msg.content);
   });

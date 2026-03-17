@@ -72,10 +72,11 @@ export class UserRecordActor implements UserRecordShape {
 
   ensureSetup(): Promise<void> {
     if (this.state === "ready") {
-      for (const deviceId of this.getTargetDeviceIds()) {
-        this.ensureDevice(deviceId).ensureSetup().catch(() => {})
-      }
-      return Promise.resolve()
+      return Promise.all(
+        this.getTargetDeviceIds().map((deviceId) =>
+          this.ensureDevice(deviceId).ensureSetup().catch(() => {})
+        )
+      ).then(() => {})
     }
     if (this.setupPromise) {
       return this.setupPromise
@@ -130,9 +131,11 @@ export class UserRecordActor implements UserRecordShape {
 
     await this.expandDiscoveryQueue()
 
-    for (const deviceId of this.getTargetDeviceIds()) {
-      this.devices.get(deviceId)?.ensureSetup().catch(() => {})
-    }
+    await Promise.all(
+      this.getTargetDeviceIds().map((deviceId) =>
+        this.devices.get(deviceId)?.ensureSetup().catch(() => {})
+      )
+    )
 
     this.setState("ready")
     this.onDeviceDirty()
@@ -150,10 +153,16 @@ export class UserRecordActor implements UserRecordShape {
         "#d": ["double-ratchet/app-keys"],
       },
       (event) => {
-        if (event.created_at < this.latestAppKeysCreatedAt) return
-        this.latestAppKeysCreatedAt = event.created_at
         try {
           const appKeys = AppKeys.fromEvent(event)
+          if (event.created_at < this.latestAppKeysCreatedAt) return
+
+          if (event.created_at === this.latestAppKeysCreatedAt && this.appKeys) {
+            this.onAppKeys(this.appKeys.merge(appKeys)).catch(() => {})
+            return
+          }
+
+          this.latestAppKeysCreatedAt = event.created_at
           this.onAppKeys(appKeys).catch(() => {})
         } catch {
           // Ignore invalid AppKeys events.

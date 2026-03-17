@@ -244,7 +244,7 @@ fn test_accept_invite_routes_session_under_claimed_owner() -> Result<()> {
 }
 
 #[test]
-fn test_repeated_invite_refreshes_send_only_device_session() -> Result<()> {
+fn test_replayed_invite_is_ignored_once_accept_bootstrap_uses_session() -> Result<()> {
     let alice_keys = Keys::generate();
     let alice_pubkey = alice_keys.public_key();
     let alice_device_id = alice_pubkey.to_hex();
@@ -284,26 +284,24 @@ fn test_repeated_invite_refreshes_send_only_device_session() -> Result<()> {
 
     let first_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
     assert!(first_accept.created_new_session);
-    let _first_response =
-        recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
-    drain_events(&bob_rx);
-
-    let refreshed_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
-    assert!(
-        refreshed_accept.created_new_session,
-        "replayed invite should refresh an existing send-only device session",
-    );
-
-    let refreshed_response =
-        recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (first_response, _) = recv_invite_response_and_message_event(&bob_rx);
     let (peer_pubkey, remote_device_id) = import_session_from_response(
         &invite,
         alice_keys.secret_key().to_secret_bytes(),
         &alice_mgr,
-        &refreshed_response,
+        &first_response,
     )?;
     assert_eq!(peer_pubkey, bob_pubkey);
     assert_eq!(remote_device_id, bob_device_id);
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    let refreshed_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    assert!(
+        !refreshed_accept.created_new_session,
+        "accept_invite bootstrap should consume the send-only session so replayed invites are ignored",
+    );
+    drain_events(&bob_rx);
 
     bob_mgr.send_text(alice_pubkey, "fresh response can decrypt".to_string(), None)?;
     let sent = recv_message_events(&bob_rx, 1);
@@ -481,6 +479,7 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
     )?;
     assert_eq!(alice_peer_pubkey, alice_pubkey);
     assert_eq!(alice_remote_device_id, alice_device_id);
+    drain_events(&alice_rx);
 
     let upgraded_sendable = alice_mgr
         .export_active_sessions()
@@ -887,6 +886,7 @@ fn test_existing_peer_fans_out_to_newly_added_device_after_appkeys_and_invite() 
     let owner_response =
         recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     alice_owner_mgr.process_received_event(owner_response);
+    drain_events(&bob_rx);
 
     bob_mgr.send_text(alice_owner_pubkey, "seed existing chat".to_string(), None)?;
     let seed_message = recv_message_events(&bob_rx, 1)
@@ -1129,6 +1129,17 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         accepted.created_new_session,
         "expected linked sender to create a direct bob-owner session from the public invite",
     );
+    let bob_owner_direct_response =
+        recv_signed_event_of_kind(&alice_linked_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    let (bob_owner_direct_peer, bob_owner_direct_device_id) = import_session_from_response(
+        &bob_owner_public_invite,
+        bob_owner_keys.secret_key().to_secret_bytes(),
+        &bob_owner_mgr,
+        &bob_owner_direct_response,
+    )?;
+    assert_eq!(bob_owner_direct_peer, alice_owner_pubkey);
+    assert_eq!(bob_owner_direct_device_id, alice_new_device_id);
+    drain_events(&alice_linked_rx);
     drain_events(&alice_owner_rx);
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
@@ -1230,18 +1241,6 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
             .get_event()?
             .sign_with_keys(&bob_owner_keys)?,
     );
-    let restarted_bob_owner_response = recv_signed_event_of_kind(
-        &alice_linked_restarted_rx,
-        nostr_double_ratchet::INVITE_RESPONSE_KIND,
-    );
-    let (restarted_bob_owner_peer, restarted_bob_owner_device_id) = import_session_from_response(
-        &bob_owner_public_invite,
-        bob_owner_keys.secret_key().to_secret_bytes(),
-        &bob_owner_mgr,
-        &restarted_bob_owner_response,
-    )?;
-    assert_eq!(restarted_bob_owner_peer, alice_owner_pubkey);
-    assert_eq!(restarted_bob_owner_device_id, alice_new_device_id);
     alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone());
     alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone());
     drain_events(&alice_linked_restarted_rx);

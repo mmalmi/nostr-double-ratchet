@@ -214,7 +214,9 @@ impl Invite {
             .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"))
             .and_then(|t| t.as_slice().get(1).map(|s| s.to_string()));
 
-        let device_id = device_tag.and_then(|d| d.split('/').nth(2).map(String::from));
+        let device_id = device_tag
+            .and_then(|d| d.split('/').nth(2).map(String::from))
+            .filter(|device_id| device_id != "public");
 
         let inviter_ephemeral_public_key = crate::utils::pubkey_from_hex(&ephemeral_key)?;
         let shared_secret_bytes = hex::decode(&shared_secret_hex)?;
@@ -542,5 +544,35 @@ impl Invite {
             device_id,
             owner_public_key,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Invite;
+    use nostr::Keys;
+
+    #[test]
+    fn from_event_preserves_device_scoped_invites() {
+        let keys = Keys::generate();
+        let device_id = keys.public_key().to_hex();
+        let invite = Invite::create_new(keys.public_key(), Some(device_id.clone()), None).unwrap();
+        let event = invite.get_event().unwrap().sign_with_keys(&keys).unwrap();
+
+        let parsed = Invite::from_event(&event).unwrap();
+
+        assert_eq!(parsed.device_id, Some(device_id));
+    }
+
+    #[test]
+    fn from_event_maps_public_invites_back_to_inviter_device() {
+        let keys = Keys::generate();
+        let invite = Invite::create_new(keys.public_key(), Some("public".to_string()), None).unwrap();
+        let event = invite.get_event().unwrap().sign_with_keys(&keys).unwrap();
+
+        let parsed = Invite::from_event(&event).unwrap();
+
+        assert_eq!(parsed.device_id, None);
+        assert_eq!(parsed.inviter, keys.public_key());
     }
 }
