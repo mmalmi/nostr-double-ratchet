@@ -19,6 +19,28 @@ Rust implementation and tooling for Double Ratchet messaging on Nostr.
 - Inner rumor `pubkey` is not used as a trusted sender identity source.
 - Inner rumors are unsigned, giving plausible deniability rather than non-repudiation.
 
+## Shared Multi-Device Helpers
+
+Prefer the shared helper functions in `nostr-double-ratchet` over local policy copies in apps,
+CLI commands, or FFI wrappers.
+
+- `apply_app_keys_snapshot(...)`: orders AppKeys by `created_at`, ignores stale snapshots, and
+  merges same-second snapshots monotonically.
+- `select_latest_app_keys_from_events(...)`: converges a relay/event history into the latest
+  monotonic AppKeys view.
+- `evaluate_device_registration_state(...)`: centralizes readiness and device-registration
+  decisions.
+- `should_require_relay_registration_confirmation(...)`: distinguishes first-device bootstrap from
+  adding a new device to an existing owner timeline.
+- `resolve_invite_owner_routing(...)`: keeps invite owner/device attribution consistent,
+  including link bootstrap and fallback-to-device routing.
+
+AppKeys should be treated as an authorization timeline. Reduced AppKeys sets should only be
+published for explicit revocation or first-device bootstrap. Imported owner-key logins on a fresh
+device should either register that device or remain explicitly single-device. First-device
+bootstrap can proceed from locally published AppKeys; public-invite fanout for additional devices
+should wait until relays reflect the updated AppKeys snapshot.
+
 ## Group Model
 
 - Group membership is represented by owner pubkeys.
@@ -54,6 +76,13 @@ cargo test -p ndr --manifest-path rust/Cargo.toml
 cargo test -p ndr --test e2e_crosslang --manifest-path rust/Cargo.toml
 cargo test -p ndr --test e2e_group_crosslang --manifest-path rust/Cargo.toml
 ```
+
+## Multi-Device Test Policy
+
+- Keep one explicit same-second AppKeys regression in the core library tests.
+- Normal CLI and client interop tests should avoid same-second AppKeys publication unless they are
+  intentionally testing that edge case.
+- Keep `ndr` in the heterogeneous-client matrix, not only library-level tests.
 
 ## Publishing
 

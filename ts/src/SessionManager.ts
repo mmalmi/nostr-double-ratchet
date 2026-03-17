@@ -4,7 +4,6 @@ import {
   NostrPublish,
   Rumor,
   Unsubscribe,
-  APP_KEYS_EVENT_KIND,
   CHAT_MESSAGE_KIND,
   CHAT_SETTINGS_KIND,
   RECEIPT_KIND,
@@ -15,7 +14,7 @@ import {
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { MessageQueue } from "./MessageQueue"
-import { AppKeys } from "./AppKeys"
+import { AppKeys, buildAppKeysFilter } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
 import { GROUP_METADATA_KIND } from "./GroupMeta"
@@ -25,8 +24,9 @@ import {
   serializeSessionState,
   upsertExpirationTag,
 } from "./utils"
+import { resolveInviteOwnerRouting } from "./multiDevice"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
-import { getEventHash } from "nostr-tools"
+import { getEventHash, type VerifiedEvent } from "nostr-tools"
 import {
   classifyMessageOrigin,
   isCrossDeviceSelfOrigin,
@@ -67,6 +67,9 @@ type PendingInviteResponse = {
 }
 
 export class SessionManager {
+  private static readonly INVITE_BOOTSTRAP_EXPIRATION_SECONDS = 60
+  private static readonly INVITE_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1500] as const
+
   // Versioning
   private readonly storageVersion = "1"
   private readonly versionPrefix: string
@@ -102,6 +105,8 @@ export class SessionManager {
 
   // Persist user records in-order per key so older async writes can't overwrite newer state.
   private userRecordWriteChain: Map<string, Promise<void>> = new Map()
+  private userSetupPromises: Map<string, Promise<void>> = new Map()
+  private bootstrapRetryTimeouts: Set<ReturnType<typeof setTimeout>> = new Set()
 
   // Subscriptions
   private ourInviteResponseSubscription: Unsubscribe | null = null
@@ -324,6 +329,7 @@ export class SessionManager {
           }
 
           this.queuePendingInviteResponse(pendingResponse)
+          this.setupUser(claimedOwner).catch(() => {})
         } catch {
         }
       }
@@ -351,11 +357,7 @@ export class SessionManager {
       const timeout = setTimeout(resolveResult, timeoutMs)
 
       const unsubscribe = this.nostrSubscribe(
-        {
-          kinds: [APP_KEYS_EVENT_KIND],
-          authors: [pubkey],
-          "#d": ["double-ratchet/app-keys"],
-        },
+        buildAppKeysFilter(pubkey),
         (event) => {
           if (resolved) return
           try {
@@ -592,12 +594,41 @@ export class SessionManager {
   }
 
   async setupUser(userPubkey: string): Promise<void> {
+    const existing = this.userSetupPromises.get(userPubkey)
+    if (existing) {
+      return existing
+    }
+
+    const setupPromise = this.doSetupUser(userPubkey).finally(() => {
+      if (this.userSetupPromises.get(userPubkey) === setupPromise) {
+        this.userSetupPromises.delete(userPubkey)
+      }
+    })
+    this.userSetupPromises.set(userPubkey, setupPromise)
+    return setupPromise
+  }
+
+  private async doSetupUser(userPubkey: string): Promise<void> {
     const userRecord = this.getOrCreateUserRecord(userPubkey)
     await userRecord.ensureSetup().catch(() => {})
 
     const latestAppKeys = await this.fetchAppKeys(userPubkey).catch(() => null)
     if (latestAppKeys) {
       await userRecord.onAppKeys(latestAppKeys).catch(() => {})
+      return
+    }
+
+    const shouldTrySingleDeviceInviteFallback =
+      userPubkey !== this.ownerPublicKey || this.deviceId === this.ownerPublicKey
+
+    if (
+      shouldTrySingleDeviceInviteFallback &&
+      !userRecord.appKeys &&
+      !userRecord.devices.has(userPubkey)
+    ) {
+      const directDevice = this.upsertDeviceRecord(userRecord, userPubkey)
+      await directDevice.ensureSetup().catch(() => {})
+      await this.storeUserRecord(userPubkey).catch(() => {})
     }
   }
 
@@ -676,6 +707,11 @@ export class SessionManager {
   }
 
   close() {
+    for (const timeout of this.bootstrapRetryTimeouts) {
+      clearTimeout(timeout)
+    }
+    this.bootstrapRetryTimeouts.clear()
+
     for (const userRecord of this.userRecords.values()) {
       userRecord.close()
     }
@@ -743,6 +779,29 @@ export class SessionManager {
     await this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
+  private planBootstrapEvents(session: Session): VerifiedEvent[] {
+    const expiresAt =
+      Math.floor(Date.now() / 1000) +
+      SessionManager.INVITE_BOOTSTRAP_EXPIRATION_SECONDS
+
+    return SessionManager.INVITE_BOOTSTRAP_RETRY_DELAYS_MS.map(
+      () => session.sendTyping({ expiresAt }).event
+    )
+  }
+
+  private scheduleBootstrapRetryEvents(events: VerifiedEvent[]): void {
+    events.slice(1).forEach((event, index) => {
+      const timeout = setTimeout(() => {
+        this.bootstrapRetryTimeouts.delete(timeout)
+        void this.nostrPublish(event).catch(() => {
+          // Best-effort retry publish. A later inbound event can still recover the session.
+        })
+      }, SessionManager.INVITE_BOOTSTRAP_RETRY_DELAYS_MS[index + 1])
+
+      this.bootstrapRetryTimeouts.add(timeout)
+    })
+  }
+
   private async sendLinkBootstrap(
     ownerPublicKey: string,
     deviceId: string,
@@ -754,10 +813,13 @@ export class SessionManager {
     }
 
     try {
-      const { event } = session.sendTyping({
-        expiresAt: Math.floor(Date.now() / 1000),
-      })
-      await this.nostrPublish(event)
+      const bootstrapEvents = this.planBootstrapEvents(session)
+      const [initialBootstrap] = bootstrapEvents
+      if (!initialBootstrap) {
+        return
+      }
+      await this.nostrPublish(initialBootstrap)
+      this.scheduleBootstrapRetryEvents(bootstrapEvents)
       await this.storeUserRecord(ownerPublicKey).catch(() => {})
     } catch {
       // Ignore bootstrap send failures; the next valid inbound event will retry queue flush.
@@ -766,10 +828,13 @@ export class SessionManager {
 
   private async sendInviteBootstrap(session: Session): Promise<void> {
     try {
-      const { event } = session.sendTyping({
-        expiresAt: Math.floor(Date.now() / 1000),
-      })
-      await this.nostrPublish(event)
+      const bootstrapEvents = this.planBootstrapEvents(session)
+      const [initialBootstrap] = bootstrapEvents
+      if (!initialBootstrap) {
+        return
+      }
+      await this.nostrPublish(initialBootstrap)
+      this.scheduleBootstrapRetryEvents(bootstrapEvents)
     } catch {
       // The session is still established even if the bootstrap publish fails.
     }
@@ -805,28 +870,27 @@ export class SessionManager {
     if (claimedOwnerPublicKey !== deviceId) {
       const appKeys = await this.fetchAppKeys(claimedOwnerPublicKey).catch(() => null)
       if (appKeys) {
-        const isAuthorized = appKeys
-          .getAllDevices()
-          .some((device) => device.identityPubkey === deviceId)
-        if (isAuthorized) {
+        const routing = resolveInviteOwnerRouting({
+          devicePubkey: deviceId,
+          claimedOwnerPublicKey,
+          invitePurpose: invite.purpose,
+          currentOwnerPublicKey: this.ownerPublicKey,
+          appKeys,
+        })
+        if (!routing.fellBackToDeviceIdentity) {
           preloadedAppKeys = appKeys
           this.updateDelegateMapping(claimedOwnerPublicKey, appKeys)
-        } else if (!(invite.purpose === "link" && claimedOwnerPublicKey === this.ownerPublicKey)) {
-          ownerPublicKey = deviceId
         }
+        ownerPublicKey = routing.ownerPublicKey
       } else {
         const persistedAppKeys = this.userRecords.get(claimedOwnerPublicKey)?.appKeys
-        const isAuthorized =
-          persistedAppKeys
-            ?.getAllDevices()
-            .some((device) => device.identityPubkey === deviceId) ?? false
-        if (
-          persistedAppKeys &&
-          !isAuthorized &&
-          !(invite.purpose === "link" && claimedOwnerPublicKey === this.ownerPublicKey)
-        ) {
-          ownerPublicKey = deviceId
-        }
+        ownerPublicKey = resolveInviteOwnerRouting({
+          devicePubkey: deviceId,
+          claimedOwnerPublicKey,
+          invitePurpose: invite.purpose,
+          currentOwnerPublicKey: this.ownerPublicKey,
+          appKeys: persistedAppKeys,
+        }).ownerPublicKey
       }
     }
 
@@ -843,7 +907,10 @@ export class SessionManager {
 
     const encryptor =
       this.identityKey instanceof Uint8Array ? this.identityKey : this.identityKey.encrypt
-    const inviteeOwnerClaim = await this.resolveInviteeOwnerClaim()
+    const inviteeOwnerClaim =
+      invite.purpose === "link"
+        ? this.ownerPublicKey
+        : await this.resolveInviteeOwnerClaim(ownerPublicKey)
     const { session, event } = await invite.accept(
       this.nostrSubscribe,
       this.ourPublicKey,
@@ -865,27 +932,22 @@ export class SessionManager {
     return { ownerPublicKey, deviceId, session }
   }
 
-  private async resolveInviteeOwnerClaim(): Promise<string | undefined> {
-    if (this.deviceId === this.ownerPublicKey) {
-      return this.ownerPublicKey
-    }
-
-    if (this.isDeviceAuthorized(this.ownerPublicKey, this.deviceId)) {
-      return this.ownerPublicKey
-    }
-
-    const fetchedAppKeys = await this.fetchAppKeys(this.ownerPublicKey, 1000).catch(() => null)
-    if (!fetchedAppKeys) {
+  private async resolveInviteeOwnerClaim(
+    recipientOwnerPublicKey: string,
+  ): Promise<string | undefined> {
+    if (
+      recipientOwnerPublicKey === this.ownerPublicKey &&
+      this.deviceId !== this.ownerPublicKey &&
+      !this.isDeviceAuthorized(this.ownerPublicKey, this.deviceId)
+    ) {
       return undefined
     }
 
-    this.updateDelegateMapping(this.ownerPublicKey, fetchedAppKeys)
-
-    return fetchedAppKeys
-      .getAllDevices()
-      .some((device) => device.identityPubkey === this.deviceId)
-      ? this.ownerPublicKey
-      : undefined
+    // Always advertise the local owner claim when we know it. The receiver still
+    // treats that claim as untrusted until AppKeys prove that this device belongs
+    // to the claimed owner, but omitting the claim entirely makes later
+    // verification impossible because the inviter has no owner timeline to watch.
+    return this.ownerPublicKey
   }
 
   async sendEvent(
@@ -904,16 +966,25 @@ export class SessionManager {
     const targets = new Set([recipientIdentityKey, this.ownerPublicKey])
     for (const target of targets) {
       const userRecord = this.userRecords.get(target)
-      const devices = userRecord?.appKeys?.getAllDevices() ?? []
+      const knownDeviceIds = new Set<string>()
 
-      const otherDevices = devices.filter(
-        d => d.identityPubkey && d.identityPubkey !== this.deviceId
-      )
+      for (const device of userRecord?.appKeys?.getAllDevices() ?? []) {
+        if (device.identityPubkey && device.identityPubkey !== this.deviceId) {
+          knownDeviceIds.add(device.identityPubkey)
+        }
+      }
 
-      if (otherDevices.length > 0) {
-        // AppKeys known: queue per-device, skip discovery to avoid growth
-        for (const device of otherDevices) {
-          await this.messageQueue.add(device.identityPubkey, completeEvent)
+      for (const deviceId of userRecord?.devices.keys() ?? []) {
+        if (deviceId && deviceId !== this.deviceId) {
+          knownDeviceIds.add(deviceId)
+        }
+      }
+
+      if (knownDeviceIds.size > 0) {
+        // If we know concrete device ids, queue directly to them so delivery can
+        // flush as soon as any invite/session bootstrap completes.
+        for (const deviceId of knownDeviceIds) {
+          await this.messageQueue.add(deviceId, completeEvent)
         }
       } else {
         await this.discoveryQueue.add(target, completeEvent)

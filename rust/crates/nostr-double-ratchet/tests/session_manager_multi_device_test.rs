@@ -187,7 +187,7 @@ fn new_public_invite(
 }
 
 #[test]
-fn test_accept_invite_routes_session_under_claimed_owner() -> Result<()> {
+fn test_accept_invite_routes_session_under_verified_claimed_owner() -> Result<()> {
     let alice_keys = Keys::generate();
     let alice_owner = alice_keys.public_key();
 
@@ -211,6 +211,12 @@ fn test_accept_invite_routes_session_under_claimed_owner() -> Result<()> {
         None,
     );
     manager.init()?;
+    drain_events(&rx);
+
+    let bob_app_keys_event = AppKeys::new(vec![DeviceEntry::new(bob_device, 1)])
+        .get_event(bob_owner)
+        .sign_with_keys(&bob_owner_keys)?;
+    manager.process_received_event(bob_app_keys_event);
     drain_events(&rx);
 
     let accepted = manager.accept_invite(&invite, Some(bob_owner))?;

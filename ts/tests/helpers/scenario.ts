@@ -159,6 +159,7 @@ export async function runScenario(config: ScenarioConfig): Promise<void> {
     })
 
     await manager.init()
+    await delegateManager.publishInvite()
 
     return deviceState
   }

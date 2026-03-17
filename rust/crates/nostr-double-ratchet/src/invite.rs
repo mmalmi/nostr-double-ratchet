@@ -567,7 +567,8 @@ mod tests {
     #[test]
     fn from_event_maps_public_invites_back_to_inviter_device() {
         let keys = Keys::generate();
-        let invite = Invite::create_new(keys.public_key(), Some("public".to_string()), None).unwrap();
+        let invite =
+            Invite::create_new(keys.public_key(), Some("public".to_string()), None).unwrap();
         let event = invite.get_event().unwrap().sign_with_keys(&keys).unwrap();
 
         let parsed = Invite::from_event(&event).unwrap();

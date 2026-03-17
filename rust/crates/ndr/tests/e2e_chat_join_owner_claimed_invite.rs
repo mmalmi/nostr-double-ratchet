@@ -1,10 +1,11 @@
-//! E2E test: ndr chat join should route private invites by claimed owner pubkey
+//! E2E test: ndr chat join should route private invites by verified owner pubkey
 
 mod common;
 
 use tempfile::TempDir;
+use tokio::time::{sleep, Duration};
 
-use nostr_double_ratchet::Invite;
+use nostr_double_ratchet::{AppKeys, DeviceEntry, Invite};
 
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
@@ -30,7 +31,7 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
 }
 
 #[tokio::test]
-async fn test_chat_join_private_invite_routes_chat_to_owner_pubkey() {
+async fn test_chat_join_private_invite_routes_chat_to_verified_owner_pubkey() {
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -55,6 +56,20 @@ async fn test_chat_join_private_invite_routes_chat_to_owner_pubkey() {
     let inviter_device_keys = nostr::Keys::generate();
     let inviter_device_pubkey = inviter_device_keys.public_key();
     let inviter_device_hex = inviter_device_pubkey.to_hex();
+
+    let app_keys_event = AppKeys::new(vec![
+        DeviceEntry::new(owner_keys.public_key(), 1),
+        DeviceEntry::new(inviter_device_pubkey, 1),
+    ])
+    .get_event(owner_keys.public_key())
+    .sign_with_keys(&owner_keys)
+    .unwrap();
+
+    let client = nostr_sdk::Client::default();
+    client.add_relay(&relay_url).await.unwrap();
+    client.connect().await;
+    client.send_event(app_keys_event).await.unwrap();
+    sleep(Duration::from_millis(200)).await;
 
     let mut invite = Invite::create_new(
         inviter_device_pubkey,

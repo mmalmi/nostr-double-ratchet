@@ -1,5 +1,5 @@
-import { AppKeys } from "../AppKeys"
-import { APP_KEYS_EVENT_KIND } from "../types"
+import { AppKeys, buildAppKeysFilter } from "../AppKeys"
+import { applyAppKeysSnapshot } from "../multiDevice"
 import type { Rumor } from "../types"
 import { DeviceRecordActor } from "./DeviceRecordActor"
 import type {
@@ -147,23 +147,21 @@ export class UserRecordActor implements UserRecordShape {
     }
 
     this.appKeysSubscription = this.deps.nostr.subscribe(
-      {
-        kinds: [APP_KEYS_EVENT_KIND],
-        authors: [this.publicKey],
-        "#d": ["double-ratchet/app-keys"],
-      },
+      buildAppKeysFilter(this.publicKey),
       (event) => {
         try {
           const appKeys = AppKeys.fromEvent(event)
-          if (event.created_at < this.latestAppKeysCreatedAt) return
-
-          if (event.created_at === this.latestAppKeysCreatedAt && this.appKeys) {
-            this.onAppKeys(this.appKeys.merge(appKeys)).catch(() => {})
+          const next = applyAppKeysSnapshot({
+            currentAppKeys: this.appKeys,
+            currentCreatedAt: this.latestAppKeysCreatedAt,
+            incomingAppKeys: appKeys,
+            incomingCreatedAt: event.created_at,
+          })
+          if (next.decision === "stale") {
             return
           }
-
-          this.latestAppKeysCreatedAt = event.created_at
-          this.onAppKeys(appKeys).catch(() => {})
+          this.latestAppKeysCreatedAt = next.createdAt
+          this.onAppKeys(next.appKeys).catch(() => {})
         } catch {
           // Ignore invalid AppKeys events.
         }

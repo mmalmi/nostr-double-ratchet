@@ -1,7 +1,9 @@
-import { VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
+import { Filter, VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
+import { applyAppKeysSnapshot } from "./multiDevice"
 import { APP_KEYS_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
 
 const now = () => Math.round(Date.now() / 1000)
+const APP_KEYS_D_TAG = "double-ratchet/app-keys"
 
 // Simplified tag format: ["device", identityPubkey, createdAt]
 type DeviceTag = [
@@ -15,6 +17,35 @@ const isDeviceTag = (tag: string[]): tag is DeviceTag =>
   tag[0] === "device" &&
   typeof tag[1] === "string" &&
   typeof tag[2] === "string"
+
+export function buildAppKeysFilter(authors?: string | string[]): Filter {
+  const normalizedAuthors = Array.isArray(authors)
+    ? authors.filter(Boolean)
+    : authors ? [authors] : undefined
+
+  // Some relays backfill stored parameterized replaceable events unreliably when
+  // queried via #d, so fetch by author+kind and validate the d-tag client-side.
+  return normalizedAuthors && normalizedAuthors.length > 0
+    ? {
+        kinds: [APP_KEYS_EVENT_KIND],
+        authors: normalizedAuthors,
+      }
+    : {
+        kinds: [APP_KEYS_EVENT_KIND],
+      }
+}
+
+export function isAppKeysEvent(
+  event: Pick<VerifiedEvent, "kind" | "tags">
+): boolean {
+  if (event.kind !== APP_KEYS_EVENT_KIND) {
+    return false
+  }
+
+  return event.tags.some(
+    (tag) => tag[0] === "d" && tag[1] === APP_KEYS_D_TAG
+  )
+}
 
 /**
  * Device identity entry - contains only identity information.
@@ -85,7 +116,7 @@ export class AppKeys {
       content: "",
       created_at: now(),
       tags: [
-        ["d", "double-ratchet/app-keys"],
+        ["d", APP_KEYS_D_TAG],
         ["version", "1"],
         ...deviceTags,
       ],
@@ -98,6 +129,9 @@ export class AppKeys {
     }
     if (!verifyEvent(event)) {
       throw new Error("Event signature is invalid")
+    }
+    if (!isAppKeysEvent(event)) {
+      throw new Error("Event is not an AppKeys snapshot")
     }
 
     // Simplified tag format: ["device", identityPubkey, createdAt]
@@ -149,11 +183,7 @@ export class AppKeys {
     onAppKeysList: (appKeys: AppKeys) => void
   ): Unsubscribe {
     return subscribe(
-      {
-        kinds: [APP_KEYS_EVENT_KIND],
-        authors: [user],
-        "#d": ["double-ratchet/app-keys"],
-      },
+      buildAppKeysFilter(user),
       (event) => {
         if (event.pubkey !== user) return
         try {
@@ -186,28 +216,21 @@ export class AppKeys {
       }, timeoutMs)
 
       const unsubscribe = subscribe(
-        {
-          kinds: [APP_KEYS_EVENT_KIND],
-          authors: [user],
-          "#d": ["double-ratchet/app-keys"],
-        },
+        buildAppKeysFilter(user),
         (event) => {
           if (event.pubkey !== user) return
           try {
             const list = AppKeys.fromEvent(event)
-            if (
-              !latest ||
-              event.created_at > latest.createdAt
-            ) {
-              latest = { list, createdAt: event.created_at }
-            } else if (event.created_at === latest.createdAt) {
-              // Same-second replaceable replays can arrive out of order on real relays.
-              // Preserve the monotonic superset instead of shrinking back to an older snapshot.
-              latest = {
-                list: latest.list.merge(list),
-                createdAt: event.created_at,
-              }
+            const next = applyAppKeysSnapshot({
+              currentAppKeys: latest?.list,
+              currentCreatedAt: latest?.createdAt,
+              incomingAppKeys: list,
+              incomingCreatedAt: event.created_at,
+            })
+            if (next.decision === "stale") {
+              return
             }
+            latest = { list: next.appKeys, createdAt: next.createdAt }
           } catch {
             // Invalid event
           }

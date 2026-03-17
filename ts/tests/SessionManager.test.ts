@@ -1,10 +1,14 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { createControlledMockSessionManager } from "./helpers/controlledMockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
 import { ControlledMockRelay } from "./helpers/ControlledMockRelay"
 import { runScenario } from "./helpers/scenario"
-import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools"
+import { finalizeEvent, generateSecretKey, getPublicKey, type UnsignedEvent, type VerifiedEvent } from "nostr-tools"
+import { Invite } from "../src/Invite"
+import { decryptInviteResponse, generateEphemeralKeypair, generateSharedSecret } from "../src/inviteUtils"
+import { InMemoryStorageAdapter } from "../src/StorageAdapter"
+import { SessionManager } from "../src/SessionManager"
 import { APP_KEYS_EVENT_KIND } from "../src/types"
 
 type DeviceRecordSnapshot = { inactiveSessions: unknown[] }
@@ -20,6 +24,25 @@ const extractDeviceRecords = (manager: unknown): DeviceRecordSnapshot[] => {
 }
 
 describe("SessionManager", () => {
+  const createRelaySubscribe = (relay: MockRelay) => (
+    filter: Parameters<MockRelay["subscribe"]>[0],
+    onEvent: Parameters<MockRelay["subscribe"]>[1]
+  ) => {
+    const handle = relay.subscribe(filter, onEvent)
+    return handle.close
+  }
+
+  const createRelayPublish =
+    (relay: MockRelay, signerSecretKey: Uint8Array) =>
+    async (event: UnsignedEvent | VerifiedEvent) => {
+      const signedEvent =
+        "sig" in event && event.sig
+          ? (event as VerifiedEvent)
+          : (finalizeEvent(event as UnsignedEvent, signerSecretKey) as VerifiedEvent)
+      relay.storeAndDeliver(signedEvent)
+      return signedEvent as never
+    }
+
   it("should receive a message", async () => {
     const sharedRelay = new MockRelay()
 
@@ -44,6 +67,371 @@ describe("SessionManager", () => {
       })
     })
     expect(bobReceivedMessage).toBe(true)
+  })
+
+  it("should bootstrap a linked device session to a single-device peer via that peer's public invite", async () => {
+    const relay = new MockRelay()
+
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const linkedDeviceSecretKey = generateSecretKey()
+    const linkedDevicePublicKey = getPublicKey(linkedDeviceSecretKey)
+
+    const peerSecretKey = generateSecretKey()
+    const peerPublicKey = getPublicKey(peerSecretKey)
+    const peerInvite = Invite.createNew(peerPublicKey, peerPublicKey, 1)
+
+    relay.storeAndDeliver(
+      finalizeEvent(peerInvite.getEvent(), peerSecretKey) as VerifiedEvent
+    )
+
+    const peerManager = new SessionManager(
+      peerPublicKey,
+      peerSecretKey,
+      peerPublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, peerSecretKey),
+      peerPublicKey,
+      {
+        ephemeralKeypair: {
+          publicKey: peerInvite.inviterEphemeralPublicKey,
+          privateKey: peerInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: peerInvite.sharedSecret,
+      },
+      new InMemoryStorageAdapter()
+    )
+    await peerManager.init()
+
+    const linkedManager = new SessionManager(
+      linkedDevicePublicKey,
+      linkedDeviceSecretKey,
+      linkedDevicePublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, linkedDeviceSecretKey),
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter()
+    )
+    await linkedManager.init()
+
+    const ownerAppKeysEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    ) as VerifiedEvent
+    relay.storeAndDeliver(ownerAppKeysEvent)
+
+    const text = `linked-to-single-device-${Date.now()}`
+    const peerReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for single-device peer message")),
+        10_000
+      )
+      const unsubscribe = peerManager.onEvent((event) => {
+        if (event.content !== text) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await linkedManager.sendMessage(peerPublicKey, text)
+    await peerReceived
+  })
+
+  it("should bootstrap a linked device session to a single-device peer when invite backfill is delayed", async () => {
+    const relay = new MockRelay()
+
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const linkedDeviceSecretKey = generateSecretKey()
+    const linkedDevicePublicKey = getPublicKey(linkedDeviceSecretKey)
+
+    const peerSecretKey = generateSecretKey()
+    const peerPublicKey = getPublicKey(peerSecretKey)
+    const peerInvite = Invite.createNew(peerPublicKey, peerPublicKey, 1)
+
+    relay.storeAndDeliver(
+      finalizeEvent(peerInvite.getEvent(), peerSecretKey) as VerifiedEvent
+    )
+
+    const delayedSubscribe = (
+      filter: Parameters<MockRelay["subscribe"]>[0],
+      onEvent: Parameters<MockRelay["subscribe"]>[1]
+    ) => {
+      const handle = relay.subscribe(filter, (event) => {
+        setTimeout(() => onEvent(event), 300)
+      })
+      return handle.close
+    }
+
+    const peerManager = new SessionManager(
+      peerPublicKey,
+      peerSecretKey,
+      peerPublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, peerSecretKey),
+      peerPublicKey,
+      {
+        ephemeralKeypair: {
+          publicKey: peerInvite.inviterEphemeralPublicKey,
+          privateKey: peerInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: peerInvite.sharedSecret,
+      },
+      new InMemoryStorageAdapter()
+    )
+    await peerManager.init()
+
+    const linkedManager = new SessionManager(
+      linkedDevicePublicKey,
+      linkedDeviceSecretKey,
+      linkedDevicePublicKey,
+      delayedSubscribe,
+      createRelayPublish(relay, linkedDeviceSecretKey),
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter()
+    )
+    await linkedManager.init()
+
+    const ownerAppKeysEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    ) as VerifiedEvent
+    relay.storeAndDeliver(ownerAppKeysEvent)
+
+    const text = `linked-delayed-invite-${Date.now()}`
+    const peerReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for delayed single-device peer message")),
+        10_000
+      )
+      const unsubscribe = peerManager.onEvent((event) => {
+        if (event.content !== text) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await linkedManager.sendMessage(peerPublicKey, text)
+    await peerReceived
+  })
+
+  it("should deliver a linked sender's first message once the sender owner AppKeys appear after the public-invite response", async () => {
+    const relay = new MockRelay()
+
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const linkedDeviceSecretKey = generateSecretKey()
+    const linkedDevicePublicKey = getPublicKey(linkedDeviceSecretKey)
+
+    const peerSecretKey = generateSecretKey()
+    const peerPublicKey = getPublicKey(peerSecretKey)
+    const peerInvite = Invite.createNew(peerPublicKey, peerPublicKey, 1)
+
+    relay.storeAndDeliver(
+      finalizeEvent(peerInvite.getEvent(), peerSecretKey) as VerifiedEvent
+    )
+
+    const peerManager = new SessionManager(
+      peerPublicKey,
+      peerSecretKey,
+      peerPublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, peerSecretKey),
+      peerPublicKey,
+      {
+        ephemeralKeypair: {
+          publicKey: peerInvite.inviterEphemeralPublicKey,
+          privateKey: peerInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: peerInvite.sharedSecret,
+      },
+      new InMemoryStorageAdapter()
+    )
+    await peerManager.init()
+
+    const linkedManager = new SessionManager(
+      linkedDevicePublicKey,
+      linkedDeviceSecretKey,
+      linkedDevicePublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, linkedDeviceSecretKey),
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter()
+    )
+    await linkedManager.init()
+
+    const text = `linked-first-message-after-owner-proof-${Date.now()}`
+    const peerReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for peer to receive linked first message")),
+        10_000
+      )
+      const unsubscribe = peerManager.onEvent((event) => {
+        if (event.content !== text) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await linkedManager.sendMessage(peerPublicKey, text)
+
+    let responseEvent: VerifiedEvent | undefined
+    await vi.waitFor(() => {
+      responseEvent = relay.getAllEvents().find((event) => event.kind === 1059) as VerifiedEvent | undefined
+      expect(responseEvent).toBeDefined()
+    }, { timeout: 5_000 })
+
+    const decrypted = await decryptInviteResponse({
+      envelopeContent: responseEvent!.content,
+      envelopeSenderPubkey: responseEvent!.pubkey,
+      inviterEphemeralPrivateKey: peerInvite.inviterEphemeralPrivateKey!,
+      inviterPrivateKey: peerSecretKey,
+      sharedSecret: peerInvite.sharedSecret,
+    })
+    expect(decrypted.inviteeIdentity).toBe(linkedDevicePublicKey)
+    expect(decrypted.ownerPublicKey).toBe(ownerPublicKey)
+
+    const ownerAppKeysEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    ) as VerifiedEvent
+    relay.storeAndDeliver(ownerAppKeysEvent)
+
+    await peerReceived
+  }, 15_000)
+
+  it("should flush a queued linked-device message once a delayed single-device invite bootstrap completes", async () => {
+    const relay = new MockRelay()
+
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const linkedDeviceSecretKey = generateSecretKey()
+    const linkedDevicePublicKey = getPublicKey(linkedDeviceSecretKey)
+
+    const peerSecretKey = generateSecretKey()
+    const peerPublicKey = getPublicKey(peerSecretKey)
+    const peerInvite = Invite.createNew(peerPublicKey, peerPublicKey, 1)
+
+    relay.storeAndDeliver(
+      finalizeEvent(peerInvite.getEvent(), peerSecretKey) as VerifiedEvent
+    )
+
+    const delayedSubscribe = (
+      filter: Parameters<MockRelay["subscribe"]>[0],
+      onEvent: Parameters<MockRelay["subscribe"]>[1]
+    ) => {
+      const handle = relay.subscribe(filter, (event) => {
+        setTimeout(() => onEvent(event), 1500)
+      })
+      return handle.close
+    }
+
+    const peerManager = new SessionManager(
+      peerPublicKey,
+      peerSecretKey,
+      peerPublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, peerSecretKey),
+      peerPublicKey,
+      {
+        ephemeralKeypair: {
+          publicKey: peerInvite.inviterEphemeralPublicKey,
+          privateKey: peerInvite.inviterEphemeralPrivateKey!,
+        },
+        sharedSecret: peerInvite.sharedSecret,
+      },
+      new InMemoryStorageAdapter()
+    )
+    await peerManager.init()
+
+    const linkedManager = new SessionManager(
+      linkedDevicePublicKey,
+      linkedDeviceSecretKey,
+      linkedDevicePublicKey,
+      delayedSubscribe,
+      createRelayPublish(relay, linkedDeviceSecretKey),
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter()
+    )
+    await linkedManager.init()
+
+    const ownerAppKeysEvent = finalizeEvent(
+      {
+        kind: APP_KEYS_EVENT_KIND,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["d", "double-ratchet/app-keys"],
+          ["version", "1"],
+          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
+        ],
+        content: "",
+      },
+      ownerSecretKey
+    ) as VerifiedEvent
+    relay.storeAndDeliver(ownerAppKeysEvent)
+
+    const text = `linked-queued-until-bootstrap-${Date.now()}`
+    const peerReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for queued single-device peer message")),
+        10_000
+      )
+      const unsubscribe = peerManager.onEvent((event) => {
+        if (event.content !== text) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await linkedManager.sendMessage(peerPublicKey, text)
+    await peerReceived
   })
 
   it("should sync messages across multiple devices", async () => {

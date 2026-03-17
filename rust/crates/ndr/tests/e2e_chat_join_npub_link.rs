@@ -86,7 +86,10 @@ async fn test_chat_join_accepts_npub_link_and_creates_chat_without_storing_a_mes
     let events = relay.events().await;
     assert!(events.iter().any(|e| e.kind == INVITE_EVENT_KIND));
     assert!(events.iter().any(|e| e.kind == INVITE_RESPONSE_KIND));
-    let message_event_count = events.iter().filter(|e| e.kind == MESSAGE_EVENT_KIND).count();
+    let message_event_count = events
+        .iter()
+        .filter(|e| e.kind == MESSAGE_EVENT_KIND)
+        .count();
     assert!(
         message_event_count <= 1,
         "Expected at most one bootstrap message event when only joining, got {}",

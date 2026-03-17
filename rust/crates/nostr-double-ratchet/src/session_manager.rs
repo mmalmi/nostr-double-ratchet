@@ -1,13 +1,14 @@
 use crate::{
-    is_app_keys_event, AppKeys, DeviceEntry, InMemoryStorage, Invite, MessageQueue, NostrPubSub,
+    apply_app_keys_snapshot, is_app_keys_event, resolve_invite_owner_routing, AppKeys,
+    AppKeysSnapshotDecision, DeviceEntry, InMemoryStorage, Invite, MessageQueue, NostrPubSub,
     OneToManyChannel, Result, SenderKeyDistribution, SenderKeyState, StorageAdapter, UserRecord,
     GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 };
 use nostr::{Keys, PublicKey, Tag, UnsignedEvent};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub enum SessionManagerEvent {
     Subscribe {
@@ -60,6 +61,10 @@ type GroupSenderKeySlot = (PublicKey, u32);
 type GroupSenderKeyPending = HashMap<GroupSenderKeySlot, Vec<nostr::Event>>;
 type SessionBookTask = Box<dyn FnOnce(&mut HashMap<PublicKey, UserRecord>) + Send + 'static>;
 
+const INVITE_BOOTSTRAP_EXPIRATION_SECONDS: u64 = 60;
+const INVITE_BOOTSTRAP_RETRY_DELAYS_MS: [u64; 3] = [0, 500, 1500];
+const MAX_PENDING_INVITE_RESPONSES: usize = 1_000;
+
 #[derive(Clone)]
 struct SessionBookActor {
     tx: crossbeam_channel::Sender<SessionBookTask>,
@@ -109,6 +114,7 @@ pub struct SessionManager {
     delegate_to_owner: Arc<Mutex<HashMap<PublicKey, PublicKey>>>,
     cached_app_keys: Arc<Mutex<HashMap<PublicKey, AppKeys>>>,
     processed_invite_responses: Arc<Mutex<HashSet<String>>>,
+    pending_invite_responses: Arc<Mutex<VecDeque<nostr::Event>>>,
     message_history: Arc<Mutex<HashMap<PublicKey, Vec<UnsignedEvent>>>>,
     latest_app_keys_created_at: Arc<Mutex<HashMap<PublicKey, u64>>>,
     message_queue: MessageQueue,
@@ -262,6 +268,7 @@ impl SessionManager {
             delegate_to_owner: Arc::new(Mutex::new(HashMap::new())),
             cached_app_keys: Arc::new(Mutex::new(HashMap::new())),
             processed_invite_responses: Arc::new(Mutex::new(HashSet::new())),
+            pending_invite_responses: Arc::new(Mutex::new(VecDeque::new())),
             message_history: Arc::new(Mutex::new(HashMap::new())),
             latest_app_keys_created_at: Arc::new(Mutex::new(HashMap::new())),
             message_queue,
@@ -754,6 +761,57 @@ impl SessionManager {
         self.owner_public_key
     }
 
+    pub fn ingest_app_keys_snapshot(
+        &self,
+        owner_pubkey: PublicKey,
+        app_keys: AppKeys,
+        created_at: u64,
+    ) {
+        self.handle_app_keys_event(owner_pubkey, app_keys, created_at);
+    }
+
+    pub fn pending_invite_response_owner_pubkeys(&self) -> Vec<PublicKey> {
+        let Some((invite, our_identity_key)) = self
+            .invite_state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|state| (state.invite.clone(), state.our_identity_key))
+        else {
+            return Vec::new();
+        };
+
+        let processed = self.processed_invite_responses.lock().unwrap().clone();
+        let pending_events: Vec<nostr::Event> = self
+            .pending_invite_responses
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+
+        let mut owners = HashSet::new();
+        for event in pending_events {
+            if processed.contains(&event.id.to_string()) {
+                continue;
+            }
+
+            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key) else {
+                continue;
+            };
+
+            owners.insert(
+                response
+                    .owner_public_key
+                    .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity)),
+            );
+        }
+
+        let mut owners: Vec<PublicKey> = owners.into_iter().collect();
+        owners.sort_by_key(|pubkey| pubkey.to_hex());
+        owners
+    }
+
     pub fn accept_invite(
         &self,
         invite: &Invite,
@@ -766,43 +824,64 @@ impl SessionManager {
             ));
         }
 
-        let owner_pubkey = owner_pubkey_hint
+        let claimed_owner_pubkey = owner_pubkey_hint
             .or(invite.owner_public_key)
             .unwrap_or_else(|| self.resolve_to_owner(&inviter_device_pubkey));
-        let is_owner_side_link_invite =
-            invite.purpose.as_deref() == Some("link") && owner_pubkey == self.owner_public_key;
+        let mut owner_pubkey = claimed_owner_pubkey;
+        let mut used_link_bootstrap_exception = false;
 
-        if owner_pubkey != inviter_device_pubkey {
+        if claimed_owner_pubkey != inviter_device_pubkey {
             let cached_app_keys = self
                 .cached_app_keys
                 .lock()
                 .unwrap()
-                .get(&owner_pubkey)
+                .get(&claimed_owner_pubkey)
                 .cloned();
             if let Some(app_keys) = cached_app_keys {
-                if app_keys.get_device(&inviter_device_pubkey).is_none()
-                    && !is_owner_side_link_invite
-                {
-                    return Err(crate::Error::Invite(
-                        "Invite device is not authorized by cached AppKeys".to_string(),
-                    ));
+                let routing = resolve_invite_owner_routing(
+                    inviter_device_pubkey,
+                    claimed_owner_pubkey,
+                    invite.purpose.as_deref(),
+                    self.owner_public_key,
+                    Some(&app_keys),
+                );
+                owner_pubkey = routing.owner_pubkey;
+                used_link_bootstrap_exception = routing.used_link_bootstrap_exception;
+                if owner_pubkey == claimed_owner_pubkey {
+                    self.update_delegate_mapping(claimed_owner_pubkey, &app_keys);
                 }
-                self.update_delegate_mapping(owner_pubkey, &app_keys);
             } else {
                 let known_device_identities = self.with_user_records(move |records| {
                     records
-                        .get(&owner_pubkey)
+                        .get(&claimed_owner_pubkey)
                         .map(|record| record.known_device_identities.clone())
                         .unwrap_or_default()
                 });
-                if !known_device_identities.is_empty() {
-                    let inviter_hex = inviter_device_pubkey.to_hex();
-                    if !known_device_identities.iter().any(|id| id == &inviter_hex)
-                        && !is_owner_side_link_invite
-                    {
-                        return Err(crate::Error::Invite(
-                            "Invite device is not authorized by stored AppKeys".to_string(),
-                        ));
+
+                let stored_app_keys = (!known_device_identities.is_empty()).then(|| {
+                    AppKeys::new(
+                        known_device_identities
+                            .iter()
+                            .filter_map(|identity_hex| {
+                                crate::utils::pubkey_from_hex(identity_hex)
+                                    .ok()
+                                    .map(|pubkey| DeviceEntry::new(pubkey, 0))
+                            })
+                            .collect(),
+                    )
+                });
+                let routing = resolve_invite_owner_routing(
+                    inviter_device_pubkey,
+                    claimed_owner_pubkey,
+                    invite.purpose.as_deref(),
+                    self.owner_public_key,
+                    stored_app_keys.as_ref(),
+                );
+                owner_pubkey = routing.owner_pubkey;
+                used_link_bootstrap_exception = routing.used_link_bootstrap_exception;
+                if owner_pubkey == claimed_owner_pubkey {
+                    if let Some(app_keys) = stored_app_keys.as_ref() {
+                        self.update_delegate_mapping(claimed_owner_pubkey, app_keys);
                     }
                 }
             }
@@ -928,24 +1007,9 @@ impl SessionManager {
 
             self.pubsub.publish_signed(response_event)?;
 
-            let invite_bootstrap = {
-                let now_s = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                let expiration =
-                    Tag::parse(&[crate::EXPIRATION_TAG.to_string(), now_s.to_string()]).ok();
-                expiration.and_then(|expiration| {
-                    self.build_message_event(
-                        owner_pubkey,
-                        crate::TYPING_KIND,
-                        "typing".to_string(),
-                        vec![expiration],
-                    )
-                    .ok()
-                    .and_then(|bootstrap| session.send_event(bootstrap).ok())
-                })
-            };
+            let invite_bootstrap_messages = self.build_bootstrap_messages(owner_pubkey);
+            let invite_bootstrap_events =
+                SessionManager::sign_bootstrap_schedule(&mut session, &invite_bootstrap_messages);
 
             session.set_pubsub(self.pubsub.clone());
             let _ = session.subscribe_to_messages();
@@ -990,10 +1054,10 @@ impl SessionManager {
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             let _ = self.store_user_record(&owner_pubkey);
             self.send_message_history(owner_pubkey, &device_id);
-            if let Some(invite_bootstrap) = invite_bootstrap {
-                let _ = self.pubsub.publish_signed(invite_bootstrap);
+            if !invite_bootstrap_events.is_empty() {
+                self.publish_bootstrap_schedule(invite_bootstrap_events);
             }
-            if is_owner_side_link_invite {
+            if used_link_bootstrap_exception {
                 self.send_link_bootstrap(owner_pubkey, &device_id);
             }
             let _ = self.flush_message_queue(&device_id);
@@ -1950,6 +2014,122 @@ impl SessionManager {
         })
     }
 
+    fn queue_pending_invite_response(&self, event: nostr::Event) {
+        let mut pending = self.pending_invite_responses.lock().unwrap();
+        if pending.iter().any(|existing| existing.id == event.id) {
+            return;
+        }
+        pending.push_back(event);
+        if pending.len() > MAX_PENDING_INVITE_RESPONSES {
+            pending.pop_front();
+        }
+    }
+
+    fn install_invite_response_session(
+        &self,
+        event_id: String,
+        response: crate::InviteResponse,
+    ) -> bool {
+        if response.invitee_identity == self.our_public_key {
+            return false;
+        }
+
+        let owner_pubkey = response
+            .owner_public_key
+            .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
+
+        if !self.is_device_authorized(owner_pubkey, response.invitee_identity) {
+            return false;
+        }
+
+        self.record_known_device_identity(owner_pubkey, response.invitee_identity);
+
+        let device_id = response
+            .device_id
+            .unwrap_or_else(|| hex::encode(response.invitee_identity.to_bytes()));
+
+        let mut session = response.session;
+        session.set_pubsub(self.pubsub.clone());
+        let _ = session.subscribe_to_messages();
+
+        self.with_user_records({
+            let device_id = device_id.clone();
+            move |records| {
+                let user_record = records
+                    .entry(owner_pubkey)
+                    .or_insert_with(|| UserRecord::new(hex::encode(owner_pubkey.to_bytes())));
+                SessionManager::upsert_device_record(user_record, &device_id);
+                user_record.upsert_session(Some(&device_id), session);
+            }
+        });
+
+        let _ = self.store_user_record(&owner_pubkey);
+        self.send_message_history(owner_pubkey, &device_id);
+        let _ = self.flush_message_queue(&device_id);
+
+        self.processed_invite_responses
+            .lock()
+            .unwrap()
+            .insert(event_id.clone());
+
+        self.pending_invite_responses
+            .lock()
+            .unwrap()
+            .retain(|event| event.id.to_string() != event_id);
+
+        true
+    }
+
+    fn retry_pending_invite_responses(&self, owner_pubkey: PublicKey) {
+        let Some((invite, our_identity_key)) = self
+            .invite_state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|state| (state.invite.clone(), state.our_identity_key))
+        else {
+            return;
+        };
+
+        let pending_events: Vec<nostr::Event> = self
+            .pending_invite_responses
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+
+        for event in pending_events {
+            if self
+                .processed_invite_responses
+                .lock()
+                .unwrap()
+                .contains(&event.id.to_string())
+            {
+                continue;
+            }
+
+            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key) else {
+                continue;
+            };
+
+            let resolved_owner = response
+                .owner_public_key
+                .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
+            if resolved_owner != owner_pubkey {
+                continue;
+            }
+
+            let installed = self.install_invite_response_session(event.id.to_string(), response);
+            eprintln!(
+                "[sm] retry_pending_invite_response event={} owner={} installed={}",
+                event.id,
+                owner_pubkey.to_hex(),
+                installed
+            );
+        }
+    }
+
     fn subscribe_to_app_keys(&self, owner_pubkey: PublicKey) {
         let mut subs = self.app_keys_subscriptions.lock().unwrap();
         if subs.contains(&owner_pubkey) {
@@ -1960,11 +2140,7 @@ impl SessionManager {
 
         let filter = nostr::Filter::new()
             .kind(nostr::Kind::Custom(crate::APP_KEYS_EVENT_KIND as u16))
-            .authors(vec![owner_pubkey])
-            .custom_tag(
-                nostr::types::filter::SingleLetterTag::lowercase(nostr::types::filter::Alphabet::D),
-                ["double-ratchet/app-keys"],
-            );
+            .authors(vec![owner_pubkey]);
         if let Ok(filter_json) = serde_json::to_string(&filter) {
             let subid = format!("app-keys-{}", uuid::Uuid::new_v4());
             let _ = self.pubsub.subscribe(subid, filter_json);
@@ -2204,43 +2380,98 @@ impl SessionManager {
         let _ = self.store_user_record(&owner_pubkey);
     }
 
-    fn send_link_bootstrap(&self, owner_pubkey: PublicKey, device_id: &str) {
-        let now_s = SystemTime::now()
+    fn build_bootstrap_messages(&self, owner_pubkey: PublicKey) -> Vec<UnsignedEvent> {
+        let expires_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-        let expiration = match Tag::parse(&[crate::EXPIRATION_TAG.to_string(), now_s.to_string()]) {
+            .as_secs()
+            + INVITE_BOOTSTRAP_EXPIRATION_SECONDS;
+        let expiration = match Tag::parse(&[
+            crate::EXPIRATION_TAG.to_string(),
+            expires_at.to_string(),
+        ]) {
             Ok(tag) => tag,
-            Err(_) => return,
-        };
-        let bootstrap = match self.build_message_event(
-            owner_pubkey,
-            crate::TYPING_KIND,
-            "typing".to_string(),
-            vec![expiration],
-        ) {
-            Ok(event) => event,
-            Err(_) => return,
+            Err(_) => return Vec::new(),
         };
 
-        let signed_bootstrap = self.with_user_records({
+        let mut bootstrap_messages = Vec::new();
+        for _ in INVITE_BOOTSTRAP_RETRY_DELAYS_MS {
+            let Ok(bootstrap) = self.build_message_event(
+                owner_pubkey,
+                crate::TYPING_KIND,
+                "typing".to_string(),
+                vec![expiration.clone()],
+            ) else {
+                break;
+            };
+            bootstrap_messages.push(bootstrap);
+        }
+
+        bootstrap_messages
+    }
+
+    fn sign_bootstrap_schedule(
+        session: &mut crate::Session,
+        bootstrap_messages: &[UnsignedEvent],
+    ) -> Vec<nostr::Event> {
+        let mut bootstrap_events = Vec::new();
+        for bootstrap in bootstrap_messages {
+            let Ok(signed_bootstrap) = session.send_event(bootstrap.clone()) else {
+                break;
+            };
+            bootstrap_events.push(signed_bootstrap);
+        }
+
+        bootstrap_events
+    }
+
+    fn publish_bootstrap_schedule(&self, bootstrap_events: Vec<nostr::Event>) {
+        let Some((initial_event, retry_events)) = bootstrap_events.split_first() else {
+            return;
+        };
+
+        let _ = self.pubsub.publish_signed(initial_event.clone());
+
+        if retry_events.is_empty() {
+            return;
+        }
+
+        let scheduled_retries: Vec<(u64, nostr::Event)> = retry_events
+            .iter()
+            .cloned()
+            .zip(INVITE_BOOTSTRAP_RETRY_DELAYS_MS.iter().copied().skip(1))
+            .map(|(event, delay_ms)| (delay_ms, event))
+            .collect();
+        let pubsub = self.pubsub.clone();
+        std::thread::spawn(move || {
+            for (delay_ms, event) in scheduled_retries {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                let _ = pubsub.publish_signed(event);
+            }
+        });
+    }
+
+    fn send_link_bootstrap(&self, owner_pubkey: PublicKey, device_id: &str) {
+        let bootstrap_messages = self.build_bootstrap_messages(owner_pubkey);
+        let bootstrap_events = self.with_user_records({
             let device_id = device_id.to_string();
+            let bootstrap_messages = bootstrap_messages.clone();
             move |records| {
                 let Some(user_record) = records.get_mut(&owner_pubkey) else {
-                    return None;
+                    return Vec::new();
                 };
                 let Some(device_record) = user_record.device_records.get_mut(&device_id) else {
-                    return None;
+                    return Vec::new();
                 };
                 let Some(session) = device_record.active_session.as_mut() else {
-                    return None;
+                    return Vec::new();
                 };
-                session.send_event(bootstrap).ok()
+                SessionManager::sign_bootstrap_schedule(session, &bootstrap_messages)
             }
         });
 
-        if let Some(signed_bootstrap) = signed_bootstrap {
-            let _ = self.pubsub.publish_signed(signed_bootstrap);
+        if !bootstrap_events.is_empty() {
+            self.publish_bootstrap_schedule(bootstrap_events);
             let _ = self.store_user_record(&owner_pubkey);
         }
     }
@@ -2290,19 +2521,17 @@ impl SessionManager {
 
             let mut latest = self.latest_app_keys_created_at.lock().unwrap();
             let latest_created_at = latest.get(&owner_pubkey).copied().unwrap_or(0);
-            if created_at < latest_created_at {
+            let applied = apply_app_keys_snapshot(
+                existing.as_ref(),
+                latest_created_at,
+                &app_keys,
+                created_at,
+            );
+            if applied.decision == AppKeysSnapshotDecision::Stale {
                 return;
             }
-            latest.insert(owner_pubkey, created_at);
-            if created_at == latest_created_at {
-                if let Some(existing) = existing {
-                    existing.merge(&app_keys)
-                } else {
-                    app_keys.clone()
-                }
-            } else {
-                app_keys.clone()
-            }
+            latest.insert(owner_pubkey, applied.created_at);
+            applied.app_keys
         };
 
         self.update_delegate_mapping(owner_pubkey, &effective_app_keys);
@@ -2335,6 +2564,8 @@ impl SessionManager {
         for device in &devices {
             self.subscribe_to_device_invite(owner_pubkey, device.identity_pubkey);
         }
+
+        self.retry_pending_invite_responses(owner_pubkey);
 
         for device in &devices {
             let device_id = device.identity_pubkey.to_hex();
@@ -2499,51 +2730,17 @@ impl SessionManager {
             }
 
             if let Some(state) = self.invite_state.lock().unwrap().as_ref() {
-                if let Ok(Some(response)) = state
+                match state
                     .invite
                     .process_invite_response(&event, state.our_identity_key)
                 {
-                    if response.invitee_identity == self.our_public_key {
-                        return;
-                    }
-
-                    let owner_pubkey = response
-                        .owner_public_key
-                        .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
-
-                    if !self.is_device_authorized(owner_pubkey, response.invitee_identity) {
-                        return;
-                    }
-
-                    self.record_known_device_identity(owner_pubkey, response.invitee_identity);
-
-                    let device_id = response
-                        .device_id
-                        .unwrap_or_else(|| hex::encode(response.invitee_identity.to_bytes()));
-
-                    let mut session = response.session;
-                    session.set_pubsub(self.pubsub.clone());
-                    let _ = session.subscribe_to_messages();
-
-                    self.with_user_records({
-                        let device_id = device_id.clone();
-                        move |records| {
-                            let user_record = records.entry(owner_pubkey).or_insert_with(|| {
-                                UserRecord::new(hex::encode(owner_pubkey.to_bytes()))
-                            });
-                            SessionManager::upsert_device_record(user_record, &device_id);
-                            user_record.upsert_session(Some(&device_id), session);
+                    Ok(Some(response)) => {
+                        if !self.install_invite_response_session(event.id.to_string(), response) {
+                            self.queue_pending_invite_response(event.clone());
                         }
-                    });
-
-                    let _ = self.store_user_record(&owner_pubkey);
-                    self.send_message_history(owner_pubkey, &device_id);
-                    let _ = self.flush_message_queue(&device_id);
-
-                    self.processed_invite_responses
-                        .lock()
-                        .unwrap()
-                        .insert(event.id.to_string());
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
                 }
             }
             return;
@@ -2623,10 +2820,10 @@ impl SessionManager {
                     );
                 }
 
+                let _ = self.store_user_record(&owner_pubkey);
                 let _ =
                     self.pubsub
                         .decrypted_message(owner_pubkey, sender_device, plaintext, event_id);
-                let _ = self.store_user_record(&owner_pubkey);
                 let _ = self.flush_message_queue(&device_id);
             } else if let Some((sender, sender_device, plaintext, event_id)) =
                 self.try_decrypt_group_sender_key_outer(&event, None)
@@ -3475,7 +3672,10 @@ mod tests {
 
         let invite = Invite::create_new(bob_pubkey, Some(bob_pubkey.to_hex()), Some(1)).unwrap();
         let accepted = manager.accept_invite(&invite, Some(bob_pubkey));
-        assert!(accepted.is_ok(), "accept_invite should succeed for single-device peer");
+        assert!(
+            accepted.is_ok(),
+            "accept_invite should succeed for single-device peer"
+        );
 
         let events = drain_events(&rx);
         assert!(
@@ -3487,6 +3687,62 @@ mod tests {
                 )
             }),
             "expected a bootstrap message event after invite acceptance"
+        );
+    }
+
+    #[test]
+    fn accept_invite_retries_bootstrap_message_event_with_future_expiration() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let bob_keys = Keys::generate();
+        let bob_pubkey = bob_keys.public_key();
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            tx,
+            Some(storage),
+            None,
+        );
+        manager.init().unwrap();
+        let _ = drain_events(&rx);
+
+        let invite = Invite::create_new(bob_pubkey, Some(bob_pubkey.to_hex()), Some(1)).unwrap();
+        manager
+            .accept_invite(&invite, Some(bob_pubkey))
+            .expect("accept_invite should succeed for single-device peer");
+
+        let initial_events = drain_events(&rx);
+        assert!(
+            initial_events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "expected immediate bootstrap publish"
+        );
+
+        std::thread::sleep(Duration::from_millis(2_100));
+        let retry_events = drain_events(&rx);
+        let retry_count = retry_events
+            .iter()
+            .filter(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            })
+            .count();
+        assert!(
+            retry_count >= 2,
+            "expected delayed bootstrap retries after invite acceptance"
         );
     }
 

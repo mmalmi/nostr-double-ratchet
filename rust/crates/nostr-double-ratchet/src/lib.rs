@@ -8,6 +8,7 @@ pub mod group_manager;
 pub mod invite;
 pub mod message_origin;
 pub mod message_queue;
+pub mod multi_device;
 pub mod one_to_many;
 pub mod pubsub;
 pub mod sender_key;
@@ -29,6 +30,12 @@ pub use group_manager::*;
 pub use invite::{Invite, InviteResponse};
 pub use message_origin::{classify_message_origin, MessageOrigin};
 pub use message_queue::{MessageQueue, QueueEntry};
+pub use multi_device::{
+    apply_app_keys_snapshot, evaluate_device_registration_state, resolve_invite_owner_routing,
+    select_latest_app_keys_from_events, should_require_relay_registration_confirmation,
+    AppKeysSnapshot, AppKeysSnapshotDecision, DeviceRegistrationState,
+    InviteOwnerRoutingResolution,
+};
 pub use one_to_many::*;
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
 pub use sender_key::*;

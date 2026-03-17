@@ -28,6 +28,15 @@ pub(crate) async fn fetch_latest_app_keys(
     client: &Client,
     owner_pubkey: nostr::PublicKey,
 ) -> Result<Option<nostr_double_ratchet::AppKeys>> {
+    Ok(fetch_latest_app_keys_snapshot(client, owner_pubkey)
+        .await?
+        .map(|snapshot| snapshot.app_keys))
+}
+
+pub(crate) async fn fetch_latest_app_keys_snapshot(
+    client: &Client,
+    owner_pubkey: nostr::PublicKey,
+) -> Result<Option<nostr_double_ratchet::AppKeysSnapshot>> {
     let filter = Filter::new()
         .kind(nostr::Kind::Custom(
             nostr_double_ratchet::APP_KEYS_EVENT_KIND as u16,
@@ -39,18 +48,7 @@ pub(crate) async fn fetch_latest_app_keys(
         .fetch_events(vec![filter], Some(Duration::from_secs(3)))
         .await?;
 
-    let mut latest: Option<(u64, nostr_double_ratchet::AppKeys)> = None;
-    for event in events.iter() {
-        if !nostr_double_ratchet::is_app_keys_event(event) {
-            continue;
-        }
-        let created_at = event.created_at.as_u64();
-        if let Ok(keys) = nostr_double_ratchet::AppKeys::from_event(event) {
-            match latest {
-                Some((ts, _)) if created_at < ts => {}
-                _ => latest = Some((created_at, keys)),
-            }
-        }
-    }
-    Ok(latest.map(|(_, keys)| keys))
+    Ok(nostr_double_ratchet::select_latest_app_keys_from_events(
+        events.iter(),
+    ))
 }

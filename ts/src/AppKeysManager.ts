@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
-import { AppKeys, DeviceEntry } from "./AppKeys"
+import { AppKeys, buildAppKeysFilter, DeviceEntry } from "./AppKeys"
 import { Invite } from "./Invite"
-import { NostrSubscribe, NostrPublish, APP_KEYS_EVENT_KIND, Unsubscribe } from "./types"
+import { NostrSubscribe, NostrPublish, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { SessionManager } from "./SessionManager"
 
@@ -202,12 +202,6 @@ export class DelegateManager {
     this.invite = savedInvite || Invite.createNew(this.devicePublicKey, this.devicePublicKey)
     await this.saveInvite(this.invite)
 
-    // Sign and publish Invite event with this device's identity key
-    const inviteEvent = this.invite.getEvent()
-    const signedInvite = finalizeEvent(inviteEvent, this.devicePrivateKey)
-    await this.nostrPublish(signedInvite).catch(() => {
-      // Failed to publish Invite
-    })
   }
 
   /**
@@ -235,6 +229,23 @@ export class DelegateManager {
   }
 
   /**
+   * Publish the current device invite.
+   * Clients should call this only after activation/session-manager setup so
+   * invite responses are observed by the active listener.
+   */
+  async publishInvite(): Promise<void> {
+    await this.init()
+
+    if (!this.invite) {
+      throw new Error("Invite not initialized")
+    }
+
+    const inviteEvent = this.invite.getEvent()
+    const signedInvite = finalizeEvent(inviteEvent, this.devicePrivateKey)
+    await this.nostrPublish(signedInvite)
+  }
+
+  /**
    * Rotate this device's invite - generates new ephemeral keys and shared secret.
    */
   async rotateInvite(): Promise<void> {
@@ -242,10 +253,7 @@ export class DelegateManager {
 
     this.invite = Invite.createNew(this.devicePublicKey, this.devicePublicKey)
     await this.saveInvite(this.invite)
-
-    const inviteEvent = this.invite.getEvent()
-    const signedInvite = finalizeEvent(inviteEvent, this.devicePrivateKey)
-    await this.nostrPublish(signedInvite)
+    await this.publishInvite()
   }
 
   /**
@@ -276,10 +284,7 @@ export class DelegateManager {
 
       // Subscribe to all AppKeys events and look for our identityPubkey
       const unsubscribe = this.nostrSubscribe(
-        {
-          kinds: [APP_KEYS_EVENT_KIND],
-          "#d": ["double-ratchet/app-keys"],
-        },
+        buildAppKeysFilter(),
         async (event) => {
           try {
             const appKeys = AppKeys.fromEvent(event)

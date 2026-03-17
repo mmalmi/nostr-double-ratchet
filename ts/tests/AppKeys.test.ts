@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
-import { AppKeys, DeviceEntry } from '../src/AppKeys'
+import { AppKeys, buildAppKeysFilter, DeviceEntry } from '../src/AppKeys'
 import { APP_KEYS_EVENT_KIND } from '../src/types'
 import type { NostrSubscribe } from '../src/types'
 
@@ -278,6 +278,53 @@ describe('AppKeys', () => {
   })
 
   describe('waitFor', () => {
+    it('uses author-only backfill filters and validates the AppKeys d-tag client-side', async () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const device = createTestDevice()
+      const seenFilters: Record<string, unknown>[] = []
+
+      const wrongEvent = finalizeEvent(
+        {
+          kind: APP_KEYS_EVENT_KIND,
+          created_at: 100,
+          tags: [
+            ['d', 'double-ratchet/not-app-keys'],
+            ['version', '1'],
+            ['device', device.identityPubkey, String(device.createdAt)],
+          ],
+          content: '',
+        },
+        ownerPrivateKey
+      )
+
+      const validEvent = finalizeEvent(
+        {
+          kind: APP_KEYS_EVENT_KIND,
+          created_at: 101,
+          tags: [
+            ['d', 'double-ratchet/app-keys'],
+            ['version', '1'],
+            ['device', device.identityPubkey, String(device.createdAt)],
+          ],
+          content: '',
+        },
+        ownerPrivateKey
+      )
+
+      const nostrSubscribe: NostrSubscribe = (filter, onEvent) => {
+        seenFilters.push(filter as Record<string, unknown>)
+        setTimeout(() => onEvent(wrongEvent), 0)
+        setTimeout(() => onEvent(validEvent), 1)
+        return () => {}
+      }
+
+      const result = await AppKeys.waitFor(ownerPublicKey, nostrSubscribe, 20)
+
+      expect(seenFilters).toEqual([buildAppKeysFilter(ownerPublicKey)])
+      expect(result?.getAllDevices()).toEqual([device])
+    })
+
     it('preserves the larger same-second AppKeys snapshot when events arrive out of order', async () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)

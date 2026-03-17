@@ -170,6 +170,7 @@ export async function runControlledScenario(config: ControlledScenarioConfig): P
     })
 
     await manager.init()
+    await delegateManager.publishInvite()
 
     return deviceState
   }

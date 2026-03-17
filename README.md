@@ -60,6 +60,40 @@ For Windows/manual install options, see [Releases](https://github.com/mmalmi/nos
 - No global availability guarantee; delivery depends on relay reachability.
 - No perfect metadata privacy (Nostr relays still see network-level and outer-event metadata).
 
+## Multi-Device Integration Contract
+
+New clients and tools should use the shared multi-device helpers in this repo instead of
+re-implementing policy ad hoc.
+
+- AppKeys are an ordered authorization timeline, not just a set.
+- Order AppKeys snapshots by Nostr `created_at`.
+- Ignore stale AppKeys snapshots.
+- If two AppKeys snapshots land in the same second, merge monotonically instead of letting
+  arrival order shrink the authorized device set.
+- Publishing a reduced AppKeys set is only valid for explicit device revocation or first-device
+  bootstrap, not normal startup/reopen.
+- Imported owner-key or `nsec` login on a fresh device must either register the current device or
+  remain explicitly single-device.
+- First-device bootstrap can proceed from locally published AppKeys. Adding a new device to an
+  existing owner timeline should wait for relay-visible AppKeys before relying on public-invite
+  fanout.
+- After device registration or revocation, clients should refresh bootstrap state,
+  subscriptions, and session routing.
+- Self-DM routing must consider owner pubkey, sender/session pubkey, rumor author pubkey, `p`
+  tags, and known own-device AppKeys/session state together. Inner rumor `pubkey` alone is not
+  enough.
+- Invite acceptance must preserve inviter owner/device attribution. Until AppKeys verifies a
+  claimed owner, clients may need to fall back to device-identity routing rather than inventing
+  ownership.
+- Prefer the shared helpers over local policy forks:
+- TypeScript: `applyAppKeysSnapshot`, `evaluateDeviceRegistrationState`,
+  `shouldRequireRelayRegistrationConfirmation`, `resolveConversationCandidatePubkeys`,
+  `resolveInviteOwnerRouting`,
+  `resolveSessionPubkeyToOwner`, `hasExistingSessionWithRecipient`
+- Rust: `apply_app_keys_snapshot`, `select_latest_app_keys_from_events`,
+  `evaluate_device_registration_state`, `should_require_relay_registration_confirmation`,
+  `resolve_invite_owner_routing`
+
 ## Group Messaging Model
 
 Groups use a hybrid model:
@@ -110,6 +144,15 @@ cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
 # ndr (CLI + e2e + cross-language)
 cargo test -p ndr --manifest-path rust/Cargo.toml
 ```
+
+## Multi-Device Test Policy
+
+- Keep one explicit same-second AppKeys regression in library tests.
+- Normal end-to-end and interop tests should avoid same-second AppKeys publishes unless the test
+  is explicitly about that edge case.
+- Keep heterogeneous-client coverage in the matrix. `ndr`, `iris-chat`, `iris-client`, and
+  `iris-chat-flutter` should not each trust only their own same-client tests.
+- When possible, assert both self-sync and peer fanout across owner and linked devices.
 
 For language-specific usage, see:
 

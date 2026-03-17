@@ -77,7 +77,7 @@ describe("DelegateManager", () => {
   })
 
   describe("init()", () => {
-    it("should publish Invite event (not AppKeys)", async () => {
+    it("should not auto-publish Invite event on init", async () => {
       const manager = new DelegateManager({
         nostrSubscribe,
         nostrPublish,
@@ -91,7 +91,22 @@ describe("DelegateManager", () => {
       )
       expect(appKeysEvents.length).toBe(0)
 
-      // Should publish its own Invite event
+      // Invite publication is explicit; init alone must not publish anything.
+      const inviteEvents = publishedEvents.filter(
+        (e) => e.kind === INVITE_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1]?.startsWith("double-ratchet/invites/"))
+      )
+      expect(inviteEvents.length).toBe(0)
+    })
+
+    it("should publish Invite event explicitly", async () => {
+      const manager = new DelegateManager({
+        nostrSubscribe,
+        nostrPublish,
+      })
+
+      await manager.init()
+      await manager.publishInvite()
+
       const inviteEvents = publishedEvents.filter(
         (e) => e.kind === INVITE_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1]?.startsWith("double-ratchet/invites/"))
       )
@@ -822,7 +837,6 @@ describe("AppKeysManager Integration", () => {
         {
           kinds: [APP_KEYS_EVENT_KIND],
           authors: [ownerPublicKey],
-          "#d": ["double-ratchet/app-keys"],
         },
         (event) => {
           try {

@@ -5,6 +5,7 @@ use nostr_double_ratchet::{
 };
 use std::sync::Arc;
 
+use crate::commands::owner_claim::fetch_latest_app_keys_snapshot;
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::storage::{Storage, StoredChat};
@@ -178,9 +179,22 @@ pub(super) async fn join_via_invite(
         build_session_manager(config, storage)?;
     import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
 
-    let accepted = manager.accept_invite(&invite, invite.owner_public_key)?;
-
     let client = connect_client(config).await?;
+    if let Some(claimed_owner_pubkey) = invite.owner_public_key {
+        if claimed_owner_pubkey != invite.inviter {
+            if let Some(snapshot) =
+                fetch_latest_app_keys_snapshot(&client, claimed_owner_pubkey).await?
+            {
+                manager.ingest_app_keys_snapshot(
+                    claimed_owner_pubkey,
+                    snapshot.app_keys,
+                    snapshot.created_at,
+                );
+            }
+        }
+    }
+
+    let accepted = manager.accept_invite(&invite, invite.owner_public_key)?;
     let response_event = flush_session_manager_events(&manager_rx, &signing_keys, &client).await?;
 
     let chat = upsert_chat_from_session_manager(

@@ -97,6 +97,7 @@ export async function createMockSessionManager(
   // Create SessionManager
   const manager = delegateManager.createSessionManager(mockStorage)
   await manager.init()
+  await delegateManager.publishInvite()
 
   return {
     manager,

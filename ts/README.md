@@ -44,6 +44,31 @@ sessionManager.onEvent((event, from) => {
 await sessionManager.sendMessage(recipientPubkey, "Hello!")
 ```
 
+## Multi-Device Integration Contract
+
+Use the exported helper functions for multi-device policy instead of duplicating the logic in app
+code.
+
+- `applyAppKeysSnapshot(...)`: order AppKeys by `created_at`, ignore stale snapshots, and merge
+  same-second snapshots monotonically.
+- `evaluateDeviceRegistrationState(...)`: decide whether the current device is registered and
+  whether the app should consider private messaging ready.
+- `shouldRequireRelayRegistrationConfirmation(...)`: distinguish first-device bootstrap from
+  “add a new device to an existing owner timeline” before blocking on relay visibility.
+- `resolveConversationCandidatePubkeys(...)`: derive the correct conversation owner/device
+  candidates for self-sync and linked-device routing.
+- `resolveInviteOwnerRouting(...)`: preserve inviter owner/device attribution during invite
+  acceptance, including the link-bootstrap exception and device-identity fallback.
+- `resolveSessionPubkeyToOwner(...)` and `hasExistingSessionWithRecipient(...)`: normalize
+  owner/device session bookkeeping instead of re-implementing user-record traversal.
+
+Normal app behavior should treat AppKeys as an ordered authorization timeline. Reduced AppKeys
+sets should only be published for explicit revocation or first-device bootstrap, not on ordinary
+startup. Imported owner-key or `nsec` logins on a fresh device should either register the current
+device or remain explicitly single-device. First-device bootstrap can proceed from locally
+published AppKeys; public-invite fanout for an additional device should wait until relays echo the
+updated AppKeys timeline.
+
 ## Security Properties
 
 ### Confidentiality
@@ -136,3 +161,10 @@ sessionManager.setAutoAdoptChatSettings(false)
 ```bash
 pnpm -C ts test:once
 ```
+
+## Multi-Device Test Policy
+
+- Keep exactly one explicit same-second AppKeys regression test in the library.
+- Ordinary end-to-end tests should wait for a new `created_at` second before publishing AppKeys
+  mutations so the normal path stays visible and trustworthy.
+- Keep heterogeneous-client interop coverage because same-client tests are not enough.
