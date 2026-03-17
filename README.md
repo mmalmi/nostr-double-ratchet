@@ -92,7 +92,8 @@ re-implementing policy ad hoc.
   `resolveSessionPubkeyToOwner`, `hasExistingSessionWithRecipient`
 - Rust: `apply_app_keys_snapshot`, `select_latest_app_keys_from_events`,
   `evaluate_device_registration_state`, `should_require_relay_registration_confirmation`,
-  `resolve_invite_owner_routing`
+  `resolve_invite_owner_routing`, `resolve_conversation_candidate_pubkeys`,
+  `resolve_rumor_peer_pubkey`
 
 ## Group Messaging Model
 

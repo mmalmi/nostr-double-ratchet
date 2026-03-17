@@ -52,6 +52,25 @@ let state = session.state_json()?;
 let session = SessionHandle::from_state_json(state)?;
 ```
 
+### Shared Multi-Device Helpers
+
+These wrappers are intended to keep mobile clients on the same policy as the core library:
+
+```rust
+let devices = resolve_latest_app_keys_devices(app_keys_event_jsons)?;
+let candidates = resolve_conversation_candidate_pubkeys(
+    owner_pubkey_hex,
+    rumor_pubkey_hex,
+    rumor_tags,
+    sender_pubkey_hex,
+);
+```
+
+- `resolve_latest_app_keys_devices(...)` converges a set of AppKeys events into the latest
+  monotonic authorized-device view.
+- `resolve_conversation_candidate_pubkeys(...)` returns the ordered conversation candidates for a
+  decrypted rumor, including self-DM and linked-device cases.
+
 ## Building for Mobile
 
 ### Android

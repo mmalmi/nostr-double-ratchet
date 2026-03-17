@@ -134,6 +134,94 @@ pub fn should_require_relay_registration_confirmation(
     state.requires_device_registration && state.has_known_registered_devices
 }
 
+fn normalize_pubkey_hex(value: &str) -> Option<String> {
+    let normalized = value.trim().to_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn first_tag_value(tags: &[Vec<String>], name: &str) -> Option<String> {
+    tags.iter()
+        .find(|tag| tag.first().is_some_and(|tag_name| tag_name == name) && tag.len() >= 2)
+        .and_then(|tag| normalize_pubkey_hex(&tag[1]))
+}
+
+pub fn resolve_rumor_peer_pubkey(
+    owner_pubkey_hex: &str,
+    rumor_pubkey_hex: &str,
+    rumor_tags: &[Vec<String>],
+    sender_pubkey_hex: Option<&str>,
+) -> Option<String> {
+    let normalized_owner = normalize_pubkey_hex(owner_pubkey_hex)?;
+    let normalized_rumor_pubkey = normalize_pubkey_hex(rumor_pubkey_hex)?;
+    let normalized_sender_pubkey = sender_pubkey_hex.and_then(normalize_pubkey_hex);
+
+    if normalized_rumor_pubkey == normalized_owner
+        || normalized_sender_pubkey.as_deref() == Some(normalized_owner.as_str())
+    {
+        return first_tag_value(rumor_tags, "p");
+    }
+
+    Some(normalized_rumor_pubkey)
+}
+
+pub fn resolve_conversation_candidate_pubkeys(
+    owner_pubkey_hex: &str,
+    rumor_pubkey_hex: &str,
+    rumor_tags: &[Vec<String>],
+    sender_pubkey_hex: &str,
+) -> Vec<String> {
+    let Some(owner) = normalize_pubkey_hex(owner_pubkey_hex) else {
+        return Vec::new();
+    };
+    let Some(sender) = normalize_pubkey_hex(sender_pubkey_hex) else {
+        return Vec::new();
+    };
+    let Some(rumor_author) = normalize_pubkey_hex(rumor_pubkey_hex) else {
+        return Vec::new();
+    };
+    let p_tag_pubkey = first_tag_value(rumor_tags, "p");
+
+    let is_self_targeted_rumor = (rumor_author == owner || sender == owner)
+        && match p_tag_pubkey.as_deref() {
+            Some(p_tag) => p_tag.is_empty() || p_tag == owner,
+            None => true,
+        };
+
+    let mut candidates = Vec::new();
+    let mut add_candidate = |candidate: Option<String>| {
+        let Some(candidate) = candidate else {
+            return;
+        };
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+
+    if is_self_targeted_rumor {
+        if rumor_author != owner {
+            add_candidate(Some(rumor_author));
+        }
+        if sender != owner {
+            add_candidate(Some(sender));
+        }
+        add_candidate(Some(owner));
+        return candidates;
+    }
+
+    add_candidate(resolve_rumor_peer_pubkey(
+        owner.as_str(),
+        rumor_pubkey_hex,
+        rumor_tags,
+        Some(sender.as_str()),
+    ));
+    add_candidate(Some(sender));
+    candidates
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InviteOwnerRoutingResolution {
     pub owner_pubkey: PublicKey,
@@ -275,6 +363,18 @@ mod tests {
 
         assert_eq!(resolved.owner_pubkey, owner);
         assert!(resolved.used_link_bootstrap_exception);
+    }
+
+    #[test]
+    fn resolves_self_targeted_conversation_candidates_with_linked_device_first() {
+        let candidates = resolve_conversation_candidate_pubkeys(
+            "owner",
+            "linked-device",
+            &[vec!["p".into(), "owner".into()]],
+            "owner",
+        );
+
+        assert_eq!(candidates, vec!["linked-device".to_string(), "owner".to_string()]);
     }
 
     #[test]

@@ -34,6 +34,10 @@ CLI commands, or FFI wrappers.
   adding a new device to an existing owner timeline.
 - `resolve_invite_owner_routing(...)`: keeps invite owner/device attribution consistent,
   including link bootstrap and fallback-to-device routing.
+- `resolve_conversation_candidate_pubkeys(...)`: centralizes self-DM and linked-device
+  conversation routing so clients do not fork the same rumor/owner/sender heuristic.
+- `resolve_rumor_peer_pubkey(...)`: resolves the immediate peer for a rumor when callers only need
+  the normalized peer identity rather than the full ordered candidate list.
 
 AppKeys should be treated as an authorization timeline. Reduced AppKeys sets should only be
 published for explicit revocation or first-device bootstrap. Imported owner-key logins on a fresh

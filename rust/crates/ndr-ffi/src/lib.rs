@@ -196,6 +196,48 @@ pub fn parse_app_keys_event(event_json: String) -> Result<Vec<FfiDeviceEntry>, N
         .collect())
 }
 
+/// Resolve the latest authorized device list from a set of AppKeys event JSON strings.
+#[uniffi::export]
+pub fn resolve_latest_app_keys_devices(
+    event_jsons: Vec<String>,
+) -> Result<Vec<FfiDeviceEntry>, NdrError> {
+    let events = event_jsons
+        .iter()
+        .filter_map(|event_json| serde_json::from_str::<nostr::Event>(event_json).ok())
+        .collect::<Vec<_>>();
+
+    let Some(snapshot) = nostr_double_ratchet::select_latest_app_keys_from_events(events.iter())
+    else {
+        return Ok(Vec::new());
+    };
+
+    Ok(snapshot
+        .app_keys
+        .get_all_devices()
+        .into_iter()
+        .map(|d| FfiDeviceEntry {
+            identity_pubkey_hex: hex::encode(d.identity_pubkey.to_bytes()),
+            created_at: d.created_at,
+        })
+        .collect())
+}
+
+/// Resolve conversation routing candidates for a decrypted rumor.
+#[uniffi::export]
+pub fn resolve_conversation_candidate_pubkeys(
+    owner_pubkey_hex: String,
+    rumor_pubkey_hex: String,
+    rumor_tags: Vec<Vec<String>>,
+    sender_pubkey_hex: String,
+) -> Vec<String> {
+    nostr_double_ratchet::resolve_conversation_candidate_pubkeys(
+        &owner_pubkey_hex,
+        &rumor_pubkey_hex,
+        &rumor_tags,
+        &sender_pubkey_hex,
+    )
+}
+
 /// FFI wrapper for Invite.
 #[derive(uniffi::Object)]
 pub struct InviteHandle {
