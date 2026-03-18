@@ -1079,7 +1079,7 @@ pub async fn accept(id: &str, config: &Config, storage: &Storage, output: &Outpu
                             client.add_relay(relay).await?;
                         }
                         client.connect().await;
-                        let _ = client.send_event(event).await;
+                        let _ = send_event_or_ignore(&client, event).await;
                     }
 
                     // Save the invite so we can process responses

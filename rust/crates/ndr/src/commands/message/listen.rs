@@ -460,6 +460,60 @@ async fn backfill_recent_pairwise_session_messages(
     Ok(())
 }
 
+async fn backfill_recent_group_sender_events(
+    client: &nostr_sdk::Client,
+    relays: &[String],
+    sender_event_pubkey: &nostr::PublicKey,
+    pending_group_sender_events: &mut std::collections::HashMap<(String, u32), Vec<nostr::Event>>,
+    seen_event_ids: &mut std::collections::HashSet<String>,
+    seen_event_ids_order: &mut std::collections::VecDeque<String>,
+) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let filter = nostr_sdk::Filter::new()
+        .kind(nostr::Kind::Custom(
+            nostr_double_ratchet::MESSAGE_EVENT_KIND as u16,
+        ))
+        .authors(vec![*sender_event_pubkey])
+        .since(nostr::Timestamp::from(now.saturating_sub(3600)));
+    let mut events =
+        fetch_events_best_effort(client, relays, filter, std::time::Duration::from_secs(3)).await?;
+    events.sort_by_key(|event| (event.created_at.as_u64(), event.id.to_hex()));
+
+    let one_to_many = OneToManyChannel::default();
+    let sender_event_pubkey_hex = sender_event_pubkey.to_hex();
+
+    for event in events {
+        let event_id = event.id.to_hex();
+        if seen_event_ids.contains(&event_id) {
+            continue;
+        }
+        seen_event_ids.insert(event_id.clone());
+        seen_event_ids_order.push_back(event_id);
+        if seen_event_ids_order.len() > MAX_SEEN_EVENT_IDS {
+            if let Some(old) = seen_event_ids_order.pop_front() {
+                seen_event_ids.remove(&old);
+            }
+        }
+
+        let parsed = match one_to_many.parse_outer_content(&event.content) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        if parsed.ciphertext.is_empty() {
+            continue;
+        }
+
+        pending_group_sender_events
+            .entry((sender_event_pubkey_hex.clone(), parsed.key_id))
+            .or_default()
+            .push(event);
+    }
+
+    Ok(())
+}
+
 struct SessionManagerDecrypted {
     sender: nostr::PublicKey,
     sender_device: Option<nostr::PublicKey>,
@@ -2369,6 +2423,20 @@ pub async fn listen(
                                                 subscribed_group_sender_pubkeys
                                                     .insert(sender_event_hex);
                                             }
+
+                                            // The sender may publish their first group message
+                                            // immediately after distributing a sender key. Backfill
+                                            // recent outer events so we do not miss that first
+                                            // message while the new subscription propagates.
+                                            backfill_recent_group_sender_events(
+                                                &client,
+                                                &relays,
+                                                &sender_event_pk,
+                                                &mut pending_group_sender_events,
+                                                &mut seen_event_ids,
+                                                &mut seen_event_ids_order,
+                                            )
+                                            .await?;
                                         }
                                     }
 
@@ -3052,6 +3120,20 @@ pub async fn listen(
                                         .await?;
                                         subscribed_group_sender_pubkeys.insert(sender_event_hex);
                                     }
+
+                                    // Group members can publish their first sender-key message
+                                    // before this new sender-event subscription is fully live.
+                                    // Backfill recent outer events so acceptance/restarts still
+                                    // recover that initial message burst.
+                                    backfill_recent_group_sender_events(
+                                        &client,
+                                        &relays,
+                                        &sender_event_pk,
+                                        &mut pending_group_sender_events,
+                                        &mut seen_event_ids,
+                                        &mut seen_event_ids_order,
+                                    )
+                                    .await?;
                                 }
                             }
 
