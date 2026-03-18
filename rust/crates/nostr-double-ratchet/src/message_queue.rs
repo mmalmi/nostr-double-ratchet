@@ -1,8 +1,8 @@
-use crate::{Result, StorageAdapter};
+use crate::Result;
 use nostr::UnsignedEvent;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,19 +15,19 @@ pub struct QueueEntry {
 
 #[derive(Clone)]
 pub struct MessageQueue {
-    storage: Arc<dyn StorageAdapter>,
+    entries: Arc<Mutex<HashMap<String, QueueEntry>>>,
     prefix: String,
 }
 
 impl MessageQueue {
-    pub fn new(storage: Arc<dyn StorageAdapter>, prefix: impl Into<String>) -> Self {
+    pub fn new(prefix: impl Into<String>) -> Self {
         Self {
-            storage,
+            entries: Arc::new(Mutex::new(HashMap::new())),
             prefix: prefix.into(),
         }
     }
 
-    fn key(&self, id: &str) -> String {
+    pub fn key(&self, id: &str) -> String {
         format!("{}{}", self.prefix, id)
     }
 
@@ -39,87 +39,75 @@ impl MessageQueue {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
 
-    pub fn add(&self, target_key: &str, event: &UnsignedEvent) -> Result<String> {
+    pub fn add(&self, target_key: &str, event: &UnsignedEvent, created_at: u64) -> Result<QueueEntry> {
         let id = format!("{}/{}", Self::event_id_or_random(event), target_key);
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
         let entry = QueueEntry {
             id: id.clone(),
             target_key: target_key.to_string(),
             event: event.clone(),
             created_at,
         };
-        self.storage
-            .put(&self.key(&id), serde_json::to_string(&entry)?)?;
-        Ok(id)
+        self.entries.lock().unwrap().insert(id, entry.clone());
+        Ok(entry)
+    }
+
+    pub fn import_entries(&self, entries: impl IntoIterator<Item = QueueEntry>) {
+        let mut stored = self.entries.lock().unwrap();
+        for entry in entries {
+            stored.insert(entry.id.clone(), entry);
+        }
     }
 
     pub fn get_for_target(&self, target_key: &str) -> Result<Vec<QueueEntry>> {
-        let keys = self.storage.list(&self.prefix)?;
-        let mut out = Vec::new();
-        for key in keys {
-            let Some(raw) = self.storage.get(&key)? else {
-                continue;
-            };
-            let Ok(entry) = serde_json::from_str::<QueueEntry>(&raw) else {
-                continue;
-            };
-            if entry.target_key == target_key {
-                out.push(entry);
-            }
-        }
+        let mut out: Vec<QueueEntry> = self
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.target_key == target_key)
+            .cloned()
+            .collect();
         out.sort_by_key(|entry| entry.created_at);
         Ok(out)
     }
 
-    pub fn remove_for_target(&self, target_key: &str) -> Result<()> {
-        let keys = self.storage.list(&self.prefix)?;
-        for key in keys {
-            let Some(raw) = self.storage.get(&key)? else {
-                continue;
-            };
-            let Ok(entry) = serde_json::from_str::<QueueEntry>(&raw) else {
-                continue;
-            };
-            if entry.target_key == target_key {
-                let _ = self.storage.del(&key);
-            }
-        }
-        Ok(())
+    pub fn remove_for_target(&self, target_key: &str) -> Result<Vec<QueueEntry>> {
+        let mut stored = self.entries.lock().unwrap();
+        let ids: Vec<String> = stored
+            .iter()
+            .filter_map(|(id, entry)| (entry.target_key == target_key).then_some(id.clone()))
+            .collect();
+        let removed = ids
+            .into_iter()
+            .filter_map(|id| stored.remove(&id))
+            .collect();
+        Ok(removed)
     }
 
-    pub fn remove_by_target_and_event_id(&self, target_key: &str, event_id: &str) -> Result<()> {
+    pub fn remove_by_target_and_event_id(
+        &self,
+        target_key: &str,
+        event_id: &str,
+    ) -> Result<Option<QueueEntry>> {
         self.remove(&format!("{}/{}", event_id, target_key))
     }
 
-    pub fn remove(&self, id: &str) -> Result<()> {
-        self.storage.del(&self.key(id))
+    pub fn remove(&self, id: &str) -> Result<Option<QueueEntry>> {
+        Ok(self.entries.lock().unwrap().remove(id))
     }
 
-    /// Remove entries older than `max_age_ms` milliseconds.
-    pub fn remove_expired(&self, max_age_ms: u64) -> Result<usize> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let keys = self.storage.list(&self.prefix)?;
-        let mut removed = 0;
-        for key in keys {
-            let Some(raw) = self.storage.get(&key)? else {
-                continue;
-            };
-            let Ok(entry) = serde_json::from_str::<QueueEntry>(&raw) else {
-                let _ = self.storage.del(&key);
-                removed += 1;
-                continue;
-            };
-            if now.saturating_sub(entry.created_at) > max_age_ms {
-                let _ = self.storage.del(&key);
-                removed += 1;
-            }
-        }
+    pub fn remove_expired(&self, now_ms: u64, max_age_ms: u64) -> Result<Vec<QueueEntry>> {
+        let mut stored = self.entries.lock().unwrap();
+        let ids: Vec<String> = stored
+            .iter()
+            .filter_map(|(id, entry)| {
+                (now_ms.saturating_sub(entry.created_at) > max_age_ms).then_some(id.clone())
+            })
+            .collect();
+        let removed = ids
+            .into_iter()
+            .filter_map(|id| stored.remove(&id))
+            .collect();
         Ok(removed)
     }
 }
@@ -127,7 +115,6 @@ impl MessageQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InMemoryStorage;
     use nostr::{EventBuilder, Keys, Kind, Timestamp};
 
     fn make_rumor(content: &str, created_at: u64) -> UnsignedEvent {
@@ -140,37 +127,23 @@ mod tests {
 
     #[test]
     fn add_and_get_for_target_returns_sorted_entries() {
-        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let queue = MessageQueue::new(storage.clone(), "v1/test-queue/");
+        let queue = MessageQueue::new("v1/test-queue/");
         let event1 = make_rumor("first", 1);
         let event2 = make_rumor("second", 2);
-
-        let id_late = format!("{}/{}", event2.id.as_ref().unwrap(), "device-a");
-        let id_early = format!("{}/{}", event1.id.as_ref().unwrap(), "device-a");
-        storage
-            .put(
-                &format!("v1/test-queue/{}", id_late),
-                serde_json::to_string(&QueueEntry {
-                    id: id_late,
-                    target_key: "device-a".to_string(),
-                    event: event2.clone(),
-                    created_at: 200,
-                })
-                .unwrap(),
-            )
-            .unwrap();
-        storage
-            .put(
-                &format!("v1/test-queue/{}", id_early),
-                serde_json::to_string(&QueueEntry {
-                    id: id_early,
-                    target_key: "device-a".to_string(),
-                    event: event1.clone(),
-                    created_at: 100,
-                })
-                .unwrap(),
-            )
-            .unwrap();
+        queue.import_entries(vec![
+            QueueEntry {
+                id: format!("{}/{}", event2.id.as_ref().unwrap(), "device-a"),
+                target_key: "device-a".to_string(),
+                event: event2.clone(),
+                created_at: 200,
+            },
+            QueueEntry {
+                id: format!("{}/{}", event1.id.as_ref().unwrap(), "device-a"),
+                target_key: "device-a".to_string(),
+                event: event1.clone(),
+                created_at: 100,
+            },
+        ]);
 
         let entries = queue.get_for_target("device-a").unwrap();
         assert_eq!(entries.len(), 2);
@@ -180,13 +153,12 @@ mod tests {
 
     #[test]
     fn remove_by_target_and_event_id_only_removes_matching_entry() {
-        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let queue = MessageQueue::new(storage, "v1/test-queue/");
+        let queue = MessageQueue::new("v1/test-queue/");
         let event = make_rumor("hello", 1);
         let event_id = event.id.as_ref().unwrap().to_string();
 
-        queue.add("device-a", &event).unwrap();
-        queue.add("device-b", &event).unwrap();
+        queue.add("device-a", &event, 100).unwrap();
+        queue.add("device-b", &event, 200).unwrap();
         queue
             .remove_by_target_and_event_id("device-a", &event_id)
             .unwrap();
@@ -197,14 +169,13 @@ mod tests {
 
     #[test]
     fn different_prefixes_do_not_interfere() {
-        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let queue_a = MessageQueue::new(storage.clone(), "v1/message-queue/");
-        let queue_b = MessageQueue::new(storage, "v1/discovery-queue/");
+        let queue_a = MessageQueue::new("v1/message-queue/");
+        let queue_b = MessageQueue::new("v1/discovery-queue/");
         let event1 = make_rumor("a", 1);
         let event2 = make_rumor("b", 2);
 
-        queue_a.add("target-1", &event1).unwrap();
-        queue_b.add("target-1", &event2).unwrap();
+        queue_a.add("target-1", &event1, 100).unwrap();
+        queue_b.add("target-1", &event2, 200).unwrap();
 
         let entries_a = queue_a.get_for_target("target-1").unwrap();
         let entries_b = queue_b.get_for_target("target-1").unwrap();
@@ -212,5 +183,23 @@ mod tests {
         assert_eq!(entries_b.len(), 1);
         assert_eq!(entries_a[0].event.id, event1.id);
         assert_eq!(entries_b[0].event.id, event2.id);
+    }
+
+    #[test]
+    fn remove_expired_returns_removed_entries() {
+        let queue = MessageQueue::new("v1/message-queue/");
+        let old_event = make_rumor("old", 1);
+        let new_event = make_rumor("new", 2);
+
+        queue.add("target-1", &old_event, 100).unwrap();
+        queue.add("target-1", &new_event, 250).unwrap();
+
+        let removed = queue.remove_expired(400, 200).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].event.id, old_event.id);
+
+        let remaining = queue.get_for_target("target-1").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].event.id, new_event.id);
     }
 }

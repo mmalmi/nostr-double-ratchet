@@ -51,8 +51,11 @@ pub use session::{
     SessionSendInput, SessionSendResult,
 };
 pub use session_manager::{
-    emit_session_manager_output, AcceptInviteResult, ManagerOutput, SessionManager, SessionManagerEffect,
-    SessionManagerNotification, SessionManagerEvent,
+    apply_session_manager_storage_writes, emit_session_manager_output,
+    initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output, resolve_session_manager_storage_reads, AcceptInviteResult,
+    ManagerOutput, SessionManager, SessionManagerEffect, SessionManagerNotification,
+    SessionManagerStorageEffect, SessionManagerStorageResults, SessionManagerEvent,
 };
 pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};

@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
-    emit_session_manager_output, FileStorageAdapter, ManagedInvite, ManagedSession as Session,
-    OneToManyChannel, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
-    CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+    initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output, emit_session_manager_output, FileStorageAdapter,
+    ManagedInvite, ManagedSession as Session, OneToManyChannel, SessionManager,
+    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND,
+    GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 
 use crate::commands::owner_claim::{
@@ -29,11 +31,20 @@ use super::types::{IncomingMessage, IncomingReaction};
 const PEER_APP_KEYS_REFRESH_INTERVAL_MS: u64 = 2_000;
 const MAX_PENDING_SESSION_MANAGER_MESSAGE_EVENTS: usize = 256;
 
+fn emit_manager_output<T>(
+    storage: &dyn StorageAdapter,
+    tx: &crossbeam_channel::Sender<SessionManagerEvent>,
+    output: nostr_double_ratchet::ManagerOutput<T>,
+) -> Result<T> {
+    Ok(persist_and_emit_session_manager_output(storage, tx, output)?)
+}
+
 fn build_session_manager(
     config: &Config,
     storage: &Storage,
 ) -> Result<(
     SessionManager,
+    std::sync::Arc<dyn StorageAdapter>,
     crossbeam_channel::Sender<SessionManagerEvent>,
     crossbeam_channel::Receiver<SessionManagerEvent>,
     String,
@@ -57,13 +68,18 @@ fn build_session_manager(
         our_private_key,
         our_pubkey_hex.clone(),
         owner_pubkey,
-        Some(session_manager_store),
+        Some(session_manager_store.clone()),
         None,
     );
-    emit_session_manager_output(&sm_tx, manager.init()?)?;
+    emit_manager_output(
+        session_manager_store.as_ref(),
+        &sm_tx,
+        initialize_session_manager(session_manager_store.as_ref(), &manager)?,
+    )?;
 
     Ok((
         manager,
+        session_manager_store,
         sm_tx,
         sm_rx,
         our_pubkey_hex,
@@ -76,6 +92,7 @@ fn build_session_manager(
 fn import_chats_into_session_manager(
     storage: &Storage,
     manager: &SessionManager,
+    session_manager_store: &dyn StorageAdapter,
     manager_tx: &crossbeam_channel::Sender<SessionManagerEvent>,
     my_owner_pubkey_hex: &str,
 ) -> Result<()> {
@@ -98,7 +115,7 @@ fn import_chats_into_session_manager(
             Ok(pk) => pk,
             Err(_) => continue,
         };
-        emit_session_manager_output(manager_tx, manager.setup_user(owner_pubkey))?;
+        emit_manager_output(session_manager_store, manager_tx, manager.setup_user(owner_pubkey))?;
 
         let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
         if known
@@ -114,7 +131,9 @@ fn import_chats_into_session_manager(
                 Err(_) => continue,
             };
 
-        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
+        let mut output = manager.import_session_state(owner_pubkey, Some(device_id), state)?;
+        persist_session_manager_output(session_manager_store, &mut output)?;
+        emit_session_manager_output(manager_tx, output)?;
     }
 
     Ok(())
@@ -203,6 +222,7 @@ fn sync_chats_from_session_manager(
 async fn refresh_peer_app_keys_snapshots(
     storage: &Storage,
     session_manager: &SessionManager,
+    session_manager_store: &dyn StorageAdapter,
     session_manager_tx: &crossbeam_channel::Sender<SessionManagerEvent>,
     client: &nostr_sdk::Client,
     my_owner_pubkey_hex: &str,
@@ -228,7 +248,8 @@ async fn refresh_peer_app_keys_snapshots(
         };
 
         if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, owner_pubkey).await? {
-            emit_session_manager_output(
+            emit_manager_output(
+                session_manager_store,
                 session_manager_tx,
                 session_manager.ingest_app_keys_snapshot(
                     owner_pubkey,
@@ -244,12 +265,14 @@ async fn refresh_peer_app_keys_snapshots(
 
 async fn refresh_pending_invite_response_app_keys(
     session_manager: &SessionManager,
+    session_manager_store: &dyn StorageAdapter,
     session_manager_tx: &crossbeam_channel::Sender<SessionManagerEvent>,
     client: &nostr_sdk::Client,
 ) -> Result<()> {
     for owner_pubkey in session_manager.pending_invite_response_owner_pubkeys() {
         if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, owner_pubkey).await? {
-            emit_session_manager_output(
+            emit_manager_output(
+                session_manager_store,
                 session_manager_tx,
                 session_manager.ingest_app_keys_snapshot(
                     owner_pubkey,
@@ -350,6 +373,7 @@ fn decrypted_content_is_group_routed(content_json: &str) -> bool {
 async fn process_session_manager_event(
     event: &nostr::Event,
     session_manager: &SessionManager,
+    session_manager_store: &dyn StorageAdapter,
     session_manager_tx: &crossbeam_channel::Sender<SessionManagerEvent>,
     manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
     client: &nostr_sdk::Client,
@@ -361,7 +385,11 @@ async fn process_session_manager_event(
     let current_event_id = event.id.to_hex();
     let current_timestamp = event.created_at.as_u64();
 
-    emit_session_manager_output(session_manager_tx, session_manager.process_received_event(event.clone()))?;
+    emit_manager_output(
+        session_manager_store,
+        session_manager_tx,
+        session_manager.process_received_event(event.clone()),
+    )?;
     let decrypted_events = flush_session_manager_events(
         manager_rx,
         client,
@@ -456,6 +484,7 @@ async fn retry_pending_session_manager_message_events(
     pending_events: &mut std::collections::HashMap<String, nostr::Event>,
     pending_order: &mut std::collections::VecDeque<String>,
     session_manager: &SessionManager,
+    session_manager_store: &dyn StorageAdapter,
     session_manager_tx: &crossbeam_channel::Sender<SessionManagerEvent>,
     manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
     client: &nostr_sdk::Client,
@@ -481,6 +510,7 @@ async fn retry_pending_session_manager_message_events(
         let result = process_session_manager_event(
             &event,
             session_manager,
+            session_manager_store,
             session_manager_tx,
             manager_rx,
             client,
@@ -754,6 +784,7 @@ pub async fn listen(
     let chat_id_owned = chat_id.map(|s| s.to_string());
     let (
         session_manager,
+        session_manager_store,
         session_manager_tx,
         session_manager_rx,
         my_pubkey,
@@ -767,6 +798,7 @@ pub async fn listen(
     import_chats_into_session_manager(
         storage,
         &session_manager,
+        session_manager_store.as_ref(),
         &session_manager_tx,
         &owner_pubkey_hex,
     )?;
@@ -1076,14 +1108,20 @@ pub async fn listen(
         refresh_peer_app_keys_snapshots(
             storage,
             &session_manager,
+            session_manager_store.as_ref(),
             &session_manager_tx,
             &client,
             &owner_pubkey_hex,
             chat_id_owned.as_deref(),
         )
         .await?;
-        refresh_pending_invite_response_app_keys(&session_manager, &session_manager_tx, &client)
-            .await?;
+        refresh_pending_invite_response_app_keys(
+            &session_manager,
+            session_manager_store.as_ref(),
+            &session_manager_tx,
+            &client,
+        )
+        .await?;
         last_peer_app_keys_refresh = Instant::now();
         let _ = flush_session_manager_events(
             &session_manager_rx,
@@ -1097,6 +1135,7 @@ pub async fn listen(
             &mut pending_session_manager_message_events,
             &mut pending_session_manager_message_event_order,
             &session_manager,
+            session_manager_store.as_ref(),
             &session_manager_tx,
             &session_manager_rx,
             &client,
@@ -1121,6 +1160,7 @@ pub async fn listen(
         import_chats_into_session_manager(
             storage,
             &session_manager,
+            session_manager_store.as_ref(),
             &session_manager_tx,
             &owner_pubkey_hex,
         )?;
@@ -1156,6 +1196,7 @@ pub async fn listen(
                 refresh_peer_app_keys_snapshots(
                     storage,
                     &session_manager,
+                    session_manager_store.as_ref(),
                     &session_manager_tx,
                     &client,
                     &owner_pubkey_hex,
@@ -1164,6 +1205,7 @@ pub async fn listen(
                 .await?;
                 refresh_pending_invite_response_app_keys(
                     &session_manager,
+                    session_manager_store.as_ref(),
                     &session_manager_tx,
                     &client,
                 )
@@ -1180,6 +1222,7 @@ pub async fn listen(
                     &mut pending_session_manager_message_events,
                     &mut pending_session_manager_message_event_order,
                     &session_manager,
+                    session_manager_store.as_ref(),
                     &session_manager_tx,
                     &session_manager_rx,
                     &client,
@@ -1205,6 +1248,7 @@ pub async fn listen(
             import_chats_into_session_manager(
                 storage,
                 &session_manager,
+                session_manager_store.as_ref(),
                 &session_manager_tx,
                 &owner_pubkey_hex,
             )?;
@@ -1216,6 +1260,7 @@ pub async fn listen(
                     refresh_peer_app_keys_snapshots(
                         storage,
                         &session_manager,
+                        session_manager_store.as_ref(),
                         &session_manager_tx,
                         &client,
                         &owner_pubkey_hex,
@@ -1224,6 +1269,7 @@ pub async fn listen(
                     .await?;
                     refresh_pending_invite_response_app_keys(
                         &session_manager,
+                        session_manager_store.as_ref(),
                         &session_manager_tx,
                         &client,
                     )
@@ -1241,6 +1287,7 @@ pub async fn listen(
                     &mut pending_session_manager_message_events,
                     &mut pending_session_manager_message_event_order,
                     &session_manager,
+                    session_manager_store.as_ref(),
                     &session_manager_tx,
                     &session_manager_rx,
                     &client,
@@ -1315,6 +1362,7 @@ pub async fn listen(
             let session_manager_result = process_session_manager_event(
                 &event,
                 &session_manager,
+                session_manager_store.as_ref(),
                 &session_manager_tx,
                 &session_manager_rx,
                 &client,
@@ -1327,6 +1375,7 @@ pub async fn listen(
             if event.kind.as_u16() as u32 == INVITE_RESPONSE_KIND {
                 refresh_pending_invite_response_app_keys(
                     &session_manager,
+                    session_manager_store.as_ref(),
                     &session_manager_tx,
                     &client,
                 )
@@ -1343,6 +1392,7 @@ pub async fn listen(
                     &mut pending_session_manager_message_events,
                     &mut pending_session_manager_message_event_order,
                     &session_manager,
+                    session_manager_store.as_ref(),
                     &session_manager_tx,
                     &session_manager_rx,
                     &client,
@@ -1447,7 +1497,8 @@ pub async fn listen(
                                 if let Some(snapshot) =
                                     fetch_latest_app_keys_snapshot(&client, their_pubkey).await?
                                 {
-                                    emit_session_manager_output(
+                                    emit_manager_output(
+                                        session_manager_store.as_ref(),
                                         &session_manager_tx,
                                         session_manager.ingest_app_keys_snapshot(
                                             their_pubkey,
@@ -1518,12 +1569,18 @@ pub async fn listen(
                                 storage.save_chat(&new_chat)?;
                                 new_chat
                             };
-                            session_manager.import_session_state(
+                            let mut import_output = session_manager.import_session_state(
                                 their_pubkey,
                                 chat.device_id.clone(),
                                 import_state,
                             )?;
-                            emit_session_manager_output(
+                            persist_session_manager_output(
+                                session_manager_store.as_ref(),
+                                &mut import_output,
+                            )?;
+                            emit_session_manager_output(&session_manager_tx, import_output)?;
+                            emit_manager_output(
+                                session_manager_store.as_ref(),
                                 &session_manager_tx,
                                 session_manager.setup_user(their_pubkey),
                             )?;
@@ -1543,6 +1600,7 @@ pub async fn listen(
                                 &mut pending_session_manager_message_events,
                                 &mut pending_session_manager_message_event_order,
                                 &session_manager,
+                                session_manager_store.as_ref(),
                                 &session_manager_tx,
                                 &session_manager_rx,
                                 &client,
@@ -3037,6 +3095,7 @@ pub async fn listen(
                 import_chats_into_session_manager(
                     storage,
                     &session_manager,
+                    session_manager_store.as_ref(),
                     &session_manager_tx,
                     &owner_pubkey_hex,
                 )?;

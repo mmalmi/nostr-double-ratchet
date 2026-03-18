@@ -1,6 +1,7 @@
 use anyhow::Result;
 use nostr_double_ratchet::{
-    emit_session_manager_output, FileStorageAdapter, SessionManager, SessionManagerEvent,
+    initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output, FileStorageAdapter, SessionManager, SessionManagerEvent,
     StorageAdapter,
 };
 use serde::Serialize;
@@ -11,6 +12,14 @@ use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
 use crate::state_sync::{select_canonical_session, ControlStamp};
 use crate::storage::Storage;
+
+fn emit_manager_output<T>(
+    storage: &dyn StorageAdapter,
+    tx: &crossbeam_channel::Sender<SessionManagerEvent>,
+    output: nostr_double_ratchet::ManagerOutput<T>,
+) -> Result<T> {
+    Ok(persist_and_emit_session_manager_output(storage, tx, output)?)
+}
 
 #[derive(Serialize)]
 struct ChatList {
@@ -179,11 +188,18 @@ fn delete_session_manager_chat(
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        Some(session_manager_store),
+        Some(session_manager_store.clone()),
         None,
     );
-    emit_session_manager_output(&sm_tx, manager.init()?)?;
-    emit_session_manager_output(&sm_tx, manager.delete_chat(their_pubkey)?)?;
+    emit_manager_output(session_manager_store.as_ref(), &sm_tx, initialize_session_manager(
+        session_manager_store.as_ref(),
+        &manager,
+    )?)?;
+    emit_manager_output(
+        session_manager_store.as_ref(),
+        &sm_tx,
+        manager.delete_chat(their_pubkey)?,
+    )?;
     Ok(())
 }
 
@@ -267,10 +283,14 @@ pub async fn ttl(
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        Some(session_manager_store),
+        Some(session_manager_store.clone()),
         None,
     );
-    emit_session_manager_output(&sm_tx, manager.init()?)?;
+    emit_manager_output(
+        session_manager_store.as_ref(),
+        &sm_tx,
+        initialize_session_manager(session_manager_store.as_ref(), &manager)?,
+    )?;
 
     // Import the current selected session so we can send via SessionManager.
     let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
@@ -281,10 +301,15 @@ pub async fn ttl(
                 e
             )
         })?;
-    manager.import_session_state(recipient, Some(device_id), state)?;
+    let mut import_output = manager.import_session_state(recipient, Some(device_id), state)?;
+    persist_session_manager_output(session_manager_store.as_ref(), &mut import_output)?;
 
     let event_ids =
-        emit_session_manager_output(&sm_tx, manager.send_chat_settings(recipient, ttl_to_send)?)?;
+        emit_manager_output(
+            session_manager_store.as_ref(),
+            &sm_tx,
+            manager.send_chat_settings(recipient, ttl_to_send)?,
+        )?;
 
     let client = connect_client(config).await?;
     let signing_keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);

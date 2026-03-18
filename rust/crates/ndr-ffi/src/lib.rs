@@ -11,7 +11,8 @@ use nostr_double_ratchet::{
     AppKeys, CreateGroupOptions, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent,
     GroupManager, GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, ManagedInvite,
     ManagedSession, SessionManager, SessionManagerEvent, SessionState, StorageAdapter,
-    emit_session_manager_output,
+    initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output,
 };
 
 mod error;
@@ -491,6 +492,7 @@ impl SessionHandle {
 #[derive(uniffi::Object)]
 pub struct SessionManagerHandle {
     inner: Mutex<SessionManager>,
+    storage: Arc<dyn StorageAdapter>,
     event_rx: Mutex<Receiver<SessionManagerEvent>>,
     event_tx: Sender<SessionManagerEvent>,
     group_manager: Mutex<GroupManager>,
@@ -501,7 +503,7 @@ impl SessionManagerHandle {
         &self,
         output: nostr_double_ratchet::ManagerOutput<T>,
     ) -> Result<T, NdrError> {
-        Ok(emit_session_manager_output(&self.event_tx, output)?)
+        Ok(persist_and_emit_session_manager_output(self.storage.as_ref(), &self.event_tx, output)?)
     }
 }
 
@@ -536,12 +538,13 @@ impl SessionManagerHandle {
         let group_manager = GroupManager::new(GroupManagerOptions {
             our_owner_pubkey: owner_pubkey,
             our_device_pubkey: our_pubkey,
-            storage: Some(storage),
+            storage: Some(storage.clone()),
             one_to_many: None,
         });
 
         Ok(Arc::new(Self {
             inner: Mutex::new(manager),
+            storage,
             event_rx: Mutex::new(rx),
             event_tx: tx,
             group_manager: Mutex::new(group_manager),
@@ -581,12 +584,13 @@ impl SessionManagerHandle {
         let group_manager = GroupManager::new(GroupManagerOptions {
             our_owner_pubkey: owner_pubkey,
             our_device_pubkey: our_pubkey,
-            storage: Some(storage),
+            storage: Some(storage.clone()),
             one_to_many: None,
         });
 
         Ok(Arc::new(Self {
             inner: Mutex::new(manager),
+            storage,
             event_rx: Mutex::new(rx),
             event_tx: tx,
             group_manager: Mutex::new(group_manager),
@@ -596,7 +600,8 @@ impl SessionManagerHandle {
     /// Initialize the session manager (loads state, creates device invite, subscribes).
     pub fn init(&self) -> Result<(), NdrError> {
         let manager = self.inner.lock().unwrap();
-        self.emit_output(manager.init()?)?;
+        let output = initialize_session_manager(self.storage.as_ref(), &manager)?;
+        self.emit_output(output)?;
         Ok(())
     }
 
@@ -604,7 +609,8 @@ impl SessionManagerHandle {
     pub fn setup_user(&self, user_pubkey_hex: String) -> Result<(), NdrError> {
         let user_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&user_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
-        self.emit_output(manager.init()?)?;
+        let output = initialize_session_manager(self.storage.as_ref(), &manager)?;
+        self.emit_output(output)?;
         self.emit_output(manager.setup_user(user_pubkey))?;
         Ok(())
     }
@@ -625,7 +631,8 @@ impl SessionManagerHandle {
             .transpose()?;
 
         let manager = self.inner.lock().unwrap();
-        self.emit_output(manager.init()?)?;
+        let output = initialize_session_manager(self.storage.as_ref(), &manager)?;
+        self.emit_output(output)?;
         let accepted = self.emit_output(manager.accept_invite(&invite, owner_pubkey_hint)?)?;
 
         Ok(SessionManagerAcceptInviteResult {
@@ -650,7 +657,8 @@ impl SessionManagerHandle {
             .transpose()?;
 
         let manager = self.inner.lock().unwrap();
-        self.emit_output(manager.init()?)?;
+        let output = initialize_session_manager(self.storage.as_ref(), &manager)?;
+        self.emit_output(output)?;
         let accepted = self.emit_output(manager.accept_invite(&invite, owner_pubkey_hint)?)?;
 
         Ok(SessionManagerAcceptInviteResult {
@@ -813,7 +821,8 @@ impl SessionManagerHandle {
         let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                                  rumor: &nostr::UnsignedEvent|
          -> nostr_double_ratchet::Result<()> {
-            emit_session_manager_output(
+            persist_and_emit_session_manager_output(
+                self.storage.as_ref(),
                 &self.event_tx,
                 session_manager.send_event(recipient_owner, rumor.clone())?,
             )?;
@@ -889,7 +898,8 @@ impl SessionManagerHandle {
         let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                                  rumor: &nostr::UnsignedEvent|
          -> nostr_double_ratchet::Result<()> {
-            emit_session_manager_output(
+            persist_and_emit_session_manager_output(
+                self.storage.as_ref(),
                 &self.event_tx,
                 session_manager.send_event(recipient_owner, rumor.clone())?,
             )?;
@@ -1023,7 +1033,8 @@ impl SessionManagerHandle {
         let state: SessionState =
             nostr_double_ratchet::utils::deserialize_session_state(&state_json)?;
         let manager = self.inner.lock().unwrap();
-        manager.import_session_state(peer_pubkey, device_id, state)?;
+        let mut output = manager.import_session_state(peer_pubkey, device_id, state)?;
+        persist_session_manager_output(self.storage.as_ref(), &mut output)?;
         Ok(())
     }
 

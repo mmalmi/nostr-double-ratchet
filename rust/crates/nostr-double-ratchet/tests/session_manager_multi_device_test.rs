@@ -1,16 +1,31 @@
 use std::sync::Arc;
 use std::time::Duration;
+use std::ops::Deref;
 
 use crossbeam_channel::{Receiver, Sender};
 use nostr::{JsonUtil, Keys, PublicKey, UnsignedEvent};
 use nostr_double_ratchet::{
-    emit_session_manager_output, AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage,
+    initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output, AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage,
     Invite, ManagedInvite, Result, SendOptions, Session, SessionManager, SessionManagerEvent,
     StorageAdapter, MESSAGE_EVENT_KIND,
 };
 
-fn emit<T>(tx: &Sender<SessionManagerEvent>, output: nostr_double_ratchet::ManagerOutput<T>) -> T {
-    emit_session_manager_output(tx, output).unwrap()
+struct ManagedTx {
+    tx: Sender<SessionManagerEvent>,
+    storage: Arc<dyn StorageAdapter>,
+}
+
+impl Deref for ManagedTx {
+    type Target = Sender<SessionManagerEvent>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+fn emit<T>(tx: &ManagedTx, output: nostr_double_ratchet::ManagerOutput<T>) -> T {
+    persist_and_emit_session_manager_output(tx.storage.as_ref(), &tx.tx, output).unwrap()
 }
 
 fn new_manager(
@@ -22,19 +37,20 @@ fn new_manager(
     invite: Option<Invite>,
 ) -> (
     SessionManager,
-    Sender<SessionManagerEvent>,
+    ManagedTx,
     Receiver<SessionManagerEvent>,
 ) {
+    let storage = storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
     let (tx, rx) = crossbeam_channel::unbounded();
     let manager = SessionManager::new(
         our_pubkey,
         identity_key,
         device_id,
         owner_pubkey,
-        storage,
+        Some(storage.clone()),
         invite,
     );
-    (manager, tx, rx)
+    (manager, ManagedTx { tx, storage }, rx)
 }
 
 fn load_stored_user_record(
@@ -176,6 +192,7 @@ fn import_session_from_response(
     invite: &Invite,
     inviter_private_key: [u8; 32],
     manager: &SessionManager,
+    tx: &ManagedTx,
     response_event: &nostr::Event,
 ) -> Result<(PublicKey, String)> {
     let response = ManagedInvite::new(invite.clone())
@@ -186,11 +203,12 @@ fn import_session_from_response(
         .device_id
         .clone()
         .unwrap_or_else(|| response.invitee_identity.to_hex());
-    manager.import_session_state(
+    let mut output = manager.import_session_state(
         owner_pubkey,
         Some(device_id.clone()),
         response.session.session.state,
     )?;
+    persist_session_manager_output(tx.storage.as_ref(), &mut output)?;
     Ok((owner_pubkey, device_id))
 }
 
@@ -237,7 +255,7 @@ fn test_accept_invite_routes_session_under_verified_claimed_owner() -> Result<()
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    emit(&tx, manager.init()?);
+    emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager)?);
     drain_events(&rx);
 
     let bob_app_keys_event = AppKeys::new(vec![DeviceEntry::new(bob_device, 1)])
@@ -305,8 +323,8 @@ fn test_replayed_invite_is_ignored_once_accept_bootstrap_uses_session() -> Resul
         None,
     );
 
-    emit(&alice_tx, alice_mgr.init()?);
-    emit(&bob_tx, bob_mgr.init()?);
+    emit(&alice_tx, initialize_session_manager(alice_tx.storage.as_ref(), &alice_mgr)?);
+    emit(&bob_tx, initialize_session_manager(bob_tx.storage.as_ref(), &bob_mgr)?);
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
@@ -317,6 +335,7 @@ fn test_replayed_invite_is_ignored_once_accept_bootstrap_uses_session() -> Resul
         &invite,
         alice_keys.secret_key().to_secret_bytes(),
         &alice_mgr,
+        &alice_tx,
         &first_response,
     )?;
     assert_eq!(peer_pubkey, bob_pubkey);
@@ -374,8 +393,8 @@ fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> 
         None,
     );
 
-    emit(&alice_tx, alice_mgr.init()?);
-    emit(&bob_tx, bob_mgr.init()?);
+    emit(&alice_tx, initialize_session_manager(alice_tx.storage.as_ref(), &alice_mgr)?);
+    emit(&bob_tx, initialize_session_manager(bob_tx.storage.as_ref(), &bob_mgr)?);
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
@@ -387,6 +406,7 @@ fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> 
         &invite,
         alice_keys.secret_key().to_secret_bytes(),
         &alice_mgr,
+        &alice_tx,
         &first_response,
     )?;
     assert_eq!(peer_pubkey, bob_pubkey);
@@ -466,8 +486,8 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         None,
     );
 
-    emit(&alice_tx, alice_mgr.init()?);
-    emit(&bob_tx, bob_mgr.init()?);
+    emit(&alice_tx, initialize_session_manager(alice_tx.storage.as_ref(), &alice_mgr)?);
+    emit(&bob_tx, initialize_session_manager(bob_tx.storage.as_ref(), &bob_mgr)?);
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
@@ -479,6 +499,7 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         &alice_public_invite,
         alice_keys.secret_key().to_secret_bytes(),
         &alice_mgr,
+        &alice_tx,
         &alice_public_response,
     )?;
     assert_eq!(peer_pubkey, bob_pubkey);
@@ -505,6 +526,7 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         &bob_public_invite,
         bob_keys.secret_key().to_secret_bytes(),
         &bob_mgr,
+        &bob_tx,
         &bob_public_response,
     )?;
     assert_eq!(alice_peer_pubkey, alice_pubkey);
@@ -574,8 +596,8 @@ fn test_multi_device_self_fanout() -> Result<()> {
         Some(invite2.clone()),
     );
 
-    emit(&tx1, manager1.init()?);
-    emit(&tx2, manager2.init()?);
+    emit(&tx1, initialize_session_manager(tx1.storage.as_ref(), &manager1)?);
+    emit(&tx2, initialize_session_manager(tx2.storage.as_ref(), &manager2)?);
     drain_events(&rx1);
     drain_events(&rx2);
 
@@ -677,8 +699,8 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
         Some(invite2.clone()),
     );
 
-    emit(&tx1, manager1.init()?);
-    emit(&tx2, manager2.init()?);
+    emit(&tx1, initialize_session_manager(tx1.storage.as_ref(), &manager1)?);
+    emit(&tx2, initialize_session_manager(tx2.storage.as_ref(), &manager2)?);
     drain_events(&rx1);
     drain_events(&rx2);
 
@@ -720,13 +742,14 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
 
     // Send a message to self (owner) from device1 with an expiration tag.
     let expires_at = 1_700_000_000u64;
-    manager1.set_peer_send_options(
+    let mut set_options = manager1.set_peer_send_options(
         owner_pubkey,
         Some(SendOptions {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         }),
     )?;
+    persist_session_manager_output(tx1.storage.as_ref(), &mut set_options)?;
     emit(&tx1, manager1.send_text(owner_pubkey, "hello".to_string(), None)?);
 
     // Deliver encrypted message to device2
@@ -797,8 +820,8 @@ fn test_delayed_link_bootstrap_flushes_queued_self_sync_message() -> Result<()> 
         None,
     );
 
-    emit(&owner_tx, owner_mgr.init()?);
-    emit(&linked_tx, linked_mgr.init()?);
+    emit(&owner_tx, initialize_session_manager(owner_tx.storage.as_ref(), &owner_mgr)?);
+    emit(&linked_tx, initialize_session_manager(linked_tx.storage.as_ref(), &linked_mgr)?);
     drain_events(&owner_rx);
     drain_events(&linked_rx);
 
@@ -809,6 +832,7 @@ fn test_delayed_link_bootstrap_flushes_queued_self_sync_message() -> Result<()> 
         &link_invite,
         linked_keys.secret_key().to_secret_bytes(),
         &linked_mgr,
+        &linked_tx,
         &link_response,
     )?;
     assert_eq!(linked_peer, owner_pubkey);
@@ -887,9 +911,15 @@ fn test_existing_peer_fans_out_to_newly_added_device_after_appkeys_and_invite() 
         None,
     );
 
-    emit(&alice_owner_tx, alice_owner_mgr.init()?);
-    emit(&alice_new_tx, alice_new_mgr.init()?);
-    emit(&bob_tx, bob_mgr.init()?);
+    emit(
+        &alice_owner_tx,
+        initialize_session_manager(alice_owner_tx.storage.as_ref(), &alice_owner_mgr)?,
+    );
+    emit(
+        &alice_new_tx,
+        initialize_session_manager(alice_new_tx.storage.as_ref(), &alice_new_mgr)?,
+    );
+    emit(&bob_tx, initialize_session_manager(bob_tx.storage.as_ref(), &bob_mgr)?);
     drain_events(&alice_owner_rx);
     drain_events(&alice_new_rx);
     drain_events(&bob_rx);
@@ -1059,10 +1089,22 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         None,
     );
 
-    emit(&alice_owner_tx, alice_owner_mgr.init()?);
-    emit(&alice_linked_tx, alice_linked_mgr.init()?);
-    emit(&bob_owner_tx, bob_owner_mgr.init()?);
-    emit(&bob_linked_tx, bob_linked_mgr.init()?);
+    emit(
+        &alice_owner_tx,
+        initialize_session_manager(alice_owner_tx.storage.as_ref(), &alice_owner_mgr)?,
+    );
+    emit(
+        &alice_linked_tx,
+        initialize_session_manager(alice_linked_tx.storage.as_ref(), &alice_linked_mgr)?,
+    );
+    emit(
+        &bob_owner_tx,
+        initialize_session_manager(bob_owner_tx.storage.as_ref(), &bob_owner_mgr)?,
+    );
+    emit(
+        &bob_linked_tx,
+        initialize_session_manager(bob_linked_tx.storage.as_ref(), &bob_linked_mgr)?,
+    );
     drain_events(&alice_owner_rx);
     drain_events(&alice_linked_rx);
     drain_events(&bob_owner_rx);
@@ -1079,6 +1121,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         &bob_owner_public_invite,
         bob_owner_keys.secret_key().to_secret_bytes(),
         &bob_owner_mgr,
+        &bob_owner_tx,
         &bob_owner_response,
     )?;
     assert_eq!(bob_owner_peer, alice_owner_pubkey);
@@ -1097,6 +1140,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         &alice_linked_link_invite,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         &alice_linked_mgr,
+        &alice_linked_tx,
         &alice_link_response,
     )?;
     assert_eq!(alice_link_peer, alice_owner_pubkey);
@@ -1116,6 +1160,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         &bob_linked_link_invite,
         bob_linked_keys.secret_key().to_secret_bytes(),
         &bob_linked_mgr,
+        &bob_linked_tx,
         &bob_link_response,
     )?;
     assert_eq!(bob_link_peer, bob_owner_pubkey);
@@ -1158,6 +1203,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         &bob_owner_public_invite,
         bob_owner_keys.secret_key().to_secret_bytes(),
         &bob_owner_mgr,
+        &bob_owner_tx,
         &bob_owner_direct_response,
     )?;
     assert_eq!(bob_owner_direct_peer, alice_owner_pubkey);
@@ -1180,6 +1226,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         &bob_linked_public_invite,
         bob_linked_keys.secret_key().to_secret_bytes(),
         &bob_linked_mgr,
+        &bob_linked_tx,
         &bob_linked_public_response,
     )?;
     assert_eq!(bob_linked_peer, alice_owner_pubkey);
@@ -1200,6 +1247,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         &alice_linked_public_invite,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         &alice_linked_mgr,
+        &alice_linked_tx,
         &alice_linked_public_response,
     )?;
     assert_eq!(alice_linked_peer, bob_owner_pubkey);
@@ -1263,7 +1311,13 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
         Some(alice_linked_storage.clone()),
         None,
     );
-    emit(&alice_linked_restarted_tx, alice_linked_restarted_mgr.init()?);
+    emit(
+        &alice_linked_restarted_tx,
+        initialize_session_manager(
+            alice_linked_restarted_tx.storage.as_ref(),
+            &alice_linked_restarted_mgr,
+        )?,
+    );
     drain_events(&alice_linked_restarted_rx);
     emit(&alice_linked_restarted_tx, alice_linked_restarted_mgr.setup_user(bob_owner_pubkey));
     emit(
@@ -1457,10 +1511,22 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         None,
     );
 
-    emit(&alice_owner_tx, alice_owner_mgr.init()?);
-    emit(&alice_linked_tx, alice_linked_mgr.init()?);
-    emit(&bob_owner_tx, bob_owner_mgr.init()?);
-    emit(&bob_linked_tx, bob_linked_mgr.init()?);
+    emit(
+        &alice_owner_tx,
+        initialize_session_manager(alice_owner_tx.storage.as_ref(), &alice_owner_mgr)?,
+    );
+    emit(
+        &alice_linked_tx,
+        initialize_session_manager(alice_linked_tx.storage.as_ref(), &alice_linked_mgr)?,
+    );
+    emit(
+        &bob_owner_tx,
+        initialize_session_manager(bob_owner_tx.storage.as_ref(), &bob_owner_mgr)?,
+    );
+    emit(
+        &bob_linked_tx,
+        initialize_session_manager(bob_linked_tx.storage.as_ref(), &bob_linked_mgr)?,
+    );
     drain_events(&alice_owner_rx);
     drain_events(&alice_linked_rx);
     drain_events(&bob_owner_rx);
@@ -1477,6 +1543,7 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         &bob_owner_public_invite,
         bob_owner_keys.secret_key().to_secret_bytes(),
         &bob_owner_mgr,
+        &bob_owner_tx,
         &bob_owner_response,
     )?;
     assert_eq!(bob_owner_peer, alice_owner_pubkey);
@@ -1495,6 +1562,7 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         &alice_linked_link_invite,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         &alice_linked_mgr,
+        &alice_linked_tx,
         &alice_link_response,
     )?;
     assert_eq!(alice_link_peer, alice_owner_pubkey);
@@ -1514,6 +1582,7 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         &bob_linked_link_invite,
         bob_linked_keys.secret_key().to_secret_bytes(),
         &bob_linked_mgr,
+        &bob_linked_tx,
         &bob_link_response,
     )?;
     assert_eq!(bob_link_peer, bob_owner_pubkey);
@@ -1557,6 +1626,7 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         &bob_linked_public_invite,
         bob_linked_keys.secret_key().to_secret_bytes(),
         &bob_linked_mgr,
+        &bob_linked_tx,
         &bob_linked_public_response,
     )?;
     assert_eq!(bob_linked_peer, alice_owner_pubkey);
@@ -1577,6 +1647,7 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         &alice_linked_public_invite,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         &alice_linked_mgr,
+        &alice_linked_tx,
         &alice_linked_public_response,
     )?;
     assert_eq!(alice_linked_peer, bob_owner_pubkey);
@@ -1649,7 +1720,13 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         Some(alice_linked_restarted_storage),
         None,
     );
-    emit(&alice_linked_restarted_tx, alice_linked_restarted_mgr.init()?);
+    emit(
+        &alice_linked_restarted_tx,
+        initialize_session_manager(
+            alice_linked_restarted_tx.storage.as_ref(),
+            &alice_linked_restarted_mgr,
+        )?,
+    );
     drain_events(&alice_linked_restarted_rx);
     emit(
         &alice_linked_restarted_tx,
@@ -1794,10 +1871,22 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         None,
     );
 
-    emit(&alice_owner_tx, alice_owner_mgr.init()?);
-    emit(&alice_new_tx, alice_new_mgr.init()?);
-    emit(&bob_owner_tx, bob_owner_mgr.init()?);
-    emit(&bob_linked_tx, bob_linked_mgr.init()?);
+    emit(
+        &alice_owner_tx,
+        initialize_session_manager(alice_owner_tx.storage.as_ref(), &alice_owner_mgr)?,
+    );
+    emit(
+        &alice_new_tx,
+        initialize_session_manager(alice_new_tx.storage.as_ref(), &alice_new_mgr)?,
+    );
+    emit(
+        &bob_owner_tx,
+        initialize_session_manager(bob_owner_tx.storage.as_ref(), &bob_owner_mgr)?,
+    );
+    emit(
+        &bob_linked_tx,
+        initialize_session_manager(bob_linked_tx.storage.as_ref(), &bob_linked_mgr)?,
+    );
     drain_events(&alice_owner_rx);
     drain_events(&alice_new_rx);
     drain_events(&bob_owner_rx);
@@ -1815,6 +1904,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         &bob_owner_public_invite,
         bob_owner_keys.secret_key().to_secret_bytes(),
         &bob_owner_mgr,
+        &bob_owner_tx,
         &bob_owner_response,
     )?;
     assert_eq!(bob_owner_peer, alice_owner_pubkey);
@@ -1834,6 +1924,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         &alice_linked_link_invite,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         &alice_new_mgr,
+        &alice_new_tx,
         &alice_link_response,
     )?;
     assert_eq!(alice_link_peer, alice_owner_pubkey);
@@ -1854,6 +1945,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         &bob_linked_link_invite,
         bob_linked_keys.secret_key().to_secret_bytes(),
         &bob_linked_mgr,
+        &bob_linked_tx,
         &bob_link_response,
     )?;
     assert_eq!(bob_link_peer, bob_owner_pubkey);
@@ -1913,6 +2005,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         &bob_linked_public_invite,
         bob_linked_keys.secret_key().to_secret_bytes(),
         &bob_linked_mgr,
+        &bob_linked_tx,
         &bob_linked_public_response,
     )?;
     assert_eq!(bob_linked_peer, alice_owner_pubkey);
@@ -1934,6 +2027,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         &alice_linked_public_invite,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         &alice_new_mgr,
+        &alice_new_tx,
         &alice_linked_public_response,
     )?;
     assert_eq!(alice_linked_peer, bob_owner_pubkey);

@@ -2,8 +2,10 @@ use anyhow::Result;
 
 use nostr::Tag;
 use nostr_double_ratchet::{
-    emit_session_manager_output, FileStorageAdapter, SessionManager, SessionManagerEvent,
-    StorageAdapter, CHAT_MESSAGE_KIND, EXPIRATION_TAG, MESSAGE_EVENT_KIND,
+    initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output, emit_session_manager_output, FileStorageAdapter,
+    SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, EXPIRATION_TAG,
+    MESSAGE_EVENT_KIND,
 };
 
 use crate::config::Config;
@@ -24,6 +26,14 @@ pub(super) struct PreparedSendMessage {
     pub(super) encrypted_event: nostr::Event,
     pub(super) timestamp: u64,
     pub(super) stored_message: StoredMessage,
+}
+
+fn emit_manager_output<T>(
+    storage: &dyn StorageAdapter,
+    tx: &crossbeam_channel::Sender<SessionManagerEvent>,
+    output: nostr_double_ratchet::ManagerOutput<T>,
+) -> Result<T> {
+    Ok(persist_and_emit_session_manager_output(storage, tx, output)?)
 }
 
 async fn resolve_or_join_chat(
@@ -60,6 +70,7 @@ fn build_session_manager(
     storage: &Storage,
 ) -> Result<(
     SessionManager,
+    std::sync::Arc<dyn StorageAdapter>,
     crossbeam_channel::Sender<SessionManagerEvent>,
     crossbeam_channel::Receiver<SessionManagerEvent>,
     nostr::Keys,
@@ -81,18 +92,30 @@ fn build_session_manager(
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        Some(session_manager_store),
+        Some(session_manager_store.clone()),
         None,
     );
-    emit_session_manager_output(&sm_tx, manager.init()?)?;
+    emit_manager_output(
+        session_manager_store.as_ref(),
+        &sm_tx,
+        initialize_session_manager(session_manager_store.as_ref(), &manager)?,
+    )?;
 
     let signing_keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
-    Ok((manager, sm_tx, sm_rx, signing_keys, owner_pubkey_hex))
+    Ok((
+        manager,
+        session_manager_store,
+        sm_tx,
+        sm_rx,
+        signing_keys,
+        owner_pubkey_hex,
+    ))
 }
 
 fn import_chats_into_session_manager(
     storage: &Storage,
     manager: &SessionManager,
+    session_manager_store: &dyn StorageAdapter,
     manager_tx: &crossbeam_channel::Sender<SessionManagerEvent>,
     my_owner_pubkey_hex: &str,
 ) -> Result<()> {
@@ -115,7 +138,7 @@ fn import_chats_into_session_manager(
             Ok(pk) => pk,
             Err(_) => continue,
         };
-        emit_session_manager_output(manager_tx, manager.setup_user(owner_pubkey))?;
+        emit_manager_output(session_manager_store, manager_tx, manager.setup_user(owner_pubkey))?;
 
         let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
         if known
@@ -131,7 +154,9 @@ fn import_chats_into_session_manager(
                 Err(_) => continue,
             };
 
-        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
+        let mut output = manager.import_session_state(owner_pubkey, Some(device_id), state)?;
+        persist_session_manager_output(session_manager_store, &mut output)?;
+        emit_session_manager_output(manager_tx, output)?;
     }
 
     Ok(())
@@ -446,12 +471,28 @@ pub(super) async fn send_message_impl(
         inner_id.clone()
     };
 
-    let (manager, manager_tx, manager_rx, signing_keys, owner_pubkey_hex) =
+    let (
+        manager,
+        session_manager_store,
+        manager_tx,
+        manager_rx,
+        signing_keys,
+        owner_pubkey_hex,
+    ) =
         build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &manager_tx, &owner_pubkey_hex)?;
+    import_chats_into_session_manager(
+        storage,
+        &manager,
+        session_manager_store.as_ref(),
+        &manager_tx,
+        &owner_pubkey_hex,
+    )?;
 
-    let event_ids =
-        emit_session_manager_output(&manager_tx, manager.send_event(recipient_pk, unsigned)?)?;
+    let event_ids = emit_manager_output(
+        session_manager_store.as_ref(),
+        &manager_tx,
+        manager.send_event(recipient_pk, unsigned)?,
+    )?;
 
     let client = connect_client(config).await?;
     let published_events =
@@ -507,11 +548,25 @@ pub async fn react(
     let recipient_pk = nostr::PublicKey::from_hex(&chat.their_pubkey)
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
-    let (manager, manager_tx, manager_rx, signing_keys, owner_pubkey_hex) =
+    let (
+        manager,
+        session_manager_store,
+        manager_tx,
+        manager_rx,
+        signing_keys,
+        owner_pubkey_hex,
+    ) =
         build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &manager_tx, &owner_pubkey_hex)?;
+    import_chats_into_session_manager(
+        storage,
+        &manager,
+        session_manager_store.as_ref(),
+        &manager_tx,
+        &owner_pubkey_hex,
+    )?;
 
-    let event_ids = emit_session_manager_output(
+    let event_ids = emit_manager_output(
+        session_manager_store.as_ref(),
         &manager_tx,
         manager.send_reaction(recipient_pk, message_id.to_string(), emoji.to_string(), None)?,
     )?;
@@ -586,12 +641,26 @@ pub async fn receipt(
     let recipient_pk = nostr::PublicKey::from_hex(&chat.their_pubkey)
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
-    let (manager, manager_tx, manager_rx, signing_keys, owner_pubkey_hex) =
+    let (
+        manager,
+        session_manager_store,
+        manager_tx,
+        manager_rx,
+        signing_keys,
+        owner_pubkey_hex,
+    ) =
         build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &manager_tx, &owner_pubkey_hex)?;
+    import_chats_into_session_manager(
+        storage,
+        &manager,
+        session_manager_store.as_ref(),
+        &manager_tx,
+        &owner_pubkey_hex,
+    )?;
 
     let message_ids_vec = message_ids.iter().map(|s| (*s).to_string()).collect();
-    let _event_ids = emit_session_manager_output(
+    let _event_ids = emit_manager_output(
+        session_manager_store.as_ref(),
         &manager_tx,
         manager.send_receipt(recipient_pk, receipt_type, message_ids_vec, None)?,
     )?;
@@ -629,12 +698,28 @@ pub async fn typing(
     let recipient_pk = nostr::PublicKey::from_hex(&chat.their_pubkey)
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
-    let (manager, manager_tx, manager_rx, signing_keys, owner_pubkey_hex) =
+    let (
+        manager,
+        session_manager_store,
+        manager_tx,
+        manager_rx,
+        signing_keys,
+        owner_pubkey_hex,
+    ) =
         build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &manager_tx, &owner_pubkey_hex)?;
+    import_chats_into_session_manager(
+        storage,
+        &manager,
+        session_manager_store.as_ref(),
+        &manager_tx,
+        &owner_pubkey_hex,
+    )?;
 
-    let _event_ids =
-        emit_session_manager_output(&manager_tx, manager.send_typing(recipient_pk, None)?)?;
+    let _event_ids = emit_manager_output(
+        session_manager_store.as_ref(),
+        &manager_tx,
+        manager.send_typing(recipient_pk, None)?,
+    )?;
 
     let client = connect_client(config).await?;
     let published_events =

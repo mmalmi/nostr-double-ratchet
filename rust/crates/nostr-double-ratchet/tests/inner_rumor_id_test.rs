@@ -6,8 +6,10 @@ use crossbeam_channel::{Receiver, Sender};
 use nostr::nips::nip44::{self, Version};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    emit_session_manager_output, utils::kdf, Header, InMemoryStorage, Invite, ManagedInvite,
+    initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output, utils::kdf, Header, InMemoryStorage, Invite, ManagedInvite,
     ManagedSession as Session, SessionManager, SessionManagerEvent, MESSAGE_EVENT_KIND,
+    StorageAdapter,
 };
 use sha2::{Digest, Sha256};
 
@@ -15,8 +17,12 @@ fn drain_events(rx: &Receiver<SessionManagerEvent>) {
     while rx.try_recv().is_ok() {}
 }
 
-fn emit<T>(tx: &Sender<SessionManagerEvent>, output: nostr_double_ratchet::ManagerOutput<T>) -> T {
-    emit_session_manager_output(tx, output).unwrap()
+fn emit<T>(
+    storage: &dyn StorageAdapter,
+    tx: &Sender<SessionManagerEvent>,
+    output: nostr_double_ratchet::ManagerOutput<T>,
+) -> T {
+    persist_and_emit_session_manager_output(storage, tx, output).unwrap()
 }
 
 fn recv_decrypted_message(rx: &Receiver<SessionManagerEvent>) -> String {
@@ -204,31 +210,33 @@ fn test_session_manager_delivers_messages_with_recomputed_inner_id() {
         .session;
 
     let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
     let manager = SessionManager::new(
         alice_keys.public_key(),
         alice_keys.secret_key().to_secret_bytes(),
         hex::encode(alice_keys.public_key().to_bytes()),
         alice_keys.public_key(),
-        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        Some(storage.clone()),
         None,
     );
 
-    emit(&tx, manager.init().unwrap());
+    emit(&*storage, &tx, initialize_session_manager(&*storage, &manager).unwrap());
 
     // Import session with Bob
-    manager
+    let mut import_output = manager
         .import_session_state(
             bob_keys.public_key(),
             Some(hex::encode(bob_keys.public_key().to_bytes())),
             alice_session.session.state.clone(),
         )
         .unwrap();
+    persist_session_manager_output(&*storage, &mut import_output).unwrap();
 
     drain_events(&rx);
 
     let bad_inner = build_bad_id_rumor_json(bob_keys.public_key());
     let bad_outer = craft_outer_from_plaintext(&mut bob_session, &bad_inner, 10);
-    emit(&tx, manager.process_received_event(bad_outer));
+    emit(&*storage, &tx, manager.process_received_event(bad_outer));
 
     let delivered = recv_decrypted_message(&rx);
     let rumor: serde_json::Value = serde_json::from_str(&delivered).unwrap();

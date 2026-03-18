@@ -1,9 +1,9 @@
 use crate::{
     apply_app_keys_snapshot, is_app_keys_event, resolve_invite_owner_routing, AppKeys,
-    AppKeysSnapshotDecision, DeviceEntry, InMemoryStorage, Invite, InviteAcceptInput,
-    InviteProcessResponseInput, InviteProcessResponseResult, MessageQueue, OneToManyChannel,
-    Result, SenderKeyDistribution, SenderKeyState, Session, SessionReceiveInput,
-    SessionReceiveResult, SessionSendInput, StorageAdapter, UserRecord,
+    AppKeysSnapshotDecision, DeviceEntry, Invite, InviteAcceptInput, InviteProcessResponseInput,
+    InviteProcessResponseResult, MessageQueue, OneToManyChannel, Result, SenderKeyDistribution,
+    SenderKeyState, Session, SessionReceiveInput, SessionReceiveResult, SessionSendInput,
+    StorageAdapter, UserRecord,
     GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 };
 use nostr::{Keys, PublicKey, Tag, UnsignedEvent};
@@ -22,6 +22,20 @@ pub enum SessionManagerEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionManagerStorageEffect {
+    Get { key: String },
+    Put { key: String, value: String },
+    Delete { key: String },
+    List { prefix: String },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionManagerStorageResults {
+    pub gets: HashMap<String, Option<String>>,
+    pub lists: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionManagerNotification {
     DecryptedMessage {
         sender: PublicKey,
@@ -35,6 +49,7 @@ pub enum SessionManagerNotification {
 pub struct ManagerOutput<T> {
     pub value: T,
     pub effects: Vec<SessionManagerEffect>,
+    pub storage_effects: Vec<SessionManagerStorageEffect>,
     pub notifications: Vec<SessionManagerNotification>,
 }
 
@@ -43,6 +58,7 @@ impl<T> ManagerOutput<T> {
         Self {
             value,
             effects: Vec::new(),
+            storage_effects: Vec::new(),
             notifications: Vec::new(),
         }
     }
@@ -51,6 +67,7 @@ impl<T> ManagerOutput<T> {
         Self {
             value,
             effects,
+            storage_effects: Vec::new(),
             notifications: Vec::new(),
         }
     }
@@ -59,12 +76,14 @@ impl<T> ManagerOutput<T> {
         ManagerOutput {
             value: f(self.value),
             effects: self.effects,
+            storage_effects: self.storage_effects,
             notifications: self.notifications,
         }
     }
 
     pub fn append_unit(&mut self, other: ManagerOutput<()>) {
         self.effects.extend(other.effects);
+        self.storage_effects.extend(other.storage_effects);
         self.notifications.extend(other.notifications);
     }
 
@@ -74,6 +93,10 @@ impl<T> ManagerOutput<T> {
 
     pub fn push_notification(&mut self, notification: SessionManagerNotification) {
         self.notifications.push(notification);
+    }
+
+    pub fn push_storage_effect(&mut self, effect: SessionManagerStorageEffect) {
+        self.storage_effects.push(effect);
     }
 }
 
@@ -124,6 +147,80 @@ pub fn emit_session_manager_output<T>(
     }
 
     Ok(output.value)
+}
+
+pub fn resolve_session_manager_storage_reads(
+    storage: &dyn StorageAdapter,
+    effects: &[SessionManagerStorageEffect],
+) -> Result<SessionManagerStorageResults> {
+    let mut results = SessionManagerStorageResults::default();
+    for effect in effects {
+        match effect {
+            SessionManagerStorageEffect::Get { key } => {
+                results.gets.insert(key.clone(), storage.get(key)?);
+            }
+            SessionManagerStorageEffect::List { prefix } => {
+                results.lists.insert(prefix.clone(), storage.list(prefix)?);
+            }
+            SessionManagerStorageEffect::Put { .. } | SessionManagerStorageEffect::Delete { .. } => {
+            }
+        }
+    }
+    Ok(results)
+}
+
+pub fn apply_session_manager_storage_writes(
+    storage: &dyn StorageAdapter,
+    effects: &[SessionManagerStorageEffect],
+) -> Result<()> {
+    for effect in effects {
+        match effect {
+            SessionManagerStorageEffect::Put { key, value } => storage.put(key, value.clone())?,
+            SessionManagerStorageEffect::Delete { key } => storage.del(key)?,
+            SessionManagerStorageEffect::Get { .. } | SessionManagerStorageEffect::List { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+pub fn persist_session_manager_output<T>(
+    storage: &dyn StorageAdapter,
+    output: &mut ManagerOutput<T>,
+) -> Result<()> {
+    apply_session_manager_storage_writes(storage, &output.storage_effects)?;
+    output.storage_effects.clear();
+    Ok(())
+}
+
+pub fn persist_and_emit_session_manager_output<T>(
+    storage: &dyn StorageAdapter,
+    tx: &crossbeam_channel::Sender<SessionManagerEvent>,
+    mut output: ManagerOutput<T>,
+) -> Result<T> {
+    persist_session_manager_output(storage, &mut output)?;
+    emit_session_manager_output(tx, output)
+}
+
+pub fn initialize_session_manager(
+    storage: &dyn StorageAdapter,
+    manager: &SessionManager,
+) -> Result<ManagerOutput<()>> {
+    let begin = manager.begin_init()?;
+    let mut reads = resolve_session_manager_storage_reads(storage, &begin.storage_effects)?;
+    let listed_keys: Vec<String> = reads
+        .lists
+        .values()
+        .flat_map(|keys| keys.iter().cloned())
+        .collect();
+    for key in listed_keys {
+        if !reads.gets.contains_key(&key) {
+            reads.gets.insert(key.clone(), storage.get(&key)?);
+        }
+    }
+
+    let mut output = manager.finish_init(reads)?;
+    persist_session_manager_output(storage, &mut output)?;
+    Ok(output)
 }
 
 pub enum SessionManagerEvent {
@@ -222,7 +319,6 @@ pub struct SessionManager {
     our_identity_key: [u8; 32],
     device_id: String,
     owner_public_key: PublicKey,
-    storage: Arc<dyn StorageAdapter>,
     initialized: Arc<Mutex<bool>>,
     invite_state: Arc<Mutex<Option<InviteState>>>,
     provided_invite: Option<Invite>,
@@ -412,24 +508,30 @@ impl SessionManager {
         Ok((accepted.session, accepted.response_event))
     }
 
-    pub fn set_default_send_options(&self, options: Option<crate::SendOptions>) -> Result<()> {
+    pub fn set_default_send_options(
+        &self,
+        options: Option<crate::SendOptions>,
+    ) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         *self.default_send_options.lock().unwrap() = options.clone();
 
         let key = self.send_options_default_key();
         match options {
-            Some(o) => self.storage.put(&key, serde_json::to_string(&o)?)?,
-            None => {
-                let _ = self.storage.del(&key);
-            }
+            Some(o) => output.push_storage_effect(SessionManagerStorageEffect::Put {
+                key,
+                value: serde_json::to_string(&o)?,
+            }),
+            None => output.push_storage_effect(SessionManagerStorageEffect::Delete { key }),
         }
-        Ok(())
+        Ok(output)
     }
 
     pub fn set_peer_send_options(
         &self,
         peer_pubkey: PublicKey,
         options: Option<crate::SendOptions>,
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         let owner = self.resolve_to_owner(&peer_pubkey);
         let key = self.send_options_peer_key(&owner);
 
@@ -438,19 +540,23 @@ impl SessionManager {
                 .lock()
                 .unwrap()
                 .insert(owner, o.clone());
-            self.storage.put(&key, serde_json::to_string(&o)?)?;
+            output.push_storage_effect(SessionManagerStorageEffect::Put {
+                key,
+                value: serde_json::to_string(&o)?,
+            });
         } else {
             self.peer_send_options.lock().unwrap().remove(&owner);
-            let _ = self.storage.del(&key);
+            output.push_storage_effect(SessionManagerStorageEffect::Delete { key });
         }
-        Ok(())
+        Ok(output)
     }
 
     pub fn set_group_send_options(
         &self,
         group_id: String,
         options: Option<crate::SendOptions>,
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         let key = self.send_options_group_key(&group_id);
 
         if let Some(o) = options.clone() {
@@ -458,12 +564,15 @@ impl SessionManager {
                 .lock()
                 .unwrap()
                 .insert(group_id.clone(), o.clone());
-            self.storage.put(&key, serde_json::to_string(&o)?)?;
+            output.push_storage_effect(SessionManagerStorageEffect::Put {
+                key,
+                value: serde_json::to_string(&o)?,
+            });
         } else {
             self.group_send_options.lock().unwrap().remove(&group_id);
-            let _ = self.storage.del(&key);
+            output.push_storage_effect(SessionManagerStorageEffect::Delete { key });
         }
-        Ok(())
+        Ok(output)
     }
 
     /// Enable/disable automatically adopting incoming `chat-settings` events (kind 10448).
@@ -478,7 +587,7 @@ impl SessionManager {
     /// This is intentionally local-only and does not create persistent tombstones.
     /// A chat can be re-initialized later by explicit join/send flows.
     pub fn delete_chat(&self, user_pubkey: PublicKey) -> Result<ManagerOutput<()>> {
-        let mut output = self.init()?;
+        let mut output = ManagerOutput::empty(());
         let owner_pubkey = self.resolve_to_owner(&user_pubkey);
         if owner_pubkey == self.owner_public_key {
             return Ok(output);
@@ -492,19 +601,17 @@ impl SessionManager {
         our_identity_key: [u8; 32],
         device_id: String,
         owner_public_key: PublicKey,
-        storage: Option<Arc<dyn StorageAdapter>>,
+        _storage: Option<Arc<dyn StorageAdapter>>,
         invite: Option<Invite>,
     ) -> Self {
-        let storage = storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
-        let message_queue = MessageQueue::new(storage.clone(), "v1/message-queue/");
-        let discovery_queue = MessageQueue::new(storage.clone(), "v1/discovery-queue/");
+        let message_queue = MessageQueue::new("v1/message-queue/");
+        let discovery_queue = MessageQueue::new("v1/discovery-queue/");
         Self {
             user_records: SessionBookActor::new(),
             our_public_key,
             our_identity_key,
             device_id,
             owner_public_key,
-            storage,
             initialized: Arc::new(Mutex::new(false)),
             invite_state: Arc::new(Mutex::new(None)),
             provided_invite: invite,
@@ -531,20 +638,62 @@ impl SessionManager {
         }
     }
 
-    pub fn init(&self) -> Result<ManagerOutput<()>> {
+    pub fn begin_init(&self) -> Result<ManagerOutput<()>> {
         let mut output = ManagerOutput::empty(());
-        let mut initialized = self.initialized.lock().unwrap();
-        if *initialized {
+        if *self.initialized.lock().unwrap() {
             return Ok(output);
         }
-        *initialized = true;
-        drop(initialized);
+        if self.provided_invite.is_none() {
+            output.push_storage_effect(SessionManagerStorageEffect::Get {
+                key: self.device_invite_key(&self.device_id),
+            });
+        }
+        output.push_storage_effect(SessionManagerStorageEffect::List {
+            prefix: self.user_record_key_prefix(),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::Get {
+            key: self.send_options_default_key(),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::List {
+            prefix: self.send_options_peer_prefix(),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::List {
+            prefix: self.send_options_group_prefix(),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::List {
+            prefix: self.group_sender_event_info_prefix(),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::List {
+            prefix: self.group_sender_key_state_prefix(),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::List {
+            prefix: self.message_queue_prefix(),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::List {
+            prefix: self.discovery_queue_prefix(),
+        });
+        Ok(output)
+    }
 
-        self.load_all_user_records()?;
-        let _ = self.load_send_options();
-        output.append_unit(self.load_group_sender_event_infos()?);
+    pub fn finish_init(&self, reads: SessionManagerStorageResults) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
+        {
+            let initialized = self.initialized.lock().unwrap();
+            if *initialized {
+                return Ok(output);
+            }
+        }
 
-        // Ensure our own device is present in our owner's record
+        self.load_all_user_records_from_results(&reads)?;
+        self.load_send_options_from_results(&reads);
+        output.append_unit(self.load_group_sender_state_from_results(&reads)?);
+        self.load_queue_from_results(&self.message_queue, &reads, &self.message_queue_prefix());
+        self.load_queue_from_results(
+            &self.discovery_queue,
+            &reads,
+            &self.discovery_queue_prefix(),
+        );
+
         self.with_user_records({
             let owner_public_key = self.owner_public_key;
             let device_id = self.device_id.clone();
@@ -578,15 +727,16 @@ impl SessionManager {
         let invite = if let Some(invite) = self.provided_invite.clone() {
             invite
         } else {
-            match self.storage.get(&device_invite_key)? {
+            match reads.gets.get(&device_invite_key).cloned().flatten() {
                 Some(data) => Invite::deserialize(&data)?,
-                None => {
-                    Invite::create_new(self.our_public_key, Some(self.device_id.clone()), None)?
-                }
+                None => Invite::create_new(self.our_public_key, Some(self.device_id.clone()), None)?,
             }
         };
 
-        self.storage.put(&device_invite_key, invite.serialize()?)?;
+        output.push_storage_effect(SessionManagerStorageEffect::Put {
+            key: device_invite_key,
+            value: invite.serialize()?,
+        });
 
         if invite.inviter_ephemeral_private_key.is_none() {
             return Err(crate::Error::Invite(
@@ -599,10 +749,8 @@ impl SessionManager {
             our_identity_key: self.our_identity_key,
         });
 
-        // Subscribe to invite responses using Invite's own filter (with #p tag)
         output.append_unit(self.subscribe_to_invite_responses(&invite)?.map(|_| ()));
 
-        // Publish our invite (signed with device identity key)
         if let Ok(unsigned) = invite.get_event() {
             let keys = Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
             if let Ok(signed) = unsigned.sign_with_keys(&keys) {
@@ -636,9 +784,8 @@ impl SessionManager {
             }
         }
 
-        // Start listening for AppKeys for our owner (to discover sibling devices)
         output.append_unit(self.setup_user(self.owner_public_key));
-
+        *self.initialized.lock().unwrap() = true;
         Ok(output)
     }
 
@@ -659,7 +806,11 @@ impl SessionManager {
 
     /// Remove discovery queue entries older than `max_age_ms` milliseconds.
     pub fn cleanup_discovery_queue(&self, max_age_ms: u64) -> Result<usize> {
-        self.discovery_queue.remove_expired(max_age_ms)
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Ok(self.discovery_queue.remove_expired(now_ms, max_age_ms)?.len())
     }
 
     #[deprecated(
@@ -756,8 +907,17 @@ impl SessionManager {
                 expires_at: None,
             }
         };
-        self.set_peer_send_options(peer_pubkey, Some(opts))?;
-        self.send_chat_settings(peer_pubkey, message_ttl_seconds)
+        let mut output = self.set_peer_send_options(peer_pubkey, Some(opts))?;
+        let ManagerOutput {
+            value: event_ids,
+            effects,
+            storage_effects,
+            notifications,
+        } = self.send_chat_settings(peer_pubkey, message_ttl_seconds)?;
+        output.effects.extend(effects);
+        output.storage_effects.extend(storage_effects);
+        output.notifications.extend(notifications);
+        Ok(output.map(|_| event_ids))
     }
 
     pub fn send_receipt(
@@ -893,7 +1053,7 @@ impl SessionManager {
         peer_pubkey: PublicKey,
         device_id: Option<String>,
         state: crate::SessionState,
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
         let session = Session::new(state);
 
         self.with_user_records(move |records| {
@@ -903,9 +1063,9 @@ impl SessionManager {
             user_record.upsert_session(device_id.as_deref(), session);
         });
 
-        self.refresh_session_subscriptions();
-        let _ = self.store_user_record(&peer_pubkey);
-        Ok(())
+        let mut output = self.refresh_session_subscriptions();
+        output.append_unit(self.store_user_record(&peer_pubkey)?);
+        Ok(output)
     }
 
     pub fn export_active_session_state(
@@ -1191,13 +1351,15 @@ impl SessionManager {
                 },
             )
         {
-            self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
-            return Ok(ManagerOutput::empty(AcceptInviteResult {
+            let output = self
+                .record_known_device_identity(owner_pubkey, inviter_device_pubkey)
+                .map(|_| AcceptInviteResult {
                 owner_pubkey,
                 inviter_device_pubkey,
                 device_id,
                 created_new_session: false,
-            }));
+            });
+            return Ok(output);
         }
         let replace_existing_active_session = existing_device_session_info.is_some_and(
             |(active_session, _, _, any_session_has_activity)| {
@@ -1286,8 +1448,8 @@ impl SessionManager {
             });
 
             output.append_unit(self.refresh_session_subscriptions());
-            self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
-            let _ = self.store_user_record(&owner_pubkey);
+            output.append_unit(self.record_known_device_identity(owner_pubkey, inviter_device_pubkey));
+            output.append_unit(self.store_user_record(&owner_pubkey)?);
             output.append_unit(self.send_message_history(owner_pubkey, &device_id));
             if !invite_bootstrap_events.is_empty() {
                 output.append_unit(self.publish_bootstrap_schedule(invite_bootstrap_events));
@@ -1419,6 +1581,10 @@ impl SessionManager {
         // Queue for each target owner:
         // - known devices -> message queue per device
         // - no known devices -> discovery queue per owner
+        let queued_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         for owner in &owners {
             let mut seen_for_owner = HashSet::new();
             let device_ids = owner_targets.get(owner).cloned().unwrap_or_default();
@@ -1428,10 +1594,19 @@ impl SessionManager {
                     continue;
                 }
                 queued_any_device = true;
-                let _ = self.message_queue.add(&device_id, &event);
+                if let Ok(entry) = self.message_queue.add(&device_id, &event, queued_at_ms) {
+                    if let Ok(effect) = Self::queue_put_effect(&self.message_queue, &entry) {
+                        output.push_storage_effect(effect);
+                    }
+                }
             }
             if !queued_any_device {
-                let _ = self.discovery_queue.add(&owner.to_hex(), &event);
+                if let Ok(entry) = self.discovery_queue.add(&owner.to_hex(), &event, queued_at_ms)
+                {
+                    if let Ok(effect) = Self::queue_put_effect(&self.discovery_queue, &entry) {
+                        output.push_storage_effect(effect);
+                    }
+                }
             }
         }
 
@@ -1503,9 +1678,15 @@ impl SessionManager {
                 if !seen.insert(device_id.clone()) {
                     continue;
                 }
-                let _ = self
+                if let Ok(Some(removed)) = self
                     .message_queue
-                    .remove_by_target_and_event_id(&device_id, id);
+                    .remove_by_target_and_event_id(&device_id, id)
+                {
+                    output.push_storage_effect(Self::queue_delete_effect(
+                        &self.message_queue,
+                        &removed.id,
+                    ));
+                }
                 if let Ok(flush_output) = self.flush_message_queue(&device_id) {
                     output.append_unit(flush_output);
                 }
@@ -1513,9 +1694,9 @@ impl SessionManager {
         }
 
         if !event_ids.is_empty() {
-            let _ = self.store_user_record(&recipient_owner);
+            output.append_unit(self.store_user_record(&recipient_owner)?);
             if include_owner_sync && self.owner_public_key != recipient_owner {
-                let _ = self.store_user_record(&self.owner_public_key);
+                output.append_unit(self.store_user_record(&self.owner_public_key)?);
             }
         }
 
@@ -1601,14 +1782,27 @@ impl SessionManager {
         self.peer_send_options.lock().unwrap().remove(&owner_pubkey);
         self.message_history.lock().unwrap().remove(&owner_pubkey);
 
-        self.discovery_queue
-            .remove_for_target(&owner_pubkey.to_hex())?;
+        for entry in self.discovery_queue.remove_for_target(&owner_pubkey.to_hex())? {
+            output.push_storage_effect(Self::queue_delete_effect(
+                &self.discovery_queue,
+                &entry.id,
+            ));
+        }
         for device_id in known_device_ids {
-            self.message_queue.remove_for_target(&device_id)?;
+            for entry in self.message_queue.remove_for_target(&device_id)? {
+                output.push_storage_effect(Self::queue_delete_effect(
+                    &self.message_queue,
+                    &entry.id,
+                ));
+            }
         }
 
-        let _ = self.storage.del(&self.send_options_peer_key(&owner_pubkey));
-        let _ = self.storage.del(&self.user_record_key(&owner_pubkey));
+        output.push_storage_effect(SessionManagerStorageEffect::Delete {
+            key: self.send_options_peer_key(&owner_pubkey),
+        });
+        output.push_storage_effect(SessionManagerStorageEffect::Delete {
+            key: self.user_record_key(&owner_pubkey),
+        });
         Ok(output)
     }
 
@@ -1640,17 +1834,44 @@ impl SessionManager {
         format!("{}{}", self.send_options_group_prefix(), group_id)
     }
 
-    fn load_send_options(&self) -> Result<()> {
-        // Default
-        if let Some(data) = self.storage.get(&self.send_options_default_key())? {
-            if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(&data) {
+    fn message_queue_prefix(&self) -> String {
+        "v1/message-queue/".to_string()
+    }
+
+    fn discovery_queue_prefix(&self) -> String {
+        "v1/discovery-queue/".to_string()
+    }
+
+    fn queue_put_effect(queue: &MessageQueue, entry: &crate::QueueEntry) -> Result<SessionManagerStorageEffect> {
+        Ok(SessionManagerStorageEffect::Put {
+            key: queue.key(&entry.id),
+            value: serde_json::to_string(entry)?,
+        })
+    }
+
+    fn queue_delete_effect(queue: &MessageQueue, id: &str) -> SessionManagerStorageEffect {
+        SessionManagerStorageEffect::Delete {
+            key: queue.key(id),
+        }
+    }
+
+    fn load_send_options_from_results(&self, reads: &SessionManagerStorageResults) {
+        *self.default_send_options.lock().unwrap() = None;
+        self.peer_send_options.lock().unwrap().clear();
+        self.group_send_options.lock().unwrap().clear();
+
+        if let Some(Some(data)) = reads.gets.get(&self.send_options_default_key()) {
+            if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(data) {
                 *self.default_send_options.lock().unwrap() = Some(opts);
             }
         }
 
-        // Per-peer
-        let peer_keys = self.storage.list(&self.send_options_peer_prefix())?;
-        for k in peer_keys {
+        for k in reads
+            .lists
+            .get(&self.send_options_peer_prefix())
+            .cloned()
+            .unwrap_or_default()
+        {
             let hex_pk = k
                 .strip_prefix(&self.send_options_peer_prefix())
                 .unwrap_or("");
@@ -1660,16 +1881,19 @@ impl SessionManager {
             let Ok(pk) = crate::utils::pubkey_from_hex(hex_pk) else {
                 continue;
             };
-            if let Some(data) = self.storage.get(&k)? {
-                if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(&data) {
+            if let Some(Some(data)) = reads.gets.get(&k) {
+                if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(data) {
                     self.peer_send_options.lock().unwrap().insert(pk, opts);
                 }
             }
         }
 
-        // Per-group
-        let group_keys = self.storage.list(&self.send_options_group_prefix())?;
-        for k in group_keys {
+        for k in reads
+            .lists
+            .get(&self.send_options_group_prefix())
+            .cloned()
+            .unwrap_or_default()
+        {
             let group_id = k
                 .strip_prefix(&self.send_options_group_prefix())
                 .unwrap_or("")
@@ -1677,8 +1901,8 @@ impl SessionManager {
             if group_id.is_empty() {
                 continue;
             }
-            if let Some(data) = self.storage.get(&k)? {
-                if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(&data) {
+            if let Some(Some(data)) = reads.gets.get(&k) {
+                if let Ok(opts) = serde_json::from_str::<crate::SendOptions>(data) {
                     self.group_send_options
                         .lock()
                         .unwrap()
@@ -1686,8 +1910,6 @@ impl SessionManager {
                 }
             }
         }
-
-        Ok(())
     }
 
     fn effective_send_options(
@@ -1755,43 +1977,53 @@ impl SessionManager {
         None
     }
 
-    fn maybe_auto_adopt_chat_settings(&self, from_owner_pubkey: PublicKey, rumor: &UnsignedEvent) {
+    fn maybe_auto_adopt_chat_settings(
+        &self,
+        from_owner_pubkey: PublicKey,
+        rumor: &UnsignedEvent,
+    ) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         if !*self.auto_adopt_chat_settings.lock().unwrap() {
-            return;
+            return output;
         }
 
         if rumor.kind.as_u16() != crate::CHAT_SETTINGS_KIND as u16 {
-            return;
+            return output;
         }
 
         let payload = match serde_json::from_str::<serde_json::Value>(&rumor.content) {
             Ok(v) => v,
-            Err(_) => return,
+            Err(_) => return output,
         };
 
         let typ = payload.get("type").and_then(|v| v.as_str());
         let v = payload.get("v").and_then(|v| v.as_u64());
         if typ != Some("chat-settings") || v != Some(1) {
-            return;
+            return output;
         }
 
         let Some(peer_pubkey) = self.chat_settings_peer_pubkey(from_owner_pubkey, rumor) else {
-            return;
+            return output;
         };
 
         match payload.get("messageTtlSeconds") {
             // Missing: clear per-peer override (fall back to global default).
             None => {
-                let _ = self.set_peer_send_options(peer_pubkey, None);
+                if let Ok(set_output) = self.set_peer_send_options(peer_pubkey, None) {
+                    output.append_unit(set_output);
+                }
             }
             // Null: disable per-peer expiration (even if a global default exists).
             Some(serde_json::Value::Null) => {
-                let _ =
-                    self.set_peer_send_options(peer_pubkey, Some(crate::SendOptions::default()));
+                if let Ok(set_output) =
+                    self.set_peer_send_options(peer_pubkey, Some(crate::SendOptions::default()))
+                {
+                    output.append_unit(set_output);
+                }
             }
             Some(serde_json::Value::Number(n)) => {
                 let Some(ttl) = n.as_u64() else {
-                    return;
+                    return output;
                 };
                 let opts = if ttl == 0 {
                     crate::SendOptions::default()
@@ -1801,10 +2033,13 @@ impl SessionManager {
                         expires_at: None,
                     }
                 };
-                let _ = self.set_peer_send_options(peer_pubkey, Some(opts));
+                if let Ok(set_output) = self.set_peer_send_options(peer_pubkey, Some(opts)) {
+                    output.append_unit(set_output);
+                }
             }
             _ => {}
         }
+        output
     }
 
     fn user_record_key(&self, pubkey: &PublicKey) -> String {
@@ -1835,6 +2070,10 @@ impl SessionManager {
         )
     }
 
+    fn group_sender_key_state_prefix(&self) -> String {
+        "group-sender-key/state/".to_string()
+    }
+
     fn tag_value(tags: &nostr::Tags, key: &str) -> Option<String> {
         tags.iter()
             .find_map(|t| {
@@ -1847,23 +2086,27 @@ impl SessionManager {
             .filter(|s| !s.is_empty())
     }
 
-    fn load_group_sender_event_infos(&self) -> Result<ManagerOutput<()>> {
+    fn load_group_sender_state_from_results(
+        &self,
+        reads: &SessionManagerStorageResults,
+    ) -> Result<ManagerOutput<()>> {
         let mut output = ManagerOutput::empty(());
-        let prefix = self.group_sender_event_info_prefix();
-        let keys = self.storage.list(&prefix)?;
+        self.group_sender_events.lock().unwrap().clear();
+        self.group_sender_key_states.lock().unwrap().clear();
 
-        for key in keys {
+        let prefix = self.group_sender_event_info_prefix();
+        for key in reads.lists.get(&prefix).cloned().unwrap_or_default() {
             let Some(hex_pk) = key.strip_prefix(&prefix) else {
                 continue;
             };
             let Ok(sender_event_pubkey) = crate::utils::pubkey_from_hex(hex_pk) else {
                 continue;
             };
-            let Some(data) = self.storage.get(&key)? else {
+            let Some(Some(data)) = reads.gets.get(&key) else {
                 continue;
             };
 
-            let stored: StoredGroupSenderEventInfo = match serde_json::from_str(&data) {
+            let stored: StoredGroupSenderEventInfo = match serde_json::from_str(data) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
@@ -1892,6 +2135,32 @@ impl SessionManager {
             if let Ok(subscribe_output) = self.subscribe_to_group_sender_event(sender_event_pubkey) {
                 output.append_unit(subscribe_output);
             }
+        }
+
+        let state_prefix = self.group_sender_key_state_prefix();
+        for key in reads.lists.get(&state_prefix).cloned().unwrap_or_default() {
+            let Some(rest) = key.strip_prefix(&state_prefix) else {
+                continue;
+            };
+            let Some((sender_hex, key_id_str)) = rest.split_once('/') else {
+                continue;
+            };
+            let Ok(sender_event_pubkey) = crate::utils::pubkey_from_hex(sender_hex) else {
+                continue;
+            };
+            let Ok(key_id) = key_id_str.parse::<u32>() else {
+                continue;
+            };
+            let Some(Some(data)) = reads.gets.get(&key) else {
+                continue;
+            };
+            let Ok(state) = serde_json::from_str::<SenderKeyState>(data) else {
+                continue;
+            };
+            self.group_sender_key_states
+                .lock()
+                .unwrap()
+                .insert((sender_event_pubkey, key_id), state);
         }
 
         Ok(output)
@@ -1928,39 +2197,11 @@ impl SessionManager {
         &self,
         sender_event_pubkey: &PublicKey,
     ) -> Option<GroupSenderEventInfo> {
-        {
-            if let Some(info) = self
-                .group_sender_events
-                .lock()
-                .unwrap()
-                .get(sender_event_pubkey)
-            {
-                return Some(info.clone());
-            }
-        }
-
-        let key = self.group_sender_event_info_key(sender_event_pubkey);
-        let data = self.storage.get(&key).ok().flatten()?;
-        let stored: StoredGroupSenderEventInfo = serde_json::from_str(&data).ok()?;
-        let sender_owner_pubkey =
-            crate::utils::pubkey_from_hex(&stored.sender_owner_pubkey).ok()?;
-        let sender_device_pubkey = stored
-            .sender_device_pubkey
-            .as_deref()
-            .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
-
-        let info = GroupSenderEventInfo {
-            group_id: stored.group_id,
-            sender_owner_pubkey,
-            sender_device_pubkey,
-        };
-
         self.group_sender_events
             .lock()
             .unwrap()
-            .insert(*sender_event_pubkey, info.clone());
-
-        Some(info)
+            .get(sender_event_pubkey)
+            .cloned()
     }
 
     fn load_sender_key_state(
@@ -1968,25 +2209,11 @@ impl SessionManager {
         sender_event_pubkey: &PublicKey,
         key_id: u32,
     ) -> Option<SenderKeyState> {
-        {
-            if let Some(state) = self
-                .group_sender_key_states
-                .lock()
-                .unwrap()
-                .get(&(*sender_event_pubkey, key_id))
-            {
-                return Some(state.clone());
-            }
-        }
-
-        let key = self.group_sender_key_state_key(sender_event_pubkey, key_id);
-        let data = self.storage.get(&key).ok().flatten()?;
-        let state: SenderKeyState = serde_json::from_str(&data).ok()?;
         self.group_sender_key_states
             .lock()
             .unwrap()
-            .insert((*sender_event_pubkey, key_id), state.clone());
-        Some(state)
+            .get(&(*sender_event_pubkey, key_id))
+            .cloned()
     }
 
     fn store_sender_key_state(
@@ -1994,31 +2221,37 @@ impl SessionManager {
         sender_event_pubkey: &PublicKey,
         key_id: u32,
         state: &SenderKeyState,
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
         let key = self.group_sender_key_state_key(sender_event_pubkey, key_id);
-        self.storage.put(&key, serde_json::to_string(state)?)?;
-        Ok(())
+        self.group_sender_key_states
+            .lock()
+            .unwrap()
+            .insert((*sender_event_pubkey, key_id), state.clone());
+        Ok(ManagerOutput {
+            value: (),
+            effects: Vec::new(),
+            storage_effects: vec![SessionManagerStorageEffect::Put {
+                key,
+                value: serde_json::to_string(state)?,
+            }],
+            notifications: Vec::new(),
+        })
     }
 
     fn ensure_sender_key_state_from_distribution(
         &self,
         sender_event_pubkey: PublicKey,
         dist: &SenderKeyDistribution,
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
         if self
             .load_sender_key_state(&sender_event_pubkey, dist.key_id)
             .is_some()
         {
-            return Ok(());
+            return Ok(ManagerOutput::empty(()));
         }
 
         let state = SenderKeyState::new(dist.key_id, dist.chain_key, dist.iteration);
-        self.group_sender_key_states
-            .lock()
-            .unwrap()
-            .insert((sender_event_pubkey, dist.key_id), state.clone());
-        self.store_sender_key_state(&sender_event_pubkey, dist.key_id, &state)?;
-        Ok(())
+        self.store_sender_key_state(&sender_event_pubkey, dist.key_id, &state)
     }
 
     fn store_group_sender_event_info(
@@ -2039,9 +2272,12 @@ impl SessionManager {
                 .map(|pk| hex::encode(pk.to_bytes())),
         };
         let key = self.group_sender_event_info_key(&sender_event_pubkey);
-        self.storage.put(&key, serde_json::to_string(&stored)?)?;
-
-        self.subscribe_to_group_sender_event(sender_event_pubkey)
+        let mut output = self.subscribe_to_group_sender_event(sender_event_pubkey)?;
+        output.push_storage_effect(SessionManagerStorageEffect::Put {
+            key,
+            value: serde_json::to_string(&stored)?,
+        });
+        Ok(output)
     }
 
     fn maybe_handle_group_sender_key_distribution(
@@ -2079,7 +2315,7 @@ impl SessionManager {
             sender_device_pubkey: from_sender_device_pubkey,
         };
         output.append_unit(self.store_group_sender_event_info(sender_event_pubkey, &info)?);
-        self.ensure_sender_key_state_from_distribution(sender_event_pubkey, &dist)?;
+        output.append_unit(self.ensure_sender_key_state_from_distribution(sender_event_pubkey, &dist)?);
 
         // Decrypt any queued outer events that were waiting for this sender key id.
         let pending = {
@@ -2102,9 +2338,10 @@ impl SessionManager {
         });
 
         for outer in pending {
-            if let Some((sender, sender_device, plaintext, event_id)) =
+            if let Some((sender, sender_device, plaintext, event_id, storage_effects)) =
                 self.try_decrypt_group_sender_key_outer(&outer, Some(info.clone()))
             {
+                output.storage_effects.extend(storage_effects);
                 output.push_notification(SessionManagerNotification::DecryptedMessage {
                     sender,
                     sender_device,
@@ -2121,7 +2358,13 @@ impl SessionManager {
         &self,
         outer: &nostr::Event,
         info_hint: Option<GroupSenderEventInfo>,
-    ) -> Option<(PublicKey, Option<PublicKey>, String, Option<String>)> {
+    ) -> Option<(
+        PublicKey,
+        Option<PublicKey>,
+        String,
+        Option<String>,
+        Vec<SessionManagerStorageEffect>,
+    )> {
         if outer.kind.as_u16() != crate::MESSAGE_EVENT_KIND as u16 {
             return None;
         }
@@ -2155,11 +2398,11 @@ impl SessionManager {
         let plaintext = parsed.decrypt(&mut state).ok()?;
 
         // Persist updated sender-key state.
-        let _ = self.store_sender_key_state(&sender_event_pubkey, key_id, &state);
-        self.group_sender_key_states
-            .lock()
-            .unwrap()
-            .insert((sender_event_pubkey, key_id), state);
+        let storage_effects = self
+            .store_sender_key_state(&sender_event_pubkey, key_id, &state)
+            .ok()
+            .map(|output| output.storage_effects)
+            .unwrap_or_default();
 
         // Ensure decrypted plaintext is a rumor-shaped JSON event so downstream callers can parse it.
         let plaintext = match serde_json::from_str::<UnsignedEvent>(&plaintext) {
@@ -2192,6 +2435,7 @@ impl SessionManager {
             info.sender_device_pubkey,
             plaintext,
             Some(outer.id.to_string()),
+            storage_effects,
         ))
     }
 
@@ -2204,7 +2448,12 @@ impl SessionManager {
             .unwrap_or(*pubkey)
     }
 
-    fn update_delegate_mapping(&self, owner_pubkey: PublicKey, app_keys: &AppKeys) {
+    fn update_delegate_mapping(
+        &self,
+        owner_pubkey: PublicKey,
+        app_keys: &AppKeys,
+    ) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let new_identities: HashSet<String> = app_keys
             .get_all_devices()
             .into_iter()
@@ -2229,7 +2478,14 @@ impl SessionManager {
                 if let Ok(pk) = crate::utils::pubkey_from_hex(identity_hex) {
                     self.delegate_to_owner.lock().unwrap().remove(&pk);
                 }
-                let _ = self.message_queue.remove_for_target(identity_hex);
+                if let Ok(removed_entries) = self.message_queue.remove_for_target(identity_hex) {
+                    for entry in removed_entries {
+                        output.push_storage_effect(Self::queue_delete_effect(
+                            &self.message_queue,
+                            &entry.id,
+                        ));
+                    }
+                }
             }
         }
 
@@ -2247,7 +2503,10 @@ impl SessionManager {
             .unwrap()
             .insert(owner_pubkey, app_keys.clone());
 
-        let _ = self.store_user_record(&owner_pubkey);
+        if let Ok(store_output) = self.store_user_record(&owner_pubkey) {
+            output.append_unit(store_output);
+        }
+        output
     }
 
     fn is_device_authorized(&self, owner_pubkey: PublicKey, device_pubkey: PublicKey) -> bool {
@@ -2300,7 +2559,7 @@ impl SessionManager {
             return output;
         }
 
-        self.record_known_device_identity(owner_pubkey, meta.invitee_identity);
+        output.append_unit(self.record_known_device_identity(owner_pubkey, meta.invitee_identity));
 
         let device_id = meta
             .device_id
@@ -2318,7 +2577,9 @@ impl SessionManager {
         });
 
         output.append_unit(self.refresh_session_subscriptions());
-        let _ = self.store_user_record(&owner_pubkey);
+        if let Ok(store_output) = self.store_user_record(&owner_pubkey) {
+            output.append_unit(store_output);
+        }
         output.append_unit(self.send_message_history(owner_pubkey, &device_id));
         if let Ok(flush_output) = self.flush_message_queue(&device_id) {
             output.append_unit(flush_output);
@@ -2503,7 +2764,12 @@ impl SessionManager {
         );
     }
 
-    fn record_known_device_identity(&self, owner_pubkey: PublicKey, device_pubkey: PublicKey) {
+    fn record_known_device_identity(
+        &self,
+        owner_pubkey: PublicKey,
+        device_pubkey: PublicKey,
+    ) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let identity_hex = hex::encode(device_pubkey.to_bytes());
         let updated = self.with_user_records(move |records| {
             let record = records
@@ -2520,8 +2786,11 @@ impl SessionManager {
             .unwrap()
             .insert(device_pubkey, owner_pubkey);
         if updated {
-            let _ = self.store_user_record(&owner_pubkey);
+            if let Ok(store_output) = self.store_user_record(&owner_pubkey) {
+                output.append_unit(store_output);
+            }
         }
+        output
     }
 
     fn flush_message_queue(&self, device_identity: &str) -> Result<ManagerOutput<()>> {
@@ -2583,18 +2852,29 @@ impl SessionManager {
         let any_sent = !sent.is_empty();
         for (entry_id, maybe_event_id) in sent {
             if let Some(event_id) = maybe_event_id {
-                let _ = self
+                if let Ok(Some(removed)) = self
                     .message_queue
-                    .remove_by_target_and_event_id(device_identity, &event_id);
+                    .remove_by_target_and_event_id(device_identity, &event_id)
+                {
+                    output.push_storage_effect(Self::queue_delete_effect(
+                        &self.message_queue,
+                        &removed.id,
+                    ));
+                }
             } else {
-                let _ = self.message_queue.remove(&entry_id);
+                if let Ok(Some(removed)) = self.message_queue.remove(&entry_id) {
+                    output.push_storage_effect(Self::queue_delete_effect(
+                        &self.message_queue,
+                        &removed.id,
+                    ));
+                }
             }
         }
 
         if any_sent {
             output.append_unit(self.refresh_session_subscriptions());
         }
-        let _ = self.store_user_record(&owner_pubkey);
+        output.append_unit(self.store_user_record(&owner_pubkey)?);
         Ok(output)
     }
 
@@ -2602,12 +2882,13 @@ impl SessionManager {
         &self,
         owner_pubkey: PublicKey,
         devices: &[DeviceEntry],
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         let entries = self
             .discovery_queue
             .get_for_target(&owner_pubkey.to_hex())?;
         if entries.is_empty() {
-            return Ok(());
+            return Ok(output);
         }
 
         for entry in entries {
@@ -2617,7 +2898,14 @@ impl SessionManager {
                 if device_id == self.device_id {
                     continue;
                 }
-                if self.message_queue.add(&device_id, &entry.event).is_err() {
+                if let Ok(queued_entry) = self
+                    .message_queue
+                    .add(&device_id, &entry.event, entry.created_at)
+                {
+                    if let Ok(effect) = Self::queue_put_effect(&self.message_queue, &queued_entry) {
+                        output.push_storage_effect(effect);
+                    }
+                } else {
                     expanded_for_all_devices = false;
                 }
             }
@@ -2625,11 +2913,16 @@ impl SessionManager {
             // Keep discovery entry when any per-device queue write fails so the next
             // AppKeys cycle can retry expansion without losing pending messages.
             if expanded_for_all_devices {
-                let _ = self.discovery_queue.remove(&entry.id);
+                if let Ok(Some(removed)) = self.discovery_queue.remove(&entry.id) {
+                    output.push_storage_effect(Self::queue_delete_effect(
+                        &self.discovery_queue,
+                        &removed.id,
+                    ));
+                }
             }
         }
 
-        Ok(())
+        Ok(output)
     }
 
     fn send_message_history(&self, owner_pubkey: PublicKey, device_id: &str) -> ManagerOutput<()> {
@@ -2674,7 +2967,9 @@ impl SessionManager {
         if any_signed_history {
             output.append_unit(self.refresh_session_subscriptions());
         }
-        let _ = self.store_user_record(&owner_pubkey);
+        if let Ok(store_output) = self.store_user_record(&owner_pubkey) {
+            output.append_unit(store_output);
+        }
         output
     }
 
@@ -2770,7 +3065,9 @@ impl SessionManager {
         if !bootstrap_events.is_empty() {
             output.append_unit(self.refresh_session_subscriptions());
             output.append_unit(self.publish_bootstrap_schedule(bootstrap_events));
-            let _ = self.store_user_record(&owner_pubkey);
+            if let Ok(store_output) = self.store_user_record(&owner_pubkey) {
+                output.append_unit(store_output);
+            }
         }
         output
     }
@@ -2797,9 +3094,18 @@ impl SessionManager {
             self.delegate_to_owner.lock().unwrap().remove(&device_pk);
         }
 
-        let _ = self.message_queue.remove_for_target(device_id);
+        if let Ok(removed_entries) = self.message_queue.remove_for_target(device_id) {
+            for entry in removed_entries {
+                output.push_storage_effect(Self::queue_delete_effect(
+                    &self.message_queue,
+                    &entry.id,
+                ));
+            }
+        }
 
-        let _ = self.store_user_record(&owner_pubkey);
+        if let Ok(store_output) = self.store_user_record(&owner_pubkey) {
+            output.append_unit(store_output);
+        }
         output
     }
 
@@ -2833,10 +3139,12 @@ impl SessionManager {
             applied.app_keys
         };
 
-        self.update_delegate_mapping(owner_pubkey, &effective_app_keys);
+        output.append_unit(self.update_delegate_mapping(owner_pubkey, &effective_app_keys));
 
         let devices = effective_app_keys.get_all_devices();
-        let _ = self.expand_discovery_queue(owner_pubkey, &devices);
+        if let Ok(expand_output) = self.expand_discovery_queue(owner_pubkey, &devices) {
+            output.append_unit(expand_output);
+        }
         let active_ids: HashSet<String> = devices
             .iter()
             .map(|d| hex::encode(d.identity_pubkey.to_bytes()))
@@ -2891,7 +3199,7 @@ impl SessionManager {
         output
     }
 
-    fn store_user_record(&self, pubkey: &PublicKey) -> Result<()> {
+    fn store_user_record(&self, pubkey: &PublicKey) -> Result<ManagerOutput<()>> {
         let stored = self.with_user_records({
             let pubkey = *pubkey;
             move |records| {
@@ -2903,22 +3211,30 @@ impl SessionManager {
         if let Some(stored) = stored {
             let key = self.user_record_key(pubkey);
             let json = serde_json::to_string(&stored)?;
-            self.storage.put(&key, json)?;
+            return Ok(ManagerOutput {
+                value: (),
+                effects: Vec::new(),
+                storage_effects: vec![SessionManagerStorageEffect::Put { key, value: json }],
+                notifications: Vec::new(),
+            });
         }
-        Ok(())
+        Ok(ManagerOutput::empty(()))
     }
 
-    fn load_all_user_records(&self) -> Result<()> {
+    fn load_all_user_records_from_results(
+        &self,
+        reads: &SessionManagerStorageResults,
+    ) -> Result<()> {
         let prefix = self.user_record_key_prefix();
-        let keys = self.storage.list(&prefix)?;
+        let keys = reads.lists.get(&prefix).cloned().unwrap_or_default();
         let mut loaded_records = Vec::new();
 
         for key in keys {
-            let Some(data) = self.storage.get(&key)? else {
+            let Some(Some(data)) = reads.gets.get(&key) else {
                 continue;
             };
 
-            let stored: crate::StoredUserRecord = match serde_json::from_str(&data) {
+            let stored: crate::StoredUserRecord = match serde_json::from_str(data) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -2977,6 +3293,25 @@ impl SessionManager {
         });
 
         Ok(())
+    }
+
+    fn load_queue_from_results(
+        &self,
+        queue: &MessageQueue,
+        reads: &SessionManagerStorageResults,
+        prefix: &str,
+    ) {
+        let mut entries = Vec::new();
+        for key in reads.lists.get(prefix).cloned().unwrap_or_default() {
+            let Some(Some(data)) = reads.gets.get(&key) else {
+                continue;
+            };
+            let Ok(entry) = serde_json::from_str::<crate::QueueEntry>(data) else {
+                continue;
+            };
+            entries.push(entry);
+        }
+        queue.import_entries(entries);
     }
 
     fn promote_session_to_active(
@@ -3127,7 +3462,7 @@ impl SessionManager {
                 };
 
                 if let Ok(rumor) = serde_json::from_str::<UnsignedEvent>(&plaintext) {
-                    self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor);
+                    output.append_unit(self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor));
                     if let Ok(group_output) = self.maybe_handle_group_sender_key_distribution(
                         owner_pubkey,
                         sender_device,
@@ -3137,7 +3472,9 @@ impl SessionManager {
                     }
                 }
 
-                let _ = self.store_user_record(&owner_pubkey);
+                if let Ok(store_output) = self.store_user_record(&owner_pubkey) {
+                    output.append_unit(store_output);
+                }
                 output.push_notification(SessionManagerNotification::DecryptedMessage {
                     sender: owner_pubkey,
                     sender_device,
@@ -3147,9 +3484,10 @@ impl SessionManager {
                 if let Ok(flush_output) = self.flush_message_queue(&device_id) {
                     output.append_unit(flush_output);
                 }
-            } else if let Some((sender, sender_device, plaintext, event_id)) =
+            } else if let Some((sender, sender_device, plaintext, event_id, storage_effects)) =
                 self.try_decrypt_group_sender_key_outer(&event, None)
             {
+                output.storage_effects.extend(storage_effects);
                 output.push_notification(SessionManagerNotification::DecryptedMessage {
                     sender,
                     sender_device,
@@ -3165,6 +3503,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InMemoryStorage;
     use nostr::Keys;
     use std::sync::{Arc, Mutex};
 
@@ -3245,10 +3584,27 @@ mod tests {
     }
 
     fn emit<T>(
-        tx: &crossbeam_channel::Sender<SessionManagerEvent>,
+        tx: &ManagedTx,
         output: ManagerOutput<T>,
     ) -> T {
-        emit_session_manager_output(tx, output).unwrap()
+        persist_and_emit_session_manager_output(tx.storage.as_ref(), &tx.tx, output).unwrap()
+    }
+
+    fn try_emit<T>(tx: &ManagedTx, output: ManagerOutput<T>) -> Result<T> {
+        persist_and_emit_session_manager_output(tx.storage.as_ref(), &tx.tx, output)
+    }
+
+    struct ManagedTx {
+        tx: crossbeam_channel::Sender<SessionManagerEvent>,
+        storage: Arc<dyn StorageAdapter>,
+    }
+
+    impl std::ops::Deref for ManagedTx {
+        type Target = crossbeam_channel::Sender<SessionManagerEvent>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.tx
+        }
     }
 
     fn new_manager(
@@ -3260,19 +3616,20 @@ mod tests {
         invite: Option<Invite>,
     ) -> (
         SessionManager,
-        crossbeam_channel::Sender<SessionManagerEvent>,
+        ManagedTx,
         crossbeam_channel::Receiver<SessionManagerEvent>,
     ) {
+        let storage = storage.unwrap_or_else(|| Arc::new(crate::InMemoryStorage::new()));
         let (tx, rx) = crossbeam_channel::unbounded();
         let manager = SessionManager::new(
             our_pubkey,
             identity_key,
             device_id,
             owner_pubkey,
-            storage,
+            Some(storage.clone()),
             invite,
         );
-        (manager, tx, rx)
+        (manager, ManagedTx { tx, storage }, rx)
     }
 
     fn sign_app_keys_event_with_created_at(
@@ -3413,7 +3770,7 @@ mod tests {
             None,
         );
 
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
 
         let subscribe_count = drain_events(&rx)
             .into_iter()
@@ -3448,7 +3805,7 @@ mod tests {
         let device_id = "test-device".to_string();
 
         let (manager, tx, _rx) = new_manager(pubkey, identity_key, device_id, pubkey, None, None);
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
 
         let peer = Keys::generate().public_key();
         emit(&tx, manager.setup_user(peer));
@@ -3748,7 +4105,7 @@ mod tests {
             Some(storage),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
 
         let events = drain_events(&rx);
         assert!(
@@ -3774,12 +4131,14 @@ mod tests {
             Some(storage.clone()),
             None,
         );
-        emit(&tx1, manager1.init().unwrap());
+        emit(&tx1, initialize_session_manager(tx1.storage.as_ref(), &manager1).unwrap());
 
-        let (inner_id, published_ids) = manager1
-            .send_text_with_inner_id(bob_pubkey, "queued before restart".to_string(), None)
-            .unwrap()
-            .value;
+        let (inner_id, published_ids) = emit(
+            &tx1,
+            manager1
+                .send_text_with_inner_id(bob_pubkey, "queued before restart".to_string(), None)
+                .unwrap(),
+        );
         assert!(published_ids.is_empty());
         assert!(
             !storage.list("v1/discovery-queue/").unwrap().is_empty(),
@@ -3796,7 +4155,7 @@ mod tests {
             Some(storage.clone()),
             None,
         );
-        emit(&tx2, manager2.init().unwrap());
+        emit(&tx2, initialize_session_manager(tx2.storage.as_ref(), &manager2).unwrap());
         let _ = drain_events(&rx2);
 
         let mut app_keys = AppKeys::new(vec![]);
@@ -3862,7 +4221,7 @@ mod tests {
             Some(storage.clone()),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         // Learn recipient devices first (AppKeys known) but don't establish a session yet.
@@ -3875,10 +4234,12 @@ mod tests {
         emit(&tx, manager.process_received_event(app_keys_event));
         let _ = drain_events(&rx);
 
-        let (inner_id, published_ids) = manager
-            .send_text_with_inner_id(bob_pubkey, "queued with known appkeys".to_string(), None)
-            .unwrap()
-            .value;
+        let (inner_id, published_ids) = emit(
+            &tx,
+            manager
+                .send_text_with_inner_id(bob_pubkey, "queued with known appkeys".to_string(), None)
+                .unwrap(),
+        );
         assert!(
             published_ids.is_empty(),
             "without an active session, send should queue for later"
@@ -3961,7 +4322,7 @@ mod tests {
             Some(storage),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         let mut app_keys = AppKeys::new(vec![]);
@@ -3984,7 +4345,7 @@ mod tests {
             accepted.is_ok(),
             "owner-side link invite should allow pre-registration acceptance"
         );
-        assert!(accepted.unwrap().value.created_new_session);
+        assert!(emit(&tx, accepted.unwrap()).created_new_session);
     }
 
     #[test]
@@ -4003,7 +4364,7 @@ mod tests {
             Some(storage),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         let invite = Invite::create_new(bob_pubkey, Some(bob_pubkey.to_hex()), Some(1)).unwrap();
@@ -4039,7 +4400,7 @@ mod tests {
             Some(storage),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         let invite = Invite::create_new(bob_pubkey, Some(bob_pubkey.to_hex()), Some(1)).unwrap();
@@ -4098,7 +4459,7 @@ mod tests {
             Some(storage.clone()),
             None,
         );
-        emit(&tx1, manager1.init().unwrap());
+        emit(&tx1, initialize_session_manager(tx1.storage.as_ref(), &manager1).unwrap());
         let _ = drain_events(&rx1);
 
         let mut app_keys = AppKeys::new(vec![]);
@@ -4120,7 +4481,7 @@ mod tests {
             Some(storage),
             None,
         );
-        emit(&tx2, manager2.init().unwrap());
+        emit(&tx2, initialize_session_manager(tx2.storage.as_ref(), &manager2).unwrap());
         let _ = drain_events(&rx2);
 
         let mut link_invite =
@@ -4134,7 +4495,7 @@ mod tests {
             accepted.is_ok(),
             "owner-side link invite should allow pre-registration acceptance after restart"
         );
-        assert!(accepted.unwrap().value.created_new_session);
+        assert!(emit(&tx2, accepted.unwrap()).created_new_session);
     }
 
     #[test]
@@ -4157,17 +4518,19 @@ mod tests {
             Some(flaky_storage.clone()),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
-        let (inner_id, published_ids) = manager
-            .send_text_with_inner_id(
-                bob_pubkey,
-                "retry after partial discovery expansion".to_string(),
-                None,
-            )
-            .unwrap()
-            .value;
+        let (inner_id, published_ids) = emit(
+            &tx,
+            manager
+                .send_text_with_inner_id(
+                    bob_pubkey,
+                    "retry after partial discovery expansion".to_string(),
+                    None,
+                )
+                .unwrap(),
+        );
         assert!(published_ids.is_empty());
 
         let discovery_count_before = count_queue_entries(
@@ -4187,7 +4550,7 @@ mod tests {
             .get_event(bob_pubkey)
             .sign_with_keys(&bob_keys)
             .unwrap();
-        emit(&tx, manager.process_received_event(app_keys_event.clone()));
+        let _ = try_emit(&tx, manager.process_received_event(app_keys_event.clone()));
 
         let discovery_count_after_first = count_queue_entries(
             &flaky_storage,
@@ -4200,7 +4563,21 @@ mod tests {
             "discovery entry should be retained when expansion only partially succeeds"
         );
 
-        // Retry AppKeys processing; the injected one-time queue failure is now consumed.
+        // Recreate manager from durable state, then retry after the injected one-time queue
+        // failure has been consumed.
+        drop(manager);
+
+        let (manager, tx, rx) = new_manager(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            Some(flaky_storage.clone()),
+            None,
+        );
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
+        let _ = drain_events(&rx);
+
         emit(&tx, manager.process_received_event(app_keys_event));
         let queued_count_after_retry = count_queue_entries(
             &flaky_storage,
@@ -4254,7 +4631,7 @@ mod tests {
             Some(storage.clone()),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         // Learn two recipient devices first; no sessions yet.
@@ -4267,17 +4644,19 @@ mod tests {
             &bob_owner_keys,
             1,
         );
-        emit(&tx, manager.process_received_event(app_keys_two_event));
+        let _ = try_emit(&tx, manager.process_received_event(app_keys_two_event));
         let _ = drain_events(&rx);
 
-        let (inner_id, published_ids) = manager
-            .send_text_with_inner_id(
-                bob_owner_pubkey,
-                "queued for two devices pre-revoke".to_string(),
-                None,
-            )
-            .unwrap()
-            .value;
+        let (inner_id, published_ids) = emit(
+            &tx,
+            manager
+                .send_text_with_inner_id(
+                    bob_owner_pubkey,
+                    "queued for two devices pre-revoke".to_string(),
+                    None,
+                )
+                .unwrap(),
+        );
         assert!(
             published_ids.is_empty(),
             "without sessions, message should queue per known device"
@@ -4390,7 +4769,7 @@ mod tests {
             Some(storage.clone()),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         let mut app_keys_two = AppKeys::new(vec![]);
@@ -4420,14 +4799,16 @@ mod tests {
         );
         let _ = drain_events(&rx);
 
-        let (inner_id, published_ids) = manager
-            .send_text_with_inner_id(
-                bob_owner_pubkey,
-                "stale appkeys replay should not collapse fanout".to_string(),
-                None,
-            )
-            .unwrap()
-            .value;
+        let (inner_id, published_ids) = emit(
+            &tx,
+            manager
+                .send_text_with_inner_id(
+                    bob_owner_pubkey,
+                    "stale appkeys replay should not collapse fanout".to_string(),
+                    None,
+                )
+                .unwrap(),
+        );
         assert!(
             published_ids.is_empty(),
             "without established sessions, message should queue per known device"
@@ -4494,7 +4875,7 @@ mod tests {
             Some(storage.clone()),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         let mut app_keys_two = AppKeys::new(vec![]);
@@ -4524,14 +4905,16 @@ mod tests {
         );
         let _ = drain_events(&rx);
 
-        let (inner_id, published_ids) = manager
-            .send_text_with_inner_id(
-                bob_owner_pubkey,
-                "same-second replay should not collapse fanout".to_string(),
-                None,
-            )
-            .unwrap()
-            .value;
+        let (inner_id, published_ids) = emit(
+            &tx,
+            manager
+                .send_text_with_inner_id(
+                    bob_owner_pubkey,
+                    "same-second replay should not collapse fanout".to_string(),
+                    None,
+                )
+                .unwrap(),
+        );
         assert!(published_ids.is_empty());
         assert_eq!(
             count_queue_entries(&storage, "v1/message-queue/", &bob_device1_id, &inner_id),
@@ -4567,18 +4950,20 @@ mod tests {
             Some(flaky_storage.clone()),
             None,
         );
-        emit(&tx, manager.init().unwrap());
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
         let _ = drain_events(&rx);
 
         // Queue in discovery first (unknown recipient devices).
-        let (inner_id, published_ids) = manager
-            .send_text_with_inner_id(
-                bob_owner_pubkey,
-                "queued before appkeys/revocation".to_string(),
-                None,
-            )
-            .unwrap()
-            .value;
+        let (inner_id, published_ids) = emit(
+            &tx,
+            manager
+                .send_text_with_inner_id(
+                    bob_owner_pubkey,
+                    "queued before appkeys/revocation".to_string(),
+                    None,
+                )
+                .unwrap(),
+        );
         assert!(published_ids.is_empty());
 
         // AppKeys with two devices: first expansion attempt will partially fail.
@@ -4591,7 +4976,7 @@ mod tests {
             &bob_owner_keys,
             1,
         );
-        emit(&tx, manager.process_received_event(app_keys_two_event));
+        let _ = try_emit(&tx, manager.process_received_event(app_keys_two_event));
         assert!(
             count_queue_entries(
                 &flaky_storage,
@@ -4603,6 +4988,19 @@ mod tests {
         );
 
         // Revoke device2 by AppKeys replacement. Retry path should keep only device1.
+        drop(manager);
+
+        let (manager, tx, rx) = new_manager(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_pubkey.to_hex(),
+            alice_pubkey,
+            Some(flaky_storage.clone()),
+            None,
+        );
+        emit(&tx, initialize_session_manager(tx.storage.as_ref(), &manager).unwrap());
+        let _ = drain_events(&rx);
+
         let mut app_keys_one = AppKeys::new(vec![]);
         app_keys_one.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 3));
         let app_keys_one_event = sign_app_keys_event_with_created_at(

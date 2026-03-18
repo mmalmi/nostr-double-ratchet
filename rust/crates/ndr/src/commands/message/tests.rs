@@ -4,7 +4,10 @@ use crate::output::Output;
 use crate::storage::Storage;
 use crate::storage::StoredChat;
 use nostr::JsonUtil;
-use nostr_double_ratchet::{emit_session_manager_output, ManagedInvite};
+use nostr_double_ratchet::{
+    emit_session_manager_output, initialize_session_manager, persist_and_emit_session_manager_output,
+    persist_session_manager_output, ManagedInvite,
+};
 use std::sync::Once;
 use tempfile::TempDir;
 
@@ -240,24 +243,33 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
             sender_keys.secret_key().to_secret_bytes(),
             our_device_id.clone(),
             sender_keys.public_key(),
-            Some(session_manager_store),
+            Some(session_manager_store.clone()),
             None,
         );
-        emit_session_manager_output(&sm_tx, manager.init().unwrap()).unwrap();
-        manager
+        persist_and_emit_session_manager_output(
+            session_manager_store.as_ref(),
+            &sm_tx,
+            initialize_session_manager(session_manager_store.as_ref(), &manager).unwrap(),
+        )
+        .unwrap();
+        let mut output = manager
             .import_session_state(
                 recipient_owner,
                 Some(device1_id.clone()),
                 session1.session.state.clone(),
             )
             .unwrap();
-        manager
+        persist_session_manager_output(session_manager_store.as_ref(), &mut output).unwrap();
+        emit_session_manager_output(&sm_tx, output).unwrap();
+        let mut output = manager
             .import_session_state(
                 recipient_owner,
                 Some(device2_id.clone()),
                 session2.session.state.clone(),
             )
             .unwrap();
+        persist_session_manager_output(session_manager_store.as_ref(), &mut output).unwrap();
+        emit_session_manager_output(&sm_tx, output).unwrap();
 
         let mut app_keys = nostr_double_ratchet::AppKeys::new(Vec::new());
         app_keys.add_device(nostr_double_ratchet::DeviceEntry::new(
@@ -272,8 +284,12 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
             .get_event(recipient_owner)
             .sign_with_keys(&recipient_owner_keys)
             .unwrap();
-        emit_session_manager_output(&sm_tx, manager.process_received_event(app_keys_event))
-            .unwrap();
+        persist_and_emit_session_manager_output(
+            session_manager_store.as_ref(),
+            &sm_tx,
+            manager.process_received_event(app_keys_event),
+        )
+        .unwrap();
     }
 
     send(
@@ -302,10 +318,15 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
         sender_keys.secret_key().to_secret_bytes(),
         our_device_id,
         sender_keys.public_key(),
-        Some(session_manager_store),
+        Some(session_manager_store.clone()),
         None,
     );
-    emit_session_manager_output(&sm_tx, manager.init().unwrap()).unwrap();
+    persist_and_emit_session_manager_output(
+        session_manager_store.as_ref(),
+        &sm_tx,
+        initialize_session_manager(session_manager_store.as_ref(), &manager).unwrap(),
+    )
+    .unwrap();
 
     let mut recipient_sends: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
