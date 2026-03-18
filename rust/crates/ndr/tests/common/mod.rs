@@ -16,11 +16,21 @@ pub fn ndr_binary() -> &'static std::path::PathBuf {
             }
         }
 
-        // Fallback: workspace `target/debug/ndr` (works when running tests from the repo root).
-        let mut fallback = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fallback.pop(); // ndr
-        fallback.pop(); // crates
-        fallback.push("target");
+        let mut fallback = std::env::var("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let mut repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                repo_root.pop(); // ndr
+                repo_root.pop(); // crates
+                repo_root.pop(); // rust
+
+                let cargo_target = repo_root.join(".cargo-target");
+                if cargo_target.exists() {
+                    cargo_target
+                } else {
+                    repo_root.join("rust").join("target")
+                }
+            });
         fallback.push("debug");
         fallback.push("ndr");
         #[cfg(windows)]

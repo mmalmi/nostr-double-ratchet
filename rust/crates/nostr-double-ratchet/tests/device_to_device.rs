@@ -1,9 +1,9 @@
-use ndr_v2_core::{
-    InviteAcceptInput, InviteCreateInput, InviteProcessResponseInput, InviteProcessResponseResult,
-    InviteState, SessionId, SessionReceiveInput, SessionReceiveResult, SessionSendInput,
+use nostr::{EventBuilder, Keys, PublicKey, SecretKey, Timestamp, UnsignedEvent};
+use nostr_double_ratchet::{
+    Invite, InviteAcceptInput, InviteCreateInput, InviteProcessResponseInput,
+    InviteProcessResponseResult, SessionReceiveInput, SessionReceiveResult, SessionSendInput,
     MESSAGE_EVENT_KIND,
 };
-use nostr::{EventBuilder, Keys, PublicKey, SecretKey, Timestamp, UnsignedEvent};
 
 fn keypair(byte: u8) -> (SecretKey, PublicKey) {
     let bytes = [byte; 32];
@@ -28,10 +28,8 @@ fn inner_event(author: PublicKey, kind: u16, content: &str, created_at: u64) -> 
 fn device_to_device_handshake_establishes_compatible_sessions() {
     let (alice_identity_sk, alice_identity_pk) = keypair(100);
     let (_, bob_identity_pk) = keypair(101);
-    let session_id = Some(SessionId("alice-bob-device-chat".to_string()));
 
-    let invite = InviteState::create(InviteCreateInput {
-        invite_id: None,
+    let invite = Invite::create(InviteCreateInput {
         inviter: alice_identity_pk,
         inviter_ephemeral_private_key: key_bytes(102),
         shared_secret: key_bytes(103),
@@ -53,17 +51,15 @@ fn device_to_device_handshake_establishes_compatible_sessions() {
             response_created_at: 1_700_000_010,
             device_id: Some("bob-device".to_string()),
             owner_public_key: Some(bob_identity_pk),
-            session_id: session_id.clone(),
         })
         .unwrap();
 
     let bob_session = accepted.session.clone();
-    let bob_current_pubkey = bob_session.our_current_nostr_key.as_ref().unwrap().public_key;
+    let bob_current_pubkey = bob_session.state.our_current_nostr_key.as_ref().unwrap().public_key;
 
     assert!(bob_session.can_send());
-    assert_eq!(bob_session.session_id, session_id);
     assert_eq!(
-        bob_session.their_next_nostr_public_key,
+        bob_session.state.their_next_nostr_public_key,
         Some(invite.inviter_ephemeral_public_key)
     );
     assert!(accepted.next_invite.used_by.contains(&bob_identity_pk));
@@ -72,7 +68,6 @@ fn device_to_device_handshake_establishes_compatible_sessions() {
         event: accepted.response_event,
         inviter_identity_private_key: alice_identity_sk.to_secret_bytes(),
         inviter_next_nostr_private_key: key_bytes(107),
-        session_id: session_id.clone(),
     });
 
     match processed {
@@ -84,10 +79,9 @@ fn device_to_device_handshake_establishes_compatible_sessions() {
             assert_eq!(meta.invitee_identity, bob_identity_pk);
             assert_eq!(meta.device_id.as_deref(), Some("bob-device"));
             assert_eq!(meta.owner_public_key, Some(bob_identity_pk));
-            assert_eq!(alice_session.session_id, session_id);
             assert!(!alice_session.can_send());
             assert_eq!(
-                alice_session.their_next_nostr_public_key,
+                alice_session.state.their_next_nostr_public_key,
                 Some(bob_current_pubkey)
             );
             assert!(next_invite.used_by.contains(&bob_identity_pk));
@@ -100,10 +94,8 @@ fn device_to_device_handshake_establishes_compatible_sessions() {
 fn device_to_device_handshake_allows_bob_to_send_and_alice_to_decrypt() {
     let (alice_identity_sk, alice_identity_pk) = keypair(110);
     let (_, bob_identity_pk) = keypair(111);
-    let session_id = Some(SessionId("alice-bob-first-message".to_string()));
 
-    let invite = InviteState::create(InviteCreateInput {
-        invite_id: None,
+    let invite = Invite::create(InviteCreateInput {
         inviter: alice_identity_pk,
         inviter_ephemeral_private_key: key_bytes(112),
         shared_secret: key_bytes(113),
@@ -125,18 +117,16 @@ fn device_to_device_handshake_allows_bob_to_send_and_alice_to_decrypt() {
             response_created_at: 1_700_000_010,
             device_id: Some("bob-device".to_string()),
             owner_public_key: Some(bob_identity_pk),
-            session_id: session_id.clone(),
         })
         .unwrap();
 
     let bob_session = accepted.session.clone();
-    let bob_sender_pubkey = bob_session.our_current_nostr_key.as_ref().unwrap().public_key;
+    let bob_sender_pubkey = bob_session.state.our_current_nostr_key.as_ref().unwrap().public_key;
 
     let alice_session = match invite.process_response(InviteProcessResponseInput {
         event: accepted.response_event,
         inviter_identity_private_key: alice_identity_sk.to_secret_bytes(),
         inviter_next_nostr_private_key: key_bytes(117),
-        session_id: session_id.clone(),
     }) {
         InviteProcessResponseResult::Accepted { session, .. } => session,
         other => panic!("expected accepted invite response, got {other:?}"),
@@ -154,7 +144,6 @@ fn device_to_device_handshake_allows_bob_to_send_and_alice_to_decrypt() {
 
     assert_eq!(u32::from(send.outer_event.kind.as_u16()), MESSAGE_EVENT_KIND);
     assert_ne!(send.next, bob_session);
-    assert_eq!(bob_session.session_id, session_id);
 
     let received = alice_session.receive_event(SessionReceiveInput {
         outer_event: send.outer_event.clone(),
@@ -164,11 +153,13 @@ fn device_to_device_handshake_allows_bob_to_send_and_alice_to_decrypt() {
     match received {
         SessionReceiveResult::Decrypted {
             next,
-            inner_event,
+            inner_event: Some(inner_event),
             meta,
+            plaintext,
         } => {
             assert_eq!(inner_event.content, "hello from bob");
             assert_eq!(inner_event.pubkey, bob_identity_pk);
+            assert!(plaintext.contains("\"content\":\"hello from bob\""));
             assert_eq!(meta.sender, bob_sender_pubkey);
             assert_eq!(meta.outer_event_id, send.outer_event.id);
             assert_ne!(next, alice_session);

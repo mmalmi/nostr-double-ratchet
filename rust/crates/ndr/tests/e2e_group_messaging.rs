@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use nostr_double_ratchet::{Invite, Session};
+use nostr_double_ratchet::{Invite, ManagedInvite, ManagedSession as Session};
 use std::path::Path;
 
 mod helpers {
@@ -116,9 +116,11 @@ fn create_session_pair(
     bob_sk: &[u8; 32],
 ) -> (Session, Session, nostr::Event) {
     let invite = Invite::create_new(*alice_pk, None, None).unwrap();
-    let (bob_session, response_event) = invite.accept(*bob_pk, *bob_sk, None).unwrap();
+    let (bob_session, response_event) = ManagedInvite::new(invite.clone())
+        .accept(*bob_pk, *bob_sk, None)
+        .unwrap();
 
-    let alice_session = invite
+    let alice_session = ManagedInvite::new(invite.clone())
         .process_invite_response(&response_event, *alice_sk)
         .unwrap()
         .unwrap()
@@ -162,12 +164,12 @@ fn test_group_message_fan_out_and_receive() {
     alice_storage.save_chat(
         alice_chat_id,
         &bob.pubkey,
-        &serde_json::to_string(&alice_session.state).unwrap(),
+        &serde_json::to_string(&alice_session.session.state).unwrap(),
     );
     bob_storage.save_chat(
         bob_chat_id,
         &alice.pubkey,
-        &serde_json::to_string(&bob_session.state).unwrap(),
+        &serde_json::to_string(&bob_session.session.state).unwrap(),
     );
 
     // Alice creates group

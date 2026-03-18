@@ -1,7 +1,7 @@
 use nostr::Keys;
 use nostr_double_ratchet::{
     utils::{deserialize_session_state, serialize_session_state},
-    Result, Session,
+    ManagedSession as Session, Result,
 };
 
 #[test]
@@ -44,16 +44,16 @@ fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
         assert_eq!(rumor["content"].as_str(), Some(*message));
     }
 
-    let serialized_bob = serialize_session_state(&bob.state)?;
+    let serialized_bob = serialize_session_state(&bob.session.state)?;
     let bob_restored = Session::new(
         deserialize_session_state(&serialized_bob)?,
         "bob_restored".to_string(),
     );
 
-    let initial_receiving_count = bob_restored.state.receiving_chain_message_number;
+    let initial_receiving_count = bob_restored.session.state.receiving_chain_message_number;
 
     for _event in &sent_events {
-        let result = bob_restored.state.clone();
+        let result = bob_restored.session.state.clone();
         assert_eq!(
             result.receiving_chain_message_number,
             initial_receiving_count
@@ -108,7 +108,7 @@ fn test_session_reinitialization() -> Result<()> {
     let rumor1: serde_json::Value = serde_json::from_str(&received1.unwrap())?;
     assert_eq!(rumor1["content"].as_str(), Some("Message 1"));
 
-    let serialized_bob_state = serialize_session_state(&bob.state)?;
+    let serialized_bob_state = serialize_session_state(&bob.session.state)?;
 
     let mut bob_restored = Session::new(
         deserialize_session_state(&serialized_bob_state)?,

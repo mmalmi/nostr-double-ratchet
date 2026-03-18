@@ -4,10 +4,11 @@ use crate::output::Output;
 use crate::storage::Storage;
 use crate::storage::StoredChat;
 use nostr::JsonUtil;
+use nostr_double_ratchet::ManagedInvite;
 use std::sync::Once;
 use tempfile::TempDir;
 
-fn create_test_session() -> nostr_double_ratchet::Session {
+fn create_test_session() -> nostr_double_ratchet::ManagedSession {
     // Create an invite
     let alice_keys = nostr::Keys::generate();
     let bob_keys = nostr::Keys::generate();
@@ -17,7 +18,7 @@ fn create_test_session() -> nostr_double_ratchet::Session {
 
     // Bob accepts the invite - this creates a session where Bob can send
     let bob_pk = bob_keys.public_key();
-    let (bob_session, _response) = invite
+    let (bob_session, _response) = ManagedInvite::new(invite.clone())
         .accept_with_owner(
             bob_pk,
             bob_keys.secret_key().to_secret_bytes(),
@@ -32,8 +33,8 @@ fn create_test_session() -> nostr_double_ratchet::Session {
 fn create_test_session_pair() -> (
     nostr::Keys,
     nostr::Keys,
-    nostr_double_ratchet::Session,
-    nostr_double_ratchet::Session,
+    nostr_double_ratchet::ManagedSession,
+    nostr_double_ratchet::ManagedSession,
 ) {
     // Create an invite
     let alice_keys = nostr::Keys::generate();
@@ -44,7 +45,7 @@ fn create_test_session_pair() -> (
 
     // Bob accepts: Bob becomes the initiator (can send first).
     let bob_pk = bob_keys.public_key();
-    let (bob_session, response) = invite
+    let (bob_session, response) = ManagedInvite::new(invite.clone())
         .accept_with_owner(
             bob_pk,
             bob_keys.secret_key().to_secret_bytes(),
@@ -54,7 +55,7 @@ fn create_test_session_pair() -> (
         .unwrap();
 
     // Alice processes response: Alice must receive first.
-    let alice_session = invite
+    let alice_session = ManagedInvite::new(invite.clone())
         .process_invite_response(&response, alice_keys.secret_key().to_secret_bytes())
         .unwrap()
         .unwrap()
@@ -83,7 +84,7 @@ fn setup() -> (TempDir, Config, Storage, String) {
 
     // Create a proper test session
     let session = create_test_session();
-    let session_state = serde_json::to_string(&session.state).unwrap();
+    let session_state = serde_json::to_string(&session.session.state).unwrap();
 
     // Create a test chat with valid session
     let their_pubkey = nostr::Keys::generate().public_key().to_hex();
@@ -187,7 +188,7 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
         None,
     )
     .unwrap();
-    let (session1, _) = invite1
+    let (session1, _) = ManagedInvite::new(invite1.clone())
         .accept_with_owner(
             sender_keys.public_key(),
             sender_keys.secret_key().to_secret_bytes(),
@@ -202,7 +203,7 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
         None,
     )
     .unwrap();
-    let (session2, _) = invite2
+    let (session2, _) = ManagedInvite::new(invite2.clone())
         .accept_with_owner(
             sender_keys.public_key(),
             sender_keys.secret_key().to_secret_bytes(),
@@ -219,7 +220,7 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
             device_id: Some(device1_id.clone()),
             created_at: 1234567890,
             last_message_at: None,
-            session_state: serde_json::to_string(&session1.state).unwrap(),
+            session_state: serde_json::to_string(&session1.session.state).unwrap(),
             message_ttl_seconds: None,
         })
         .unwrap();
@@ -248,14 +249,14 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
             .import_session_state(
                 recipient_owner,
                 Some(device1_id.clone()),
-                session1.state.clone(),
+                session1.session.state.clone(),
             )
             .unwrap();
         manager
             .import_session_state(
                 recipient_owner,
                 Some(device2_id.clone()),
-                session2.state.clone(),
+                session2.session.state.clone(),
             )
             .unwrap();
 
@@ -336,7 +337,7 @@ async fn test_send_message_with_ttl_adds_expiration_tag() {
     let config = Config::load(temp.path()).unwrap();
 
     let chat_id = "test-chat".to_string();
-    let session_state = serde_json::to_string(&bob_session.state).unwrap();
+    let session_state = serde_json::to_string(&bob_session.session.state).unwrap();
     storage
         .save_chat(&StoredChat {
             id: chat_id.clone(),
@@ -403,7 +404,7 @@ async fn test_chat_default_ttl_is_applied_when_sending_without_overrides() {
     let config = Config::load(temp.path()).unwrap();
 
     let chat_id = "test-chat".to_string();
-    let session_state = serde_json::to_string(&bob_session.state).unwrap();
+    let session_state = serde_json::to_string(&bob_session.session.state).unwrap();
     let ttl_seconds = 90u64;
     storage
         .save_chat(&StoredChat {
@@ -524,7 +525,7 @@ async fn test_send_chat_id_routes_by_pubkey_not_selected_chat_id() {
     let config = Config::load(temp.path()).unwrap();
 
     let session = create_test_session();
-    let session_state = serde_json::to_string(&session.state).unwrap();
+    let session_state = serde_json::to_string(&session.session.state).unwrap();
     let peer_pubkey = nostr::Keys::generate().public_key().to_hex();
 
     // Two chats with the same peer pubkey. "new-chat" is the canonical one by recency.
@@ -582,7 +583,7 @@ async fn test_receive_typing_does_not_save_message() {
     let (_alice_keys, bob_keys, mut bob_session, alice_session) = create_test_session_pair();
 
     let chat_id = "peer-chat".to_string();
-    let session_state = serde_json::to_string(&alice_session.state).unwrap();
+    let session_state = serde_json::to_string(&alice_session.session.state).unwrap();
     storage
         .save_chat(&StoredChat {
             id: chat_id.clone(),
@@ -622,7 +623,7 @@ fn test_resolve_target_by_hex_pubkey() {
 
     // Create a chat with this pubkey
     let session = create_test_session();
-    let session_state = serde_json::to_string(&session.state).unwrap();
+    let session_state = serde_json::to_string(&session.session.state).unwrap();
     storage
         .save_chat(&StoredChat {
             id: "pk-chat".to_string(),
@@ -647,7 +648,7 @@ fn test_resolve_target_by_npub() {
     let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
 
     let session = create_test_session();
-    let session_state = serde_json::to_string(&session.state).unwrap();
+    let session_state = serde_json::to_string(&session.session.state).unwrap();
     storage
         .save_chat(&StoredChat {
             id: "npub-chat".to_string(),
@@ -672,7 +673,7 @@ fn test_resolve_target_by_chat_link_hash_npub() {
     let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
 
     let session = create_test_session();
-    let session_state = serde_json::to_string(&session.state).unwrap();
+    let session_state = serde_json::to_string(&session.session.state).unwrap();
     storage
         .save_chat(&StoredChat {
             id: "link-chat".to_string(),
@@ -731,7 +732,7 @@ fn test_resolve_target_prefers_recent() {
             device_id: None,
             created_at: 1000,
             last_message_at: Some(2000),
-            session_state: serde_json::to_string(&session1.state).unwrap(),
+            session_state: serde_json::to_string(&session1.session.state).unwrap(),
             message_ttl_seconds: None,
         })
         .unwrap();
@@ -742,7 +743,7 @@ fn test_resolve_target_prefers_recent() {
             device_id: None,
             created_at: 1000,
             last_message_at: Some(5000),
-            session_state: serde_json::to_string(&session2.state).unwrap(),
+            session_state: serde_json::to_string(&session2.session.state).unwrap(),
             message_ttl_seconds: None,
         })
         .unwrap();
@@ -759,7 +760,7 @@ fn test_resolve_target_by_petname() {
     let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
 
     let session = create_test_session();
-    let session_state = serde_json::to_string(&session.state).unwrap();
+    let session_state = serde_json::to_string(&session.session.state).unwrap();
     storage
         .save_chat(&StoredChat {
             id: "pet-chat".to_string(),

@@ -14,10 +14,14 @@
  */
 
 import { finalizeEvent, getPublicKey, generateSecretKey } from "nostr-tools";
+import { webcrypto } from "node:crypto";
 import WebSocket from "ws";
 
 // Use ws for Node.js WebSocket support (nostr-tools expects global WebSocket sometimes).
 (global as any).WebSocket = WebSocket;
+if (!(globalThis as any).crypto) {
+  (globalThis as any).crypto = webcrypto;
+}
 
 import { Invite } from "../src/Invite";
 import { AppKeys } from "../src/AppKeys";
@@ -241,4 +245,3 @@ main().catch((e) => {
   log(`E2E_ERROR:${e?.message || e}`);
   process.exit(1);
 });
-

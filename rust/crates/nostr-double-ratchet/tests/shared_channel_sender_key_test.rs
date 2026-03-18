@@ -2,7 +2,7 @@ use base64::Engine;
 use nostr_double_ratchet::{
     group::GROUP_SENDER_KEY_DISTRIBUTION_KIND,
     sender_key::{SenderKeyDistribution, SenderKeyState},
-    Invite, CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND,
+    Invite, ManagedInvite, CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND,
 };
 
 #[test]
@@ -17,11 +17,11 @@ fn session_sender_key_distribution_then_sender_event_message_roundtrip() {
     let bob_pk = bob_keys.public_key();
 
     let invite = Invite::create_new(alice_pk, None, None).unwrap();
-    let (mut bob_session, response_event) = invite
+    let (mut bob_session, response_event) = ManagedInvite::new(invite.clone())
         .accept(bob_pk, bob_keys.secret_key().to_secret_bytes(), None)
         .unwrap();
 
-    let mut alice_session = invite
+    let mut alice_session = ManagedInvite::new(invite.clone())
         .process_invite_response(&response_event, alice_keys.secret_key().to_secret_bytes())
         .unwrap()
         .unwrap()

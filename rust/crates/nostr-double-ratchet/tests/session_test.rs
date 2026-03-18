@@ -1,5 +1,5 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet::{ManagedInvite, ManagedSession as Session, Result};
 
 #[test]
 fn test_session_init() -> Result<()> {
@@ -20,9 +20,9 @@ fn test_session_init() -> Result<()> {
     )?;
 
     assert_eq!(alice.name, "alice");
-    assert!(alice.state.our_current_nostr_key.is_some());
-    assert!(alice.state.sending_chain_key.is_some());
-    assert_eq!(alice.state.sending_chain_message_number, 0);
+    assert!(alice.session.state.our_current_nostr_key.is_some());
+    assert!(alice.session.state.sending_chain_key.is_some());
+    assert_eq!(alice.session.state.sending_chain_message_number, 0);
 
     Ok(())
 }
@@ -46,9 +46,9 @@ fn test_session_init_responder() -> Result<()> {
     )?;
 
     assert_eq!(bob.name, "bob");
-    assert!(bob.state.our_current_nostr_key.is_none());
-    assert!(bob.state.sending_chain_key.is_none());
-    assert_eq!(bob.state.sending_chain_message_number, 0);
+    assert!(bob.session.state.our_current_nostr_key.is_none());
+    assert!(bob.session.state.sending_chain_key.is_none());
+    assert_eq!(bob.session.state.sending_chain_message_number, 0);
 
     Ok(())
 }
@@ -105,23 +105,23 @@ fn test_multiple_messages() -> Result<()> {
         Some("alice".to_string()),
     )?;
 
-    let initial_chain_number = alice.state.sending_chain_message_number;
+    let initial_chain_number = alice.session.state.sending_chain_message_number;
 
     let _event1 = alice.send("Message 1".to_string())?;
     assert_eq!(
-        alice.state.sending_chain_message_number,
+        alice.session.state.sending_chain_message_number,
         initial_chain_number + 1
     );
 
     let _event2 = alice.send("Message 2".to_string())?;
     assert_eq!(
-        alice.state.sending_chain_message_number,
+        alice.session.state.sending_chain_message_number,
         initial_chain_number + 2
     );
 
     let _event3 = alice.send("Message 3".to_string())?;
     assert_eq!(
-        alice.state.sending_chain_message_number,
+        alice.session.state.sending_chain_message_number,
         initial_chain_number + 3
     );
 
@@ -149,20 +149,20 @@ fn test_session_state_serialization() -> Result<()> {
     )?;
 
     // Serialize
-    let serialized = serialize_session_state(&alice.state)?;
+    let serialized = serialize_session_state(&alice.session.state)?;
     assert!(!serialized.is_empty());
 
     // Deserialize
     let deserialized = deserialize_session_state(&serialized)?;
 
     // Verify key fields match
-    assert_eq!(alice.state.root_key, deserialized.root_key);
+    assert_eq!(alice.session.state.root_key, deserialized.root_key);
     assert_eq!(
-        alice.state.sending_chain_message_number,
+        alice.session.state.sending_chain_message_number,
         deserialized.sending_chain_message_number
     );
     assert_eq!(
-        alice.state.receiving_chain_message_number,
+        alice.session.state.receiving_chain_message_number,
         deserialized.receiving_chain_message_number
     );
 
@@ -179,7 +179,7 @@ fn test_send_reaction_format() {
         nostr_double_ratchet::Invite::create_new(alice_keys.public_key(), None, None).unwrap();
 
     // Bob accepts - after accept, BOB can send first (he's the ratchet initiator)
-    let (mut bob_session, _response) = invite
+    let (mut bob_session, _response) = ManagedInvite::new(invite.clone())
         .accept(
             bob_keys.public_key(),
             bob_keys.secret_key().to_secret_bytes(),
@@ -220,7 +220,7 @@ fn test_reaction_roundtrip() {
         nostr_double_ratchet::Invite::create_new(alice_keys.public_key(), None, None).unwrap();
 
     // Bob accepts the invite - after accept, BOB can send first!
-    let (mut bob_session, response) = invite
+    let (mut bob_session, response) = ManagedInvite::new(invite.clone())
         .accept(
             bob_keys.public_key(),
             bob_keys.secret_key().to_secret_bytes(),
@@ -229,7 +229,7 @@ fn test_reaction_roundtrip() {
         .unwrap();
 
     // Alice processes the response - Alice needs to receive first
-    let mut alice_session = invite
+    let mut alice_session = ManagedInvite::new(invite.clone())
         .process_invite_response(&response, alice_keys.secret_key().to_secret_bytes())
         .unwrap()
         .unwrap()

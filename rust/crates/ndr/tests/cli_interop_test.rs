@@ -12,10 +12,15 @@ use tempfile::TempDir;
 
 #[allow(unused_mut)]
 fn expected_ndr_binary_path() -> std::path::PathBuf {
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); // ndr
-    path.pop(); // crates
-    path.push("target");
+    let mut path = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let mut repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            repo_root.pop(); // ndr
+            repo_root.pop(); // crates
+            repo_root.pop(); // rust
+            repo_root.join(".cargo-target")
+        });
     path.push("debug");
     path.push("ndr");
     #[cfg(windows)]

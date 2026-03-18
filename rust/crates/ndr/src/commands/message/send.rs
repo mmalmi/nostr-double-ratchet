@@ -17,7 +17,7 @@ use super::resolve_target;
 use super::types::{MessageInfo, MessageList, MessageSent, ReactionInfo};
 
 #[cfg(test)]
-use nostr_double_ratchet::Session;
+use nostr_double_ratchet::ManagedSession as Session;
 
 #[cfg(test)]
 pub(super) struct PreparedSendMessage {

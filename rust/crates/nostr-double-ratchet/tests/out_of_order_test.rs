@@ -1,5 +1,5 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet::{ManagedSession as Session, Result};
 
 #[test]
 fn test_out_of_order_message_delivery() -> Result<()> {

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use nostr_sdk::Client;
 use serde::Serialize;
+use nostr_double_ratchet::ManagedInvite;
 
 use crate::config::Config;
 use crate::nostr_client::send_event_or_ignore;
@@ -198,8 +199,12 @@ pub async fn accept(url: &str, config: &Config, storage: &Storage, output: &Outp
     let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
     let owner_private_key = config.private_key_bytes()?;
 
-    let (_session, response_event) =
-        invite.accept_with_owner(owner_pubkey, owner_private_key, None, Some(owner_pubkey))?;
+    let (_session, response_event) = ManagedInvite::new(invite.clone()).accept_with_owner(
+        owner_pubkey,
+        owner_private_key,
+        None,
+        Some(owner_pubkey),
+    )?;
 
     // Publish to relays if configured
     let relays = config.resolved_relays();

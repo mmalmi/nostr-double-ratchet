@@ -6,6 +6,8 @@ pub mod file_storage;
 pub mod group;
 pub mod group_manager;
 pub mod invite;
+pub mod managed_invite;
+pub mod managed_session;
 pub mod message_origin;
 pub mod message_queue;
 pub mod multi_device;
@@ -27,7 +29,11 @@ pub use error::{Error, Result};
 pub use file_storage::{DebouncedFileStorage, FileStorageAdapter};
 pub use group::*;
 pub use group_manager::*;
-pub use invite::{Invite, InviteResponse};
+pub use invite::{
+    Invite, InviteAcceptInput, InviteAcceptResult, InviteCreateInput, InviteProcessResponseInput,
+    InviteProcessResponseResult, InviteResponseMeta,
+};
+pub use managed_invite::{InviteResponse, ManagedInvite};
 pub use message_origin::{classify_message_origin, MessageOrigin};
 pub use message_queue::{MessageQueue, QueueEntry};
 pub use multi_device::{
@@ -39,7 +45,11 @@ pub use multi_device::{
 pub use one_to_many::*;
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
 pub use sender_key::*;
-pub use session::Session;
+pub use managed_session::ManagedSession;
+pub use session::{
+    Session, SessionInitInput, SessionReceiveInput, SessionReceiveMeta, SessionReceiveResult,
+    SessionSendInput, SessionSendResult,
+};
 pub use session_manager::{AcceptInviteResult, SessionManager, SessionManagerEvent};
 pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};

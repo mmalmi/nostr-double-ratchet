@@ -3,8 +3,8 @@ use crossbeam_channel::{Receiver, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
     CreateGroupOptions, FanoutGroupMetadataOptions, FileStorageAdapter, GroupManager,
-    GroupManagerOptions, GroupSendEvent, Session, SessionManager, SessionManagerEvent,
-    StorageAdapter, CHAT_MESSAGE_KIND, REACTION_KIND,
+    GroupManagerOptions, GroupSendEvent, ManagedSession as Session, SessionManager,
+    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -420,7 +420,7 @@ fn queue_pairwise_session_events_for_recipient(
         };
 
         let mut updated_chat = chat.clone();
-        updated_chat.session_state = serde_json::to_string(&session.state)?;
+        updated_chat.session_state = serde_json::to_string(&session.session.state)?;
         queue.storage.save_chat(&updated_chat)?;
 
         queue.queued_events.push(encrypted);

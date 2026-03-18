@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossbeam_channel::{Receiver, Sender};
 use nostr_double_ratchet::{
     AppKeys, CreateGroupOptions, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent,
-    GroupManager, GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, Session,
-    SessionManager, SessionManagerEvent, SessionState, StorageAdapter,
+    GroupManager, GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, ManagedInvite,
+    ManagedSession, SessionManager, SessionManagerEvent, SessionState, StorageAdapter,
 };
 
 mod error;
@@ -276,8 +276,11 @@ impl InviteHandle {
         let invitee_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&invitee_pubkey_hex)?;
         let invitee_privkey = parse_private_key(&invitee_privkey_hex)?;
 
-        let (session, response_event) =
-            invite.accept(invitee_pubkey, invitee_privkey, device_id)?;
+        let (session, response_event) = ManagedInvite::new(invite.clone()).accept(
+            invitee_pubkey,
+            invitee_privkey,
+            device_id,
+        )?;
         let response_event_json = serde_json::to_string(&response_event)?;
 
         Ok(InviteAcceptResult {
@@ -304,8 +307,12 @@ impl InviteHandle {
             None => None,
         };
 
-        let (session, response_event) =
-            invite.accept_with_owner(invitee_pubkey, invitee_privkey, device_id, owner_pubkey)?;
+        let (session, response_event) = ManagedInvite::new(invite.clone()).accept_with_owner(
+            invitee_pubkey,
+            invitee_privkey,
+            device_id,
+            owner_pubkey,
+        )?;
         let response_event_json = serde_json::to_string(&response_event)?;
 
         Ok(InviteAcceptResult {
@@ -344,7 +351,8 @@ impl InviteHandle {
         let event: nostr::Event = serde_json::from_str(&event_json)?;
         let inviter_privkey = parse_private_key(&inviter_privkey_hex)?;
 
-        let response = invite.process_invite_response(&event, inviter_privkey)?;
+        let response =
+            ManagedInvite::new(invite.clone()).process_invite_response(&event, inviter_privkey)?;
         let Some(response) = response else {
             return Ok(None);
         };
@@ -375,7 +383,7 @@ impl InviteHandle {
 /// FFI wrapper for Session.
 #[derive(uniffi::Object)]
 pub struct SessionHandle {
-    inner: Mutex<Session>,
+    inner: Mutex<ManagedSession>,
 }
 
 #[uniffi::export]
@@ -394,7 +402,8 @@ impl SessionHandle {
         let our_privkey = parse_private_key(&our_ephemeral_privkey_hex)?;
         let shared_secret = parse_secret(&shared_secret_hex)?;
 
-        let session = Session::init(their_pubkey, our_privkey, is_initiator, shared_secret, name)?;
+        let session =
+            ManagedSession::init(their_pubkey, our_privkey, is_initiator, shared_secret, name)?;
 
         Ok(Arc::new(Self {
             inner: Mutex::new(session),
@@ -406,7 +415,7 @@ impl SessionHandle {
     pub fn from_state_json(state_json: String) -> Result<Arc<Self>, NdrError> {
         let state: SessionState =
             nostr_double_ratchet::utils::deserialize_session_state(&state_json)?;
-        let session = Session::new(state, "restored".to_string());
+        let session = ManagedSession::new(state, "restored".to_string());
 
         Ok(Arc::new(Self {
             inner: Mutex::new(session),
@@ -417,7 +426,7 @@ impl SessionHandle {
     pub fn state_json(&self) -> Result<String, NdrError> {
         let session = self.inner.lock().unwrap();
         Ok(nostr_double_ratchet::utils::serialize_session_state(
-            &session.state,
+            &session.session.state,
         )?)
     }
 

@@ -13,10 +13,14 @@
  */
 
 import WebSocket from "ws";
+import { webcrypto } from "node:crypto";
 import { generateSecretKey, getPublicKey, type VerifiedEvent } from "nostr-tools";
 
 // Use ws for Node.js WebSocket support.
 (globalThis as any).WebSocket = WebSocket;
+if (!(globalThis as any).crypto) {
+  (globalThis as any).crypto = webcrypto;
+}
 
 import { Invite } from "../src/Invite";
 import { Group, GROUP_METADATA_KIND, GROUP_SENDER_KEY_DISTRIBUTION_KIND, generateGroupSecret, type GroupData } from "../src/Group";

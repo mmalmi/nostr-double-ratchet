@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
-    FileStorageAdapter, OneToManyChannel, Session, SessionManager, SessionManagerEvent,
-    StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND,
-    RECEIPT_KIND, TYPING_KIND,
+    FileStorageAdapter, ManagedInvite, ManagedSession as Session, OneToManyChannel,
+    SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND,
+    GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 
 use crate::commands::owner_claim::{
@@ -1338,7 +1338,9 @@ pub async fn listen(
                         Err(_) => continue,
                     };
 
-                    match invite.process_invite_response(&event, our_private_key) {
+                    match ManagedInvite::new(invite.clone())
+                        .process_invite_response(&event, our_private_key)
+                    {
                         Ok(Some(response)) => {
                             let resolved_owner = response.resolved_owner_pubkey();
                             let their_pubkey =
@@ -1405,7 +1407,7 @@ pub async fn listen(
                                 .clone()
                                 .or_else(|| Some(response.invitee_identity.to_hex()));
                             let session = response.session;
-                            let response_state = session.state.clone();
+                            let response_state = session.session.state.clone();
                             let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
                             let mut import_state = response_state.clone();
 
@@ -1665,7 +1667,8 @@ pub async fn listen(
                         continue;
                     }
 
-                    if let Ok((mut accept_session, response_event)) = invite.accept_with_owner(
+                    if let Ok((mut accept_session, response_event)) =
+                        ManagedInvite::new(invite.clone()).accept_with_owner(
                         my_pubkey_key,
                         our_private_key,
                         None,
@@ -1686,20 +1689,20 @@ pub async fn listen(
                                         )
                                         .can_send();
                                         let accepted_can_send = Session::new(
-                                            accept_session.state.clone(),
+                                            accept_session.session.state.clone(),
                                             existing_chat.id.clone(),
                                         )
                                         .can_send();
                                         if existing_can_send && !accepted_can_send {
                                             existing_state
                                         } else {
-                                            accept_session.state.clone()
+                                            accept_session.session.state.clone()
                                         }
                                     }
-                                    Err(_) => accept_session.state.clone(),
+                                    Err(_) => accept_session.session.state.clone(),
                                 };
 
-                            accept_session.state = selected_state.clone();
+                            accept_session.session.state = selected_state.clone();
                             existing_chat.device_id = Some(invite.inviter.to_hex());
                             existing_chat.session_state = serde_json::to_string(&selected_state)?;
                             storage.save_chat(&existing_chat)?;
@@ -1713,7 +1716,7 @@ pub async fn listen(
                                     .duration_since(std::time::UNIX_EPOCH)?
                                     .as_secs(),
                                 last_message_at: None,
-                                session_state: serde_json::to_string(&accept_session.state)?,
+                                session_state: serde_json::to_string(&accept_session.session.state)?,
                                 message_ttl_seconds: None,
                             };
                             storage.save_chat(&new_chat)?;
@@ -1728,7 +1731,8 @@ pub async fn listen(
                         // so they must receive at least one message before they can send.
                         if let Ok(typing_event) = accept_session.send_typing() {
                             // Persist ratcheted state before network I/O.
-                            chat.session_state = serde_json::to_string(&accept_session.state)?;
+                            chat.session_state =
+                                serde_json::to_string(&accept_session.session.state)?;
                             storage.save_chat(&chat)?;
 
                             // Best-effort; group functionality still works if this fails.
@@ -1948,7 +1952,8 @@ pub async fn listen(
 
                             // Always update session state first
                             let mut updated_chat = chat.clone();
-                            updated_chat.session_state = serde_json::to_string(&session.state)?;
+                            updated_chat.session_state =
+                                serde_json::to_string(&session.session.state)?;
 
                             if let Some(ref gid) = group_id {
                                 // === Group-routed event ===

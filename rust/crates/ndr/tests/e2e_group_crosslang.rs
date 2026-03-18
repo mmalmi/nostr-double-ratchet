@@ -25,7 +25,10 @@ fn workspace_root() -> PathBuf {
 
 #[allow(unused_mut)]
 fn expected_ndr_binary_path() -> PathBuf {
-    let mut path = workspace_root().join("target/debug/ndr");
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_root().parent().unwrap().join(".cargo-target"));
+    let mut path = target_dir.join("debug/ndr");
     #[cfg(windows)]
     {
         path.set_extension("exe");

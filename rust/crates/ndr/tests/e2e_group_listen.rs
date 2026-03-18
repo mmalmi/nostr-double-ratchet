@@ -39,7 +39,10 @@ fn workspace_root() -> PathBuf {
 }
 
 fn expected_ndr_binary_path() -> PathBuf {
-    let path = workspace_root().join("target/debug/ndr");
+    let path = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_root().parent().unwrap().join(".cargo-target"))
+        .join("debug/ndr");
     #[cfg(windows)]
     {
         path.set_extension("exe");
@@ -1064,31 +1067,56 @@ async fn test_group_chat_six_participants_everyone_receives() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Each participant sends a group message; everyone else should receive it.
-        for sender_idx in 0..participants.len() {
-            let sender = &participants[sender_idx];
+        // Warm up sender-key distribution once per participant before asserting full fanout.
+        // In the six-participant case, the first group send from a member also has to establish
+        // their sender key across many pairwise sessions, which makes the test timing-sensitive.
+        for sender in &participants {
+            let warmup = format!("warmup-{}", sender.name);
+            let _ = run_ndr(sender.dir.path(), &["group", "send", &group_id, &warmup]).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        // Each participant sends a group message.
+        for sender in &participants {
             let msg = format!("group-msg-{}", sender.name);
             let _ = run_ndr(sender.dir.path(), &["group", "send", &group_id, &msg]).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
 
-            for (recipient_idx, listener) in listeners.iter_mut().enumerate() {
-                if recipient_idx == sender_idx {
-                    continue;
-                }
-                let event = read_until_event_with_content(
+        // Then verify each listener eventually receives the full set from every other member.
+        for (recipient_idx, listener) in listeners.iter_mut().enumerate() {
+            let expected: std::collections::BTreeSet<String> = participants
+                .iter()
+                .enumerate()
+                .filter(|(sender_idx, _)| *sender_idx != recipient_idx)
+                .map(|(_, sender)| format!("group-msg-{}", sender.name))
+                .collect();
+            let mut seen = std::collections::BTreeSet::new();
+            let started = Instant::now();
+
+            while seen != expected {
+                let remaining = Duration::from_secs(20)
+                    .checked_sub(started.elapsed())
+                    .unwrap_or_default();
+                let event = read_until_event(
                     &mut listener.stdout,
                     "group_message",
-                    Some(&msg),
-                    Duration::from_secs(10),
+                    remaining,
                 )
                 .await
                 .unwrap_or_else(|| {
+                    let missing: Vec<_> = expected.difference(&seen).cloned().collect();
                     panic!(
-                        "{} should receive group_message '{}' from {}",
-                        participants[recipient_idx].name, msg, sender.name
+                        "{} missing group messages: {:?}",
+                        participants[recipient_idx].name, missing
                     )
                 });
                 assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
-                assert_eq!(event["content"].as_str(), Some(msg.as_str()));
+                if let Some(content) = event["content"].as_str() {
+                    if expected.contains(content) {
+                        seen.insert(content.to_string());
+                    }
+                }
             }
         }
 

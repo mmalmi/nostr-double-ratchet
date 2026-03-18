@@ -11,9 +11,13 @@
  */
 
 import { getPublicKey, generateSecretKey } from "nostr-tools";
+import { webcrypto } from "node:crypto";
 import WebSocket from "ws";
 
 (global as any).WebSocket = WebSocket;
+if (!(globalThis as any).crypto) {
+  (globalThis as any).crypto = webcrypto;
+}
 
 import { Invite } from "../src/Invite";
 import { Session } from "../src/Session";

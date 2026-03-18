@@ -4,8 +4,8 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 use nostr::{JsonUtil, Keys, PublicKey, UnsignedEvent};
 use nostr_double_ratchet::{
-    AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage, Invite, Result, SendOptions,
-    Session, SessionManager, SessionManagerEvent, StorageAdapter, MESSAGE_EVENT_KIND,
+    AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage, Invite, ManagedInvite, Result,
+    SendOptions, Session, SessionManager, SessionManagerEvent, StorageAdapter, MESSAGE_EVENT_KIND,
 };
 
 fn load_stored_user_record(
@@ -149,7 +149,7 @@ fn import_session_from_response(
     manager: &SessionManager,
     response_event: &nostr::Event,
 ) -> Result<(PublicKey, String)> {
-    let response = invite
+    let response = ManagedInvite::new(invite.clone())
         .process_invite_response(response_event, inviter_private_key)?
         .expect("expected invite response payload");
     let owner_pubkey = response.resolved_owner_pubkey();
@@ -160,7 +160,7 @@ fn import_session_from_response(
     manager.import_session_state(
         owner_pubkey,
         Some(device_id.clone()),
-        response.session.state,
+        response.session.session.state,
     )?;
     Ok((owner_pubkey, device_id))
 }
@@ -467,7 +467,7 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         .export_active_sessions()
         .into_iter()
         .find(|(owner, device_id, _)| *owner == bob_pubkey && device_id == &bob_device_id)
-        .map(|(_, _, state)| Session::new(state, "debug".to_string()).can_send())
+        .map(|(_, _, state)| Session::new(state).can_send())
         .unwrap_or(false);
     assert!(
         !imported_sendable,
@@ -491,7 +491,7 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         .export_active_sessions()
         .into_iter()
         .find(|(owner, device_id, _)| *owner == bob_pubkey && device_id == &bob_device_id)
-        .map(|(_, _, state)| Session::new(state, "debug".to_string()).can_send())
+        .map(|(_, _, state)| Session::new(state).can_send())
         .unwrap_or(false);
     assert!(
         upgraded_sendable,
@@ -1773,7 +1773,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         .filter(|(owner, device_id, state)| {
             *owner == bob_owner_pubkey
                 && device_id == &bob_owner_device_id
-                && Session::new(state.clone(), "debug".to_string()).can_send()
+                && Session::new(state.clone()).can_send()
         })
         .count();
     assert_eq!(

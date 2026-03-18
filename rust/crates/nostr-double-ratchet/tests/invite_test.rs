@@ -1,5 +1,7 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Invite, Result, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND};
+use nostr_double_ratchet::{
+    Invite, InviteAcceptInput, Result, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+};
 
 #[test]
 fn test_create_new_invite() -> Result<()> {
@@ -177,18 +179,31 @@ fn test_invite_accept_creates_session() -> Result<()> {
     let bob_keys = Keys::generate();
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
+    let bob_session_sk = Keys::generate().secret_key().to_secret_bytes();
+    let bob_next_sk = Keys::generate().secret_key().to_secret_bytes();
+    let envelope_sk = Keys::generate().secret_key().to_secret_bytes();
 
-    let (session, event) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let accepted = invite.accept(InviteAcceptInput {
+        invitee_public_key: bob_pk,
+        invitee_identity_private_key: bob_sk,
+        invitee_session_private_key: bob_session_sk,
+        invitee_next_nostr_private_key: bob_next_sk,
+        envelope_sender_private_key: envelope_sk,
+        response_created_at: 1_700_000_000,
+        device_id: Some("device-1".to_string()),
+        owner_public_key: None,
+    })?;
+    let session = accepted.session;
+    let event = accepted.response_event;
 
     assert!(session.state.sending_chain_key.is_some());
     assert_eq!(event.kind.as_u16(), INVITE_RESPONSE_KIND as u16);
     assert_ne!(event.pubkey.to_bytes(), bob_pk.to_bytes());
 
-    let has_p_tag = event.tags.iter().any(|t| {
-        let v = t.clone().to_vec();
-        v.first().map(|s| s.as_str()) == Some("p")
-            && v.get(1).map(|s| s.as_str())
-                == Some(&hex::encode(invite.inviter_ephemeral_public_key.to_bytes()))
+    let has_p_tag = event.tags.iter().any(|tag| {
+        tag.as_slice().first().map(|s| s.as_str()) == Some("p")
+            && tag.as_slice().get(1).map(|s| s.as_str())
+                == Some(invite.inviter_ephemeral_public_key.to_hex().as_str())
     });
     assert!(has_p_tag);
 
@@ -227,8 +242,22 @@ fn test_accept_with_device_id() -> Result<()> {
     let bob_keys = Keys::generate();
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
+    let bob_session_sk = Keys::generate().secret_key().to_secret_bytes();
+    let bob_next_sk = Keys::generate().secret_key().to_secret_bytes();
+    let envelope_sk = Keys::generate().secret_key().to_secret_bytes();
 
-    let (session, event) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let accepted = invite.accept(InviteAcceptInput {
+        invitee_public_key: bob_pk,
+        invitee_identity_private_key: bob_sk,
+        invitee_session_private_key: bob_session_sk,
+        invitee_next_nostr_private_key: bob_next_sk,
+        envelope_sender_private_key: envelope_sk,
+        response_created_at: 1_700_000_000,
+        device_id: Some("device-1".to_string()),
+        owner_public_key: None,
+    })?;
+    let session = accepted.session;
+    let event = accepted.response_event;
 
     assert!(session.state.sending_chain_key.is_some());
     assert_eq!(event.kind.as_u16(), INVITE_RESPONSE_KIND as u16);
@@ -246,8 +275,21 @@ fn test_accept_without_device_id() -> Result<()> {
     let bob_keys = Keys::generate();
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
+    let bob_session_sk = Keys::generate().secret_key().to_secret_bytes();
+    let bob_next_sk = Keys::generate().secret_key().to_secret_bytes();
+    let envelope_sk = Keys::generate().secret_key().to_secret_bytes();
 
-    let (session, _event) = invite.accept(bob_pk, bob_sk, None)?;
+    let accepted = invite.accept(InviteAcceptInput {
+        invitee_public_key: bob_pk,
+        invitee_identity_private_key: bob_sk,
+        invitee_session_private_key: bob_session_sk,
+        invitee_next_nostr_private_key: bob_next_sk,
+        envelope_sender_private_key: envelope_sk,
+        response_created_at: 1_700_000_000,
+        device_id: None,
+        owner_public_key: None,
+    })?;
+    let session = accepted.session;
 
     assert!(session.state.sending_chain_key.is_some());
 

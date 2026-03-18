@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use nostr_double_ratchet::{
-    Session, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+    ManagedSession as Session, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, REACTION_KIND,
+    RECEIPT_KIND, TYPING_KIND,
 };
 
 use crate::output::Output;
@@ -75,7 +76,7 @@ pub async fn receive(event_json: &str, storage: &Storage, output: &Output) -> Re
 
                 // Update session state
                 let mut updated_chat = chat;
-                updated_chat.session_state = serde_json::to_string(&session.state)?;
+                updated_chat.session_state = serde_json::to_string(&session.session.state)?;
 
                 // Encrypted 1:1 chat settings (disappearing-message signaling).
                 if rumor_kind == CHAT_SETTINGS_KIND {

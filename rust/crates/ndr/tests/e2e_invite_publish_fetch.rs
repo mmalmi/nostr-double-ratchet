@@ -5,7 +5,7 @@ mod common;
 use tempfile::TempDir;
 use tokio::time::{sleep, Duration};
 
-use nostr_double_ratchet::{Invite, INVITE_EVENT_KIND};
+use nostr_double_ratchet::{Invite, ManagedInvite, INVITE_EVENT_KIND};
 
 /// Run ndr CLI command and return JSON output
 async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
@@ -97,7 +97,7 @@ async fn test_publish_fetch_and_message_both_ways() {
     let bob_keys = nostr::Keys::new(bob_sk_key.clone());
     let bob_pubkey = bob_keys.public_key();
 
-    let (mut bob_session, response_event) = invite
+    let (mut bob_session, response_event) = ManagedInvite::new(invite.clone())
         .accept(bob_pubkey, bob_sk_key.secret_bytes(), None)
         .expect("Failed to accept invite");
 
@@ -120,7 +120,7 @@ async fn test_publish_fetch_and_message_both_ways() {
     let alice_invite = Invite::deserialize(&stored.serialized)
         .expect("Failed to deserialize Alice's stored invite");
 
-    let response = alice_invite
+    let response = ManagedInvite::new(alice_invite.clone())
         .process_invite_response(&response_event, alice_sk_key.secret_bytes())
         .expect("Failed to process invite response")
         .expect("Expected session from invite response");

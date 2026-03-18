@@ -1,4 +1,4 @@
-use crate::{Session, SessionState};
+use crate::{ManagedSession, SessionState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -17,8 +17,8 @@ pub struct StoredDeviceRecord {
 pub struct DeviceRecord {
     pub device_id: String,
     pub public_key: String,
-    pub active_session: Option<Session>,
-    pub inactive_sessions: Vec<Session>,
+    pub active_session: Option<ManagedSession>,
+    pub inactive_sessions: Vec<ManagedSession>,
     pub created_at: u64,
     pub is_stale: bool,
     pub stale_timestamp: Option<u64>,
@@ -44,7 +44,7 @@ impl UserRecord {
         }
     }
 
-    pub fn upsert_session(&mut self, device_id: Option<&str>, session: Session) {
+    pub fn upsert_session(&mut self, device_id: Option<&str>, session: ManagedSession) {
         let device_id = device_id.unwrap_or("unknown").to_string();
 
         let device = self
@@ -69,7 +69,7 @@ impl UserRecord {
                 ),
             });
 
-        if Self::device_contains_session_state(device, &session.state) {
+        if Self::device_contains_session_state(device, &session.session.state) {
             session.close();
             Self::compact_duplicate_sessions(device);
             device.last_activity = Some(
@@ -118,11 +118,11 @@ impl UserRecord {
         );
     }
 
-    fn session_priority(session: &Session) -> (u8, u32, u32) {
+    fn session_priority(session: &ManagedSession) -> (u8, u32, u32) {
         let can_send = session.can_send();
-        let can_receive = session.state.receiving_chain_key.is_some()
-            || session.state.their_current_nostr_public_key.is_some()
-            || session.state.receiving_chain_message_number > 0;
+        let can_receive = session.session.state.receiving_chain_key.is_some()
+            || session.session.state.their_current_nostr_public_key.is_some()
+            || session.session.state.receiving_chain_message_number > 0;
 
         let directionality = match (can_send, can_receive) {
             (true, true) => 3,
@@ -133,8 +133,8 @@ impl UserRecord {
 
         (
             directionality,
-            session.state.receiving_chain_message_number,
-            session.state.sending_chain_message_number,
+            session.session.state.receiving_chain_message_number,
+            session.session.state.sending_chain_message_number,
         )
     }
 
@@ -142,47 +142,47 @@ impl UserRecord {
         device
             .active_session
             .as_ref()
-            .is_some_and(|session| session.state == *state)
+            .is_some_and(|session| session.session.state == *state)
             || device
                 .inactive_sessions
                 .iter()
-                .any(|session| session.state == *state)
+                .any(|session| session.session.state == *state)
     }
 
     pub(crate) fn compact_duplicate_sessions(device: &mut DeviceRecord) {
         let active_state = device
             .active_session
             .as_ref()
-            .map(|session| session.state.clone());
+            .map(|session| session.session.state.clone());
         let mut unique_states = Vec::new();
         let mut inactive_sessions = Vec::with_capacity(device.inactive_sessions.len());
 
         for session in device.inactive_sessions.drain(..) {
             let is_duplicate = active_state
                 .as_ref()
-                .is_some_and(|state| *state == session.state)
+                .is_some_and(|state| *state == session.session.state)
                 || unique_states
                     .iter()
-                    .any(|state: &SessionState| *state == session.state);
+                    .any(|state: &SessionState| *state == session.session.state);
 
             if is_duplicate {
                 session.close();
                 continue;
             }
 
-            unique_states.push(session.state.clone());
+            unique_states.push(session.session.state.clone());
             inactive_sessions.push(session);
         }
 
         device.inactive_sessions = inactive_sessions;
     }
 
-    pub fn get_all_sessions_mut(&mut self) -> Vec<&mut Session> {
+    pub fn get_all_sessions_mut(&mut self) -> Vec<&mut ManagedSession> {
         if self.is_stale {
             return Vec::new();
         }
 
-        let mut sessions: Vec<&mut Session> = Vec::new();
+        let mut sessions: Vec<&mut ManagedSession> = Vec::new();
         for device in self.device_records.values_mut().filter(|d| !d.is_stale) {
             if let Some(ref mut active) = device.active_session {
                 sessions.push(active);
@@ -194,12 +194,12 @@ impl UserRecord {
         sessions
     }
 
-    pub fn get_active_sessions_mut(&mut self) -> Vec<&mut Session> {
+    pub fn get_active_sessions_mut(&mut self) -> Vec<&mut ManagedSession> {
         if self.is_stale {
             return Vec::new();
         }
 
-        let mut sessions: Vec<&mut Session> = self
+        let mut sessions: Vec<&mut ManagedSession> = self
             .device_records
             .values_mut()
             .filter(|d| !d.is_stale)
@@ -231,11 +231,11 @@ impl UserRecord {
                 .values()
                 .map(|d| StoredDeviceRecord {
                     device_id: d.device_id.clone(),
-                    active_session: d.active_session.as_ref().map(|s| s.state.clone()),
+                    active_session: d.active_session.as_ref().map(|s| s.session.state.clone()),
                     inactive_sessions: d
                         .inactive_sessions
                         .iter()
-                        .map(|s| s.state.clone())
+                        .map(|s| s.session.state.clone())
                         .collect(),
                     created_at: d.created_at,
                     is_stale: d.is_stale,
@@ -267,13 +267,13 @@ mod tests {
         can_receive: bool,
         receiving_chain_message_number: u32,
         sending_chain_message_number: u32,
-    ) -> Session {
+    ) -> ManagedSession {
         let our_current = Keys::generate();
         let our_next = Keys::generate();
         let their_current = Keys::generate();
         let their_next = Keys::generate();
 
-        Session::new(
+        ManagedSession::new(
             SessionState {
                 root_key: [1u8; 32],
                 their_current_nostr_public_key: can_receive.then(|| their_current.public_key()),
@@ -303,9 +303,9 @@ mod tests {
     fn upsert_session_keeps_bidirectional_session_active_over_send_only() {
         let mut user = UserRecord::new("peer".to_string());
         let bidirectional = make_session(true, true, 1, 0);
-        let bidirectional_state = bidirectional.state.clone();
+        let bidirectional_state = bidirectional.session.state.clone();
         let send_only = make_session(true, false, 0, 0);
-        let send_only_state = send_only.state.clone();
+        let send_only_state = send_only.session.state.clone();
 
         user.upsert_session(Some("device-a"), bidirectional);
         user.upsert_session(Some("device-a"), send_only);
@@ -315,20 +315,20 @@ mod tests {
             device
                 .active_session
                 .as_ref()
-                .map(|session| session.state.clone()),
+                .map(|session| session.session.state.clone()),
             Some(bidirectional_state),
         );
         assert_eq!(device.inactive_sessions.len(), 1);
-        assert_eq!(device.inactive_sessions[0].state, send_only_state);
+        assert_eq!(device.inactive_sessions[0].session.state, send_only_state);
     }
 
     #[test]
     fn upsert_session_promotes_bidirectional_session_over_send_only() {
         let mut user = UserRecord::new("peer".to_string());
         let send_only = make_session(true, false, 0, 0);
-        let send_only_state = send_only.state.clone();
+        let send_only_state = send_only.session.state.clone();
         let bidirectional = make_session(true, true, 2, 1);
-        let bidirectional_state = bidirectional.state.clone();
+        let bidirectional_state = bidirectional.session.state.clone();
 
         user.upsert_session(Some("device-a"), send_only);
         user.upsert_session(Some("device-a"), bidirectional);
@@ -338,10 +338,10 @@ mod tests {
             device
                 .active_session
                 .as_ref()
-                .map(|session| session.state.clone()),
+                .map(|session| session.session.state.clone()),
             Some(bidirectional_state),
         );
         assert_eq!(device.inactive_sessions.len(), 1);
-        assert_eq!(device.inactive_sessions[0].state, send_only_state);
+        assert_eq!(device.inactive_sessions[0].session.state, send_only_state);
     }
 }

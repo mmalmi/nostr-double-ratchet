@@ -1,5 +1,5 @@
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, UnsignedEvent};
-use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet::{ManagedSession as Session, Result};
 
 #[test]
 fn test_alice_bob_conversation() -> Result<()> {
@@ -140,8 +140,8 @@ fn test_session_persistence() -> Result<()> {
     let msg2 = bob.send("Before save 2".to_string())?;
     alice.receive(&msg2)?;
 
-    let alice_state_json = serialize_session_state(&alice.state)?;
-    let bob_state_json = serialize_session_state(&bob.state)?;
+    let alice_state_json = serialize_session_state(&alice.session.state)?;
+    let bob_state_json = serialize_session_state(&bob.session.state)?;
 
     let alice_restored_state = deserialize_session_state(&alice_state_json)?;
     let bob_restored_state = deserialize_session_state(&bob_state_json)?;

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
+use nostr_double_ratchet::ManagedInvite;
 
 use crate::commands::owner_claim::resolve_verified_owner_pubkey;
 use crate::config::Config;
@@ -252,7 +253,7 @@ pub async fn accept(
         .map_err(|e| anyhow::anyhow!("Invalid event JSON: {}", e))?;
 
     // Process the acceptance - creates session
-    let result = invite.process_invite_response(&event, our_private_key)?;
+    let result = ManagedInvite::new(invite.clone()).process_invite_response(&event, our_private_key)?;
 
     let response = result.ok_or_else(|| anyhow::anyhow!("Failed to process invite acceptance"))?;
     let resolved_owner = response.resolved_owner_pubkey();
@@ -311,7 +312,7 @@ pub async fn accept(
     let session = response.session;
 
     // Serialize session state
-    let session_state = serde_json::to_string(&session.state)?;
+    let session_state = serde_json::to_string(&session.session.state)?;
 
     let chat_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
     let their_pubkey_hex = hex::encode(their_pubkey.to_bytes());
@@ -334,7 +335,7 @@ pub async fn accept(
         storage,
         their_pubkey,
         chat.device_id.clone(),
-        session.state.clone(),
+        session.session.state.clone(),
     )?;
 
     // Optionally delete the used invite
@@ -440,7 +441,7 @@ mod tests {
         let owner_keys = nostr::Keys::generate();
         let owner_pubkey = owner_keys.public_key();
 
-        let (_session, response_event) = invite
+        let (_session, response_event) = ManagedInvite::new(invite.clone())
             .accept_with_owner(
                 owner_pubkey,
                 owner_keys.secret_key().to_secret_bytes(),
@@ -491,7 +492,7 @@ mod tests {
         let device_keys = nostr::Keys::generate();
         let owner_keys = nostr::Keys::generate();
 
-        let (_session, response_event) = invite
+        let (_session, response_event) = ManagedInvite::new(invite.clone())
             .accept_with_owner(
                 device_keys.public_key(),
                 device_keys.secret_key().to_secret_bytes(),

@@ -6,8 +6,8 @@ use crossbeam_channel::Receiver;
 use nostr::nips::nip44::{self, Version};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    utils::kdf, Header, InMemoryStorage, Invite, Session, SessionManager, SessionManagerEvent,
-    MESSAGE_EVENT_KIND,
+    utils::kdf, Header, InMemoryStorage, Invite, ManagedInvite, ManagedSession as Session,
+    SessionManager, SessionManagerEvent, MESSAGE_EVENT_KIND,
 };
 use sha2::{Digest, Sha256};
 
@@ -34,20 +34,21 @@ fn recv_decrypted_message(rx: &Receiver<SessionManagerEvent>) -> String {
 /// This intentionally mirrors `Session::send_event` but lets us inject malformed rumors.
 fn craft_outer_from_plaintext(session: &mut Session, plaintext: &str, now_s: u64) -> nostr::Event {
     let sending_chain_key = session
+        .session
         .state
         .sending_chain_key
         .expect("expected initiator session with sending_chain_key");
 
     let kdf_outputs = kdf(&sending_chain_key, &[1u8], 2);
-    session.state.sending_chain_key = Some(kdf_outputs[0]);
+    session.session.state.sending_chain_key = Some(kdf_outputs[0]);
     let message_key = kdf_outputs[1];
 
     let header = Header {
-        number: session.state.sending_chain_message_number,
-        next_public_key: hex::encode(session.state.our_next_nostr_key.public_key.to_bytes()),
-        previous_chain_length: session.state.previous_sending_chain_message_count,
+        number: session.session.state.sending_chain_message_number,
+        next_public_key: hex::encode(session.session.state.our_next_nostr_key.public_key.to_bytes()),
+        previous_chain_length: session.session.state.previous_sending_chain_message_count,
     };
-    session.state.sending_chain_message_number += 1;
+    session.session.state.sending_chain_message_number += 1;
 
     let conversation_key = nip44::v2::ConversationKey::new(message_key);
     let encrypted_bytes =
@@ -55,11 +56,13 @@ fn craft_outer_from_plaintext(session: &mut Session, plaintext: &str, now_s: u64
     let encrypted_data = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
 
     let our_current = session
+        .session
         .state
         .our_current_nostr_key
         .as_ref()
         .expect("expected initiator session with our_current_nostr_key");
     let their_pk = session
+        .session
         .state
         .their_next_nostr_public_key
         .expect("expected initiator session with their_next_nostr_public_key");
@@ -130,7 +133,7 @@ fn test_session_receive_recomputes_inner_rumor_id_and_stays_in_sync() {
     let invite = Invite::create_new(alice_keys.public_key(), None, None).unwrap();
 
     // Bob accepts: Bob becomes the initiator (can send first).
-    let (mut bob_session, response) = invite
+    let (mut bob_session, response) = ManagedInvite::new(invite.clone())
         .accept(
             bob_keys.public_key(),
             bob_keys.secret_key().to_secret_bytes(),
@@ -139,7 +142,7 @@ fn test_session_receive_recomputes_inner_rumor_id_and_stays_in_sync() {
         .unwrap();
 
     // Alice processes response: Alice must receive first.
-    let mut alice_session = invite
+    let mut alice_session = ManagedInvite::new(invite.clone())
         .process_invite_response(&response, alice_keys.secret_key().to_secret_bytes())
         .unwrap()
         .unwrap()
@@ -158,8 +161,8 @@ fn test_session_receive_recomputes_inner_rumor_id_and_stays_in_sync() {
 
     // Ratchet state should still be aligned.
     assert_eq!(
-        bob_session.state.sending_chain_key.unwrap(),
-        alice_session.state.receiving_chain_key.unwrap(),
+        bob_session.session.state.sending_chain_key.unwrap(),
+        alice_session.session.state.receiving_chain_key.unwrap(),
         "chain keys desynced after receiving message with bad id"
     );
 
@@ -181,7 +184,7 @@ fn test_session_manager_delivers_messages_with_recomputed_inner_id() {
     let invite = Invite::create_new(alice_keys.public_key(), None, None).unwrap();
 
     // Bob initiator session
-    let (mut bob_session, response) = invite
+    let (mut bob_session, response) = ManagedInvite::new(invite.clone())
         .accept(
             bob_keys.public_key(),
             bob_keys.secret_key().to_secret_bytes(),
@@ -190,7 +193,7 @@ fn test_session_manager_delivers_messages_with_recomputed_inner_id() {
         .unwrap();
 
     // Alice responder session state (to import into manager)
-    let alice_session = invite
+    let alice_session = ManagedInvite::new(invite.clone())
         .process_invite_response(&response, alice_keys.secret_key().to_secret_bytes())
         .unwrap()
         .unwrap()
@@ -214,7 +217,7 @@ fn test_session_manager_delivers_messages_with_recomputed_inner_id() {
         .import_session_state(
             bob_keys.public_key(),
             Some(hex::encode(bob_keys.public_key().to_bytes())),
-            alice_session.state.clone(),
+            alice_session.session.state.clone(),
         )
         .unwrap();
 
