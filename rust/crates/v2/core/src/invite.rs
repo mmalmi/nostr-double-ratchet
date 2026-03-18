@@ -1,15 +1,15 @@
-use crate::{
-    Error, InviteId, Result, SessionInitInput, SessionReceiveMeta, SessionState, SessionId,
-};
+use crate::session::{SessionError, SessionId, SessionInitInput, SessionState};
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
-use nostr::PublicKey;
-use nostr::{Event, EventBuilder, Keys, SecretKey, Tag, Timestamp};
-use serde::{Deserialize, Serialize};
+use nostr::{Event, EventBuilder, Keys, PublicKey, SecretKey, Tag, Timestamp};
+use thiserror::Error;
 
 pub const INVITE_RESPONSE_KIND: u32 = 1059;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InviteId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InviteState {
     pub invite_id: Option<InviteId>,
     pub inviter_ephemeral_public_key: PublicKey,
@@ -65,12 +65,11 @@ pub struct InviteProcessResponseInput {
     pub session_id: Option<SessionId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InviteResponseMeta {
     pub invitee_identity: PublicKey,
     pub device_id: Option<String>,
     pub owner_public_key: Option<PublicKey>,
-    pub session_meta: Option<SessionReceiveMeta>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,15 +82,31 @@ pub enum InviteProcessResponseResult {
     },
     InvalidRelevant {
         next: InviteState,
-        error: Error,
+        error: InviteError,
     },
 }
 
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum InviteError {
+    #[error("failed to decrypt invite payload: {0}")]
+    Decryption(String),
+    #[error("invalid invite event: {0}")]
+    InvalidEvent(String),
+    #[error("invite error: {0}")]
+    Invite(String),
+    #[error("serialization error: {0}")]
+    Serialization(String),
+    #[error("session error: {0}")]
+    Session(#[from] SessionError),
+}
+
+pub type InviteResult<T> = std::result::Result<T, InviteError>;
+
 impl InviteState {
-    pub fn create(input: InviteCreateInput) -> Result<Self> {
-        let inviter_ephemeral_public_key = nostr::Keys::new(
-            nostr::SecretKey::from_slice(&input.inviter_ephemeral_private_key)
-                .map_err(|e| Error::Invite(e.to_string()))?,
+    pub fn create(input: InviteCreateInput) -> InviteResult<Self> {
+        let inviter_ephemeral_public_key = Keys::new(
+            SecretKey::from_slice(&input.inviter_ephemeral_private_key)
+                .map_err(|e| InviteError::Invite(e.to_string()))?,
         )
         .public_key();
 
@@ -110,17 +125,18 @@ impl InviteState {
         })
     }
 
-    pub fn accept(&self, _input: InviteAcceptInput) -> Result<InviteAcceptResult> {
-        let input = _input;
+    pub fn accept(&self, input: InviteAcceptInput) -> InviteResult<InviteAcceptResult> {
         if let Some(max_uses) = self.max_uses {
             if self.used_by.len() >= max_uses {
-                return Err(Error::Invite("invite has reached max uses".to_string()));
+                return Err(InviteError::Invite(
+                    "invite has reached max uses".to_string(),
+                ));
             }
         }
 
         let invitee_session_keys = Keys::new(
             SecretKey::from_slice(&input.invitee_session_private_key)
-                .map_err(|e| Error::Invite(e.to_string()))?,
+                .map_err(|e| InviteError::Invite(e.to_string()))?,
         );
         let invitee_session_public_key = invitee_session_keys.public_key();
 
@@ -150,18 +166,18 @@ impl InviteState {
         let payload_json = serde_json::Value::Object(payload).to_string();
 
         let invitee_identity_secret = SecretKey::from_slice(&input.invitee_identity_private_key)
-            .map_err(|e| Error::Invite(e.to_string()))?;
+            .map_err(|e| InviteError::Invite(e.to_string()))?;
         let dh_encrypted = nip44::encrypt(
             &invitee_identity_secret,
             &self.inviter,
             payload_json,
             Version::V2,
         )
-        .map_err(|e| Error::Decryption(e.to_string()))?;
+        .map_err(|e| InviteError::Decryption(e.to_string()))?;
 
         let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
         let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, &dh_encrypted)
-            .map_err(|e| Error::Decryption(e.to_string()))?;
+            .map_err(|e| InviteError::Decryption(e.to_string()))?;
         let inner_encrypted = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
         let inner_event = serde_json::json!({
             "pubkey": input.invitee_public_key.to_hex(),
@@ -171,7 +187,7 @@ impl InviteState {
 
         let envelope_keys = Keys::new(
             SecretKey::from_slice(&input.envelope_sender_private_key)
-                .map_err(|e| Error::Invite(e.to_string()))?,
+                .map_err(|e| InviteError::Invite(e.to_string()))?,
         );
         let envelope_content = nip44::encrypt(
             envelope_keys.secret_key(),
@@ -179,7 +195,7 @@ impl InviteState {
             inner_event.to_string(),
             Version::V2,
         )
-        .map_err(|e| Error::Decryption(e.to_string()))?;
+        .map_err(|e| InviteError::Decryption(e.to_string()))?;
 
         let outer_event = EventBuilder::new(
             nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16),
@@ -187,12 +203,12 @@ impl InviteState {
         )
         .tag(
             Tag::parse(&["p".to_string(), self.inviter_ephemeral_public_key.to_hex()])
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+                .map_err(|e| InviteError::InvalidEvent(e.to_string()))?,
         )
         .custom_created_at(Timestamp::from(input.response_created_at))
         .build(envelope_keys.public_key())
         .sign_with_keys(&envelope_keys)
-        .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        .map_err(|e| InviteError::InvalidEvent(e.to_string()))?;
 
         let mut next_invite = self.clone();
         if !next_invite.used_by.contains(&input.invitee_public_key) {
@@ -206,11 +222,7 @@ impl InviteState {
         })
     }
 
-    pub fn process_response(
-        &self,
-        _input: InviteProcessResponseInput,
-    ) -> InviteProcessResponseResult {
-        let input = _input;
+    pub fn process_response(&self, input: InviteProcessResponseInput) -> InviteProcessResponseResult {
         if u32::from(input.event.kind.as_u16()) != INVITE_RESPONSE_KIND {
             return InviteProcessResponseResult::NotForThisInvite { next: self.clone() };
         }
@@ -221,69 +233,55 @@ impl InviteState {
             .iter()
             .find(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("p"))
             .and_then(|tag| tag.as_slice().get(1).map(|s| s.to_string()));
-        if tagged_pubkey.as_deref() != Some(self.inviter_ephemeral_public_key.to_hex().as_str()) {
+        let expected_tag = self.inviter_ephemeral_public_key.to_hex();
+        if tagged_pubkey.as_deref() != Some(expected_tag.as_str()) {
             return InviteProcessResponseResult::NotForThisInvite { next: self.clone() };
         }
 
         let snapshot = self.clone();
-        let outcome = (|| -> Result<(InviteState, SessionState, InviteResponseMeta)> {
+        let outcome = (|| -> InviteResult<(InviteState, SessionState, InviteResponseMeta)> {
             let inviter_ephemeral_private_key = self
                 .inviter_ephemeral_private_key
-                .ok_or_else(|| Error::Invite("missing inviter ephemeral private key".to_string()))?;
+                .ok_or_else(|| InviteError::Invite("missing inviter ephemeral private key".to_string()))?;
             let inviter_ephemeral_secret = SecretKey::from_slice(&inviter_ephemeral_private_key)
-                .map_err(|e| Error::Invite(e.to_string()))?;
+                .map_err(|e| InviteError::Invite(e.to_string()))?;
             let decrypted = nip44::decrypt(&inviter_ephemeral_secret, &input.event.pubkey, &input.event.content)
-                .map_err(|e| Error::Decryption(e.to_string()))?;
+                .map_err(|e| InviteError::Decryption(e.to_string()))?;
             let inner_event: serde_json::Value =
-                serde_json::from_str(&decrypted).map_err(|e| Error::Serialization(e.to_string()))?;
+                serde_json::from_str(&decrypted).map_err(|e| InviteError::Serialization(e.to_string()))?;
 
             let invitee_identity_hex = inner_event
                 .get("pubkey")
                 .and_then(|value| value.as_str())
-                .ok_or_else(|| Error::Invite("missing invitee pubkey".to_string()))?;
+                .ok_or_else(|| InviteError::Invite("missing invitee pubkey".to_string()))?;
             let invitee_identity =
-                PublicKey::from_hex(invitee_identity_hex).map_err(|e| Error::Invite(e.to_string()))?;
+                PublicKey::from_hex(invitee_identity_hex).map_err(|e| InviteError::Invite(e.to_string()))?;
             let inner_content = inner_event
                 .get("content")
                 .and_then(|value| value.as_str())
-                .ok_or_else(|| Error::Invite("missing inner content".to_string()))?;
+                .ok_or_else(|| InviteError::Invite("missing inner content".to_string()))?;
 
             let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
             let ciphertext_bytes = base64::engine::general_purpose::STANDARD
                 .decode(inner_content)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
-            let dh_encrypted_ciphertext =
-                String::from_utf8(nip44::v2::decrypt_to_bytes(&conversation_key, &ciphertext_bytes)
-                    .map_err(|e| Error::Decryption(e.to_string()))?)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
+                .map_err(|e| InviteError::Serialization(e.to_string()))?;
+            let dh_encrypted_ciphertext = String::from_utf8(
+                nip44::v2::decrypt_to_bytes(&conversation_key, &ciphertext_bytes)
+                    .map_err(|e| InviteError::Decryption(e.to_string()))?,
+            )
+            .map_err(|e| InviteError::Serialization(e.to_string()))?;
 
             let inviter_identity_secret = SecretKey::from_slice(&input.inviter_identity_private_key)
-                .map_err(|e| Error::Invite(e.to_string()))?;
+                .map_err(|e| InviteError::Invite(e.to_string()))?;
             let dh_decrypted = nip44::decrypt(
                 &inviter_identity_secret,
                 &invitee_identity,
                 &dh_encrypted_ciphertext,
             )
-            .map_err(|e| Error::Decryption(e.to_string()))?;
-            let payload: serde_json::Value =
-                serde_json::from_str(&dh_decrypted).map_err(|e| Error::Serialization(e.to_string()))?;
+            .map_err(|e| InviteError::Decryption(e.to_string()))?;
 
-            let session_key_hex = payload
-                .get("sessionKey")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| Error::Invite("missing sessionKey".to_string()))?;
-            let invitee_session_pubkey =
-                PublicKey::from_hex(session_key_hex).map_err(|e| Error::Invite(e.to_string()))?;
-            let device_id = payload
-                .get("deviceId")
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
-            let owner_public_key = payload
-                .get("ownerPublicKey")
-                .and_then(|value| value.as_str())
-                .map(PublicKey::from_hex)
-                .transpose()
-                .map_err(|e| Error::Invite(e.to_string()))?;
+            let (invitee_session_pubkey, device_id, owner_public_key) =
+                decode_response_payload(&dh_decrypted)?;
 
             let session = SessionState::init(SessionInitInput {
                 session_id: input.session_id,
@@ -306,7 +304,6 @@ impl InviteState {
                     invitee_identity,
                     device_id,
                     owner_public_key,
-                    session_meta: None,
                 },
             ))
         })();
@@ -321,6 +318,335 @@ impl InviteState {
                 next: snapshot,
                 error,
             },
+        }
+    }
+}
+
+fn decode_response_payload(
+    decrypted_payload: &str,
+) -> InviteResult<(PublicKey, Option<String>, Option<PublicKey>)> {
+    let payload: serde_json::Value = match serde_json::from_str(decrypted_payload) {
+        Ok(payload) => payload,
+        Err(_) => {
+            let legacy_session_pubkey = PublicKey::from_hex(decrypted_payload)
+                .map_err(|e| InviteError::Invite(e.to_string()))?;
+            return Ok((legacy_session_pubkey, None, None));
+        }
+    };
+
+    let session_key_hex = payload
+        .get("sessionKey")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| InviteError::Invite("missing sessionKey".to_string()))?;
+    let invitee_session_pubkey =
+        PublicKey::from_hex(session_key_hex).map_err(|e| InviteError::Invite(e.to_string()))?;
+    let device_id = payload
+        .get("deviceId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let owner_public_key = payload
+        .get("ownerPublicKey")
+        .and_then(|value| value.as_str())
+        .map(PublicKey::from_hex)
+        .transpose()
+        .map_err(|e| InviteError::Invite(e.to_string()))?;
+
+    Ok((invitee_session_pubkey, device_id, owner_public_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keypair(byte: u8) -> (SecretKey, PublicKey) {
+        let bytes = [byte; 32];
+        let sk = SecretKey::from_slice(&bytes).unwrap();
+        let pk = Keys::new(sk.clone()).public_key();
+        (sk, pk)
+    }
+
+    fn key_bytes(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    #[test]
+    fn invite_accept_returns_session_and_response() {
+        let (_, inviter_pk) = keypair(40);
+        let invite = InviteState::create(InviteCreateInput {
+            invite_id: None,
+            inviter: inviter_pk,
+            inviter_ephemeral_private_key: [41u8; 32],
+            shared_secret: [42u8; 32],
+            created_at: 100,
+            device_id: Some("inviter-device".to_string()),
+            max_uses: None,
+            purpose: None,
+            owner_public_key: None,
+        })
+        .unwrap();
+        let (_, invitee_pk) = keypair(44);
+
+        let accepted = invite
+            .accept(InviteAcceptInput {
+                invitee_public_key: invitee_pk,
+                invitee_identity_private_key: key_bytes(44),
+                invitee_session_private_key: key_bytes(45),
+                invitee_next_nostr_private_key: key_bytes(46),
+                envelope_sender_private_key: key_bytes(47),
+                response_created_at: 101,
+                device_id: Some("invitee-device".to_string()),
+                owner_public_key: Some(invitee_pk),
+                session_id: None,
+            })
+            .unwrap();
+
+        assert_eq!(u32::from(accepted.response_event.kind.as_u16()), INVITE_RESPONSE_KIND);
+        assert!(accepted.session.can_send());
+    }
+
+    #[test]
+    fn invite_accept_enforces_max_uses() {
+        let (_, inviter_pk) = keypair(48);
+        let invite = InviteState {
+            invite_id: None,
+            inviter_ephemeral_public_key: Keys::new(SecretKey::from_slice(&key_bytes(49)).unwrap()).public_key(),
+            shared_secret: key_bytes(50),
+            inviter: inviter_pk,
+            inviter_ephemeral_private_key: Some(key_bytes(49)),
+            device_id: None,
+            max_uses: Some(1),
+            used_by: vec![keypair(51).1],
+            created_at: 1,
+            purpose: None,
+            owner_public_key: None,
+        };
+
+        let result = invite.accept(InviteAcceptInput {
+            invitee_public_key: keypair(52).1,
+            invitee_identity_private_key: key_bytes(52),
+            invitee_session_private_key: key_bytes(53),
+            invitee_next_nostr_private_key: key_bytes(54),
+            envelope_sender_private_key: key_bytes(55),
+            response_created_at: 2,
+            device_id: None,
+            owner_public_key: None,
+            session_id: None,
+        });
+
+        assert!(matches!(result, Err(InviteError::Invite(_))));
+    }
+
+    #[test]
+    fn invite_process_matching_response_returns_accepted() {
+        let (inviter_sk, inviter_pk) = keypair(60);
+        let invite = InviteState::create(InviteCreateInput {
+            invite_id: None,
+            inviter: inviter_pk,
+            inviter_ephemeral_private_key: key_bytes(61),
+            shared_secret: key_bytes(62),
+            created_at: 200,
+            device_id: Some("inviter".to_string()),
+            max_uses: None,
+            purpose: None,
+            owner_public_key: None,
+        })
+        .unwrap();
+        let (_, invitee_pk) = keypair(64);
+        let accepted = invite
+            .accept(InviteAcceptInput {
+                invitee_public_key: invitee_pk,
+                invitee_identity_private_key: key_bytes(64),
+                invitee_session_private_key: key_bytes(65),
+                invitee_next_nostr_private_key: key_bytes(66),
+                envelope_sender_private_key: key_bytes(67),
+                response_created_at: 201,
+                device_id: Some("invitee".to_string()),
+                owner_public_key: Some(invitee_pk),
+                session_id: None,
+            })
+            .unwrap();
+
+        let processed = invite.process_response(InviteProcessResponseInput {
+            event: accepted.response_event,
+            inviter_identity_private_key: inviter_sk.to_secret_bytes(),
+            inviter_next_nostr_private_key: key_bytes(68),
+            session_id: None,
+        });
+
+        match processed {
+            InviteProcessResponseResult::Accepted { meta, .. } => {
+                assert_eq!(meta.invitee_identity, invitee_pk);
+                assert_eq!(meta.owner_public_key, Some(invitee_pk));
+            }
+            other => panic!("expected accepted invite response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invite_process_nonmatching_response_returns_not_for_this_invite() {
+        let (_, inviter_a) = keypair(70);
+        let invite_a = InviteState::create(InviteCreateInput {
+            invite_id: None,
+            inviter: inviter_a,
+            inviter_ephemeral_private_key: key_bytes(71),
+            shared_secret: key_bytes(72),
+            created_at: 300,
+            device_id: Some("a".to_string()),
+            max_uses: None,
+            purpose: None,
+            owner_public_key: None,
+        })
+        .unwrap();
+        let (_, inviter_b) = keypair(73);
+        let invite_b = InviteState::create(InviteCreateInput {
+            invite_id: None,
+            inviter: inviter_b,
+            inviter_ephemeral_private_key: key_bytes(74),
+            shared_secret: key_bytes(75),
+            created_at: 301,
+            device_id: Some("b".to_string()),
+            max_uses: None,
+            purpose: None,
+            owner_public_key: None,
+        })
+        .unwrap();
+        let (_, invitee_pk) = keypair(76);
+        let accepted = invite_b
+            .accept(InviteAcceptInput {
+                invitee_public_key: invitee_pk,
+                invitee_identity_private_key: key_bytes(76),
+                invitee_session_private_key: key_bytes(77),
+                invitee_next_nostr_private_key: key_bytes(78),
+                envelope_sender_private_key: key_bytes(79),
+                response_created_at: 302,
+                device_id: None,
+                owner_public_key: None,
+                session_id: None,
+            })
+            .unwrap();
+
+        let processed = invite_a.process_response(InviteProcessResponseInput {
+            event: accepted.response_event,
+            inviter_identity_private_key: key_bytes(70),
+            inviter_next_nostr_private_key: key_bytes(80),
+            session_id: None,
+        });
+
+        assert!(matches!(
+            processed,
+            InviteProcessResponseResult::NotForThisInvite { .. }
+        ));
+    }
+
+    #[test]
+    fn invite_process_invalid_relevant_response_returns_invalid_relevant() {
+        let (inviter_sk, inviter_pk) = keypair(81);
+        let invite = InviteState::create(InviteCreateInput {
+            invite_id: None,
+            inviter: inviter_pk,
+            inviter_ephemeral_private_key: key_bytes(82),
+            shared_secret: key_bytes(83),
+            created_at: 400,
+            device_id: Some("inviter".to_string()),
+            max_uses: None,
+            purpose: None,
+            owner_public_key: None,
+        })
+        .unwrap();
+        let (_, invitee_pk) = keypair(84);
+        let mut accepted = invite
+            .accept(InviteAcceptInput {
+                invitee_public_key: invitee_pk,
+                invitee_identity_private_key: key_bytes(84),
+                invitee_session_private_key: key_bytes(85),
+                invitee_next_nostr_private_key: key_bytes(86),
+                envelope_sender_private_key: key_bytes(87),
+                response_created_at: 401,
+                device_id: None,
+                owner_public_key: None,
+                session_id: None,
+            })
+            .unwrap()
+            .response_event;
+        accepted.content = "tampered".to_string();
+
+        let processed = invite.process_response(InviteProcessResponseInput {
+            event: accepted,
+            inviter_identity_private_key: inviter_sk.to_secret_bytes(),
+            inviter_next_nostr_private_key: key_bytes(88),
+            session_id: None,
+        });
+
+        match processed {
+            InviteProcessResponseResult::InvalidRelevant { next, .. } => assert_eq!(next, invite),
+            other => panic!("expected invalid relevant result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_response_accepts_legacy_raw_session_key_payload() {
+        let (inviter_identity_sk, inviter_identity_pk) = keypair(90);
+        let invite = InviteState::create(InviteCreateInput {
+            invite_id: None,
+            inviter: inviter_identity_pk,
+            inviter_ephemeral_private_key: key_bytes(91),
+            shared_secret: key_bytes(92),
+            created_at: 10,
+            device_id: None,
+            max_uses: None,
+            purpose: None,
+            owner_public_key: None,
+        })
+        .unwrap();
+        let (_, invitee_identity_pk) = keypair(93);
+        let invitee_identity_sk = SecretKey::from_slice(&key_bytes(93)).unwrap();
+        let invitee_session_keys = Keys::new(SecretKey::from_slice(&key_bytes(94)).unwrap());
+
+        let dh_encrypted = nip44::encrypt(
+            &invitee_identity_sk,
+            &inviter_identity_pk,
+            invitee_session_keys.public_key().to_hex(),
+            Version::V2,
+        )
+        .unwrap();
+        let conversation_key = nip44::v2::ConversationKey::new(invite.shared_secret);
+        let inner_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, &dh_encrypted).unwrap();
+        let inner_event = serde_json::json!({
+            "pubkey": invitee_identity_pk.to_hex(),
+            "content": base64::engine::general_purpose::STANDARD.encode(inner_bytes),
+            "created_at": 11_u64,
+        });
+
+        let envelope_keys = Keys::new(SecretKey::from_slice(&key_bytes(95)).unwrap());
+        let envelope_content = nip44::encrypt(
+            envelope_keys.secret_key(),
+            &invite.inviter_ephemeral_public_key,
+            inner_event.to_string(),
+            Version::V2,
+        )
+        .unwrap();
+        let event = EventBuilder::new(
+            nostr::Kind::Custom(INVITE_RESPONSE_KIND as u16),
+            envelope_content,
+        )
+        .tag(Tag::parse(&["p".to_string(), invite.inviter_ephemeral_public_key.to_hex()]).unwrap())
+        .custom_created_at(Timestamp::from(11_u64))
+        .build(envelope_keys.public_key())
+        .sign_with_keys(&envelope_keys)
+        .unwrap();
+
+        let processed = invite.process_response(InviteProcessResponseInput {
+            event,
+            inviter_identity_private_key: inviter_identity_sk.to_secret_bytes(),
+            inviter_next_nostr_private_key: key_bytes(96),
+            session_id: None,
+        });
+
+        match processed {
+            InviteProcessResponseResult::Accepted { meta, .. } => {
+                assert_eq!(meta.invitee_identity, invitee_identity_pk);
+            }
+            other => panic!("expected accepted result, got {other:?}"),
         }
     }
 }
