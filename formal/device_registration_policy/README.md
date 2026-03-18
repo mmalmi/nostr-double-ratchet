@@ -13,6 +13,12 @@ The model treats two scenarios in parallel:
 - `bootstrap`: no previous devices were known
 - `additional`: an existing owner timeline already exists
 
+Relay behavior is modeled at the policy level, not the socket level. `relay-visible` means
+"visible to other participants through the relay set they can verify against", not "every relay in
+the world has converged". A relay that connects but stays silent belongs in end-to-end interop
+tests; the formal question is whether partial relay visibility is enough to justify trusting a
+device for routing.
+
 `RouteReady(s)` encodes the policy for when public-invite routing is allowed to trust the current
 device in each scenario.
 

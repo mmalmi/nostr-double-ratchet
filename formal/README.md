@@ -33,6 +33,10 @@ practice.
   covers both bootstrap and additional-device flows:
   trusting locally published AppKeys is unsafe for additional devices, while requiring relay
   visibility everywhere breaks first-device bootstrap and recovery.
+- Multi-relay behavior matters at the policy boundary, but only in the abstract sense of
+  `locally published` versus `relay-visible`. Silent or lagging relays are worth testing end to
+  end, while TLA+ should focus on whether enough relay-visible state exists for other participants
+  to verify an authorization change.
 
 ## Running Models
 
