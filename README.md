@@ -155,6 +155,26 @@ cargo test -p ndr --manifest-path rust/Cargo.toml
   `iris-chat-flutter` should not each trust only their own same-client tests.
 - When possible, assert both self-sync and peer fanout across owner and linked devices.
 
+## Formal Models
+
+The [`formal/`](./formal) directory contains small TLA+ models for the rules that are easiest to
+get subtly wrong in multi-device and invite handling.
+
+- [`formal/session_manager_fanout`](./formal/session_manager_fanout):
+  AppKeys replay ordering, monotonic same-second merges, revocation, and eventual fanout recovery.
+- [`formal/invite_handshake`](./formal/invite_handshake):
+  invite replay handling, unauthorized owner-claim rejection, and single-device fallback.
+- [`formal/device_registration_policy`](./formal/device_registration_policy):
+  the split policy for imported-device registration:
+  first-device bootstrap may trust locally published AppKeys, but an additional device on an
+  existing owner timeline must wait for relay-visible AppKeys before public-invite fanout trusts
+  it.
+
+The main TLA+ learning from the latest multi-device work is that there is no single global
+registration rule that fits both bootstrap and additional-device flows. Always trusting local
+AppKeys is too weak for additional devices; always requiring relay visibility is too strict for
+bootstrap and recovery.
+
 For language-specific usage, see:
 
 - [ts/README.md](./ts/README.md)
