@@ -796,7 +796,8 @@ impl SessionManager {
                 continue;
             }
 
-            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key) else {
+            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key)
+            else {
                 continue;
             };
 
@@ -942,18 +943,11 @@ impl SessionManager {
                 ))
             }
         });
-        let self_owner_authorized_device_replay = owner_pubkey == self.owner_public_key
-            && inviter_device_pubkey != self.our_public_key
-            && existing_device_session_info.is_some()
-            && self.is_device_authorized(owner_pubkey, inviter_device_pubkey);
-
-        if self_owner_authorized_device_replay
-            || existing_device_session_info.is_some_and(
-                |(_, any_send_capable, any_receive_capable, any_session_has_activity)| {
-                    any_send_capable && (any_receive_capable || any_session_has_activity)
-                },
-            )
-        {
+        if existing_device_session_info.is_some_and(
+            |(_, any_send_capable, any_receive_capable, any_session_has_activity)| {
+                any_send_capable && (any_receive_capable || any_session_has_activity)
+            },
+        ) {
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             return Ok(AcceptInviteResult {
                 owner_pubkey,
@@ -2109,7 +2103,8 @@ impl SessionManager {
                 continue;
             }
 
-            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key) else {
+            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key)
+            else {
                 continue;
             };
 
@@ -2386,13 +2381,11 @@ impl SessionManager {
             .unwrap()
             .as_secs()
             + INVITE_BOOTSTRAP_EXPIRATION_SECONDS;
-        let expiration = match Tag::parse(&[
-            crate::EXPIRATION_TAG.to_string(),
-            expires_at.to_string(),
-        ]) {
-            Ok(tag) => tag,
-            Err(_) => return Vec::new(),
-        };
+        let expiration =
+            match Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()]) {
+                Ok(tag) => tag,
+                Err(_) => return Vec::new(),
+            };
 
         let mut bootstrap_messages = Vec::new();
         for _ in INVITE_BOOTSTRAP_RETRY_DELAYS_MS {

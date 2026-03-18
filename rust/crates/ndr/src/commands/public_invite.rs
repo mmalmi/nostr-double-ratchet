@@ -182,8 +182,12 @@ pub(super) async fn join_via_invite(
     let client = connect_client(config).await?;
     if let Some(claimed_owner_pubkey) = invite.owner_public_key {
         if claimed_owner_pubkey != invite.inviter {
-            if let Some(snapshot) =
-                fetch_latest_app_keys_snapshot(&client, claimed_owner_pubkey).await?
+            if let Some(snapshot) = fetch_latest_app_keys_snapshot(
+                &client,
+                &config.resolved_relays(),
+                claimed_owner_pubkey,
+            )
+            .await?
             {
                 manager.ingest_app_keys_snapshot(
                     claimed_owner_pubkey,

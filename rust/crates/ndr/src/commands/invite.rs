@@ -265,8 +265,10 @@ pub async fn accept(
             None
         };
 
-    let their_pubkey = resolve_verified_owner_pubkey(owner_verification_client.as_ref(), &response)
-        .await?
+    let resolved_relays = config.resolved_relays();
+    let their_pubkey =
+        resolve_verified_owner_pubkey(owner_verification_client.as_ref(), &resolved_relays, &response)
+            .await?
         .ok_or_else(|| {
             let owner_hex = resolved_owner.to_hex();
             let device_hex = response.invitee_identity.to_hex();

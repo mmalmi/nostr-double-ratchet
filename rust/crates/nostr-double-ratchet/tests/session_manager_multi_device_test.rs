@@ -516,6 +516,105 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
 }
 
 #[test]
+fn test_processing_same_owner_sibling_public_invite_upgrades_response_import() -> Result<()> {
+    let owner_keys = Keys::generate();
+    let owner_pubkey = owner_keys.public_key();
+
+    let current_keys = Keys::generate();
+    let current_pubkey = current_keys.public_key();
+    let current_device_id = current_pubkey.to_hex();
+
+    let sibling_keys = Keys::generate();
+    let sibling_pubkey = sibling_keys.public_key();
+    let sibling_device_id = sibling_pubkey.to_hex();
+
+    let current_public_invite =
+        new_public_invite(current_pubkey, current_device_id.clone(), owner_pubkey)?;
+    let sibling_public_invite =
+        new_public_invite(sibling_pubkey, sibling_device_id.clone(), owner_pubkey)?;
+
+    let (current_tx, current_rx) = crossbeam_channel::unbounded();
+    let (sibling_tx, sibling_rx) = crossbeam_channel::unbounded();
+
+    let current_mgr = SessionManager::new(
+        current_pubkey,
+        current_keys.secret_key().to_secret_bytes(),
+        current_device_id.clone(),
+        owner_pubkey,
+        current_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        Some(current_public_invite.clone()),
+    );
+    let sibling_mgr = SessionManager::new(
+        sibling_pubkey,
+        sibling_keys.secret_key().to_secret_bytes(),
+        sibling_device_id.clone(),
+        owner_pubkey,
+        sibling_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        Some(sibling_public_invite.clone()),
+    );
+
+    current_mgr.init()?;
+    sibling_mgr.init()?;
+    drain_events(&current_rx);
+    drain_events(&sibling_rx);
+
+    let app_keys = AppKeys::new(vec![
+        DeviceEntry::new(owner_pubkey, 1),
+        DeviceEntry::new(current_pubkey, 2),
+        DeviceEntry::new(sibling_pubkey, 3),
+    ]);
+    let app_keys_event = app_keys
+        .get_event(owner_pubkey)
+        .sign_with_keys(&owner_keys)?;
+    current_mgr.process_received_event(app_keys_event.clone());
+    sibling_mgr.process_received_event(app_keys_event);
+    drain_events(&current_rx);
+    drain_events(&sibling_rx);
+
+    let accepted = sibling_mgr.accept_invite(&current_public_invite, Some(owner_pubkey))?;
+    assert!(accepted.created_new_session);
+    let current_response =
+        recv_signed_event_of_kind(&sibling_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    current_mgr.process_received_event(current_response);
+    drain_events(&current_rx);
+    drain_events(&sibling_rx);
+
+    let imported_sendable = current_mgr
+        .export_active_sessions()
+        .into_iter()
+        .find(|(owner, device_id, _)| *owner == owner_pubkey && device_id == &sibling_device_id)
+        .map(|(_, _, state)| Session::new(state, "debug".to_string()).can_send())
+        .unwrap_or(false);
+    assert!(
+        !imported_sendable,
+        "response import alone should not already be send-capable for same-owner siblings",
+    );
+
+    let accepted = current_mgr.accept_invite(&sibling_public_invite, Some(owner_pubkey))?;
+    assert!(
+        accepted.created_new_session,
+        "same-owner sibling public invite should refresh an imported response-only session",
+    );
+    let _ = recv_signed_event_of_kind(&current_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
+    drain_events(&current_rx);
+
+    let upgraded_sendable = current_mgr
+        .export_active_sessions()
+        .into_iter()
+        .find(|(owner, device_id, _)| *owner == owner_pubkey && device_id == &sibling_device_id)
+        .map(|(_, _, state)| Session::new(state, "debug".to_string()).can_send())
+        .unwrap_or(false);
+    assert!(
+        upgraded_sendable,
+        "processing the sibling public invite should upgrade the same-owner device to a send-capable session",
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_multi_device_self_fanout() -> Result<()> {
     let owner_keys = Keys::generate();
     let owner_pubkey = owner_keys.public_key();

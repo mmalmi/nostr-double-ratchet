@@ -31,11 +31,11 @@ pub use invite::{Invite, InviteResponse};
 pub use message_origin::{classify_message_origin, MessageOrigin};
 pub use message_queue::{MessageQueue, QueueEntry};
 pub use multi_device::{
-    apply_app_keys_snapshot, evaluate_device_registration_state, resolve_invite_owner_routing,
-    resolve_conversation_candidate_pubkeys, resolve_rumor_peer_pubkey,
-    select_latest_app_keys_from_events, should_require_relay_registration_confirmation,
-    AppKeysSnapshot, AppKeysSnapshotDecision, DeviceRegistrationState,
-    InviteOwnerRoutingResolution,
+    apply_app_keys_snapshot, evaluate_device_registration_state,
+    resolve_conversation_candidate_pubkeys, resolve_invite_owner_routing,
+    resolve_rumor_peer_pubkey, select_latest_app_keys_from_events,
+    should_require_relay_registration_confirmation, AppKeysSnapshot, AppKeysSnapshotDecision,
+    DeviceRegistrationState, InviteOwnerRoutingResolution,
 };
 pub use one_to_many::*;
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};

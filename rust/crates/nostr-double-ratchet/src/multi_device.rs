@@ -374,7 +374,10 @@ mod tests {
             "owner",
         );
 
-        assert_eq!(candidates, vec!["linked-device".to_string(), "owner".to_string()]);
+        assert_eq!(
+            candidates,
+            vec!["linked-device".to_string(), "owner".to_string()]
+        );
     }
 
     #[test]
