@@ -6,11 +6,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::{Receiver, Sender};
 use nostr_double_ratchet::{
     AppKeys, CreateGroupOptions, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent,
-    GroupManager, GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, Session,
-    SessionManager, SessionManagerEvent, SessionState, StorageAdapter,
+    GroupSendEvent, InMemoryStorage, Invite, NdrRuntime, Session, SessionManagerEvent,
+    SessionState, StorageAdapter,
 };
 
 mod error;
@@ -522,10 +521,7 @@ impl SessionHandle {
 /// FFI wrapper for SessionManager.
 #[derive(uniffi::Object)]
 pub struct SessionManagerHandle {
-    inner: Mutex<SessionManager>,
-    event_rx: Mutex<Receiver<SessionManagerEvent>>,
-    event_tx: Sender<SessionManagerEvent>,
-    group_manager: Mutex<GroupManager>,
+    runtime: NdrRuntime,
 }
 
 #[uniffi::export]
@@ -546,30 +542,16 @@ impl SessionManagerHandle {
         };
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-        let manager = SessionManager::new(
+        let runtime = NdrRuntime::new(
             our_pubkey,
             our_identity_key,
             device_id,
             owner_pubkey,
-            tx.clone(),
-            Some(storage.clone()),
+            Some(storage),
             None,
         );
 
-        let group_manager = GroupManager::new(GroupManagerOptions {
-            our_owner_pubkey: owner_pubkey,
-            our_device_pubkey: our_pubkey,
-            storage: Some(storage),
-            one_to_many: None,
-        });
-
-        Ok(Arc::new(Self {
-            inner: Mutex::new(manager),
-            event_rx: Mutex::new(rx),
-            event_tx: tx,
-            group_manager: Mutex::new(group_manager),
-        }))
+        Ok(Arc::new(Self { runtime }))
     }
 
     /// Create a new session manager with file-backed storage.
@@ -592,45 +574,28 @@ impl SessionManagerHandle {
             .map_err(NdrError::from)?;
         let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
 
-        let (tx, rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-        let manager = SessionManager::new(
+        let runtime = NdrRuntime::new(
             our_pubkey,
             our_identity_key,
             device_id,
             owner_pubkey,
-            tx.clone(),
-            Some(storage.clone()),
+            Some(storage),
             None,
         );
 
-        let group_manager = GroupManager::new(GroupManagerOptions {
-            our_owner_pubkey: owner_pubkey,
-            our_device_pubkey: our_pubkey,
-            storage: Some(storage),
-            one_to_many: None,
-        });
-
-        Ok(Arc::new(Self {
-            inner: Mutex::new(manager),
-            event_rx: Mutex::new(rx),
-            event_tx: tx,
-            group_manager: Mutex::new(group_manager),
-        }))
+        Ok(Arc::new(Self { runtime }))
     }
 
     /// Initialize the session manager (loads state, creates device invite, subscribes).
     pub fn init(&self) -> Result<(), NdrError> {
-        let manager = self.inner.lock().unwrap();
-        manager.init()?;
+        self.runtime.init()?;
         Ok(())
     }
 
     /// Subscribe to a user's AppKeys/device-invite streams and converge sessions.
     pub fn setup_user(&self, user_pubkey_hex: String) -> Result<(), NdrError> {
         let user_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&user_pubkey_hex)?;
-        let manager = self.inner.lock().unwrap();
-        manager.init()?;
-        manager.setup_user(user_pubkey);
+        self.runtime.setup_user(user_pubkey)?;
         Ok(())
     }
 
@@ -649,9 +614,7 @@ impl SessionManagerHandle {
             .map(nostr_double_ratchet::utils::pubkey_from_hex)
             .transpose()?;
 
-        let manager = self.inner.lock().unwrap();
-        manager.init()?;
-        let accepted = manager.accept_invite(&invite, owner_pubkey_hint)?;
+        let accepted = self.runtime.accept_invite(&invite, owner_pubkey_hint)?;
 
         Ok(SessionManagerAcceptInviteResult {
             owner_pubkey_hex: accepted.owner_pubkey.to_hex(),
@@ -674,9 +637,7 @@ impl SessionManagerHandle {
             .map(nostr_double_ratchet::utils::pubkey_from_hex)
             .transpose()?;
 
-        let manager = self.inner.lock().unwrap();
-        manager.init()?;
-        let accepted = manager.accept_invite(&invite, owner_pubkey_hint)?;
+        let accepted = self.runtime.accept_invite(&invite, owner_pubkey_hint)?;
 
         Ok(SessionManagerAcceptInviteResult {
             owner_pubkey_hex: accepted.owner_pubkey.to_hex(),
@@ -694,12 +655,11 @@ impl SessionManagerHandle {
         expires_at_seconds: Option<u64>,
     ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
-        let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_text(recipient, text, options)?)
+        Ok(self.runtime.send_text(recipient, text, options)?)
     }
 
     /// Send a text message and return both the stable inner (rumor) id and the
@@ -711,13 +671,12 @@ impl SessionManagerHandle {
         expires_at_seconds: Option<u64>,
     ) -> Result<SendTextResult, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
-        let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
         let (inner_id, outer_event_ids) =
-            manager.send_text_with_inner_id(recipient, text, options)?;
+            self.runtime.send_text_with_inner_id(recipient, text, options)?;
         Ok(SendTextResult {
             inner_id,
             outer_event_ids,
@@ -791,8 +750,7 @@ impl SessionManagerHandle {
             .try_into()
             .map_err(|_| NdrError::InvalidEvent("kind out of range".into()))?;
 
-        let manager = self.inner.lock().unwrap();
-        let owner_pubkey = manager.get_owner_pubkey();
+        let owner_pubkey = self.runtime.get_owner_pubkey();
 
         let mut event = nostr::EventBuilder::new(nostr::Kind::from(kind_u16), &content)
             .tags(tags)
@@ -806,7 +764,7 @@ impl SessionManagerHandle {
             .map(|id| id.to_string())
             .unwrap_or_default();
 
-        let outer_event_ids = manager.send_event(recipient, event)?;
+        let outer_event_ids = self.runtime.send_event(recipient, event)?;
 
         Ok(SendTextResult {
             inner_id,
@@ -816,8 +774,9 @@ impl SessionManagerHandle {
 
     /// Upsert group metadata into the embedded GroupManager.
     pub fn group_upsert(&self, group: FfiGroupData) -> Result<(), NdrError> {
-        let mut group_manager = self.group_manager.lock().unwrap();
-        group_manager.upsert_group(ffi_group_data_to_group_data(group))?;
+        self.runtime.with_group_context(|_, group_manager, _| {
+            group_manager.upsert_group(ffi_group_data_to_group_data(group))
+        })?;
         Ok(())
     }
 
@@ -832,58 +791,59 @@ impl SessionManagerHandle {
         let member_refs: Vec<&str> = member_owner_pubkeys.iter().map(String::as_str).collect();
         let should_fanout = fanout_metadata.unwrap_or(true);
 
-        let session_manager = self.inner.lock().unwrap();
-        let mut group_manager = self.group_manager.lock().unwrap();
+        self.runtime.with_group_context(|session_manager, group_manager, _| {
+            let mut send_pairwise =
+                |recipient_owner: nostr::PublicKey,
+                 rumor: &nostr::UnsignedEvent|
+                 -> nostr_double_ratchet::Result<()> {
+                    session_manager.send_event(recipient_owner, rumor.clone())?;
+                    Ok(())
+                };
 
-        let mut send_pairwise = |recipient_owner: nostr::PublicKey,
-                                 rumor: &nostr::UnsignedEvent|
-         -> nostr_double_ratchet::Result<()> {
-            session_manager.send_event(recipient_owner, rumor.clone())?;
-            Ok(())
-        };
+            let mut opts = CreateGroupOptions {
+                send_pairwise: None,
+                fanout_metadata: should_fanout,
+                now_ms,
+            };
+            if should_fanout {
+                opts.send_pairwise = Some(&mut send_pairwise);
+            }
 
-        let mut opts = CreateGroupOptions {
-            send_pairwise: None,
-            fanout_metadata: should_fanout,
-            now_ms,
-        };
-        if should_fanout {
-            opts.send_pairwise = Some(&mut send_pairwise);
-        }
+            let created = group_manager.create_group(&name, &member_refs, opts)?;
+            let metadata_rumor_json = created
+                .metadata_rumor
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
 
-        let created = group_manager.create_group(&name, &member_refs, opts)?;
-        let metadata_rumor_json = created
-            .metadata_rumor
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-
-        Ok(GroupCreateResult {
-            group: group_data_to_ffi_group_data(created.group),
-            metadata_rumor_json,
-            fanout: GroupCreateFanout {
-                enabled: created.fanout.enabled,
-                attempted: created.fanout.attempted as u64,
-                succeeded: created.fanout.succeeded,
-                failed: created.fanout.failed,
-            },
+            Ok(GroupCreateResult {
+                group: group_data_to_ffi_group_data(created.group),
+                metadata_rumor_json,
+                fanout: GroupCreateFanout {
+                    enabled: created.fanout.enabled,
+                    attempted: created.fanout.attempted as u64,
+                    succeeded: created.fanout.succeeded,
+                    failed: created.fanout.failed,
+                },
+            })
         })
     }
 
     /// Remove a group from the embedded GroupManager.
     pub fn group_remove(&self, group_id: String) {
-        let mut group_manager = self.group_manager.lock().unwrap();
-        group_manager.remove_group(&group_id);
+        self.runtime
+            .with_group_context(|_, group_manager, _| group_manager.remove_group(&group_id));
     }
 
     /// Return known sender-event pubkeys used for one-to-many group transport.
     pub fn group_known_sender_event_pubkeys(&self) -> Vec<String> {
-        let mut group_manager = self.group_manager.lock().unwrap();
-        group_manager
-            .known_sender_event_pubkeys()
-            .into_iter()
-            .map(|pk| pk.to_hex())
-            .collect()
+        self.runtime.with_group_context(|_, group_manager, _| {
+            group_manager
+                .known_sender_event_pubkeys()
+                .into_iter()
+                .map(|pk| pk.to_hex())
+                .collect()
+        })
     }
 
     /// Send a group event through GroupManager.
@@ -904,42 +864,42 @@ impl SessionManagerHandle {
             serde_json::from_str(&tags_json)?
         };
 
-        let session_manager = self.inner.lock().unwrap();
-        let mut group_manager = self.group_manager.lock().unwrap();
-        let event_tx = self.event_tx.clone();
+        self.runtime
+            .with_group_context(|session_manager, group_manager, event_tx| {
+                let mut send_pairwise =
+                    |recipient_owner: nostr::PublicKey,
+                     rumor: &nostr::UnsignedEvent|
+                     -> nostr_double_ratchet::Result<()> {
+                        session_manager.send_event(recipient_owner, rumor.clone())?;
+                        Ok(())
+                    };
 
-        let mut send_pairwise = |recipient_owner: nostr::PublicKey,
-                                 rumor: &nostr::UnsignedEvent|
-         -> nostr_double_ratchet::Result<()> {
-            session_manager.send_event(recipient_owner, rumor.clone())?;
-            Ok(())
-        };
+                let mut publish_outer = |outer: &nostr::Event| -> nostr_double_ratchet::Result<()> {
+                    event_tx
+                        .send(SessionManagerEvent::PublishSigned(outer.clone()))
+                        .map_err(|e| nostr_double_ratchet::Error::Storage(e.to_string()))?;
+                    Ok(())
+                };
 
-        let mut publish_outer = |outer: &nostr::Event| -> nostr_double_ratchet::Result<()> {
-            event_tx
-                .send(SessionManagerEvent::PublishSigned(outer.clone()))
-                .map_err(|e| nostr_double_ratchet::Error::Storage(e.to_string()))?;
-            Ok(())
-        };
+                let result = group_manager.send_event(
+                    &group_id,
+                    GroupSendEvent {
+                        kind,
+                        content,
+                        tags,
+                    },
+                    &mut send_pairwise,
+                    &mut publish_outer,
+                    now_ms,
+                )?;
 
-        let result = group_manager.send_event(
-            &group_id,
-            GroupSendEvent {
-                kind,
-                content,
-                tags,
-            },
-            &mut send_pairwise,
-            &mut publish_outer,
-            now_ms,
-        )?;
-
-        Ok(GroupSendResult {
-            outer_event_json: serde_json::to_string(&result.outer)?,
-            inner_event_json: serde_json::to_string(&result.inner)?,
-            outer_event_id: result.outer.id.to_string(),
-            inner_event_id: unsigned_event_id_string(&result.inner),
-        })
+                Ok(GroupSendResult {
+                    outer_event_json: serde_json::to_string(&result.outer)?,
+                    inner_event_json: serde_json::to_string(&result.inner)?,
+                    outer_event_id: result.outer.id.to_string(),
+                    inner_event_id: unsigned_event_id_string(&result.inner),
+                })
+            })
     }
 
     /// Handle a decrypted pairwise session rumor that may carry sender-key distribution.
@@ -958,12 +918,13 @@ impl SessionManagerHandle {
             None => Some(event.pubkey),
         };
 
-        let mut group_manager = self.group_manager.lock().unwrap();
-        let decrypted = group_manager.handle_incoming_session_event(
-            &event,
-            from_owner_pubkey,
-            from_sender_device_pubkey,
-        );
+        let decrypted = self.runtime.with_group_context(|_, group_manager, _| {
+            group_manager.handle_incoming_session_event(
+                &event,
+                from_owner_pubkey,
+                from_sender_device_pubkey,
+            )
+        });
         Ok(decrypted
             .into_iter()
             .map(group_decrypted_to_result)
@@ -976,10 +937,13 @@ impl SessionManagerHandle {
         event_json: String,
     ) -> Result<Option<GroupDecryptedResult>, NdrError> {
         let event: nostr::Event = serde_json::from_str(&event_json)?;
-        let mut group_manager = self.group_manager.lock().unwrap();
-        Ok(group_manager
-            .handle_outer_event(&event)
-            .map(group_decrypted_to_result))
+        Ok(self
+            .runtime
+            .with_group_context(|_, group_manager, _| {
+                group_manager
+                    .handle_outer_event(&event)
+                    .map(group_decrypted_to_result)
+            }))
     }
 
     /// Send a delivery/read receipt for messages.
@@ -991,12 +955,14 @@ impl SessionManagerHandle {
         expires_at_seconds: Option<u64>,
     ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
-        let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_receipt(recipient, &receipt_type, message_ids, options)?)
+        Ok(self
+            .runtime
+            .session_manager()
+            .send_receipt(recipient, &receipt_type, message_ids, options)?)
     }
 
     /// Send a typing indicator.
@@ -1006,12 +972,11 @@ impl SessionManagerHandle {
         expires_at_seconds: Option<u64>,
     ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
-        let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_typing(recipient, options)?)
+        Ok(self.runtime.session_manager().send_typing(recipient, options)?)
     }
 
     /// Send an emoji reaction (kind 7) to a specific message id.
@@ -1023,12 +988,14 @@ impl SessionManagerHandle {
         expires_at_seconds: Option<u64>,
     ) -> Result<Vec<String>, NdrError> {
         let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
-        let manager = self.inner.lock().unwrap();
         let options = expires_at_seconds.map(|expires_at| nostr_double_ratchet::SendOptions {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_reaction(recipient, message_id, emoji, options)?)
+        Ok(self
+            .runtime
+            .session_manager()
+            .send_reaction(recipient, message_id, emoji, options)?)
     }
 
     /// Import a session state for a peer.
@@ -1041,8 +1008,8 @@ impl SessionManagerHandle {
         let peer_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&peer_pubkey_hex)?;
         let state: SessionState =
             nostr_double_ratchet::utils::deserialize_session_state(&state_json)?;
-        let manager = self.inner.lock().unwrap();
-        manager.import_session_state(peer_pubkey, device_id, state)?;
+        self.runtime
+            .import_session_state(peer_pubkey, device_id, state)?;
         Ok(())
     }
 
@@ -1052,8 +1019,11 @@ impl SessionManagerHandle {
         peer_pubkey_hex: String,
     ) -> Result<Option<String>, NdrError> {
         let peer_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&peer_pubkey_hex)?;
-        let manager = self.inner.lock().unwrap();
-        if let Some(state) = manager.export_active_session_state(peer_pubkey)? {
+        if let Some(state) = self
+            .runtime
+            .session_manager()
+            .export_active_session_state(peer_pubkey)?
+        {
             Ok(Some(nostr_double_ratchet::utils::serialize_session_state(
                 &state,
             )?))
@@ -1065,19 +1035,15 @@ impl SessionManagerHandle {
     /// Process a received Nostr event JSON.
     pub fn process_event(&self, event_json: String) -> Result<(), NdrError> {
         let event: nostr::Event = serde_json::from_str(&event_json)?;
-        let manager = self.inner.lock().unwrap();
-        manager.process_received_event(event);
+        self.runtime.session_manager().process_received_event(event);
         Ok(())
     }
 
     /// Drain pending pubsub events from the internal queue.
     pub fn drain_events(&self) -> Result<Vec<PubSubEvent>, NdrError> {
-        let rx = self.event_rx.lock().unwrap();
         let mut events = Vec::new();
 
-        loop {
-            match rx.try_recv() {
-                Ok(event) => {
+        for event in self.runtime.drain_events() {
                     let pubsub_event = match event {
                         SessionManagerEvent::Publish(unsigned) => PubSubEvent {
                             kind: "publish".to_string(),
@@ -1140,10 +1106,6 @@ impl SessionManagerHandle {
                         },
                     };
                     events.push(pubsub_event);
-                }
-                Err(crossbeam_channel::TryRecvError::Empty) => break,
-                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
-            }
         }
 
         Ok(events)
@@ -1151,26 +1113,22 @@ impl SessionManagerHandle {
 
     /// Get our device id.
     pub fn get_device_id(&self) -> String {
-        let manager = self.inner.lock().unwrap();
-        manager.get_device_id().to_string()
+        self.runtime.get_device_id().to_string()
     }
 
     /// Get our public key as hex.
     pub fn get_our_pubkey_hex(&self) -> String {
-        let manager = self.inner.lock().unwrap();
-        manager.get_our_pubkey().to_hex()
+        self.runtime.get_our_pubkey().to_hex()
     }
 
     /// Get owner public key as hex.
     pub fn get_owner_pubkey_hex(&self) -> String {
-        let manager = self.inner.lock().unwrap();
-        manager.get_owner_pubkey().to_hex()
+        self.runtime.get_owner_pubkey().to_hex()
     }
 
     /// Get total active sessions.
     pub fn get_total_sessions(&self) -> u64 {
-        let manager = self.inner.lock().unwrap();
-        manager.get_total_sessions() as u64
+        self.runtime.session_manager().get_total_sessions() as u64
     }
 }
 

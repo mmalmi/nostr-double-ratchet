@@ -11,6 +11,7 @@ pub mod message_queue;
 pub mod multi_device;
 pub mod one_to_many;
 pub mod pubsub;
+pub mod runtime;
 pub mod sender_key;
 pub mod session;
 pub mod session_manager;
@@ -39,6 +40,7 @@ pub use multi_device::{
 };
 pub use one_to_many::*;
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
+pub use runtime::NdrRuntime;
 pub use sender_key::*;
 pub use session::Session;
 pub use session_manager::{AcceptInviteResult, SessionManager, SessionManagerEvent};

@@ -2,10 +2,11 @@ use anyhow::Result;
 
 use nostr::Tag;
 use nostr_double_ratchet::{
-    FileStorageAdapter, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
+    FileStorageAdapter, NdrRuntime, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
     EXPIRATION_TAG, MESSAGE_EVENT_KIND,
 };
 
+use crate::commands::owner_claim::fetch_latest_app_keys_snapshot;
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
@@ -55,12 +56,11 @@ async fn resolve_or_join_chat(
     }
 }
 
-fn build_session_manager(
+fn build_runtime(
     config: &Config,
     storage: &Storage,
 ) -> Result<(
-    SessionManager,
-    crossbeam_channel::Receiver<SessionManagerEvent>,
+    NdrRuntime,
     nostr::Keys,
     String,
 )> {
@@ -74,20 +74,18 @@ fn build_session_manager(
         FileStorageAdapter::new(storage.data_dir().join("session_manager"))?,
     );
 
-    let (sm_tx, sm_rx) = crossbeam_channel::unbounded();
-    let manager = SessionManager::new(
+    let runtime = NdrRuntime::new(
         our_pubkey,
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        sm_tx,
         Some(session_manager_store),
         None,
     );
-    manager.init()?;
+    runtime.init()?;
 
     let signing_keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
-    Ok((manager, sm_rx, signing_keys, owner_pubkey_hex))
+    Ok((runtime, signing_keys, owner_pubkey_hex))
 }
 
 fn import_chats_into_session_manager(
@@ -215,13 +213,13 @@ fn sync_chats_from_session_manager(
 }
 
 async fn flush_session_manager_message_events(
-    manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
+    runtime: &NdrRuntime,
     signing_keys: &nostr::Keys,
     client: &nostr_sdk::Client,
 ) -> Result<Vec<nostr::Event>> {
     let mut message_events = Vec::new();
 
-    while let Ok(event) = manager_rx.try_recv() {
+    for event in runtime.drain_events() {
         let signed = match event {
             SessionManagerEvent::Publish(unsigned) => unsigned
                 .sign_with_keys(signing_keys)
@@ -241,6 +239,92 @@ async fn flush_session_manager_message_events(
     }
 
     Ok(message_events)
+}
+
+async fn refresh_recipient_app_keys(
+    runtime: &NdrRuntime,
+    client: &nostr_sdk::Client,
+    config: &Config,
+    recipient: nostr::PublicKey,
+) -> Result<std::collections::HashSet<nostr::PublicKey>> {
+    use std::collections::HashSet;
+    use tokio::time::{Duration, Instant};
+
+    let relays = config.resolved_relays();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() <= deadline {
+        if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, &relays, recipient).await? {
+        let sibling_devices: HashSet<nostr::PublicKey> = snapshot
+            .app_keys
+            .get_all_devices()
+            .into_iter()
+            .map(|device| device.identity_pubkey)
+            .filter(|device_pubkey| *device_pubkey != recipient)
+            .collect();
+
+        runtime.ingest_app_keys_snapshot(recipient, snapshot.app_keys, snapshot.created_at);
+            return Ok(sibling_devices);
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Ok(HashSet::new())
+}
+
+async fn process_recipient_device_invites(
+    runtime: &NdrRuntime,
+    client: &nostr_sdk::Client,
+    config: &Config,
+    sibling_devices: &std::collections::HashSet<nostr::PublicKey>,
+) -> Result<()> {
+    use nostr_sdk::Filter;
+    use tokio::time::{Duration, Instant};
+
+    if sibling_devices.is_empty() {
+        return Ok(());
+    }
+
+    let relays = config.resolved_relays();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut processed = std::collections::HashSet::new();
+
+    while Instant::now() <= deadline {
+        let invite_events = crate::nostr_client::fetch_events_best_effort(
+            client,
+            &relays,
+            Filter::new()
+                .kind(nostr::Kind::Custom(
+                    nostr_double_ratchet::INVITE_EVENT_KIND as u16,
+                ))
+                .authors(sibling_devices.iter().copied().collect::<Vec<_>>())
+                .limit(50),
+            Duration::from_secs(3),
+        )
+        .await?;
+
+        for event in invite_events {
+            if !sibling_devices.contains(&event.pubkey) {
+                continue;
+            }
+            let expected_d = format!("double-ratchet/invites/{}", event.pubkey.to_hex());
+            let matches_device_invite = event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.first().map(|value| value.as_str()) == Some("d")
+                    && parts.get(1).map(|value| value.as_str()) == Some(expected_d.as_str())
+            });
+            if matches_device_invite && processed.insert(event.pubkey) {
+                runtime.session_manager().process_received_event(event);
+            }
+        }
+
+        if processed == *sibling_devices {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -445,16 +529,18 @@ pub(super) async fn send_message_impl(
         inner_id.clone()
     };
 
-    let (manager, manager_rx, signing_keys, owner_pubkey_hex) =
-        build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
-
-    let event_ids = manager.send_event(recipient_pk, unsigned)?;
+    let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    let manager = runtime.session_manager();
+    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
+    let sibling_devices =
+        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    let event_ids = runtime.send_event(recipient_pk, unsigned)?;
+    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
     let published_events =
-        flush_session_manager_message_events(&manager_rx, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, &manager, &owner_pubkey_hex)?;
+        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     if let Some(updated_chat) = storage.get_chat_by_pubkey(&recipient_pk.to_hex())? {
         chat = updated_chat;
@@ -505,21 +591,23 @@ pub async fn react(
     let recipient_pk = nostr::PublicKey::from_hex(&chat.their_pubkey)
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
-    let (manager, manager_rx, signing_keys, owner_pubkey_hex) =
-        build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
+    let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    let manager = runtime.session_manager();
+    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
-    let event_ids = manager.send_reaction(
+    let client = connect_client(config).await?;
+    let sibling_devices =
+        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    let event_ids = runtime.send_reaction(
         recipient_pk,
         message_id.to_string(),
         emoji.to_string(),
         None,
     )?;
-
-    let client = connect_client(config).await?;
+    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
     let published_events =
-        flush_session_manager_message_events(&manager_rx, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, &manager, &owner_pubkey_hex)?;
+        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let pubkey = config.public_key()?;
     let timestamp = std::time::SystemTime::now()
@@ -586,17 +674,19 @@ pub async fn receipt(
     let recipient_pk = nostr::PublicKey::from_hex(&chat.their_pubkey)
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
-    let (manager, manager_rx, signing_keys, owner_pubkey_hex) =
-        build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
-
+    let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    let manager = runtime.session_manager();
+    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
     let message_ids_vec = message_ids.iter().map(|s| (*s).to_string()).collect();
-    let _event_ids = manager.send_receipt(recipient_pk, receipt_type, message_ids_vec, None)?;
 
     let client = connect_client(config).await?;
+    let sibling_devices =
+        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    let _event_ids = runtime.send_receipt(recipient_pk, receipt_type, message_ids_vec, None)?;
+    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
     let _published_events =
-        flush_session_manager_message_events(&manager_rx, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, &manager, &owner_pubkey_hex)?;
+        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     output.success(
         "receipt",
@@ -626,16 +716,18 @@ pub async fn typing(
     let recipient_pk = nostr::PublicKey::from_hex(&chat.their_pubkey)
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
-    let (manager, manager_rx, signing_keys, owner_pubkey_hex) =
-        build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
-
-    let _event_ids = manager.send_typing(recipient_pk, None)?;
+    let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    let manager = runtime.session_manager();
+    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
+    let sibling_devices =
+        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    let _event_ids = runtime.send_typing(recipient_pk, None)?;
+    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
     let published_events =
-        flush_session_manager_message_events(&manager_rx, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, &manager, &owner_pubkey_hex)?;
+        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     output.success(
         "typing",

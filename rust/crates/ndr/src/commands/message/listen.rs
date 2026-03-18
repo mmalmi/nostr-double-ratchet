@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
-    FileStorageAdapter, OneToManyChannel, Session, SessionManager, SessionManagerEvent,
+    FileStorageAdapter, NdrRuntime, OneToManyChannel, Session, SessionManager,
+    SessionManagerEvent,
     StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND,
     RECEIPT_KIND, TYPING_KIND,
 };
@@ -36,8 +37,7 @@ fn build_session_manager(
     config: &Config,
     storage: &Storage,
 ) -> Result<(
-    SessionManager,
-    crossbeam_channel::Receiver<SessionManagerEvent>,
+    NdrRuntime,
     String,
     nostr::PublicKey,
     String,
@@ -53,21 +53,18 @@ fn build_session_manager(
         FileStorageAdapter::new(storage.data_dir().join("session_manager"))?,
     );
 
-    let (sm_tx, sm_rx) = crossbeam_channel::unbounded();
-    let manager = SessionManager::new(
+    let runtime = NdrRuntime::new(
         our_pubkey,
         our_private_key,
         our_pubkey_hex.clone(),
         owner_pubkey,
-        sm_tx,
         Some(session_manager_store),
         None,
     );
-    manager.init()?;
+    runtime.init()?;
 
     Ok((
-        manager,
-        sm_rx,
+        runtime,
         our_pubkey_hex,
         our_pubkey,
         owner_pubkey_hex,
@@ -263,7 +260,7 @@ async fn refresh_pending_invite_response_app_keys(
 
 async fn backfill_recent_pairwise_session_messages(
     session_manager: &SessionManager,
-    manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     relays: &[String],
     pubkeys: &std::collections::HashSet<String>,
@@ -314,8 +311,7 @@ async fn backfill_recent_pairwise_session_messages(
 
         let session_manager_result = process_session_manager_event(
             &event,
-            session_manager,
-            manager_rx,
+            runtime,
             client,
             config,
             storage,
@@ -348,7 +344,7 @@ async fn backfill_recent_pairwise_session_messages(
         pending_events,
         pending_order,
         session_manager,
-        manager_rx,
+        runtime,
         client,
         config,
         storage,
@@ -447,8 +443,7 @@ fn decrypted_content_is_group_routed(content_json: &str) -> bool {
 
 async fn process_session_manager_event(
     event: &nostr::Event,
-    session_manager: &SessionManager,
-    manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
     storage: &Storage,
@@ -457,11 +452,11 @@ async fn process_session_manager_event(
 ) -> Result<SessionManagerProcessingResult> {
     let current_event_id = event.id.to_hex();
     let current_timestamp = event.created_at.as_u64();
+    let session_manager = runtime.session_manager();
 
     session_manager.process_received_event(event.clone());
     let decrypted_events =
-        flush_session_manager_events(manager_rx, client, config, subscribed_manager_filters)
-            .await?;
+        flush_session_manager_events(runtime, client, config, subscribed_manager_filters).await?;
     let session_group_decrypts: Vec<SessionGroupDecrypt> = decrypted_events
         .iter()
         .filter_map(|decrypted| {
@@ -549,7 +544,7 @@ async fn retry_pending_session_manager_message_events(
     pending_events: &mut std::collections::HashMap<String, nostr::Event>,
     pending_order: &mut std::collections::VecDeque<String>,
     session_manager: &SessionManager,
-    manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
     storage: &Storage,
@@ -572,8 +567,7 @@ async fn retry_pending_session_manager_message_events(
 
         let result = process_session_manager_event(
             &event,
-            session_manager,
-            manager_rx,
+            runtime,
             client,
             config,
             storage,
@@ -767,14 +761,14 @@ pub(super) fn apply_session_manager_one_to_one_decrypted(
 }
 
 async fn flush_session_manager_events(
-    manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
     subscribed_manager_filters: &mut std::collections::HashSet<String>,
 ) -> Result<Vec<SessionManagerDecrypted>> {
     let mut decrypted = Vec::new();
 
-    while let Ok(event) = manager_rx.try_recv() {
+    for event in runtime.drain_events() {
         match event {
             SessionManagerEvent::Publish(unsigned) => {
                 let sk = nostr::SecretKey::from_slice(&config.private_key_bytes()?)?;
@@ -845,13 +839,13 @@ pub async fn listen(
     let mut config = config.clone();
     let chat_id_owned = chat_id.map(|s| s.to_string());
     let (
-        session_manager,
-        session_manager_rx,
+        runtime,
         my_pubkey,
         my_pubkey_key,
         owner_pubkey_hex,
         owner_pubkey,
     ) = build_session_manager(&config, storage)?;
+    let session_manager = runtime.session_manager();
     // Clean up stale discovery queue entries (older than 24 hours).
     let _ = session_manager.cleanup_discovery_queue(24 * 60 * 60 * 1000);
 
@@ -1170,7 +1164,7 @@ pub async fn listen(
         refresh_pending_invite_response_app_keys(&session_manager, &client, &relays).await?;
         last_peer_app_keys_refresh = Instant::now();
         let _ = flush_session_manager_events(
-            &session_manager_rx,
+            &runtime,
             &client,
             &config,
             &mut subscribed_manager_filters,
@@ -1181,7 +1175,7 @@ pub async fn listen(
             &mut pending_session_manager_message_events,
             &mut pending_session_manager_message_event_order,
             &session_manager,
-            &session_manager_rx,
+            &runtime,
             &client,
             &config,
             storage,
@@ -1192,7 +1186,7 @@ pub async fn listen(
         .await?;
         backfill_recent_pairwise_session_messages(
             &session_manager,
-            &session_manager_rx,
+            &runtime,
             &client,
             &relays,
             &subscribed_pubkeys,
@@ -1260,7 +1254,7 @@ pub async fn listen(
             refresh_pending_invite_response_app_keys(&session_manager, &client, &relays).await?;
             last_peer_app_keys_refresh = Instant::now();
             let _ = flush_session_manager_events(
-                &session_manager_rx,
+                &runtime,
                 &client,
                 &config,
                 &mut subscribed_manager_filters,
@@ -1270,7 +1264,7 @@ pub async fn listen(
                 &mut pending_session_manager_message_events,
                 &mut pending_session_manager_message_event_order,
                 &session_manager,
-                &session_manager_rx,
+                &runtime,
                 &client,
                 &config,
                 storage,
@@ -1281,7 +1275,7 @@ pub async fn listen(
             .await?;
             backfill_recent_pairwise_session_messages(
                 &session_manager,
-                &session_manager_rx,
+                &runtime,
                 &client,
                 &relays,
                 &subscribed_pubkeys,
@@ -1328,7 +1322,7 @@ pub async fn listen(
                     last_peer_app_keys_refresh = Instant::now();
                 }
                 let _ = flush_session_manager_events(
-                    &session_manager_rx,
+                    &runtime,
                     &client,
                     &config,
                     &mut subscribed_manager_filters,
@@ -1338,7 +1332,7 @@ pub async fn listen(
                     &mut pending_session_manager_message_events,
                     &mut pending_session_manager_message_event_order,
                     &session_manager,
-                    &session_manager_rx,
+                    &runtime,
                     &client,
                     &config,
                     storage,
@@ -1381,7 +1375,7 @@ pub async fn listen(
                 subscribe_filters_best_effort(&client, &relays, filters.clone()).await?;
                 backfill_recent_pairwise_session_messages(
                     &session_manager,
-                    &session_manager_rx,
+                    &runtime,
                     &client,
                     &relays,
                     &subscribed_pubkeys,
@@ -1427,8 +1421,7 @@ pub async fn listen(
             }
             let session_manager_result = process_session_manager_event(
                 &event,
-                &session_manager,
-                &session_manager_rx,
+                &runtime,
                 &client,
                 &config,
                 storage,
@@ -1440,7 +1433,7 @@ pub async fn listen(
                 refresh_pending_invite_response_app_keys(&session_manager, &client, &relays)
                     .await?;
                 let _ = flush_session_manager_events(
-                    &session_manager_rx,
+                    &runtime,
                     &client,
                     &config,
                     &mut subscribed_manager_filters,
@@ -1451,7 +1444,7 @@ pub async fn listen(
                     &mut pending_session_manager_message_events,
                     &mut pending_session_manager_message_event_order,
                     &session_manager,
-                    &session_manager_rx,
+                    &runtime,
                     &client,
                     &config,
                     storage,
@@ -1631,7 +1624,7 @@ pub async fn listen(
                             )?;
                             session_manager.setup_user(their_pubkey);
                             let _ = flush_session_manager_events(
-                                &session_manager_rx,
+                                &runtime,
                                 &client,
                                 &config,
                                 &mut subscribed_manager_filters,
@@ -1646,7 +1639,7 @@ pub async fn listen(
                                 &mut pending_session_manager_message_events,
                                 &mut pending_session_manager_message_event_order,
                                 &session_manager,
-                                &session_manager_rx,
+                                &runtime,
                                 &client,
                                 &config,
                                 storage,
