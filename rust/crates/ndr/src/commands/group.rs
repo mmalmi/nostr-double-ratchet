@@ -375,7 +375,7 @@ fn queue_pairwise_session_events_for_recipient(
         )?;
         let event_ids = queue
             .session_manager
-            .send_event_recipient_only(recipient_owner, rumor.clone())
+            .send_event(recipient_owner, rumor.clone())
             .unwrap_or_default();
         let drained = drain_session_manager_message_events(queue.session_manager_rx);
         sync_member_chats_from_session_manager(

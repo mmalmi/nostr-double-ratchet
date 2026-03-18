@@ -3,6 +3,7 @@
 
 mod common;
 
+use nostr_double_ratchet::StorageAdapter;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -326,6 +327,75 @@ async fn wait_for_chat_with_pubkey(
                 chat.get("their_pubkey").and_then(|v| v.as_str()) == Some(target_pubkey)
             }) {
                 return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+async fn wait_for_known_peer_device_count(
+    data_dir: &Path,
+    owner_pubkey: &str,
+    min_count: usize,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let store =
+            match nostr_double_ratchet::FileStorageAdapter::new(data_dir.join("session_manager")) {
+                Ok(store) => store,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+            };
+        let key = format!("user/{}", owner_pubkey);
+        if let Ok(Some(data)) = store.get(&key) {
+            if let Ok(record) =
+                serde_json::from_str::<nostr_double_ratchet::StoredUserRecord>(&data)
+            {
+                if record.known_device_identities.len() >= min_count
+                    || record.devices.len() >= min_count
+                {
+                    return true;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+async fn wait_for_active_peer_device_sessions(
+    data_dir: &Path,
+    owner_pubkey: &str,
+    min_count: usize,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let store =
+            match nostr_double_ratchet::FileStorageAdapter::new(data_dir.join("session_manager")) {
+                Ok(store) => store,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+            };
+        let key = format!("user/{}", owner_pubkey);
+        if let Ok(Some(data)) = store.get(&key) {
+            if let Ok(record) =
+                serde_json::from_str::<nostr_double_ratchet::StoredUserRecord>(&data)
+            {
+                let active = record
+                    .devices
+                    .iter()
+                    .filter(|device| device.active_session.is_some())
+                    .count();
+                if active >= min_count {
+                    return true;
+                }
             }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -735,6 +805,383 @@ async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror()
 }
 
 #[tokio::test]
+async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
+    let _guard = e2e_test_lock();
+    let mut relay = common::WsRelay::new();
+    let addr = relay.start().await.expect("Failed to start relay");
+    let relay_url = format!("ws://{}", addr);
+    println!("Relay started at: {}", relay_url);
+
+    struct UserDevices {
+        name: &'static str,
+        owner_pubkey: String,
+        primary_dir: TempDir,
+        secondary_dir: TempDir,
+    }
+
+    let specs = [
+        (
+            "alice",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+        (
+            "bob",
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        ),
+        (
+            "carol",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+    ];
+
+    let mut users: Vec<UserDevices> = Vec::new();
+    let mut primary_listeners: Vec<Listener> = Vec::new();
+    let mut secondary_listeners: Vec<Listener> = Vec::new();
+
+    let result = async {
+        // Link a secondary device for each owner and keep it listening.
+        for (name, primary_secret) in specs {
+            let primary_dir = setup_ndr_dir(&relay_url);
+            let secondary_dir = setup_ndr_dir(&relay_url);
+
+            let primary_login = run_ndr(primary_dir.path(), &["login", primary_secret]).await;
+            let owner_pubkey = primary_login["data"]["pubkey"]
+                .as_str()
+                .expect("owner pubkey")
+                .to_string();
+
+            let link = run_ndr(secondary_dir.path(), &["link", "create"]).await;
+            let link_url = link["data"]["url"]
+                .as_str()
+                .expect("link invite url")
+                .to_string();
+
+            let (secondary_child, mut secondary_stdout) =
+                start_ndr_listen(secondary_dir.path()).await;
+            assert!(
+                read_until_command(&mut secondary_stdout, "listen", Duration::from_secs(5)).await,
+                "{} secondary should print listen message",
+                name
+            );
+
+            let _ = run_ndr(primary_dir.path(), &["link", "accept", &link_url]).await;
+
+            let linked = read_until_event(
+                &mut secondary_stdout,
+                "link_accepted",
+                Duration::from_secs(15),
+            )
+            .await
+            .expect("secondary should receive link_accepted");
+            assert_eq!(
+                linked["owner_pubkey"].as_str(),
+                Some(owner_pubkey.as_str()),
+                "{} secondary should link to its owner",
+                name
+            );
+
+            users.push(UserDevices {
+                name,
+                owner_pubkey,
+                primary_dir,
+                secondary_dir,
+            });
+            secondary_listeners.push(Listener {
+                child: secondary_child,
+                stdout: secondary_stdout,
+            });
+        }
+
+        // Start listeners for all primary devices.
+        for user in &users {
+            let (primary_child, mut primary_stdout) =
+                start_ndr_listen(user.primary_dir.path()).await;
+            assert!(
+                read_until_command(&mut primary_stdout, "listen", Duration::from_secs(5)).await,
+                "{} primary should print listen message",
+                user.name
+            );
+            primary_listeners.push(Listener {
+                child: primary_child,
+                stdout: primary_stdout,
+            });
+        }
+
+        // Establish full mesh of owner-level chats across primaries.
+        for i in 0..users.len() {
+            for j in (i + 1)..users.len() {
+                let inviter = &users[i];
+                let invitee = &users[j];
+                let label = format!("group-mesh-{}-{}", inviter.name, invitee.name);
+                let invite = run_ndr(
+                    inviter.primary_dir.path(),
+                    &["invite", "create", "-l", &label],
+                )
+                .await;
+                let invite_url = invite["data"]["url"]
+                    .as_str()
+                    .expect("invite url")
+                    .to_string();
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let _ = run_ndr(invitee.primary_dir.path(), &["chat", "join", &invite_url]).await;
+
+                let created = read_until_event(
+                    &mut primary_listeners[i].stdout,
+                    "session_created",
+                    Duration::from_secs(10),
+                )
+                .await
+                .expect("inviter should receive session_created");
+                assert_eq!(
+                    created["their_pubkey"].as_str(),
+                    Some(invitee.owner_pubkey.as_str())
+                );
+
+                let kickoff = format!("kickoff-{}-{}", invitee.name, inviter.name);
+                let _ = run_ndr(
+                    invitee.primary_dir.path(),
+                    &["send", &inviter.owner_pubkey, &kickoff],
+                )
+                .await;
+                let kickoff_event = read_until_event_with_content(
+                    &mut primary_listeners[i].stdout,
+                    "message",
+                    Some(&kickoff),
+                    Duration::from_secs(10),
+                )
+                .await
+                .expect("inviter should receive kickoff");
+                assert_eq!(kickoff_event["content"].as_str(), Some(kickoff.as_str()));
+            }
+        }
+
+        // Linked secondaries should discover chats with every peer owner.
+        for i in 0..users.len() {
+            for j in 0..users.len() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    wait_for_chat_with_pubkey(
+                        users[i].secondary_dir.path(),
+                        &users[j].owner_pubkey,
+                        Duration::from_secs(20),
+                    )
+                    .await,
+                    "{} secondary should discover chat with {} owner",
+                    users[i].name,
+                    users[j].name
+                );
+            }
+        }
+
+        for i in 0..users.len() {
+            for j in 0..users.len() {
+                if i == j {
+                    continue;
+                }
+                let kickoff = format!("secondary-kickoff-{}-{}", users[i].name, users[j].name);
+                let _ = run_ndr(
+                    users[i].secondary_dir.path(),
+                    &["send", &users[j].owner_pubkey, &kickoff],
+                )
+                .await;
+                let kickoff_event = read_until_event_with_content(
+                    &mut primary_listeners[j].stdout,
+                    "message",
+                    Some(&kickoff),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} primary should receive kickoff from {} secondary",
+                        users[j].name, users[i].name
+                    )
+                });
+                assert_eq!(kickoff_event["content"].as_str(), Some(kickoff.as_str()));
+            }
+        }
+
+        for i in 0..users.len() {
+            for j in 0..users.len() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    wait_for_known_peer_device_count(
+                        users[i].primary_dir.path(),
+                        &users[j].owner_pubkey,
+                        2,
+                        Duration::from_secs(20),
+                    )
+                    .await,
+                    "{} primary should learn both devices for {}",
+                    users[i].name,
+                    users[j].name
+                );
+            }
+        }
+
+        for i in 0..users.len() {
+            for j in 0..users.len() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    wait_for_active_peer_device_sessions(
+                        users[i].primary_dir.path(),
+                        &users[j].owner_pubkey,
+                        2,
+                        Duration::from_secs(20),
+                    )
+                    .await,
+                    "{} primary should establish sessions to both devices for {}",
+                    users[i].name,
+                    users[j].name
+                );
+            }
+        }
+
+        // Alice primary creates a group for the three owners.
+        let members_csv = format!("{},{}", users[1].owner_pubkey, users[2].owner_pubkey);
+        let group_create = run_ndr(
+            users[0].primary_dir.path(),
+            &[
+                "group",
+                "create",
+                "--name",
+                "Three Users Two Clients",
+                "--members",
+                &members_csv,
+            ],
+        )
+        .await;
+        let group_id = group_create["data"]["id"]
+            .as_str()
+            .expect("group id")
+            .to_string();
+
+        // Group metadata should fan out to every other client, including Alice's linked device.
+        for (label, is_secondary, idx) in [
+            ("alice secondary", true, 0usize),
+            ("bob primary", false, 1usize),
+            ("bob secondary", true, 1usize),
+            ("carol primary", false, 2usize),
+            ("carol secondary", true, 2usize),
+        ] {
+            let event = if is_secondary {
+                read_until_event(
+                    &mut secondary_listeners[idx].stdout,
+                    "group_metadata",
+                    Duration::from_secs(20),
+                )
+                .await
+            } else {
+                read_until_event(
+                    &mut primary_listeners[idx].stdout,
+                    "group_metadata",
+                    Duration::from_secs(20),
+                )
+                .await
+            }
+            .unwrap_or_else(|| panic!("{label} should receive group_metadata"));
+
+            assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
+            assert_eq!(event["action"].as_str(), Some("created"));
+        }
+
+        // Everyone except Alice primary must accept explicitly; creator is already accepted.
+        for idx in 0..users.len() {
+            if idx != 0 {
+                let _ = run_ndr(
+                    users[idx].primary_dir.path(),
+                    &["group", "accept", &group_id],
+                )
+                .await;
+            }
+            let _ = run_ndr(
+                users[idx].secondary_dir.path(),
+                &["group", "accept", &group_id],
+            )
+            .await;
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // A message from each owner's primary should reach every other primary and every secondary.
+        for sender_idx in 0..users.len() {
+            let sender = &users[sender_idx];
+            let warmup = format!("group-warmup-from-{}", sender.name);
+            let _ = run_ndr(
+                sender.primary_dir.path(),
+                &["group", "send", &group_id, &warmup],
+            )
+            .await;
+
+            let msg = format!("group-msg-from-{}", sender.name);
+
+            for recipient_idx in 0..users.len() {
+                if recipient_idx == sender_idx {
+                    continue;
+                }
+                let event = send_group_message_until_received(
+                    sender.primary_dir.path(),
+                    &group_id,
+                    &msg,
+                    &mut primary_listeners[recipient_idx].stdout,
+                    3,
+                    Duration::from_secs(8),
+                )
+                .await
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} primary should receive '{}' from {}",
+                        users[recipient_idx].name, msg, sender.name
+                    )
+                });
+                assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
+                assert_eq!(event["content"].as_str(), Some(msg.as_str()));
+            }
+
+            for recipient_idx in 0..users.len() {
+                let event = send_group_message_until_received(
+                    sender.primary_dir.path(),
+                    &group_id,
+                    &msg,
+                    &mut secondary_listeners[recipient_idx].stdout,
+                    3,
+                    Duration::from_secs(8),
+                )
+                .await
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} secondary should receive '{}' from {}",
+                        users[recipient_idx].name, msg, sender.name
+                    )
+                });
+                assert_eq!(event["group_id"].as_str(), Some(group_id.as_str()));
+                assert_eq!(event["content"].as_str(), Some(msg.as_str()));
+            }
+        }
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    for listener in primary_listeners {
+        stop_child(listener.child).await;
+    }
+    for listener in secondary_listeners {
+        stop_child(listener.child).await;
+    }
+    relay.stop().await;
+
+    if let Err(err) = result {
+        panic!("{:?}", err);
+    }
+}
+
+#[tokio::test]
 async fn test_group_sender_key_rotation() {
     let _guard = e2e_test_lock();
     let mut relay = common::WsRelay::new();
@@ -1068,12 +1515,12 @@ async fn test_group_chat_six_participants_everyone_receives() {
         for sender_idx in 0..participants.len() {
             let sender = &participants[sender_idx];
             let msg = format!("group-msg-{}", sender.name);
-            let _ = run_ndr(sender.dir.path(), &["group", "send", &group_id, &msg]).await;
 
             for (recipient_idx, listener) in listeners.iter_mut().enumerate() {
                 if recipient_idx == sender_idx {
                     continue;
                 }
+                let _ = run_ndr(sender.dir.path(), &["group", "send", &group_id, &msg]).await;
                 let event = read_until_event_with_content(
                     &mut listener.stdout,
                     "group_message",
