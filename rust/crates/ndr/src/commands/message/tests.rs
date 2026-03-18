@@ -4,7 +4,7 @@ use crate::output::Output;
 use crate::storage::Storage;
 use crate::storage::StoredChat;
 use nostr::JsonUtil;
-use nostr_double_ratchet::ManagedInvite;
+use nostr_double_ratchet::{emit_session_manager_output, ManagedInvite};
 use std::sync::Once;
 use tempfile::TempDir;
 
@@ -240,11 +240,10 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
             sender_keys.secret_key().to_secret_bytes(),
             our_device_id.clone(),
             sender_keys.public_key(),
-            sm_tx,
             Some(session_manager_store),
             None,
         );
-        manager.init().unwrap();
+        emit_session_manager_output(&sm_tx, manager.init().unwrap()).unwrap();
         manager
             .import_session_state(
                 recipient_owner,
@@ -273,7 +272,8 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
             .get_event(recipient_owner)
             .sign_with_keys(&recipient_owner_keys)
             .unwrap();
-        manager.process_received_event(app_keys_event);
+        emit_session_manager_output(&sm_tx, manager.process_received_event(app_keys_event))
+            .unwrap();
     }
 
     send(
@@ -302,11 +302,10 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
         sender_keys.secret_key().to_secret_bytes(),
         our_device_id,
         sender_keys.public_key(),
-        sm_tx,
         Some(session_manager_store),
         None,
     );
-    manager.init().unwrap();
+    emit_session_manager_output(&sm_tx, manager.init().unwrap()).unwrap();
 
     let mut recipient_sends: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();

@@ -1,12 +1,41 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use nostr::{JsonUtil, Keys, PublicKey, UnsignedEvent};
 use nostr_double_ratchet::{
-    AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage, Invite, ManagedInvite, Result,
-    SendOptions, Session, SessionManager, SessionManagerEvent, StorageAdapter, MESSAGE_EVENT_KIND,
+    emit_session_manager_output, AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage,
+    Invite, ManagedInvite, Result, SendOptions, Session, SessionManager, SessionManagerEvent,
+    StorageAdapter, MESSAGE_EVENT_KIND,
 };
+
+fn emit<T>(tx: &Sender<SessionManagerEvent>, output: nostr_double_ratchet::ManagerOutput<T>) -> T {
+    emit_session_manager_output(tx, output).unwrap()
+}
+
+fn new_manager(
+    our_pubkey: PublicKey,
+    identity_key: [u8; 32],
+    device_id: String,
+    owner_pubkey: PublicKey,
+    storage: Option<Arc<dyn StorageAdapter>>,
+    invite: Option<Invite>,
+) -> (
+    SessionManager,
+    Sender<SessionManagerEvent>,
+    Receiver<SessionManagerEvent>,
+) {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        our_pubkey,
+        identity_key,
+        device_id,
+        owner_pubkey,
+        storage,
+        invite,
+    );
+    (manager, tx, rx)
+}
 
 fn load_stored_user_record(
     storage_root: &std::path::Path,
@@ -200,26 +229,24 @@ fn test_accept_invite_routes_session_under_verified_claimed_owner() -> Result<()
     let mut invite = Invite::create_new(bob_device, Some(bob_device_id.clone()), None)?;
     invite.owner_public_key = Some(bob_owner);
 
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let manager = SessionManager::new(
+    let (manager, tx, rx) = new_manager(
         alice_keys.public_key(),
         alice_keys.secret_key().to_secret_bytes(),
         alice_keys.public_key().to_hex(),
         alice_owner,
-        tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    manager.init()?;
+    emit(&tx, manager.init()?);
     drain_events(&rx);
 
     let bob_app_keys_event = AppKeys::new(vec![DeviceEntry::new(bob_device, 1)])
         .get_event(bob_owner)
         .sign_with_keys(&bob_owner_keys)?;
-    manager.process_received_event(bob_app_keys_event);
+    emit(&tx, manager.process_received_event(bob_app_keys_event));
     drain_events(&rx);
 
-    let accepted = manager.accept_invite(&invite, Some(bob_owner))?;
+    let accepted = emit(&tx, manager.accept_invite(&invite, Some(bob_owner))?);
     assert_eq!(accepted.owner_pubkey, bob_owner);
     assert_eq!(accepted.device_id, bob_device_id);
 
@@ -261,34 +288,29 @@ fn test_replayed_invite_is_ignored_once_accept_bootstrap_uses_session() -> Resul
 
     let invite = Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None)?;
 
-    let (alice_tx, alice_rx) = crossbeam_channel::unbounded();
-    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
-
-    let alice_mgr = SessionManager::new(
+    let (alice_mgr, alice_tx, alice_rx) = new_manager(
         alice_pubkey,
         alice_keys.secret_key().to_secret_bytes(),
         alice_device_id.clone(),
         alice_pubkey,
-        alice_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    let bob_mgr = SessionManager::new(
+    let (bob_mgr, bob_tx, bob_rx) = new_manager(
         bob_pubkey,
         bob_keys.secret_key().to_secret_bytes(),
         bob_device_id.clone(),
         bob_pubkey,
-        bob_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
 
-    alice_mgr.init()?;
-    bob_mgr.init()?;
+    emit(&alice_tx, alice_mgr.init()?);
+    emit(&bob_tx, bob_mgr.init()?);
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
-    let first_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    let first_accept = emit(&bob_tx, bob_mgr.accept_invite(&invite, Some(alice_pubkey))?);
     assert!(first_accept.created_new_session);
     let (first_response, _) = recv_invite_response_and_message_event(&bob_rx);
     let (peer_pubkey, remote_device_id) = import_session_from_response(
@@ -302,16 +324,19 @@ fn test_replayed_invite_is_ignored_once_accept_bootstrap_uses_session() -> Resul
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
-    let refreshed_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    let refreshed_accept = emit(&bob_tx, bob_mgr.accept_invite(&invite, Some(alice_pubkey))?);
     assert!(
         !refreshed_accept.created_new_session,
         "accept_invite bootstrap should consume the send-only session so replayed invites are ignored",
     );
     drain_events(&bob_rx);
 
-    bob_mgr.send_text(alice_pubkey, "fresh response can decrypt".to_string(), None)?;
+    emit(
+        &bob_tx,
+        bob_mgr.send_text(alice_pubkey, "fresh response can decrypt".to_string(), None)?,
+    );
     let sent = recv_message_events(&bob_rx, 1);
-    alice_mgr.process_received_event(sent[0].clone());
+    emit(&alice_tx, alice_mgr.process_received_event(sent[0].clone()));
 
     let decrypted =
         recv_decrypted_containing(&alice_rx, "\"content\":\"fresh response can decrypt\"");
@@ -332,34 +357,29 @@ fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> 
 
     let invite = Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None)?;
 
-    let (alice_tx, alice_rx) = crossbeam_channel::unbounded();
-    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
-
-    let alice_mgr = SessionManager::new(
+    let (alice_mgr, alice_tx, alice_rx) = new_manager(
         alice_pubkey,
         alice_keys.secret_key().to_secret_bytes(),
         alice_device_id.clone(),
         alice_pubkey,
-        alice_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    let bob_mgr = SessionManager::new(
+    let (bob_mgr, bob_tx, bob_rx) = new_manager(
         bob_pubkey,
         bob_keys.secret_key().to_secret_bytes(),
         bob_device_id.clone(),
         bob_pubkey,
-        bob_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
 
-    alice_mgr.init()?;
-    bob_mgr.init()?;
+    emit(&alice_tx, alice_mgr.init()?);
+    emit(&bob_tx, bob_mgr.init()?);
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
-    let first_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    let first_accept = emit(&bob_tx, bob_mgr.accept_invite(&invite, Some(alice_pubkey))?);
     assert!(first_accept.created_new_session);
     let first_response =
         recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
@@ -374,32 +394,38 @@ fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> 
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
-    bob_mgr.send_text(
-        alice_pubkey,
-        "first send establishes path".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_tx,
+        bob_mgr.send_text(
+            alice_pubkey,
+            "first send establishes path".to_string(),
+            None,
+        )?,
+    );
     let first_message = recv_message_events(&bob_rx, 1);
-    alice_mgr.process_received_event(first_message[0].clone());
+    emit(&alice_tx, alice_mgr.process_received_event(first_message[0].clone()));
     let decrypted =
         recv_decrypted_containing(&alice_rx, "\"content\":\"first send establishes path\"");
     assert!(decrypted.contains("\"content\":\"first send establishes path\""));
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
-    let replayed_accept = bob_mgr.accept_invite(&invite, Some(alice_pubkey))?;
+    let replayed_accept = emit(&bob_tx, bob_mgr.accept_invite(&invite, Some(alice_pubkey))?);
     assert!(
         !replayed_accept.created_new_session,
         "used send-only session should ignore replayed invite refreshes",
     );
 
-    bob_mgr.send_text(
-        alice_pubkey,
-        "replayed invite did not churn path".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_tx,
+        bob_mgr.send_text(
+            alice_pubkey,
+            "replayed invite did not churn path".to_string(),
+            None,
+        )?,
+    );
     let second_message = recv_message_events(&bob_rx, 1);
-    alice_mgr.process_received_event(second_message[0].clone());
+    emit(&alice_tx, alice_mgr.process_received_event(second_message[0].clone()));
     let decrypted = recv_decrypted_containing(
         &alice_rx,
         "\"content\":\"replayed invite did not churn path\"",
@@ -423,34 +449,29 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None)?;
     let bob_public_invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None)?;
 
-    let (alice_tx, alice_rx) = crossbeam_channel::unbounded();
-    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
-
-    let alice_mgr = SessionManager::new(
+    let (alice_mgr, alice_tx, alice_rx) = new_manager(
         alice_pubkey,
         alice_keys.secret_key().to_secret_bytes(),
         alice_device_id.clone(),
         alice_pubkey,
-        alice_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    let bob_mgr = SessionManager::new(
+    let (bob_mgr, bob_tx, bob_rx) = new_manager(
         bob_pubkey,
         bob_keys.secret_key().to_secret_bytes(),
         bob_device_id.clone(),
         bob_pubkey,
-        bob_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
 
-    alice_mgr.init()?;
-    bob_mgr.init()?;
+    emit(&alice_tx, alice_mgr.init()?);
+    emit(&bob_tx, bob_mgr.init()?);
     drain_events(&alice_rx);
     drain_events(&bob_rx);
 
-    let accepted = bob_mgr.accept_invite(&alice_public_invite, Some(alice_pubkey))?;
+    let accepted = emit(&bob_tx, bob_mgr.accept_invite(&alice_public_invite, Some(alice_pubkey))?);
     assert!(accepted.created_new_session);
     let alice_public_response =
         recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
@@ -474,7 +495,10 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         "response import alone should not already be send-capable",
     );
 
-    alice_mgr.process_received_event(bob_public_invite.get_event()?.sign_with_keys(&bob_keys)?);
+    emit(
+        &alice_tx,
+        alice_mgr.process_received_event(bob_public_invite.get_event()?.sign_with_keys(&bob_keys)?),
+    );
     let bob_public_response =
         recv_signed_event_of_kind(&alice_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (alice_peer_pubkey, alice_remote_device_id) = import_session_from_response(
@@ -498,13 +522,16 @@ fn test_processing_peer_public_invite_upgrades_response_import_to_send_capable()
         "processing the peer public invite should upgrade the device to a send-capable session",
     );
 
-    alice_mgr.send_text(
-        bob_pubkey,
-        "public invite refresh makes reply sendable".to_string(),
-        None,
-    )?;
+    emit(
+        &alice_tx,
+        alice_mgr.send_text(
+            bob_pubkey,
+            "public invite refresh makes reply sendable".to_string(),
+            None,
+        )?,
+    );
     let sent = recv_message_events(&alice_rx, 1);
-    bob_mgr.process_received_event(sent[0].clone());
+    emit(&bob_tx, bob_mgr.process_received_event(sent[0].clone()));
 
     let decrypted = recv_decrypted_containing(
         &bob_rx,
@@ -529,31 +556,26 @@ fn test_multi_device_self_fanout() -> Result<()> {
     let invite1 = Invite::create_new(device1_keys.public_key(), Some(device1_id.clone()), None)?;
     let invite2 = Invite::create_new(device2_keys.public_key(), Some(device2_id.clone()), None)?;
 
-    let (tx1, rx1) = crossbeam_channel::unbounded();
-    let (tx2, rx2) = crossbeam_channel::unbounded();
-
-    let manager1 = SessionManager::new(
+    let (manager1, tx1, rx1) = new_manager(
         device1_keys.public_key(),
         device1_keys.secret_key().to_secret_bytes(),
         device1_id.clone(),
         owner_pubkey,
-        tx1,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         Some(invite1.clone()),
     );
 
-    let manager2 = SessionManager::new(
+    let (manager2, tx2, rx2) = new_manager(
         device2_keys.public_key(),
         device2_keys.secret_key().to_secret_bytes(),
         device2_id.clone(),
         owner_pubkey,
-        tx2,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         Some(invite2.clone()),
     );
 
-    manager1.init()?;
-    manager2.init()?;
+    emit(&tx1, manager1.init()?);
+    emit(&tx2, manager2.init()?);
     drain_events(&rx1);
     drain_events(&rx2);
 
@@ -567,12 +589,12 @@ fn test_multi_device_self_fanout() -> Result<()> {
         .get_event(owner_pubkey)
         .sign_with_keys(&owner_keys)?;
 
-    manager1.process_received_event(app_keys_event.clone());
-    manager2.process_received_event(app_keys_event);
+    emit(&tx1, manager1.process_received_event(app_keys_event.clone()));
+    emit(&tx2, manager2.process_received_event(app_keys_event));
 
     // Device2 accepts device1 invite
     let invite_event = invite1.get_event()?.sign_with_keys(&device1_keys)?;
-    manager2.process_received_event(invite_event);
+    emit(&tx2, manager2.process_received_event(invite_event));
 
     // Deliver invite response back to device1
     let response_event = loop {
@@ -581,20 +603,20 @@ fn test_multi_device_self_fanout() -> Result<()> {
             break signed;
         }
     };
-    manager1.process_received_event(response_event);
+    emit(&tx1, manager1.process_received_event(response_event));
 
     // Device2 sends first to establish ratchet for device1
-    manager2.send_text(owner_pubkey, "ping".to_string(), None)?;
+    emit(&tx2, manager2.send_text(owner_pubkey, "ping".to_string(), None)?);
     let ping_event = loop {
         let signed = recv_signed_event(&rx2);
         if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
             break signed;
         }
     };
-    manager1.process_received_event(ping_event);
+    emit(&tx1, manager1.process_received_event(ping_event));
 
     // Send a message to self (owner) from device1; should fan out to device2
-    manager1.send_text(owner_pubkey, "hello".to_string(), None)?;
+    emit(&tx1, manager1.send_text(owner_pubkey, "hello".to_string(), None)?);
 
     // Deliver encrypted message to device2
     let message_event = loop {
@@ -603,7 +625,7 @@ fn test_multi_device_self_fanout() -> Result<()> {
             break signed;
         }
     };
-    manager2.process_received_event(message_event);
+    emit(&tx2, manager2.process_received_event(message_event));
 
     // Expect decrypted message on device2
     let mut decrypted = None;
@@ -637,31 +659,26 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
     let invite1 = Invite::create_new(device1_keys.public_key(), Some(device1_id.clone()), None)?;
     let invite2 = Invite::create_new(device2_keys.public_key(), Some(device2_id.clone()), None)?;
 
-    let (tx1, rx1) = crossbeam_channel::unbounded();
-    let (tx2, rx2) = crossbeam_channel::unbounded();
-
-    let manager1 = SessionManager::new(
+    let (manager1, tx1, rx1) = new_manager(
         device1_keys.public_key(),
         device1_keys.secret_key().to_secret_bytes(),
         device1_id.clone(),
         owner_pubkey,
-        tx1,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         Some(invite1.clone()),
     );
 
-    let manager2 = SessionManager::new(
+    let (manager2, tx2, rx2) = new_manager(
         device2_keys.public_key(),
         device2_keys.secret_key().to_secret_bytes(),
         device2_id.clone(),
         owner_pubkey,
-        tx2,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         Some(invite2.clone()),
     );
 
-    manager1.init()?;
-    manager2.init()?;
+    emit(&tx1, manager1.init()?);
+    emit(&tx2, manager2.init()?);
     drain_events(&rx1);
     drain_events(&rx2);
 
@@ -675,12 +692,12 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
         .get_event(owner_pubkey)
         .sign_with_keys(&owner_keys)?;
 
-    manager1.process_received_event(app_keys_event.clone());
-    manager2.process_received_event(app_keys_event);
+    emit(&tx1, manager1.process_received_event(app_keys_event.clone()));
+    emit(&tx2, manager2.process_received_event(app_keys_event));
 
     // Device2 accepts device1 invite
     let invite_event = invite1.get_event()?.sign_with_keys(&device1_keys)?;
-    manager2.process_received_event(invite_event);
+    emit(&tx2, manager2.process_received_event(invite_event));
 
     // Deliver invite response back to device1
     let response_event = loop {
@@ -689,17 +706,17 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
             break signed;
         }
     };
-    manager1.process_received_event(response_event);
+    emit(&tx1, manager1.process_received_event(response_event));
 
     // Device2 sends first to establish ratchet for device1
-    manager2.send_text(owner_pubkey, "ping".to_string(), None)?;
+    emit(&tx2, manager2.send_text(owner_pubkey, "ping".to_string(), None)?);
     let ping_event = loop {
         let signed = recv_signed_event(&rx2);
         if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
             break signed;
         }
     };
-    manager1.process_received_event(ping_event);
+    emit(&tx1, manager1.process_received_event(ping_event));
 
     // Send a message to self (owner) from device1 with an expiration tag.
     let expires_at = 1_700_000_000u64;
@@ -710,7 +727,7 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
             ttl_seconds: None,
         }),
     )?;
-    manager1.send_text(owner_pubkey, "hello".to_string(), None)?;
+    emit(&tx1, manager1.send_text(owner_pubkey, "hello".to_string(), None)?);
 
     // Deliver encrypted message to device2
     let message_event = loop {
@@ -719,7 +736,7 @@ fn test_send_text_with_expiration_tag_propagates_to_receiver() -> Result<()> {
             break signed;
         }
     };
-    manager2.process_received_event(message_event);
+    emit(&tx2, manager2.process_received_event(message_event));
 
     // Expect decrypted message on device2
     let mut decrypted = None;
@@ -763,34 +780,29 @@ fn test_delayed_link_bootstrap_flushes_queued_self_sync_message() -> Result<()> 
 
     let link_invite = new_link_invite(linked_pubkey, linked_device_id.clone(), owner_pubkey)?;
 
-    let (owner_tx, owner_rx) = crossbeam_channel::unbounded();
-    let (linked_tx, linked_rx) = crossbeam_channel::unbounded();
-
-    let owner_mgr = SessionManager::new(
+    let (owner_mgr, owner_tx, owner_rx) = new_manager(
         owner_pubkey,
         owner_keys.secret_key().to_secret_bytes(),
         owner_device_id.clone(),
         owner_pubkey,
-        owner_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    let linked_mgr = SessionManager::new(
+    let (linked_mgr, linked_tx, linked_rx) = new_manager(
         linked_pubkey,
         linked_keys.secret_key().to_secret_bytes(),
         linked_device_id.clone(),
         owner_pubkey,
-        linked_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
 
-    owner_mgr.init()?;
-    linked_mgr.init()?;
+    emit(&owner_tx, owner_mgr.init()?);
+    emit(&linked_tx, linked_mgr.init()?);
     drain_events(&owner_rx);
     drain_events(&linked_rx);
 
-    let accepted = owner_mgr.accept_invite(&link_invite, Some(owner_pubkey))?;
+    let accepted = emit(&owner_tx, owner_mgr.accept_invite(&link_invite, Some(owner_pubkey))?);
     assert_eq!(accepted.owner_pubkey, owner_pubkey);
     let (link_response, link_bootstrap) = recv_invite_response_and_message_event(&owner_rx);
     let (linked_peer, linked_remote_device_id) = import_session_from_response(
@@ -804,17 +816,20 @@ fn test_delayed_link_bootstrap_flushes_queued_self_sync_message() -> Result<()> 
     drain_events(&owner_rx);
     drain_events(&linked_rx);
 
-    let queued = linked_mgr.send_text(owner_pubkey, "queued before bootstrap".to_string(), None)?;
+    let queued = emit(
+        &linked_tx,
+        linked_mgr.send_text(owner_pubkey, "queued before bootstrap".to_string(), None)?,
+    );
     assert!(
         queued.is_empty(),
         "message should stay queued until the first owner bootstrap arrives"
     );
 
-    linked_mgr.process_received_event(link_bootstrap);
+    emit(&linked_tx, linked_mgr.process_received_event(link_bootstrap));
 
     let flushed = recv_message_events(&linked_rx, 1);
     assert_eq!(flushed.len(), 1);
-    owner_mgr.process_received_event(flushed[0].clone());
+    emit(&owner_tx, owner_mgr.process_received_event(flushed[0].clone()));
 
     let decrypted = recv_decrypted_containing(&owner_rx, "\"content\":\"queued before bootstrap\"");
     assert!(decrypted.contains("\"content\":\"queued before bootstrap\""));
@@ -847,59 +862,55 @@ fn test_existing_peer_fans_out_to_newly_added_device_after_appkeys_and_invite() 
         None,
     )?;
 
-    let (alice_owner_tx, alice_owner_rx) = crossbeam_channel::unbounded();
-    let (alice_new_tx, alice_new_rx) = crossbeam_channel::unbounded();
-    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
-
-    let alice_owner_mgr = SessionManager::new(
+    let (alice_owner_mgr, alice_owner_tx, alice_owner_rx) = new_manager(
         alice_owner_pubkey,
         alice_owner_keys.secret_key().to_secret_bytes(),
         alice_owner_device_id.clone(),
         alice_owner_pubkey,
-        alice_owner_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         Some(owner_invite.clone()),
     );
-    let alice_new_mgr = SessionManager::new(
+    let (alice_new_mgr, alice_new_tx, alice_new_rx) = new_manager(
         alice_new_device_pubkey,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         alice_new_device_id.clone(),
         alice_owner_pubkey,
-        alice_new_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         Some(new_device_invite.clone()),
     );
-    let bob_mgr = SessionManager::new(
+    let (bob_mgr, bob_tx, bob_rx) = new_manager(
         bob_pubkey,
         bob_keys.secret_key().to_secret_bytes(),
         bob_device_id,
         bob_pubkey,
-        bob_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
 
-    alice_owner_mgr.init()?;
-    alice_new_mgr.init()?;
-    bob_mgr.init()?;
+    emit(&alice_owner_tx, alice_owner_mgr.init()?);
+    emit(&alice_new_tx, alice_new_mgr.init()?);
+    emit(&bob_tx, bob_mgr.init()?);
     drain_events(&alice_owner_rx);
     drain_events(&alice_new_rx);
     drain_events(&bob_rx);
 
     // Bob already has an existing session with Alice's original device.
-    let accepted = bob_mgr.accept_invite(&owner_invite, Some(alice_owner_pubkey))?;
+    let accepted = emit(&bob_tx, bob_mgr.accept_invite(&owner_invite, Some(alice_owner_pubkey))?);
     assert_eq!(accepted.owner_pubkey, alice_owner_pubkey);
     let owner_response =
         recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
-    alice_owner_mgr.process_received_event(owner_response);
+    emit(&alice_owner_tx, alice_owner_mgr.process_received_event(owner_response));
     drain_events(&bob_rx);
 
-    bob_mgr.send_text(alice_owner_pubkey, "seed existing chat".to_string(), None)?;
+    emit(
+        &bob_tx,
+        bob_mgr.send_text(alice_owner_pubkey, "seed existing chat".to_string(), None)?,
+    );
     let seed_message = recv_message_events(&bob_rx, 1)
         .into_iter()
         .next()
         .expect("expected seed message");
-    alice_owner_mgr.process_received_event(seed_message);
+    emit(&alice_owner_tx, alice_owner_mgr.process_received_event(seed_message));
 
     let initial_decrypted =
         recv_decrypted_containing(&alice_owner_rx, "\"content\":\"seed existing chat\"");
@@ -915,32 +926,38 @@ fn test_existing_peer_fans_out_to_newly_added_device_after_appkeys_and_invite() 
     let app_keys_event = app_keys
         .get_event(alice_owner_pubkey)
         .sign_with_keys(&alice_owner_keys)?;
-    bob_mgr.process_received_event(app_keys_event);
+    emit(&bob_tx, bob_mgr.process_received_event(app_keys_event));
     drain_events(&bob_rx);
 
     // Bob learns the new device invite and auto-accepts it.
     let new_device_invite_event = new_device_invite
         .get_event()?
         .sign_with_keys(&alice_new_device_keys)?;
-    bob_mgr.process_received_event(new_device_invite_event);
+    emit(&bob_tx, bob_mgr.process_received_event(new_device_invite_event));
     let new_device_response =
         recv_signed_event_of_kind(&bob_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
-    alice_new_mgr.process_received_event(new_device_response);
+    emit(&alice_new_tx, alice_new_mgr.process_received_event(new_device_response));
     drain_events(&alice_new_rx);
     drain_events(&bob_rx);
 
     // The next send to Alice should fan out to both devices.
-    bob_mgr.send_text(
-        alice_owner_pubkey,
-        "fanout to old and new device".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_tx,
+        bob_mgr.send_text(
+            alice_owner_pubkey,
+            "fanout to old and new device".to_string(),
+            None,
+        )?,
+    );
     let fanout_messages = recv_message_events(&bob_rx, 2);
     assert_eq!(fanout_messages.len(), 2);
 
     for event in &fanout_messages {
-        alice_owner_mgr.process_received_event(event.clone());
-        alice_new_mgr.process_received_event(event.clone());
+        emit(
+            &alice_owner_tx,
+            alice_owner_mgr.process_received_event(event.clone()),
+        );
+        emit(&alice_new_tx, alice_new_mgr.process_received_event(event.clone()));
     }
 
     let owner_decrypted = recv_decrypted_containing(
@@ -1009,59 +1026,52 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let bob_linked_storage =
         Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>;
 
-    let (alice_owner_tx, alice_owner_rx) = crossbeam_channel::unbounded();
-    let (alice_linked_tx, alice_linked_rx) = crossbeam_channel::unbounded();
-    let (bob_owner_tx, bob_owner_rx) = crossbeam_channel::unbounded();
-    let (bob_linked_tx, bob_linked_rx) = crossbeam_channel::unbounded();
-
-    let alice_owner_mgr = SessionManager::new(
+    let (alice_owner_mgr, alice_owner_tx, alice_owner_rx) = new_manager(
         alice_owner_pubkey,
         alice_owner_keys.secret_key().to_secret_bytes(),
         alice_owner_device_id.clone(),
         alice_owner_pubkey,
-        alice_owner_tx,
         Some(alice_owner_storage.clone()),
         None,
     );
-    let alice_linked_mgr = SessionManager::new(
+    let (alice_linked_mgr, alice_linked_tx, alice_linked_rx) = new_manager(
         alice_new_device_pubkey,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         alice_new_device_id.clone(),
         alice_owner_pubkey,
-        alice_linked_tx,
         Some(alice_linked_storage.clone()),
         None,
     );
-    let bob_owner_mgr = SessionManager::new(
+    let (bob_owner_mgr, bob_owner_tx, bob_owner_rx) = new_manager(
         bob_owner_pubkey,
         bob_owner_keys.secret_key().to_secret_bytes(),
         bob_owner_device_id.clone(),
         bob_owner_pubkey,
-        bob_owner_tx,
         Some(bob_owner_storage.clone()),
         None,
     );
-    let bob_linked_mgr = SessionManager::new(
+    let (bob_linked_mgr, bob_linked_tx, bob_linked_rx) = new_manager(
         bob_linked_pubkey,
         bob_linked_keys.secret_key().to_secret_bytes(),
         bob_linked_device_id.clone(),
         bob_owner_pubkey,
-        bob_linked_tx,
         Some(bob_linked_storage.clone()),
         None,
     );
 
-    alice_owner_mgr.init()?;
-    alice_linked_mgr.init()?;
-    bob_owner_mgr.init()?;
-    bob_linked_mgr.init()?;
+    emit(&alice_owner_tx, alice_owner_mgr.init()?);
+    emit(&alice_linked_tx, alice_linked_mgr.init()?);
+    emit(&bob_owner_tx, bob_owner_mgr.init()?);
+    emit(&bob_linked_tx, bob_linked_mgr.init()?);
     drain_events(&alice_owner_rx);
     drain_events(&alice_linked_rx);
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
-    let accepted =
-        alice_owner_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?;
+    let accepted = emit(
+        &alice_owner_tx,
+        alice_owner_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
     let bob_owner_response =
         recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
@@ -1076,8 +1086,10 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     drain_events(&alice_owner_rx);
     drain_events(&bob_owner_rx);
 
-    let accepted =
-        alice_owner_mgr.accept_invite(&alice_linked_link_invite, Some(alice_owner_pubkey))?;
+    let accepted = emit(
+        &alice_owner_tx,
+        alice_owner_mgr.accept_invite(&alice_linked_link_invite, Some(alice_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, alice_owner_pubkey);
     let (alice_link_response, alice_link_bootstrap) =
         recv_invite_response_and_message_event(&alice_owner_rx);
@@ -1089,11 +1101,14 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     )?;
     assert_eq!(alice_link_peer, alice_owner_pubkey);
     assert_eq!(alice_link_remote_device_id, alice_owner_device_id);
-    alice_linked_mgr.process_received_event(alice_link_bootstrap);
+    emit(&alice_linked_tx, alice_linked_mgr.process_received_event(alice_link_bootstrap));
     drain_events(&alice_owner_rx);
     drain_events(&alice_linked_rx);
 
-    let accepted = bob_owner_mgr.accept_invite(&bob_linked_link_invite, Some(bob_owner_pubkey))?;
+    let accepted = emit(
+        &bob_owner_tx,
+        bob_owner_mgr.accept_invite(&bob_linked_link_invite, Some(bob_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
     let (bob_link_response, bob_link_bootstrap) =
         recv_invite_response_and_message_event(&bob_owner_rx);
@@ -1105,7 +1120,7 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     )?;
     assert_eq!(bob_link_peer, bob_owner_pubkey);
     assert_eq!(bob_link_remote_device_id, bob_owner_device_id);
-    bob_linked_mgr.process_received_event(bob_link_bootstrap);
+    emit(&bob_linked_tx, bob_linked_mgr.process_received_event(bob_link_bootstrap));
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
@@ -1116,9 +1131,9 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let alice_app_keys_event = alice_app_keys
         .get_event(alice_owner_pubkey)
         .sign_with_keys(&alice_owner_keys)?;
-    alice_linked_mgr.process_received_event(alice_app_keys_event.clone());
-    bob_owner_mgr.process_received_event(alice_app_keys_event.clone());
-    bob_linked_mgr.process_received_event(alice_app_keys_event.clone());
+    emit(&alice_linked_tx, alice_linked_mgr.process_received_event(alice_app_keys_event.clone()));
+    emit(&bob_owner_tx, bob_owner_mgr.process_received_event(alice_app_keys_event.clone()));
+    emit(&bob_linked_tx, bob_linked_mgr.process_received_event(alice_app_keys_event.clone()));
 
     let bob_app_keys = AppKeys::new(vec![
         DeviceEntry::new(bob_owner_pubkey, 1),
@@ -1127,10 +1142,12 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let bob_app_keys_event = bob_app_keys
         .get_event(bob_owner_pubkey)
         .sign_with_keys(&bob_owner_keys)?;
-    alice_linked_mgr.process_received_event(bob_app_keys_event.clone());
-    alice_owner_mgr.process_received_event(bob_app_keys_event.clone());
-    let accepted =
-        alice_linked_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?;
+    emit(&alice_linked_tx, alice_linked_mgr.process_received_event(bob_app_keys_event.clone()));
+    emit(&alice_owner_tx, alice_owner_mgr.process_received_event(bob_app_keys_event.clone()));
+    let accepted = emit(
+        &alice_linked_tx,
+        alice_linked_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?,
+    );
     assert!(
         accepted.created_new_session,
         "expected linked sender to create a direct bob-owner session from the public invite",
@@ -1153,7 +1170,10 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let bob_linked_public_invite_event = bob_linked_public_invite
         .get_event()?
         .sign_with_keys(&bob_linked_keys)?;
-    alice_owner_mgr.process_received_event(bob_linked_public_invite_event.clone());
+    emit(
+        &alice_owner_tx,
+        alice_owner_mgr.process_received_event(bob_linked_public_invite_event.clone()),
+    );
     let bob_linked_public_response =
         recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (bob_linked_peer, bob_linked_remote_device_id) = import_session_from_response(
@@ -1170,7 +1190,10 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     let alice_linked_public_invite_event = alice_linked_public_invite
         .get_event()?
         .sign_with_keys(&alice_new_device_keys)?;
-    bob_linked_mgr.process_received_event(alice_linked_public_invite_event);
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.process_received_event(alice_linked_public_invite_event),
+    );
     let alice_linked_public_response =
         recv_signed_event_of_kind(&bob_linked_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (alice_linked_peer, alice_linked_remote_device_id) = import_session_from_response(
@@ -1184,12 +1207,15 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     drain_events(&alice_linked_rx);
     drain_events(&bob_linked_rx);
 
-    alice_owner_mgr.send_text(bob_owner_pubkey, "seed existing chat".to_string(), None)?;
+    emit(
+        &alice_owner_tx,
+        alice_owner_mgr.send_text(bob_owner_pubkey, "seed existing chat".to_string(), None)?,
+    );
     let seed_messages = recv_message_events(&alice_owner_rx, 3);
     for event in &seed_messages {
-        alice_linked_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
-        bob_linked_mgr.process_received_event(event.clone());
+        emit(&alice_linked_tx, alice_linked_mgr.process_received_event(event.clone()));
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
+        emit(&bob_linked_tx, bob_linked_mgr.process_received_event(event.clone()));
     }
 
     let alice_self_seed =
@@ -1204,16 +1230,19 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
-    bob_linked_mgr.send_text(
-        alice_owner_pubkey,
-        "before restart reaches linked receiver".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.send_text(
+            alice_owner_pubkey,
+            "before restart reaches linked receiver".to_string(),
+            None,
+        )?,
+    );
     let before_restart_messages = recv_message_events(&bob_linked_rx, 3);
     for event in &before_restart_messages {
-        alice_owner_mgr.process_received_event(event.clone());
-        alice_linked_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
+        emit(&alice_owner_tx, alice_owner_mgr.process_received_event(event.clone()));
+        emit(&alice_linked_tx, alice_linked_mgr.process_received_event(event.clone()));
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
     }
 
     let before_restart = recv_decrypted_containing(
@@ -1225,43 +1254,69 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     drain_events(&alice_owner_rx);
     drain_events(&bob_owner_rx);
 
-    let (alice_linked_restarted_tx, alice_linked_restarted_rx) = crossbeam_channel::unbounded();
-    let alice_linked_restarted_mgr = SessionManager::new(
+    let (alice_linked_restarted_mgr, alice_linked_restarted_tx, alice_linked_restarted_rx) =
+        new_manager(
         alice_new_device_pubkey,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         alice_new_device_id.clone(),
         alice_owner_pubkey,
-        alice_linked_restarted_tx,
         Some(alice_linked_storage.clone()),
         None,
     );
-    alice_linked_restarted_mgr.init()?;
+    emit(&alice_linked_restarted_tx, alice_linked_restarted_mgr.init()?);
     drain_events(&alice_linked_restarted_rx);
-    alice_linked_restarted_mgr.setup_user(bob_owner_pubkey);
-    alice_linked_restarted_mgr.setup_user(alice_owner_pubkey);
-    drain_events(&alice_linked_restarted_rx);
-    alice_linked_restarted_mgr.process_received_event(bob_app_keys_event.clone());
-    alice_linked_restarted_mgr.process_received_event(alice_app_keys_event.clone());
-    alice_linked_restarted_mgr.process_received_event(
-        bob_owner_public_invite
-            .get_event()?
-            .sign_with_keys(&bob_owner_keys)?,
+    emit(&alice_linked_restarted_tx, alice_linked_restarted_mgr.setup_user(bob_owner_pubkey));
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.setup_user(alice_owner_pubkey),
     );
-    alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone());
-    alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone());
+    drain_events(&alice_linked_restarted_rx);
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(bob_app_keys_event.clone()),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(alice_app_keys_event.clone()),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(
+            bob_owner_public_invite
+                .get_event()?
+                .sign_with_keys(&bob_owner_keys)?,
+        ),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone()),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone()),
+    );
     drain_events(&alice_linked_restarted_rx);
     drain_events(&bob_owner_rx);
 
-    bob_linked_mgr.send_text(
-        alice_owner_pubkey,
-        "after restart reaches linked receiver".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.send_text(
+            alice_owner_pubkey,
+            "after restart reaches linked receiver".to_string(),
+            None,
+        )?,
+    );
     let after_restart_messages = recv_message_events(&bob_linked_rx, 3);
     for event in &after_restart_messages {
-        alice_owner_mgr.process_received_event(event.clone());
-        alice_linked_restarted_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
+        emit(
+            &alice_owner_tx,
+            alice_owner_mgr.process_received_event(event.clone()),
+        );
+        emit(
+            &alice_linked_restarted_tx,
+            alice_linked_restarted_mgr.process_received_event(event.clone()),
+        );
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
     }
 
     let after_restart = recv_decrypted_containing(
@@ -1274,17 +1329,23 @@ fn test_linked_receiver_restores_and_receives_after_restart() -> Result<()> {
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
-    alice_linked_restarted_mgr.send_text(
-        bob_owner_pubkey,
-        "after restart linked sender keeps multi-device fanout".to_string(),
-        None,
-    )?;
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.send_text(
+            bob_owner_pubkey,
+            "after restart linked sender keeps multi-device fanout".to_string(),
+            None,
+        )?,
+    );
     let post_restart_fanout = recv_message_events(&alice_linked_restarted_rx, 3);
     assert_eq!(post_restart_fanout.len(), 3);
     for event in &post_restart_fanout {
-        alice_owner_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
-        bob_linked_mgr.process_received_event(event.clone());
+        emit(
+            &alice_owner_tx,
+            alice_owner_mgr.process_received_event(event.clone()),
+        );
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
+        emit(&bob_linked_tx, bob_linked_mgr.process_received_event(event.clone()));
     }
 
     let alice_owner_self_sync = recv_decrypted_containing(
@@ -1363,59 +1424,52 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     let bob_linked_storage: Arc<dyn StorageAdapter> =
         Arc::new(FileStorageAdapter::new(base.join("bob-linked"))?);
 
-    let (alice_owner_tx, alice_owner_rx) = crossbeam_channel::unbounded();
-    let (alice_linked_tx, alice_linked_rx) = crossbeam_channel::unbounded();
-    let (bob_owner_tx, bob_owner_rx) = crossbeam_channel::unbounded();
-    let (bob_linked_tx, bob_linked_rx) = crossbeam_channel::unbounded();
-
-    let alice_owner_mgr = SessionManager::new(
+    let (alice_owner_mgr, alice_owner_tx, alice_owner_rx) = new_manager(
         alice_owner_pubkey,
         alice_owner_keys.secret_key().to_secret_bytes(),
         alice_owner_device_id.clone(),
         alice_owner_pubkey,
-        alice_owner_tx,
         Some(alice_owner_storage),
         None,
     );
-    let alice_linked_mgr = SessionManager::new(
+    let (alice_linked_mgr, alice_linked_tx, alice_linked_rx) = new_manager(
         alice_new_device_pubkey,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         alice_new_device_id.clone(),
         alice_owner_pubkey,
-        alice_linked_tx,
         Some(alice_linked_storage),
         None,
     );
-    let bob_owner_mgr = SessionManager::new(
+    let (bob_owner_mgr, bob_owner_tx, bob_owner_rx) = new_manager(
         bob_owner_pubkey,
         bob_owner_keys.secret_key().to_secret_bytes(),
         bob_owner_device_id.clone(),
         bob_owner_pubkey,
-        bob_owner_tx,
         Some(bob_owner_storage),
         None,
     );
-    let bob_linked_mgr = SessionManager::new(
+    let (bob_linked_mgr, bob_linked_tx, bob_linked_rx) = new_manager(
         bob_linked_pubkey,
         bob_linked_keys.secret_key().to_secret_bytes(),
         bob_linked_device_id.clone(),
         bob_owner_pubkey,
-        bob_linked_tx,
         Some(bob_linked_storage),
         None,
     );
 
-    alice_owner_mgr.init()?;
-    alice_linked_mgr.init()?;
-    bob_owner_mgr.init()?;
-    bob_linked_mgr.init()?;
+    emit(&alice_owner_tx, alice_owner_mgr.init()?);
+    emit(&alice_linked_tx, alice_linked_mgr.init()?);
+    emit(&bob_owner_tx, bob_owner_mgr.init()?);
+    emit(&bob_linked_tx, bob_linked_mgr.init()?);
     drain_events(&alice_owner_rx);
     drain_events(&alice_linked_rx);
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
-    let accepted =
-        alice_owner_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?;
+    let accepted = emit(
+        &alice_owner_tx,
+        alice_owner_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
     let bob_owner_response =
         recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
@@ -1430,8 +1484,10 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     drain_events(&alice_owner_rx);
     drain_events(&bob_owner_rx);
 
-    let accepted =
-        alice_owner_mgr.accept_invite(&alice_linked_link_invite, Some(alice_owner_pubkey))?;
+    let accepted = emit(
+        &alice_owner_tx,
+        alice_owner_mgr.accept_invite(&alice_linked_link_invite, Some(alice_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, alice_owner_pubkey);
     let (alice_link_response, alice_link_bootstrap) =
         recv_invite_response_and_message_event(&alice_owner_rx);
@@ -1443,11 +1499,14 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     )?;
     assert_eq!(alice_link_peer, alice_owner_pubkey);
     assert_eq!(alice_link_remote_device_id, alice_owner_device_id);
-    alice_linked_mgr.process_received_event(alice_link_bootstrap);
+    emit(&alice_linked_tx, alice_linked_mgr.process_received_event(alice_link_bootstrap));
     drain_events(&alice_owner_rx);
     drain_events(&alice_linked_rx);
 
-    let accepted = bob_owner_mgr.accept_invite(&bob_linked_link_invite, Some(bob_owner_pubkey))?;
+    let accepted = emit(
+        &bob_owner_tx,
+        bob_owner_mgr.accept_invite(&bob_linked_link_invite, Some(bob_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
     let (bob_link_response, bob_link_bootstrap) =
         recv_invite_response_and_message_event(&bob_owner_rx);
@@ -1459,7 +1518,7 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     )?;
     assert_eq!(bob_link_peer, bob_owner_pubkey);
     assert_eq!(bob_link_remote_device_id, bob_owner_device_id);
-    bob_linked_mgr.process_received_event(bob_link_bootstrap);
+    emit(&bob_linked_tx, bob_linked_mgr.process_received_event(bob_link_bootstrap));
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
@@ -1470,8 +1529,8 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     let alice_app_keys_event = alice_app_keys
         .get_event(alice_owner_pubkey)
         .sign_with_keys(&alice_owner_keys)?;
-    bob_owner_mgr.process_received_event(alice_app_keys_event.clone());
-    bob_linked_mgr.process_received_event(alice_app_keys_event.clone());
+    emit(&bob_owner_tx, bob_owner_mgr.process_received_event(alice_app_keys_event.clone()));
+    emit(&bob_linked_tx, bob_linked_mgr.process_received_event(alice_app_keys_event.clone()));
 
     let bob_app_keys = AppKeys::new(vec![
         DeviceEntry::new(bob_owner_pubkey, 1),
@@ -1480,7 +1539,7 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     let bob_app_keys_event = bob_app_keys
         .get_event(bob_owner_pubkey)
         .sign_with_keys(&bob_owner_keys)?;
-    alice_owner_mgr.process_received_event(bob_app_keys_event.clone());
+    emit(&alice_owner_tx, alice_owner_mgr.process_received_event(bob_app_keys_event.clone()));
     drain_events(&alice_owner_rx);
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
@@ -1488,7 +1547,10 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     let bob_linked_public_invite_event = bob_linked_public_invite
         .get_event()?
         .sign_with_keys(&bob_linked_keys)?;
-    alice_owner_mgr.process_received_event(bob_linked_public_invite_event.clone());
+    emit(
+        &alice_owner_tx,
+        alice_owner_mgr.process_received_event(bob_linked_public_invite_event.clone()),
+    );
     let bob_linked_public_response =
         recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (bob_linked_peer, bob_linked_remote_device_id) = import_session_from_response(
@@ -1505,7 +1567,10 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     let alice_linked_public_invite_event = alice_linked_public_invite
         .get_event()?
         .sign_with_keys(&alice_new_device_keys)?;
-    bob_linked_mgr.process_received_event(alice_linked_public_invite_event);
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.process_received_event(alice_linked_public_invite_event),
+    );
     let alice_linked_public_response =
         recv_signed_event_of_kind(&bob_linked_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (alice_linked_peer, alice_linked_remote_device_id) = import_session_from_response(
@@ -1519,12 +1584,15 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     drain_events(&alice_linked_rx);
     drain_events(&bob_linked_rx);
 
-    alice_owner_mgr.send_text(bob_owner_pubkey, "seed existing chat".to_string(), None)?;
+    emit(
+        &alice_owner_tx,
+        alice_owner_mgr.send_text(bob_owner_pubkey, "seed existing chat".to_string(), None)?,
+    );
     let seed_messages = recv_message_events(&alice_owner_rx, 3);
     for event in &seed_messages {
-        alice_linked_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
-        bob_linked_mgr.process_received_event(event.clone());
+        emit(&alice_linked_tx, alice_linked_mgr.process_received_event(event.clone()));
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
+        emit(&bob_linked_tx, bob_linked_mgr.process_received_event(event.clone()));
     }
 
     let alice_self_seed =
@@ -1539,16 +1607,19 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
-    bob_linked_mgr.send_text(
-        alice_owner_pubkey,
-        "before restart reaches linked receiver".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.send_text(
+            alice_owner_pubkey,
+            "before restart reaches linked receiver".to_string(),
+            None,
+        )?,
+    );
     let before_restart_messages = recv_message_events(&bob_linked_rx, 3);
     for event in &before_restart_messages {
-        alice_owner_mgr.process_received_event(event.clone());
-        alice_linked_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
+        emit(&alice_owner_tx, alice_owner_mgr.process_received_event(event.clone()));
+        emit(&alice_linked_tx, alice_linked_mgr.process_received_event(event.clone()));
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
     }
 
     let before_restart = recv_decrypted_containing(
@@ -1567,33 +1638,53 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         "expected alice-linked to persist a receive-capable Bob-linked session before restart",
     );
 
-    let (alice_linked_restarted_tx, alice_linked_restarted_rx) = crossbeam_channel::unbounded();
     let alice_linked_restarted_storage: Arc<dyn StorageAdapter> =
         Arc::new(FileStorageAdapter::new(base.join("alice-linked"))?);
-    let alice_linked_restarted_mgr = SessionManager::new(
+    let (alice_linked_restarted_mgr, alice_linked_restarted_tx, alice_linked_restarted_rx) =
+        new_manager(
         alice_new_device_pubkey,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         alice_new_device_id.clone(),
         alice_owner_pubkey,
-        alice_linked_restarted_tx,
         Some(alice_linked_restarted_storage),
         None,
     );
-    alice_linked_restarted_mgr.init()?;
+    emit(&alice_linked_restarted_tx, alice_linked_restarted_mgr.init()?);
     drain_events(&alice_linked_restarted_rx);
-    alice_linked_restarted_mgr.setup_user(bob_owner_pubkey);
-    alice_linked_restarted_mgr.setup_user(alice_owner_pubkey);
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.setup_user(bob_owner_pubkey),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.setup_user(alice_owner_pubkey),
+    );
     drain_events(&alice_linked_restarted_rx);
 
-    alice_linked_restarted_mgr.process_received_event(bob_app_keys_event.clone());
-    alice_linked_restarted_mgr.process_received_event(alice_app_keys_event.clone());
-    alice_linked_restarted_mgr.process_received_event(
-        bob_owner_public_invite
-            .get_event()?
-            .sign_with_keys(&bob_owner_keys)?,
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(bob_app_keys_event.clone()),
     );
-    alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone());
-    alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone());
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(alice_app_keys_event.clone()),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(
+            bob_owner_public_invite
+                .get_event()?
+                .sign_with_keys(&bob_owner_keys)?,
+        ),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(bob_linked_public_invite_event.clone()),
+    );
+    emit(
+        &alice_linked_restarted_tx,
+        alice_linked_restarted_mgr.process_received_event(alice_linked_public_response.clone()),
+    );
     drain_events(&alice_linked_restarted_rx);
 
     let stored_after_replay = load_stored_user_record(&base.join("alice-linked"), bob_owner_pubkey);
@@ -1602,16 +1693,22 @@ fn test_linked_receiver_restores_and_receives_after_restart_with_file_storage() 
         "expected replayed AppKeys/invites to preserve Bob-linked receive state after restart",
     );
 
-    bob_linked_mgr.send_text(
-        alice_owner_pubkey,
-        "after restart reaches linked receiver".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.send_text(
+            alice_owner_pubkey,
+            "after restart reaches linked receiver".to_string(),
+            None,
+        )?,
+    );
     let after_restart_messages = recv_message_events(&bob_linked_rx, 3);
     for event in &after_restart_messages {
-        alice_owner_mgr.process_received_event(event.clone());
-        alice_linked_restarted_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
+        emit(&alice_owner_tx, alice_owner_mgr.process_received_event(event.clone()));
+        emit(
+            &alice_linked_restarted_tx,
+            alice_linked_restarted_mgr.process_received_event(event.clone()),
+        );
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
     }
 
     let after_restart = recv_decrypted_containing(
@@ -1664,60 +1761,53 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
         alice_owner_pubkey,
     )?;
 
-    let (alice_owner_tx, alice_owner_rx) = crossbeam_channel::unbounded();
-    let (alice_new_tx, alice_new_rx) = crossbeam_channel::unbounded();
-    let (bob_owner_tx, bob_owner_rx) = crossbeam_channel::unbounded();
-    let (bob_linked_tx, bob_linked_rx) = crossbeam_channel::unbounded();
-
-    let alice_owner_mgr = SessionManager::new(
+    let (alice_owner_mgr, alice_owner_tx, alice_owner_rx) = new_manager(
         alice_owner_pubkey,
         alice_owner_keys.secret_key().to_secret_bytes(),
         alice_owner_device_id.clone(),
         alice_owner_pubkey,
-        alice_owner_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    let alice_new_mgr = SessionManager::new(
+    let (alice_new_mgr, alice_new_tx, alice_new_rx) = new_manager(
         alice_new_device_pubkey,
         alice_new_device_keys.secret_key().to_secret_bytes(),
         alice_new_device_id.clone(),
         alice_owner_pubkey,
-        alice_new_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    let bob_owner_mgr = SessionManager::new(
+    let (bob_owner_mgr, bob_owner_tx, bob_owner_rx) = new_manager(
         bob_owner_pubkey,
         bob_owner_keys.secret_key().to_secret_bytes(),
         bob_owner_device_id.clone(),
         bob_owner_pubkey,
-        bob_owner_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
-    let bob_linked_mgr = SessionManager::new(
+    let (bob_linked_mgr, bob_linked_tx, bob_linked_rx) = new_manager(
         bob_linked_pubkey,
         bob_linked_keys.secret_key().to_secret_bytes(),
         bob_linked_device_id.clone(),
         bob_owner_pubkey,
-        bob_linked_tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
 
-    alice_owner_mgr.init()?;
-    alice_new_mgr.init()?;
-    bob_owner_mgr.init()?;
-    bob_linked_mgr.init()?;
+    emit(&alice_owner_tx, alice_owner_mgr.init()?);
+    emit(&alice_new_tx, alice_new_mgr.init()?);
+    emit(&bob_owner_tx, bob_owner_mgr.init()?);
+    emit(&bob_linked_tx, bob_linked_mgr.init()?);
     drain_events(&alice_owner_rx);
     drain_events(&alice_new_rx);
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
     // Mirror app bootstrap: Alice accepts Bob's public invite so Alice can send first.
-    let accepted =
-        alice_owner_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?;
+    let accepted = emit(
+        &alice_owner_tx,
+        alice_owner_mgr.accept_invite(&bob_owner_public_invite, Some(bob_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
     let bob_owner_response =
         recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
@@ -1733,8 +1823,10 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     drain_events(&bob_owner_rx);
 
     // Link Alice's new device and deliver the owner-side bootstrap packet.
-    let accepted =
-        alice_owner_mgr.accept_invite(&alice_linked_link_invite, Some(alice_owner_pubkey))?;
+    let accepted = emit(
+        &alice_owner_tx,
+        alice_owner_mgr.accept_invite(&alice_linked_link_invite, Some(alice_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, alice_owner_pubkey);
     let (alice_link_response, alice_link_bootstrap) =
         recv_invite_response_and_message_event(&alice_owner_rx);
@@ -1746,12 +1838,15 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     )?;
     assert_eq!(alice_link_peer, alice_owner_pubkey);
     assert_eq!(alice_link_remote_device_id, alice_owner_device_id);
-    alice_new_mgr.process_received_event(alice_link_bootstrap);
+    emit(&alice_new_tx, alice_new_mgr.process_received_event(alice_link_bootstrap));
     drain_events(&alice_owner_rx);
     drain_events(&alice_new_rx);
 
     // Link Bob's new device and deliver the owner-side bootstrap packet.
-    let accepted = bob_owner_mgr.accept_invite(&bob_linked_link_invite, Some(bob_owner_pubkey))?;
+    let accepted = emit(
+        &bob_owner_tx,
+        bob_owner_mgr.accept_invite(&bob_linked_link_invite, Some(bob_owner_pubkey))?,
+    );
     assert_eq!(accepted.owner_pubkey, bob_owner_pubkey);
     let (bob_link_response, bob_link_bootstrap) =
         recv_invite_response_and_message_event(&bob_owner_rx);
@@ -1763,7 +1858,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     )?;
     assert_eq!(bob_link_peer, bob_owner_pubkey);
     assert_eq!(bob_link_remote_device_id, bob_owner_device_id);
-    bob_linked_mgr.process_received_event(bob_link_bootstrap);
+    emit(&bob_linked_tx, bob_linked_mgr.process_received_event(bob_link_bootstrap));
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
 
@@ -1789,8 +1884,8 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     let alice_app_keys_event = alice_app_keys
         .get_event(alice_owner_pubkey)
         .sign_with_keys(&alice_owner_keys)?;
-    bob_owner_mgr.process_received_event(alice_app_keys_event.clone());
-    bob_linked_mgr.process_received_event(alice_app_keys_event);
+    emit(&bob_owner_tx, bob_owner_mgr.process_received_event(alice_app_keys_event.clone()));
+    emit(&bob_linked_tx, bob_linked_mgr.process_received_event(alice_app_keys_event));
 
     let bob_app_keys = AppKeys::new(vec![
         DeviceEntry::new(bob_owner_pubkey, 1),
@@ -1799,7 +1894,7 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     let bob_app_keys_event = bob_app_keys
         .get_event(bob_owner_pubkey)
         .sign_with_keys(&bob_owner_keys)?;
-    alice_owner_mgr.process_received_event(bob_app_keys_event);
+    emit(&alice_owner_tx, alice_owner_mgr.process_received_event(bob_app_keys_event));
     drain_events(&alice_owner_rx);
     drain_events(&bob_owner_rx);
     drain_events(&bob_linked_rx);
@@ -1808,7 +1903,10 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     let bob_linked_public_invite_event = bob_linked_public_invite
         .get_event()?
         .sign_with_keys(&bob_linked_keys)?;
-    alice_owner_mgr.process_received_event(bob_linked_public_invite_event);
+    emit(
+        &alice_owner_tx,
+        alice_owner_mgr.process_received_event(bob_linked_public_invite_event),
+    );
     let bob_linked_public_response =
         recv_signed_event_of_kind(&alice_owner_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (bob_linked_peer, bob_linked_remote_device_id) = import_session_from_response(
@@ -1826,7 +1924,10 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     let alice_linked_public_invite_event = alice_linked_public_invite
         .get_event()?
         .sign_with_keys(&alice_new_device_keys)?;
-    bob_linked_mgr.process_received_event(alice_linked_public_invite_event);
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.process_received_event(alice_linked_public_invite_event),
+    );
     let alice_linked_public_response =
         recv_signed_event_of_kind(&bob_linked_rx, nostr_double_ratchet::INVITE_RESPONSE_KIND);
     let (alice_linked_peer, alice_linked_remote_device_id) = import_session_from_response(
@@ -1842,13 +1943,16 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
 
     // Alice sends to Bob after learning Bob's linked device. This should fan out to Bob owner,
     // Bob linked, and Alice's linked device via self-sync.
-    alice_owner_mgr.send_text(bob_owner_pubkey, "seed existing chat".to_string(), None)?;
+    emit(
+        &alice_owner_tx,
+        alice_owner_mgr.send_text(bob_owner_pubkey, "seed existing chat".to_string(), None)?,
+    );
     let seed_messages = recv_message_events(&alice_owner_rx, 3);
     assert_eq!(seed_messages.len(), 3);
     for event in &seed_messages {
-        alice_new_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
-        bob_linked_mgr.process_received_event(event.clone());
+        emit(&alice_new_tx, alice_new_mgr.process_received_event(event.clone()));
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
+        emit(&bob_linked_tx, bob_linked_mgr.process_received_event(event.clone()));
     }
 
     let alice_self_seed =
@@ -1864,18 +1968,21 @@ fn test_linked_sender_fans_out_to_newly_added_peer_device() -> Result<()> {
     drain_events(&bob_linked_rx);
 
     // The linked sender should now fan out to Alice owner, Alice linked, and Bob owner.
-    bob_linked_mgr.send_text(
-        alice_owner_pubkey,
-        "linked sender fanout to old and new device".to_string(),
-        None,
-    )?;
+    emit(
+        &bob_linked_tx,
+        bob_linked_mgr.send_text(
+            alice_owner_pubkey,
+            "linked sender fanout to old and new device".to_string(),
+            None,
+        )?,
+    );
     let fanout_messages = recv_message_events(&bob_linked_rx, 3);
     assert_eq!(fanout_messages.len(), 3);
 
     for event in &fanout_messages {
-        alice_owner_mgr.process_received_event(event.clone());
-        alice_new_mgr.process_received_event(event.clone());
-        bob_owner_mgr.process_received_event(event.clone());
+        emit(&alice_owner_tx, alice_owner_mgr.process_received_event(event.clone()));
+        emit(&alice_new_tx, alice_new_mgr.process_received_event(event.clone()));
+        emit(&bob_owner_tx, bob_owner_mgr.process_received_event(event.clone()));
     }
 
     let bob_owner_self_copy = recv_decrypted_containing(

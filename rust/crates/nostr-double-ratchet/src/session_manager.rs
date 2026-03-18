@@ -1,8 +1,8 @@
 use crate::{
     apply_app_keys_snapshot, is_app_keys_event, resolve_invite_owner_routing, AppKeys,
     AppKeysSnapshotDecision, DeviceEntry, InMemoryStorage, Invite, InviteAcceptInput,
-    InviteProcessResponseInput, InviteProcessResponseResult, MessageQueue, NostrPubSub,
-    OneToManyChannel, Result, SenderKeyDistribution, SenderKeyState, Session, SessionReceiveInput,
+    InviteProcessResponseInput, InviteProcessResponseResult, MessageQueue, OneToManyChannel,
+    Result, SenderKeyDistribution, SenderKeyState, Session, SessionReceiveInput,
     SessionReceiveResult, SessionSendInput, StorageAdapter, UserRecord,
     GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 };
@@ -11,6 +11,120 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone)]
+pub enum SessionManagerEffect {
+    Publish(UnsignedEvent),
+    PublishSigned(nostr::Event),
+    Subscribe { subid: String, filter_json: String },
+    Unsubscribe { subid: String },
+    SchedulePublishSigned { delay_ms: u64, event: nostr::Event },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionManagerNotification {
+    DecryptedMessage {
+        sender: PublicKey,
+        sender_device: Option<PublicKey>,
+        content: String,
+        event_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagerOutput<T> {
+    pub value: T,
+    pub effects: Vec<SessionManagerEffect>,
+    pub notifications: Vec<SessionManagerNotification>,
+}
+
+impl<T> ManagerOutput<T> {
+    pub fn empty(value: T) -> Self {
+        Self {
+            value,
+            effects: Vec::new(),
+            notifications: Vec::new(),
+        }
+    }
+
+    pub fn with_effects(value: T, effects: Vec<SessionManagerEffect>) -> Self {
+        Self {
+            value,
+            effects,
+            notifications: Vec::new(),
+        }
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> ManagerOutput<U> {
+        ManagerOutput {
+            value: f(self.value),
+            effects: self.effects,
+            notifications: self.notifications,
+        }
+    }
+
+    pub fn append_unit(&mut self, other: ManagerOutput<()>) {
+        self.effects.extend(other.effects);
+        self.notifications.extend(other.notifications);
+    }
+
+    pub fn push_effect(&mut self, effect: SessionManagerEffect) {
+        self.effects.push(effect);
+    }
+
+    pub fn push_notification(&mut self, notification: SessionManagerNotification) {
+        self.notifications.push(notification);
+    }
+}
+
+pub fn emit_session_manager_output<T>(
+    tx: &crossbeam_channel::Sender<SessionManagerEvent>,
+    output: ManagerOutput<T>,
+) -> Result<T> {
+    for effect in output.effects {
+        match effect {
+            SessionManagerEffect::Publish(unsigned) => tx
+                .send(SessionManagerEvent::Publish(unsigned))
+                .map_err(|e| crate::Error::Storage(e.to_string()))?,
+            SessionManagerEffect::PublishSigned(signed) => tx
+                .send(SessionManagerEvent::PublishSigned(signed))
+                .map_err(|e| crate::Error::Storage(e.to_string()))?,
+            SessionManagerEffect::Subscribe { subid, filter_json } => tx
+                .send(SessionManagerEvent::Subscribe { subid, filter_json })
+                .map_err(|e| crate::Error::Storage(e.to_string()))?,
+            SessionManagerEffect::Unsubscribe { subid } => tx
+                .send(SessionManagerEvent::Unsubscribe(subid))
+                .map_err(|e| crate::Error::Storage(e.to_string()))?,
+            SessionManagerEffect::SchedulePublishSigned { delay_ms, event } => {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                    let _ = tx.send(SessionManagerEvent::PublishSigned(event));
+                });
+            }
+        }
+    }
+
+    for notification in output.notifications {
+        match notification {
+            SessionManagerNotification::DecryptedMessage {
+                sender,
+                sender_device,
+                content,
+                event_id,
+            } => tx
+                .send(SessionManagerEvent::DecryptedMessage {
+                    sender,
+                    sender_device,
+                    content,
+                    event_id,
+                })
+                .map_err(|e| crate::Error::Storage(e.to_string()))?,
+        }
+    }
+
+    Ok(output.value)
+}
 
 pub enum SessionManagerEvent {
     Subscribe {
@@ -109,7 +223,6 @@ pub struct SessionManager {
     device_id: String,
     owner_public_key: PublicKey,
     storage: Arc<dyn StorageAdapter>,
-    pubsub: Arc<dyn NostrPubSub>,
     initialized: Arc<Mutex<bool>>,
     invite_state: Arc<Mutex<Option<InviteState>>>,
     provided_invite: Option<Invite>,
@@ -160,7 +273,8 @@ impl SessionManager {
         authors
     }
 
-    fn refresh_session_subscriptions(&self) {
+    fn refresh_session_subscriptions(&self) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let wanted = self.with_user_records(|records| {
             let mut authors = HashSet::new();
             for user_record in records.values() {
@@ -185,7 +299,7 @@ impl SessionManager {
             }
 
             if let Some(subid) = subscriptions.remove(&pubkey) {
-                let _ = self.pubsub.unsubscribe(subid);
+                output.push_effect(SessionManagerEffect::Unsubscribe { subid });
             }
         }
 
@@ -203,13 +317,17 @@ impl SessionManager {
                 continue;
             };
             let subid = format!("session-{}", uuid::Uuid::new_v4());
-            if self.pubsub.subscribe(subid.clone(), filter_json).is_ok() {
-                subscriptions.insert(pubkey, subid);
-            }
+            output.push_effect(SessionManagerEffect::Subscribe {
+                subid: subid.clone(),
+                filter_json,
+            });
+            subscriptions.insert(pubkey, subid);
         }
+
+        output
     }
 
-    fn subscribe_to_invite_responses(&self, invite: &Invite) -> Result<String> {
+    fn subscribe_to_invite_responses(&self, invite: &Invite) -> Result<ManagerOutput<String>> {
         let filter = crate::pubsub::build_filter()
             .kinds(vec![crate::INVITE_RESPONSE_KIND as u64])
             .pubkeys(vec![invite.inviter_ephemeral_public_key])
@@ -217,11 +335,13 @@ impl SessionManager {
 
         let filter_json = serde_json::to_string(&filter)?;
         let subid = format!("invite-response-{}", uuid::Uuid::new_v4());
-        self.pubsub.subscribe(subid.clone(), filter_json)?;
-        Ok(subid)
+        Ok(ManagerOutput::with_effects(
+            subid.clone(),
+            vec![SessionManagerEffect::Subscribe { subid, filter_json }],
+        ))
     }
 
-    fn subscribe_to_user_invites(&self, user_pubkey: PublicKey) -> Result<String> {
+    fn subscribe_to_user_invites(&self, user_pubkey: PublicKey) -> Result<ManagerOutput<String>> {
         let filter = nostr::Filter::new()
             .kind(nostr::Kind::from(crate::INVITE_EVENT_KIND as u16))
             .authors(vec![user_pubkey])
@@ -232,8 +352,10 @@ impl SessionManager {
 
         let filter_json = serde_json::to_string(&filter)?;
         let subid = format!("invite-user-{}", uuid::Uuid::new_v4());
-        self.pubsub.subscribe(subid.clone(), filter_json)?;
-        Ok(subid)
+        Ok(ManagerOutput::with_effects(
+            subid.clone(),
+            vec![SessionManagerEffect::Subscribe { subid, filter_json }],
+        ))
     }
 
     fn send_with_session(session: &mut Session, event: UnsignedEvent) -> Result<nostr::Event> {
@@ -355,13 +477,14 @@ impl SessionManager {
     ///
     /// This is intentionally local-only and does not create persistent tombstones.
     /// A chat can be re-initialized later by explicit join/send flows.
-    pub fn delete_chat(&self, user_pubkey: PublicKey) -> Result<()> {
-        self.init()?;
+    pub fn delete_chat(&self, user_pubkey: PublicKey) -> Result<ManagerOutput<()>> {
+        let mut output = self.init()?;
         let owner_pubkey = self.resolve_to_owner(&user_pubkey);
         if owner_pubkey == self.owner_public_key {
-            return Ok(());
+            return Ok(output);
         }
-        self.delete_user_local(owner_pubkey)
+        output.append_unit(self.delete_user_local(owner_pubkey)?);
+        Ok(output)
     }
 
     pub fn new(
@@ -369,32 +492,9 @@ impl SessionManager {
         our_identity_key: [u8; 32],
         device_id: String,
         owner_public_key: PublicKey,
-        event_tx: crossbeam_channel::Sender<SessionManagerEvent>,
         storage: Option<Arc<dyn StorageAdapter>>,
         invite: Option<Invite>,
     ) -> Self {
-        let pubsub: Arc<dyn NostrPubSub> = Arc::new(event_tx);
-        Self::new_with_pubsub(
-            our_public_key,
-            our_identity_key,
-            device_id,
-            owner_public_key,
-            pubsub,
-            storage,
-            invite,
-        )
-    }
-
-    pub fn new_with_pubsub(
-        our_public_key: PublicKey,
-        our_identity_key: [u8; 32],
-        device_id: String,
-        owner_public_key: PublicKey,
-        pubsub: Arc<dyn NostrPubSub>,
-        storage: Option<Arc<dyn StorageAdapter>>,
-        invite: Option<Invite>,
-    ) -> Self {
-        let pubsub: Arc<dyn NostrPubSub> = Arc::new(crate::pubsub::DedupingPubSub::new(pubsub));
         let storage = storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
         let message_queue = MessageQueue::new(storage.clone(), "v1/message-queue/");
         let discovery_queue = MessageQueue::new(storage.clone(), "v1/discovery-queue/");
@@ -405,7 +505,6 @@ impl SessionManager {
             device_id,
             owner_public_key,
             storage,
-            pubsub,
             initialized: Arc::new(Mutex::new(false)),
             invite_state: Arc::new(Mutex::new(None)),
             provided_invite: invite,
@@ -432,17 +531,18 @@ impl SessionManager {
         }
     }
 
-    pub fn init(&self) -> Result<()> {
+    pub fn init(&self) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         let mut initialized = self.initialized.lock().unwrap();
         if *initialized {
-            return Ok(());
+            return Ok(output);
         }
         *initialized = true;
         drop(initialized);
 
         self.load_all_user_records()?;
         let _ = self.load_send_options();
-        let _ = self.load_group_sender_event_infos();
+        output.append_unit(self.load_group_sender_event_infos()?);
 
         // Ensure our own device is present in our owner's record
         self.with_user_records({
@@ -500,17 +600,17 @@ impl SessionManager {
         });
 
         // Subscribe to invite responses using Invite's own filter (with #p tag)
-        self.subscribe_to_invite_responses(&invite)?;
+        output.append_unit(self.subscribe_to_invite_responses(&invite)?.map(|_| ()));
 
         // Publish our invite (signed with device identity key)
         if let Ok(unsigned) = invite.get_event() {
             let keys = Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
             if let Ok(signed) = unsigned.sign_with_keys(&keys) {
-                let _ = self.pubsub.publish_signed(signed);
+                output.push_effect(SessionManagerEffect::PublishSigned(signed));
             }
         }
 
-        self.refresh_session_subscriptions();
+        output.append_unit(self.refresh_session_subscriptions());
 
         let active_device_ids = self.with_user_records(move |records| {
             records
@@ -531,13 +631,15 @@ impl SessionManager {
         });
 
         for device_id in active_device_ids {
-            let _ = self.flush_message_queue(&device_id);
+            if let Ok(flush_output) = self.flush_message_queue(&device_id) {
+                output.append_unit(flush_output);
+            }
         }
 
         // Start listening for AppKeys for our owner (to discover sibling devices)
-        self.setup_user(self.owner_public_key);
+        output.append_unit(self.setup_user(self.owner_public_key));
 
-        Ok(())
+        Ok(output)
     }
 
     pub fn send_text(
@@ -545,13 +647,14 @@ impl SessionManager {
         recipient: PublicKey,
         text: String,
         options: Option<crate::SendOptions>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         if text.trim().is_empty() {
-            return Ok(Vec::new());
+            return Ok(ManagerOutput::empty(Vec::new()));
         }
 
-        let (_, event_ids) = self.send_text_with_inner_id(recipient, text, options)?;
-        Ok(event_ids)
+        Ok(self
+            .send_text_with_inner_id(recipient, text, options)?
+            .map(|(_, event_ids)| event_ids))
     }
 
     /// Remove discovery queue entries older than `max_age_ms` milliseconds.
@@ -567,7 +670,7 @@ impl SessionManager {
         recipient: PublicKey,
         text: String,
         expires_at: u64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         self.send_text(
             recipient,
             text,
@@ -585,9 +688,9 @@ impl SessionManager {
         recipient: PublicKey,
         text: String,
         options: Option<crate::SendOptions>,
-    ) -> Result<(String, Vec<String>)> {
+    ) -> Result<ManagerOutput<(String, Vec<String>)>> {
         if text.trim().is_empty() {
-            return Ok((String::new(), Vec::new()));
+            return Ok(ManagerOutput::empty((String::new(), Vec::new())));
         }
 
         let owner = self.resolve_to_owner(&recipient);
@@ -612,8 +715,7 @@ impl SessionManager {
             .map(|id| id.to_string())
             .unwrap_or_default();
 
-        let event_ids = self.send_event(recipient, event)?;
-        Ok((inner_id, event_ids))
+        Ok(self.send_event(recipient, event)?.map(|event_ids| (inner_id, event_ids)))
     }
 
     /// Send an encrypted 1:1 chat settings event (inner kind 10448).
@@ -623,7 +725,7 @@ impl SessionManager {
         &self,
         recipient: PublicKey,
         message_ttl_seconds: u64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         let payload = crate::ChatSettingsPayloadV1 {
             typ: "chat-settings".to_string(),
             v: 1,
@@ -645,7 +747,7 @@ impl SessionManager {
         &self,
         peer_pubkey: PublicKey,
         message_ttl_seconds: u64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         let opts = if message_ttl_seconds == 0 {
             crate::SendOptions::default()
         } else {
@@ -664,9 +766,9 @@ impl SessionManager {
         receipt_type: &str,
         message_ids: Vec<String>,
         options: Option<crate::SendOptions>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         if message_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ManagerOutput::empty(Vec::new()));
         }
 
         let mut tags: Vec<Tag> = Vec::new();
@@ -704,7 +806,7 @@ impl SessionManager {
         &self,
         recipient: PublicKey,
         options: Option<crate::SendOptions>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
         let now_s = SystemTime::now()
@@ -735,9 +837,9 @@ impl SessionManager {
         message_id: String,
         emoji: String,
         options: Option<crate::SendOptions>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         if message_id.trim().is_empty() || emoji.trim().is_empty() {
-            return Ok(Vec::new());
+            return Ok(ManagerOutput::empty(Vec::new()));
         }
 
         let mut tags: Vec<Tag> = Vec::new();
@@ -895,8 +997,8 @@ impl SessionManager {
         owner_pubkey: PublicKey,
         app_keys: AppKeys,
         created_at: u64,
-    ) {
-        self.handle_app_keys_event(owner_pubkey, app_keys, created_at);
+    ) -> ManagerOutput<()> {
+        self.handle_app_keys_event(owner_pubkey, app_keys, created_at)
     }
 
     pub fn pending_invite_response_owner_pubkeys(&self) -> Vec<PublicKey> {
@@ -951,7 +1053,7 @@ impl SessionManager {
         &self,
         invite: &Invite,
         owner_pubkey_hint: Option<PublicKey>,
-    ) -> Result<AcceptInviteResult> {
+    ) -> Result<ManagerOutput<AcceptInviteResult>> {
         let inviter_device_pubkey = invite.inviter;
         if inviter_device_pubkey == self.our_public_key {
             return Err(crate::Error::Invite(
@@ -1090,12 +1192,12 @@ impl SessionManager {
             )
         {
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
-            return Ok(AcceptInviteResult {
+            return Ok(ManagerOutput::empty(AcceptInviteResult {
                 owner_pubkey,
                 inviter_device_pubkey,
                 device_id,
                 created_new_session: false,
-            });
+            }));
         }
         let replace_existing_active_session = existing_device_session_info.is_some_and(
             |(active_session, _, _, any_session_has_activity)| {
@@ -1132,10 +1234,15 @@ impl SessionManager {
             pending.insert(inviter_device_pubkey);
         }
 
-        let result = (|| -> Result<AcceptInviteResult> {
+        let result = (|| -> Result<ManagerOutput<AcceptInviteResult>> {
+            let mut output = ManagerOutput::empty(AcceptInviteResult {
+                owner_pubkey,
+                inviter_device_pubkey,
+                device_id: device_id.clone(),
+                created_new_session: true,
+            });
             let (mut session, response_event) = self.accept_invite_session(invite)?;
-
-            self.pubsub.publish_signed(response_event)?;
+            output.push_effect(SessionManagerEffect::PublishSigned(response_event));
 
             let invite_bootstrap_messages = self.build_bootstrap_messages(owner_pubkey);
             let invite_bootstrap_events =
@@ -1178,24 +1285,21 @@ impl SessionManager {
                 }
             });
 
-            self.refresh_session_subscriptions();
+            output.append_unit(self.refresh_session_subscriptions());
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             let _ = self.store_user_record(&owner_pubkey);
-            self.send_message_history(owner_pubkey, &device_id);
+            output.append_unit(self.send_message_history(owner_pubkey, &device_id));
             if !invite_bootstrap_events.is_empty() {
-                self.publish_bootstrap_schedule(invite_bootstrap_events);
+                output.append_unit(self.publish_bootstrap_schedule(invite_bootstrap_events));
             }
             if used_link_bootstrap_exception {
-                self.send_link_bootstrap(owner_pubkey, &device_id);
+                output.append_unit(self.send_link_bootstrap(owner_pubkey, &device_id));
             }
-            let _ = self.flush_message_queue(&device_id);
+            if let Ok(flush_output) = self.flush_message_queue(&device_id) {
+                output.append_unit(flush_output);
+            }
 
-            Ok(AcceptInviteResult {
-                owner_pubkey,
-                inviter_device_pubkey,
-                device_id,
-                created_new_session: true,
-            })
+            Ok(output)
         })();
 
         self.pending_acceptances
@@ -1258,7 +1362,8 @@ impl SessionManager {
         recipient_owner: PublicKey,
         event: UnsignedEvent,
         include_owner_sync: bool,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
+        let mut output = ManagerOutput::empty(Vec::new());
         let mut owners = vec![recipient_owner];
         if include_owner_sync && self.owner_public_key != recipient_owner {
             owners.push(self.owner_public_key);
@@ -1277,7 +1382,7 @@ impl SessionManager {
 
         // Ensure all target owners are set up.
         for owner in &owners {
-            self.setup_user(*owner);
+            output.append_unit(self.setup_user(*owner));
         }
 
         // Gather known devices per owner.
@@ -1383,14 +1488,13 @@ impl SessionManager {
             if let Some(signed_event) = maybe_signed_event {
                 updated_sessions = true;
                 event_ids.push(signed_event.id.to_string());
-                if self.pubsub.publish_signed(signed_event).is_ok() {
-                    published_device_ids.push(device_id.clone());
-                }
+                output.push_effect(SessionManagerEffect::PublishSigned(signed_event));
+                published_device_ids.push(device_id.clone());
             }
         }
 
         if updated_sessions {
-            self.refresh_session_subscriptions();
+            output.append_unit(self.refresh_session_subscriptions());
         }
 
         if let Some(ref id) = inner_event_id {
@@ -1402,7 +1506,9 @@ impl SessionManager {
                 let _ = self
                     .message_queue
                     .remove_by_target_and_event_id(&device_id, id);
-                let _ = self.flush_message_queue(&device_id);
+                if let Ok(flush_output) = self.flush_message_queue(&device_id) {
+                    output.append_unit(flush_output);
+                }
             }
         }
 
@@ -1413,10 +1519,15 @@ impl SessionManager {
             }
         }
 
-        Ok(event_ids)
+        output.value = event_ids;
+        Ok(output)
     }
 
-    pub fn send_event(&self, recipient: PublicKey, event: UnsignedEvent) -> Result<Vec<String>> {
+    pub fn send_event(
+        &self,
+        recipient: PublicKey,
+        event: UnsignedEvent,
+    ) -> Result<ManagerOutput<Vec<String>>> {
         let recipient_owner = self.resolve_to_owner(&recipient);
         self.send_event_internal(recipient_owner, event, true)
     }
@@ -1425,14 +1536,15 @@ impl SessionManager {
         &self,
         recipient: PublicKey,
         event: UnsignedEvent,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ManagerOutput<Vec<String>>> {
         let recipient_owner = self.resolve_to_owner(&recipient);
         self.send_event_internal(recipient_owner, event, false)
     }
 
-    fn delete_user_local(&self, owner_pubkey: PublicKey) -> Result<()> {
+    fn delete_user_local(&self, owner_pubkey: PublicKey) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         if owner_pubkey == self.owner_public_key {
-            return Ok(());
+            return Ok(output);
         }
 
         let (known_device_ids, known_identity_hexes) = self.with_user_records(move |records| {
@@ -1450,7 +1562,7 @@ impl SessionManager {
             (known_device_ids, user_record.known_device_identities)
         });
 
-        self.refresh_session_subscriptions();
+        output.append_unit(self.refresh_session_subscriptions());
 
         let mut known_device_pubkeys: Vec<PublicKey> = Vec::new();
         for device_id in &known_device_ids {
@@ -1497,7 +1609,7 @@ impl SessionManager {
 
         let _ = self.storage.del(&self.send_options_peer_key(&owner_pubkey));
         let _ = self.storage.del(&self.user_record_key(&owner_pubkey));
-        Ok(())
+        Ok(output)
     }
 
     fn device_invite_key(&self, device_id: &str) -> String {
@@ -1735,7 +1847,8 @@ impl SessionManager {
             .filter(|s| !s.is_empty())
     }
 
-    fn load_group_sender_event_infos(&self) -> Result<()> {
+    fn load_group_sender_event_infos(&self) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         let prefix = self.group_sender_event_info_prefix();
         let keys = self.storage.list(&prefix)?;
 
@@ -1776,17 +1889,22 @@ impl SessionManager {
                 .unwrap()
                 .insert(sender_event_pubkey, info);
 
-            let _ = self.subscribe_to_group_sender_event(sender_event_pubkey);
+            if let Ok(subscribe_output) = self.subscribe_to_group_sender_event(sender_event_pubkey) {
+                output.append_unit(subscribe_output);
+            }
         }
 
-        Ok(())
+        Ok(output)
     }
 
-    fn subscribe_to_group_sender_event(&self, sender_event_pubkey: PublicKey) -> Result<()> {
+    fn subscribe_to_group_sender_event(
+        &self,
+        sender_event_pubkey: PublicKey,
+    ) -> Result<ManagerOutput<()>> {
         {
             let mut subs = self.group_sender_event_subscriptions.lock().unwrap();
             if subs.contains(&sender_event_pubkey) {
-                return Ok(());
+                return Ok(ManagerOutput::empty(()));
             }
             subs.insert(sender_event_pubkey);
         }
@@ -1800,7 +1918,10 @@ impl SessionManager {
             "group-sender-event-{}",
             hex::encode(sender_event_pubkey.to_bytes())
         );
-        self.pubsub.subscribe(subid, filter_json)
+        Ok(ManagerOutput::with_effects(
+            (),
+            vec![SessionManagerEffect::Subscribe { subid, filter_json }],
+        ))
     }
 
     fn load_group_sender_event_info(
@@ -1904,7 +2025,7 @@ impl SessionManager {
         &self,
         sender_event_pubkey: PublicKey,
         info: &GroupSenderEventInfo,
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
         self.group_sender_events
             .lock()
             .unwrap()
@@ -1920,8 +2041,7 @@ impl SessionManager {
         let key = self.group_sender_event_info_key(&sender_event_pubkey);
         self.storage.put(&key, serde_json::to_string(&stored)?)?;
 
-        let _ = self.subscribe_to_group_sender_event(sender_event_pubkey);
-        Ok(())
+        self.subscribe_to_group_sender_event(sender_event_pubkey)
     }
 
     fn maybe_handle_group_sender_key_distribution(
@@ -1929,9 +2049,10 @@ impl SessionManager {
         from_owner_pubkey: PublicKey,
         from_sender_device_pubkey: Option<PublicKey>,
         rumor: &UnsignedEvent,
-    ) -> Result<()> {
+    ) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         if rumor.kind.as_u16() != GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16 {
-            return Ok(());
+            return Ok(output);
         }
 
         let tag_group_id = Self::tag_value(&rumor.tags, "l");
@@ -1939,15 +2060,15 @@ impl SessionManager {
 
         if let Some(ref gid) = tag_group_id {
             if dist.group_id != *gid {
-                return Ok(());
+                return Ok(output);
             }
         }
 
         let Some(sender_event_hex) = dist.sender_event_pubkey.as_deref() else {
-            return Ok(());
+            return Ok(output);
         };
         let Ok(sender_event_pubkey) = crate::utils::pubkey_from_hex(sender_event_hex) else {
-            return Ok(());
+            return Ok(output);
         };
 
         let info = GroupSenderEventInfo {
@@ -1957,7 +2078,7 @@ impl SessionManager {
             // Never trust inner rumor `pubkey` for identity attribution.
             sender_device_pubkey: from_sender_device_pubkey,
         };
-        self.store_group_sender_event_info(sender_event_pubkey, &info)?;
+        output.append_unit(self.store_group_sender_event_info(sender_event_pubkey, &info)?);
         self.ensure_sender_key_state_from_distribution(sender_event_pubkey, &dist)?;
 
         // Decrypt any queued outer events that were waiting for this sender key id.
@@ -1967,7 +2088,7 @@ impl SessionManager {
                 .unwrap_or_default()
         };
         if pending.is_empty() {
-            return Ok(());
+            return Ok(output);
         }
 
         // Best-effort: process in message-number order to reduce skipped-key cache pressure.
@@ -1984,13 +2105,16 @@ impl SessionManager {
             if let Some((sender, sender_device, plaintext, event_id)) =
                 self.try_decrypt_group_sender_key_outer(&outer, Some(info.clone()))
             {
-                let _ = self
-                    .pubsub
-                    .decrypted_message(sender, sender_device, plaintext, event_id);
+                output.push_notification(SessionManagerNotification::DecryptedMessage {
+                    sender,
+                    sender_device,
+                    content: plaintext,
+                    event_id,
+                });
             }
         }
 
-        Ok(())
+        Ok(output)
     }
 
     fn try_decrypt_group_sender_key_outer(
@@ -2162,9 +2286,10 @@ impl SessionManager {
         event_id: String,
         session: Session,
         meta: crate::InviteResponseMeta,
-    ) -> bool {
+    ) -> ManagerOutput<bool> {
+        let mut output = ManagerOutput::empty(false);
         if meta.invitee_identity == self.our_public_key {
-            return false;
+            return output;
         }
 
         let owner_pubkey = meta
@@ -2172,7 +2297,7 @@ impl SessionManager {
             .unwrap_or_else(|| self.resolve_to_owner(&meta.invitee_identity));
 
         if !self.is_device_authorized(owner_pubkey, meta.invitee_identity) {
-            return false;
+            return output;
         }
 
         self.record_known_device_identity(owner_pubkey, meta.invitee_identity);
@@ -2192,10 +2317,12 @@ impl SessionManager {
             }
         });
 
-        self.refresh_session_subscriptions();
+        output.append_unit(self.refresh_session_subscriptions());
         let _ = self.store_user_record(&owner_pubkey);
-        self.send_message_history(owner_pubkey, &device_id);
-        let _ = self.flush_message_queue(&device_id);
+        output.append_unit(self.send_message_history(owner_pubkey, &device_id));
+        if let Ok(flush_output) = self.flush_message_queue(&device_id) {
+            output.append_unit(flush_output);
+        }
 
         self.processed_invite_responses
             .lock()
@@ -2207,10 +2334,12 @@ impl SessionManager {
             .unwrap()
             .retain(|event| event.id.to_string() != event_id);
 
-        true
+        output.value = true;
+        output
     }
 
-    fn retry_pending_invite_responses(&self, owner_pubkey: PublicKey) {
+    fn retry_pending_invite_responses(&self, owner_pubkey: PublicKey) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let Some((invite, our_identity_key)) = self
             .invite_state
             .lock()
@@ -2218,7 +2347,7 @@ impl SessionManager {
             .as_ref()
             .map(|state| (state.invite.clone(), state.our_identity_key))
         else {
-            return;
+            return output;
         };
 
         let pending_events: Vec<nostr::Event> = self
@@ -2257,8 +2386,11 @@ impl SessionManager {
                 continue;
             }
 
-            let installed =
+            let installed_output =
                 self.install_invite_response_session(event.id.to_string(), session, meta);
+            let installed = installed_output.value;
+            output.effects.extend(installed_output.effects);
+            output.notifications.extend(installed_output.notifications);
             eprintln!(
                 "[sm] retry_pending_invite_response event={} owner={} installed={}",
                 event.id,
@@ -2266,12 +2398,14 @@ impl SessionManager {
                 installed
             );
         }
+
+        output
     }
 
-    fn subscribe_to_app_keys(&self, owner_pubkey: PublicKey) {
+    fn subscribe_to_app_keys(&self, owner_pubkey: PublicKey) -> ManagerOutput<()> {
         let mut subs = self.app_keys_subscriptions.lock().unwrap();
         if subs.contains(&owner_pubkey) {
-            return;
+            return ManagerOutput::empty(());
         }
         subs.insert(owner_pubkey);
         drop(subs);
@@ -2281,11 +2415,17 @@ impl SessionManager {
             .authors(vec![owner_pubkey]);
         if let Ok(filter_json) = serde_json::to_string(&filter) {
             let subid = format!("app-keys-{}", uuid::Uuid::new_v4());
-            let _ = self.pubsub.subscribe(subid, filter_json);
+            return ManagerOutput::with_effects(
+                (),
+                vec![SessionManagerEffect::Subscribe { subid, filter_json }],
+            );
         }
+
+        ManagerOutput::empty(())
     }
 
-    pub fn setup_user(&self, user_pubkey: PublicKey) {
+    pub fn setup_user(&self, user_pubkey: PublicKey) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let owner_pubkey = self.resolve_to_owner(&user_pubkey);
 
         let known_identities = self.with_user_records(move |records| {
@@ -2296,19 +2436,25 @@ impl SessionManager {
                 .clone()
         });
 
-        self.subscribe_to_app_keys(owner_pubkey);
+        output.append_unit(self.subscribe_to_app_keys(owner_pubkey));
 
         for identity_hex in known_identities {
             if let Ok(pk) = crate::utils::pubkey_from_hex(&identity_hex) {
-                self.subscribe_to_device_invite(owner_pubkey, pk);
+                output.append_unit(self.subscribe_to_device_invite(owner_pubkey, pk));
             }
         }
+
+        output
     }
 
-    fn subscribe_to_device_invite(&self, owner_pubkey: PublicKey, device_pubkey: PublicKey) {
+    fn subscribe_to_device_invite(
+        &self,
+        owner_pubkey: PublicKey,
+        device_pubkey: PublicKey,
+    ) -> ManagerOutput<()> {
         let mut subs = self.invite_subscriptions.lock().unwrap();
         if subs.contains(&device_pubkey) {
-            return;
+            return ManagerOutput::empty(());
         }
         subs.insert(device_pubkey);
         drop(subs);
@@ -2324,10 +2470,12 @@ impl SessionManager {
                 .is_some()
         });
         if has_active_session {
-            return;
+            return ManagerOutput::empty(());
         }
 
-        let _ = self.subscribe_to_user_invites(device_pubkey);
+        self.subscribe_to_user_invites(device_pubkey)
+            .map(|output| output.map(|_| ()))
+            .unwrap_or_else(|_| ManagerOutput::empty(()))
     }
 
     fn upsert_device_record(record: &mut UserRecord, device_id: &str) {
@@ -2376,10 +2524,11 @@ impl SessionManager {
         }
     }
 
-    fn flush_message_queue(&self, device_identity: &str) -> Result<()> {
+    fn flush_message_queue(&self, device_identity: &str) -> Result<ManagerOutput<()>> {
+        let mut output = ManagerOutput::empty(());
         let entries = self.message_queue.get_for_target(device_identity)?;
         if entries.is_empty() {
-            return Ok(());
+            return Ok(output);
         }
 
         let owner_pubkey = self.with_user_records({
@@ -2394,7 +2543,7 @@ impl SessionManager {
             }
         });
         let Some(owner_pubkey) = owner_pubkey else {
-            return Ok(());
+            return Ok(output);
         };
 
         let mut sent: Vec<(String, Option<String>)> = Vec::new();
@@ -2427,9 +2576,8 @@ impl SessionManager {
         });
 
         for (entry_id, maybe_event_id, signed_event) in pending_publishes {
-            if self.pubsub.publish_signed(signed_event).is_ok() {
-                sent.push((entry_id, maybe_event_id));
-            }
+            output.push_effect(SessionManagerEffect::PublishSigned(signed_event));
+            sent.push((entry_id, maybe_event_id));
         }
 
         let any_sent = !sent.is_empty();
@@ -2444,10 +2592,10 @@ impl SessionManager {
         }
 
         if any_sent {
-            self.refresh_session_subscriptions();
+            output.append_unit(self.refresh_session_subscriptions());
         }
         let _ = self.store_user_record(&owner_pubkey);
-        Ok(())
+        Ok(output)
     }
 
     fn expand_discovery_queue(
@@ -2484,7 +2632,8 @@ impl SessionManager {
         Ok(())
     }
 
-    fn send_message_history(&self, owner_pubkey: PublicKey, device_id: &str) {
+    fn send_message_history(&self, owner_pubkey: PublicKey, device_id: &str) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let history = {
             self.message_history
                 .lock()
@@ -2495,7 +2644,7 @@ impl SessionManager {
         };
 
         if history.is_empty() {
-            return;
+            return output;
         }
 
         let signed_history = self.with_user_records({
@@ -2520,12 +2669,13 @@ impl SessionManager {
 
         let any_signed_history = !signed_history.is_empty();
         for signed_event in signed_history {
-            let _ = self.pubsub.publish_signed(signed_event);
+            output.push_effect(SessionManagerEffect::PublishSigned(signed_event));
         }
         if any_signed_history {
-            self.refresh_session_subscriptions();
+            output.append_unit(self.refresh_session_subscriptions());
         }
         let _ = self.store_user_record(&owner_pubkey);
+        output
     }
 
     fn build_bootstrap_messages(&self, owner_pubkey: PublicKey) -> Vec<UnsignedEvent> {
@@ -2573,15 +2723,16 @@ impl SessionManager {
         bootstrap_events
     }
 
-    fn publish_bootstrap_schedule(&self, bootstrap_events: Vec<nostr::Event>) {
+    fn publish_bootstrap_schedule(&self, bootstrap_events: Vec<nostr::Event>) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let Some((initial_event, retry_events)) = bootstrap_events.split_first() else {
-            return;
+            return output;
         };
 
-        let _ = self.pubsub.publish_signed(initial_event.clone());
+        output.push_effect(SessionManagerEffect::PublishSigned(initial_event.clone()));
 
         if retry_events.is_empty() {
-            return;
+            return output;
         }
 
         let scheduled_retries: Vec<(u64, nostr::Event)> = retry_events
@@ -2590,16 +2741,14 @@ impl SessionManager {
             .zip(INVITE_BOOTSTRAP_RETRY_DELAYS_MS.iter().copied().skip(1))
             .map(|(event, delay_ms)| (delay_ms, event))
             .collect();
-        let pubsub = self.pubsub.clone();
-        std::thread::spawn(move || {
-            for (delay_ms, event) in scheduled_retries {
-                std::thread::sleep(Duration::from_millis(delay_ms));
-                let _ = pubsub.publish_signed(event);
-            }
-        });
+        for (delay_ms, event) in scheduled_retries {
+            output.push_effect(SessionManagerEffect::SchedulePublishSigned { delay_ms, event });
+        }
+        output
     }
 
-    fn send_link_bootstrap(&self, owner_pubkey: PublicKey, device_id: &str) {
+    fn send_link_bootstrap(&self, owner_pubkey: PublicKey, device_id: &str) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let bootstrap_messages = self.build_bootstrap_messages(owner_pubkey);
         let bootstrap_events = self.with_user_records({
             let device_id = device_id.to_string();
@@ -2619,13 +2768,15 @@ impl SessionManager {
         });
 
         if !bootstrap_events.is_empty() {
-            self.refresh_session_subscriptions();
-            self.publish_bootstrap_schedule(bootstrap_events);
+            output.append_unit(self.refresh_session_subscriptions());
+            output.append_unit(self.publish_bootstrap_schedule(bootstrap_events));
             let _ = self.store_user_record(&owner_pubkey);
         }
+        output
     }
 
-    fn cleanup_device(&self, owner_pubkey: PublicKey, device_id: &str) {
+    fn cleanup_device(&self, owner_pubkey: PublicKey, device_id: &str) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let removed = self.with_user_records({
             let device_id = device_id.to_string();
             move |records| {
@@ -2637,10 +2788,10 @@ impl SessionManager {
             }
         });
         if !removed {
-            return;
+            return output;
         }
 
-        self.refresh_session_subscriptions();
+        output.append_unit(self.refresh_session_subscriptions());
 
         if let Ok(device_pk) = crate::utils::pubkey_from_hex(device_id) {
             self.delegate_to_owner.lock().unwrap().remove(&device_pk);
@@ -2649,9 +2800,16 @@ impl SessionManager {
         let _ = self.message_queue.remove_for_target(device_id);
 
         let _ = self.store_user_record(&owner_pubkey);
+        output
     }
 
-    fn handle_app_keys_event(&self, owner_pubkey: PublicKey, app_keys: AppKeys, created_at: u64) {
+    fn handle_app_keys_event(
+        &self,
+        owner_pubkey: PublicKey,
+        app_keys: AppKeys,
+        created_at: u64,
+    ) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         let effective_app_keys = {
             let existing = self
                 .cached_app_keys
@@ -2669,7 +2827,7 @@ impl SessionManager {
                 created_at,
             );
             if applied.decision == AppKeysSnapshotDecision::Stale {
-                return;
+                return output;
             }
             latest.insert(owner_pubkey, applied.created_at);
             applied.app_keys
@@ -2694,7 +2852,7 @@ impl SessionManager {
 
         for device_id in existing_devices {
             if !active_ids.contains(&device_id) {
-                self.cleanup_device(owner_pubkey, &device_id);
+                output.append_unit(self.cleanup_device(owner_pubkey, &device_id));
                 self.invite_subscriptions
                     .lock()
                     .unwrap()
@@ -2703,10 +2861,10 @@ impl SessionManager {
         }
 
         for device in &devices {
-            self.subscribe_to_device_invite(owner_pubkey, device.identity_pubkey);
+            output.append_unit(self.subscribe_to_device_invite(owner_pubkey, device.identity_pubkey));
         }
 
-        self.retry_pending_invite_responses(owner_pubkey);
+        output.append_unit(self.retry_pending_invite_responses(owner_pubkey));
 
         for device in &devices {
             let device_id = device.identity_pubkey.to_hex();
@@ -2724,9 +2882,13 @@ impl SessionManager {
                 }
             });
             if has_active_session {
-                let _ = self.flush_message_queue(&device_id);
+                if let Ok(flush_output) = self.flush_message_queue(&device_id) {
+                    output.append_unit(flush_output);
+                }
             }
         }
+
+        output
     }
 
     fn store_user_record(&self, pubkey: &PublicKey) -> Result<()> {
@@ -2842,12 +3004,17 @@ impl SessionManager {
         }
     }
 
-    pub fn process_received_event(&self, event: nostr::Event) {
+    pub fn process_received_event(&self, event: nostr::Event) -> ManagerOutput<()> {
+        let mut output = ManagerOutput::empty(());
         if is_app_keys_event(&event) {
             if let Ok(app_keys) = AppKeys::from_event(&event) {
-                self.handle_app_keys_event(event.pubkey, app_keys, event.created_at.as_u64());
+                output.append_unit(self.handle_app_keys_event(
+                    event.pubkey,
+                    app_keys,
+                    event.created_at.as_u64(),
+                ));
             }
-            return;
+            return output;
         }
 
         if event.kind.as_u16() == crate::INVITE_RESPONSE_KIND as u16 {
@@ -2857,7 +3024,7 @@ impl SessionManager {
                 .unwrap()
                 .contains(&event.id.to_string())
             {
-                return;
+                return output;
             }
 
             if let Some(state) = self.invite_state.lock().unwrap().as_ref() {
@@ -2869,26 +3036,31 @@ impl SessionManager {
                     inviter_next_nostr_private_key,
                 }) {
                     InviteProcessResponseResult::Accepted { session, meta, .. } => {
-                        if !self.install_invite_response_session(
+                        let install_output = self.install_invite_response_session(
                             event.id.to_string(),
                             session,
                             meta,
-                        ) {
+                        );
+                        if !install_output.value {
                             self.queue_pending_invite_response(event.clone());
                         }
+                        output.effects.extend(install_output.effects);
+                        output.notifications.extend(install_output.notifications);
                     }
                     InviteProcessResponseResult::NotForThisInvite { .. } => {}
                     InviteProcessResponseResult::InvalidRelevant { .. } => {}
                 }
             }
-            return;
+            return output;
         }
 
         if event.kind.as_u16() == crate::INVITE_EVENT_KIND as u16 {
             if let Ok(invite) = Invite::from_event(&event) {
-                let _ = self.accept_invite(&invite, None);
+                if let Ok(accept_output) = self.accept_invite(&invite, None) {
+                    output.append_unit(accept_output.map(|_| ()));
+                }
             }
-            return;
+            return output;
         }
 
         if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16 {
@@ -2940,14 +3112,14 @@ impl SessionManager {
             });
 
             if let Some((owner_pubkey, plaintext, device_id)) = decrypted {
-                self.refresh_session_subscriptions();
+                output.append_unit(self.refresh_session_subscriptions());
                 let sender_device = if let Ok(sender_pk) = crate::utils::pubkey_from_hex(&device_id)
                 {
                     let sender_owner = self.resolve_to_owner(&sender_pk);
                     if sender_owner != sender_pk
                         && !self.is_device_authorized(sender_owner, sender_pk)
                     {
-                        return;
+                        return output;
                     }
                     Some(sender_pk)
                 } else {
@@ -2956,26 +3128,37 @@ impl SessionManager {
 
                 if let Ok(rumor) = serde_json::from_str::<UnsignedEvent>(&plaintext) {
                     self.maybe_auto_adopt_chat_settings(owner_pubkey, &rumor);
-                    let _ = self.maybe_handle_group_sender_key_distribution(
+                    if let Ok(group_output) = self.maybe_handle_group_sender_key_distribution(
                         owner_pubkey,
                         sender_device,
                         &rumor,
-                    );
+                    ) {
+                        output.append_unit(group_output);
+                    }
                 }
 
                 let _ = self.store_user_record(&owner_pubkey);
-                let _ =
-                    self.pubsub
-                        .decrypted_message(owner_pubkey, sender_device, plaintext, event_id);
-                let _ = self.flush_message_queue(&device_id);
+                output.push_notification(SessionManagerNotification::DecryptedMessage {
+                    sender: owner_pubkey,
+                    sender_device,
+                    content: plaintext,
+                    event_id,
+                });
+                if let Ok(flush_output) = self.flush_message_queue(&device_id) {
+                    output.append_unit(flush_output);
+                }
             } else if let Some((sender, sender_device, plaintext, event_id)) =
                 self.try_decrypt_group_sender_key_outer(&event, None)
             {
-                let _ = self
-                    .pubsub
-                    .decrypted_message(sender, sender_device, plaintext, event_id);
+                output.push_notification(SessionManagerNotification::DecryptedMessage {
+                    sender,
+                    sender_device,
+                    content: plaintext,
+                    event_id,
+                });
             }
         }
+        output
     }
 }
 
@@ -3061,6 +3244,37 @@ mod tests {
         out
     }
 
+    fn emit<T>(
+        tx: &crossbeam_channel::Sender<SessionManagerEvent>,
+        output: ManagerOutput<T>,
+    ) -> T {
+        emit_session_manager_output(tx, output).unwrap()
+    }
+
+    fn new_manager(
+        our_pubkey: PublicKey,
+        identity_key: [u8; 32],
+        device_id: String,
+        owner_pubkey: PublicKey,
+        storage: Option<Arc<dyn StorageAdapter>>,
+        invite: Option<Invite>,
+    ) -> (
+        SessionManager,
+        crossbeam_channel::Sender<SessionManagerEvent>,
+        crossbeam_channel::Receiver<SessionManagerEvent>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            our_pubkey,
+            identity_key,
+            device_id,
+            owner_pubkey,
+            storage,
+            invite,
+        );
+        (manager, tx, rx)
+    }
+
     fn sign_app_keys_event_with_created_at(
         app_keys: &AppKeys,
         owner_pubkey: PublicKey,
@@ -3125,17 +3339,8 @@ mod tests {
         let identity_key = keys.secret_key().to_secret_bytes();
         let device_id = "test-device".to_string();
 
-        let (tx, _rx) = crossbeam_channel::unbounded();
-
-        let manager = SessionManager::new(
-            pubkey,
-            identity_key,
-            device_id.clone(),
-            pubkey,
-            tx,
-            None,
-            None,
-        );
+        let (manager, _tx, _rx) =
+            new_manager(pubkey, identity_key, device_id.clone(), pubkey, None, None);
 
         assert_eq!(manager.get_device_id(), device_id);
     }
@@ -3147,9 +3352,7 @@ mod tests {
         let identity_key = keys.secret_key().to_secret_bytes();
         let device_id = "test-device".to_string();
 
-        let (tx, _rx) = crossbeam_channel::unbounded();
-
-        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
+        let (manager, _tx, _rx) = new_manager(pubkey, identity_key, device_id, pubkey, None, None);
 
         let recipient = Keys::generate().public_key();
         let result = manager.send_text(recipient, "test".to_string(), None);
@@ -3164,8 +3367,7 @@ mod tests {
         let identity_key = keys.secret_key().to_secret_bytes();
         let device_id = "test-device".to_string();
 
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
+        let (manager, _tx, _rx) = new_manager(pubkey, identity_key, device_id, pubkey, None, None);
 
         let recipient = Keys::generate().public_key();
         manager.send_typing(recipient, None).unwrap();
@@ -3202,18 +3404,16 @@ mod tests {
             )
             .unwrap();
 
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             our_keys.public_key(),
             our_keys.secret_key().to_secret_bytes(),
             "test-device".to_string(),
             our_keys.public_key(),
-            tx,
             Some(storage),
             None,
         );
 
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
 
         let subscribe_count = drain_events(&rx)
             .into_iter()
@@ -3247,18 +3447,17 @@ mod tests {
         let identity_key = keys.secret_key().to_secret_bytes();
         let device_id = "test-device".to_string();
 
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
-        manager.init().unwrap();
+        let (manager, tx, _rx) = new_manager(pubkey, identity_key, device_id, pubkey, None, None);
+        emit(&tx, manager.init().unwrap());
 
         let peer = Keys::generate().public_key();
-        manager.setup_user(peer);
+        emit(&tx, manager.setup_user(peer));
         assert!(manager.get_user_pubkeys().contains(&peer));
 
-        manager.delete_chat(peer).unwrap();
+        emit(&tx, manager.delete_chat(peer).unwrap());
         assert!(!manager.get_user_pubkeys().contains(&peer));
 
-        manager.send_text(peer, "reinit".to_string(), None).unwrap();
+        emit(&tx, manager.send_text(peer, "reinit".to_string(), None).unwrap());
         assert!(manager.get_user_pubkeys().contains(&peer));
     }
 
@@ -3269,14 +3468,11 @@ mod tests {
         let identity_key = our_keys.secret_key().to_secret_bytes();
 
         let storage = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             our_pubkey,
             identity_key,
             "test-device".to_string(),
             our_pubkey,
-            tx,
             Some(storage),
             None,
         );
@@ -3309,13 +3505,16 @@ mod tests {
         .custom_created_at(nostr::Timestamp::from(1))
         .build(sender_device_pubkey);
 
-        manager
-            .maybe_handle_group_sender_key_distribution(
+        emit(
+            &tx,
+            manager
+                .maybe_handle_group_sender_key_distribution(
                 sender_owner_pubkey,
                 Some(sender_device_pubkey),
                 &dist_rumor,
             )
-            .unwrap();
+                .unwrap(),
+        );
 
         let events = drain_events(&rx);
         let expected_subid = format!(
@@ -3346,7 +3545,7 @@ mod tests {
             )
             .unwrap();
 
-        manager.process_received_event(outer.clone());
+        emit(&tx, manager.process_received_event(outer.clone()));
 
         let events = drain_events(&rx);
         let dec = events.iter().find_map(|ev| match ev {
@@ -3376,14 +3575,11 @@ mod tests {
         let identity_key = our_keys.secret_key().to_secret_bytes();
 
         let storage = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             our_pubkey,
             identity_key,
             "test-device".to_string(),
             our_pubkey,
-            tx,
             Some(storage),
             None,
         );
@@ -3411,13 +3607,16 @@ mod tests {
         .tag(Tag::parse(&["l".to_string(), group_id.clone()]).unwrap())
         .custom_created_at(nostr::Timestamp::from(1))
         .build(sender_device_pubkey);
-        manager
-            .maybe_handle_group_sender_key_distribution(
+        emit(
+            &tx,
+            manager
+                .maybe_handle_group_sender_key_distribution(
                 sender_owner_pubkey,
                 Some(sender_device_pubkey),
                 &dist1_rumor,
             )
-            .unwrap();
+                .unwrap(),
+        );
         let _ = drain_events(&rx);
 
         // Now receive an outer message for a new key id (2) before we've seen its distribution.
@@ -3441,7 +3640,7 @@ mod tests {
             )
             .unwrap();
 
-        manager.process_received_event(outer.clone());
+        emit(&tx, manager.process_received_event(outer.clone()));
         assert!(
             drain_events(&rx)
                 .iter()
@@ -3465,13 +3664,16 @@ mod tests {
         .tag(Tag::parse(&["l".to_string(), group_id.clone()]).unwrap())
         .custom_created_at(nostr::Timestamp::from(2))
         .build(sender_device_pubkey);
-        manager
-            .maybe_handle_group_sender_key_distribution(
+        emit(
+            &tx,
+            manager
+                .maybe_handle_group_sender_key_distribution(
                 sender_owner_pubkey,
                 Some(sender_device_pubkey),
                 &dist2_rumor,
             )
-            .unwrap();
+                .unwrap(),
+        );
 
         let events = drain_events(&rx);
         let dec = events.iter().find_map(|ev| match ev {
@@ -3496,13 +3698,11 @@ mod tests {
 
         // First manager stores sender-event mapping in storage.
         {
-            let (tx, _rx) = crossbeam_channel::unbounded();
-            let manager = SessionManager::new(
+            let (manager, tx, _rx) = new_manager(
                 our_pubkey,
                 our_keys.secret_key().to_secret_bytes(),
                 "test-device".to_string(),
                 our_pubkey,
-                tx,
                 Some(storage.clone()),
                 None,
             );
@@ -3528,26 +3728,27 @@ mod tests {
             .custom_created_at(nostr::Timestamp::from(1))
             .build(sender_device_pubkey);
 
-            manager
-                .maybe_handle_group_sender_key_distribution(
+            emit(
+                &tx,
+                manager
+                    .maybe_handle_group_sender_key_distribution(
                     sender_owner_pubkey,
                     Some(sender_device_pubkey),
                     &dist_rumor,
                 )
-                .unwrap();
+                    .unwrap(),
+            );
         }
 
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             our_pubkey,
             our_keys.secret_key().to_secret_bytes(),
             "test-device".to_string(),
             our_pubkey,
-            tx,
             Some(storage),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
 
         let events = drain_events(&rx);
         assert!(
@@ -3565,21 +3766,20 @@ mod tests {
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
 
-        let (tx1, _rx1) = crossbeam_channel::unbounded();
-        let manager1 = SessionManager::new(
+        let (manager1, tx1, _rx1) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx1,
             Some(storage.clone()),
             None,
         );
-        manager1.init().unwrap();
+        emit(&tx1, manager1.init().unwrap());
 
         let (inner_id, published_ids) = manager1
             .send_text_with_inner_id(bob_pubkey, "queued before restart".to_string(), None)
-            .unwrap();
+            .unwrap()
+            .value;
         assert!(published_ids.is_empty());
         assert!(
             !storage.list("v1/discovery-queue/").unwrap().is_empty(),
@@ -3588,17 +3788,15 @@ mod tests {
 
         drop(manager1);
 
-        let (tx2, rx2) = crossbeam_channel::unbounded();
-        let manager2 = SessionManager::new(
+        let (manager2, tx2, rx2) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx2,
             Some(storage.clone()),
             None,
         );
-        manager2.init().unwrap();
+        emit(&tx2, manager2.init().unwrap());
         let _ = drain_events(&rx2);
 
         let mut app_keys = AppKeys::new(vec![]);
@@ -3607,7 +3805,7 @@ mod tests {
             .get_event(bob_pubkey)
             .sign_with_keys(&bob_keys)
             .unwrap();
-        manager2.process_received_event(app_keys_event);
+        emit(&tx2, manager2.process_received_event(app_keys_event));
 
         let bob_device_id = bob_pubkey.to_hex();
         let queued_keys = storage.list("v1/message-queue/").unwrap();
@@ -3624,7 +3822,7 @@ mod tests {
             .unwrap()
             .sign_with_keys(&bob_keys)
             .unwrap();
-        manager2.process_received_event(invite_event);
+        emit(&tx2, manager2.process_received_event(invite_event));
 
         let events = drain_events(&rx2);
         assert!(
@@ -3656,17 +3854,15 @@ mod tests {
         let bob_device_id = bob_pubkey.to_hex();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(storage.clone()),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         // Learn recipient devices first (AppKeys known) but don't establish a session yet.
@@ -3676,12 +3872,13 @@ mod tests {
             .get_event(bob_pubkey)
             .sign_with_keys(&bob_keys)
             .unwrap();
-        manager.process_received_event(app_keys_event);
+        emit(&tx, manager.process_received_event(app_keys_event));
         let _ = drain_events(&rx);
 
         let (inner_id, published_ids) = manager
             .send_text_with_inner_id(bob_pubkey, "queued with known appkeys".to_string(), None)
-            .unwrap();
+            .unwrap()
+            .value;
         assert!(
             published_ids.is_empty(),
             "without an active session, send should queue for later"
@@ -3723,7 +3920,7 @@ mod tests {
             .unwrap()
             .sign_with_keys(&bob_keys)
             .unwrap();
-        manager.process_received_event(invite_event);
+        emit(&tx, manager.process_received_event(invite_event));
 
         let events = drain_events(&rx);
         assert!(
@@ -3756,17 +3953,15 @@ mod tests {
         let new_device_pubkey = new_device_keys.public_key();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             owner_pubkey,
             owner_keys.secret_key().to_secret_bytes(),
             owner_pubkey.to_hex(),
             owner_pubkey,
-            tx,
             Some(storage),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         let mut app_keys = AppKeys::new(vec![]);
@@ -3776,7 +3971,7 @@ mod tests {
             .get_event(owner_pubkey)
             .sign_with_keys(&owner_keys)
             .unwrap();
-        manager.process_received_event(app_keys_event);
+        emit(&tx, manager.process_received_event(app_keys_event));
 
         let mut link_invite =
             Invite::create_new(new_device_pubkey, Some(new_device_pubkey.to_hex()), Some(1))
@@ -3789,7 +3984,7 @@ mod tests {
             accepted.is_ok(),
             "owner-side link invite should allow pre-registration acceptance"
         );
-        assert!(accepted.unwrap().created_new_session);
+        assert!(accepted.unwrap().value.created_new_session);
     }
 
     #[test]
@@ -3800,25 +3995,20 @@ mod tests {
         let bob_pubkey = bob_keys.public_key();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(storage),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         let invite = Invite::create_new(bob_pubkey, Some(bob_pubkey.to_hex()), Some(1)).unwrap();
-        let accepted = manager.accept_invite(&invite, Some(bob_pubkey));
-        assert!(
-            accepted.is_ok(),
-            "accept_invite should succeed for single-device peer"
-        );
+        let accepted = emit(&tx, manager.accept_invite(&invite, Some(bob_pubkey)).unwrap());
+        assert!(accepted.created_new_session);
 
         let events = drain_events(&rx);
         assert!(
@@ -3841,23 +4031,24 @@ mod tests {
         let bob_pubkey = bob_keys.public_key();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(storage),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         let invite = Invite::create_new(bob_pubkey, Some(bob_pubkey.to_hex()), Some(1)).unwrap();
-        manager
-            .accept_invite(&invite, Some(bob_pubkey))
-            .expect("accept_invite should succeed for single-device peer");
+        emit(
+            &tx,
+            manager
+                .accept_invite(&invite, Some(bob_pubkey))
+                .expect("accept_invite should succeed for single-device peer"),
+        );
 
         let initial_events = drain_events(&rx);
         assert!(
@@ -3899,17 +4090,15 @@ mod tests {
         let new_device_pubkey = new_device_keys.public_key();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx1, rx1) = crossbeam_channel::unbounded();
-        let manager1 = SessionManager::new(
+        let (manager1, tx1, rx1) = new_manager(
             owner_pubkey,
             owner_keys.secret_key().to_secret_bytes(),
             owner_pubkey.to_hex(),
             owner_pubkey,
-            tx1,
             Some(storage.clone()),
             None,
         );
-        manager1.init().unwrap();
+        emit(&tx1, manager1.init().unwrap());
         let _ = drain_events(&rx1);
 
         let mut app_keys = AppKeys::new(vec![]);
@@ -3919,21 +4108,19 @@ mod tests {
             .get_event(owner_pubkey)
             .sign_with_keys(&owner_keys)
             .unwrap();
-        manager1.process_received_event(app_keys_event);
+        emit(&tx1, manager1.process_received_event(app_keys_event));
 
         drop(manager1);
 
-        let (tx2, rx2) = crossbeam_channel::unbounded();
-        let manager2 = SessionManager::new(
+        let (manager2, tx2, rx2) = new_manager(
             owner_pubkey,
             owner_keys.secret_key().to_secret_bytes(),
             owner_pubkey.to_hex(),
             owner_pubkey,
-            tx2,
             Some(storage),
             None,
         );
-        manager2.init().unwrap();
+        emit(&tx2, manager2.init().unwrap());
         let _ = drain_events(&rx2);
 
         let mut link_invite =
@@ -3947,7 +4134,7 @@ mod tests {
             accepted.is_ok(),
             "owner-side link invite should allow pre-registration acceptance after restart"
         );
-        assert!(accepted.unwrap().created_new_session);
+        assert!(accepted.unwrap().value.created_new_session);
     }
 
     #[test]
@@ -3962,17 +4149,15 @@ mod tests {
         let flaky_storage: Arc<dyn StorageAdapter> =
             Arc::new(FailFirstMessageQueuePutStorage::new(base_storage.clone()));
 
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(flaky_storage.clone()),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         let (inner_id, published_ids) = manager
@@ -3981,7 +4166,8 @@ mod tests {
                 "retry after partial discovery expansion".to_string(),
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .value;
         assert!(published_ids.is_empty());
 
         let discovery_count_before = count_queue_entries(
@@ -4001,7 +4187,7 @@ mod tests {
             .get_event(bob_pubkey)
             .sign_with_keys(&bob_keys)
             .unwrap();
-        manager.process_received_event(app_keys_event.clone());
+        emit(&tx, manager.process_received_event(app_keys_event.clone()));
 
         let discovery_count_after_first = count_queue_entries(
             &flaky_storage,
@@ -4015,7 +4201,7 @@ mod tests {
         );
 
         // Retry AppKeys processing; the injected one-time queue failure is now consumed.
-        manager.process_received_event(app_keys_event);
+        emit(&tx, manager.process_received_event(app_keys_event));
         let queued_count_after_retry = count_queue_entries(
             &flaky_storage,
             "v1/message-queue/",
@@ -4033,7 +4219,7 @@ mod tests {
             .unwrap()
             .sign_with_keys(&bob_keys)
             .unwrap();
-        manager.process_received_event(invite_event);
+        emit(&tx, manager.process_received_event(invite_event));
 
         let events = drain_events(&rx);
         assert!(
@@ -4060,17 +4246,15 @@ mod tests {
         let bob_device2_id = bob_device2_keys.public_key().to_hex();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(storage.clone()),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         // Learn two recipient devices first; no sessions yet.
@@ -4083,7 +4267,7 @@ mod tests {
             &bob_owner_keys,
             1,
         );
-        manager.process_received_event(app_keys_two_event);
+        emit(&tx, manager.process_received_event(app_keys_two_event));
         let _ = drain_events(&rx);
 
         let (inner_id, published_ids) = manager
@@ -4092,7 +4276,8 @@ mod tests {
                 "queued for two devices pre-revoke".to_string(),
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .value;
         assert!(
             published_ids.is_empty(),
             "without sessions, message should queue per known device"
@@ -4115,7 +4300,7 @@ mod tests {
             &bob_owner_keys,
             2,
         );
-        manager.process_received_event(app_keys_one_event);
+        emit(&tx, manager.process_received_event(app_keys_one_event));
 
         assert_eq!(
             count_queue_entries(&storage, "v1/message-queue/", &bob_device2_id, &inner_id),
@@ -4140,7 +4325,7 @@ mod tests {
             .unwrap()
             .sign_with_keys(&bob_device1_keys)
             .unwrap();
-        manager.process_received_event(invite_event);
+        emit(&tx, manager.process_received_event(invite_event));
         let events = drain_events(&rx);
         assert!(
             events.iter().any(|ev| {
@@ -4197,38 +4382,42 @@ mod tests {
         let bob_device2_id = bob_device2_keys.public_key().to_hex();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(storage.clone()),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         let mut app_keys_two = AppKeys::new(vec![]);
         app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
         app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
-        manager.process_received_event(sign_app_keys_event(
-            &app_keys_two,
-            bob_owner_pubkey,
-            &bob_owner_keys,
-            2,
-        ));
+        emit(
+            &tx,
+            manager.process_received_event(sign_app_keys_event(
+                &app_keys_two,
+                bob_owner_pubkey,
+                &bob_owner_keys,
+                2,
+            )),
+        );
         let _ = drain_events(&rx);
 
         let mut stale_one_device = AppKeys::new(vec![]);
         stale_one_device.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
-        manager.process_received_event(sign_app_keys_event(
-            &stale_one_device,
-            bob_owner_pubkey,
-            &bob_owner_keys,
-            1,
-        ));
+        emit(
+            &tx,
+            manager.process_received_event(sign_app_keys_event(
+                &stale_one_device,
+                bob_owner_pubkey,
+                &bob_owner_keys,
+                1,
+            )),
+        );
         let _ = drain_events(&rx);
 
         let (inner_id, published_ids) = manager
@@ -4237,7 +4426,8 @@ mod tests {
                 "stale appkeys replay should not collapse fanout".to_string(),
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .value;
         assert!(
             published_ids.is_empty(),
             "without established sessions, message should queue per known device"
@@ -4296,38 +4486,42 @@ mod tests {
         let bob_device2_id = bob_device2_keys.public_key().to_hex();
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(storage.clone()),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         let mut app_keys_two = AppKeys::new(vec![]);
         app_keys_two.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
         app_keys_two.add_device(DeviceEntry::new(bob_device2_keys.public_key(), 2));
-        manager.process_received_event(sign_app_keys_event(
-            &app_keys_two,
-            bob_owner_pubkey,
-            &bob_owner_keys,
-            5,
-        ));
+        emit(
+            &tx,
+            manager.process_received_event(sign_app_keys_event(
+                &app_keys_two,
+                bob_owner_pubkey,
+                &bob_owner_keys,
+                5,
+            )),
+        );
         let _ = drain_events(&rx);
 
         let mut same_second_subset = AppKeys::new(vec![]);
         same_second_subset.add_device(DeviceEntry::new(bob_device1_keys.public_key(), 1));
-        manager.process_received_event(sign_app_keys_event(
-            &same_second_subset,
-            bob_owner_pubkey,
-            &bob_owner_keys,
-            5,
-        ));
+        emit(
+            &tx,
+            manager.process_received_event(sign_app_keys_event(
+                &same_second_subset,
+                bob_owner_pubkey,
+                &bob_owner_keys,
+                5,
+            )),
+        );
         let _ = drain_events(&rx);
 
         let (inner_id, published_ids) = manager
@@ -4336,7 +4530,8 @@ mod tests {
                 "same-second replay should not collapse fanout".to_string(),
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .value;
         assert!(published_ids.is_empty());
         assert_eq!(
             count_queue_entries(&storage, "v1/message-queue/", &bob_device1_id, &inner_id),
@@ -4364,17 +4559,15 @@ mod tests {
         let flaky_storage: Arc<dyn StorageAdapter> =
             Arc::new(FailFirstMessageQueuePutStorage::new(base_storage.clone()));
 
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let manager = SessionManager::new(
+        let (manager, tx, rx) = new_manager(
             alice_pubkey,
             alice_keys.secret_key().to_secret_bytes(),
             alice_pubkey.to_hex(),
             alice_pubkey,
-            tx,
             Some(flaky_storage.clone()),
             None,
         );
-        manager.init().unwrap();
+        emit(&tx, manager.init().unwrap());
         let _ = drain_events(&rx);
 
         // Queue in discovery first (unknown recipient devices).
@@ -4384,7 +4577,8 @@ mod tests {
                 "queued before appkeys/revocation".to_string(),
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .value;
         assert!(published_ids.is_empty());
 
         // AppKeys with two devices: first expansion attempt will partially fail.
@@ -4397,7 +4591,7 @@ mod tests {
             &bob_owner_keys,
             1,
         );
-        manager.process_received_event(app_keys_two_event);
+        emit(&tx, manager.process_received_event(app_keys_two_event));
         assert!(
             count_queue_entries(
                 &flaky_storage,
@@ -4417,8 +4611,8 @@ mod tests {
             &bob_owner_keys,
             2,
         );
-        manager.process_received_event(app_keys_one_event.clone());
-        manager.process_received_event(app_keys_one_event);
+        emit(&tx, manager.process_received_event(app_keys_one_event.clone()));
+        emit(&tx, manager.process_received_event(app_keys_one_event));
 
         assert_eq!(
             count_queue_entries(
@@ -4451,7 +4645,7 @@ mod tests {
             .unwrap()
             .sign_with_keys(&bob_device1_keys)
             .unwrap();
-        manager.process_received_event(invite_event);
+        emit(&tx, manager.process_received_event(invite_event));
         let events = drain_events(&rx);
         assert!(
             events.iter().any(|ev| {
@@ -4471,9 +4665,7 @@ mod tests {
         let pubkey = keys.public_key();
         let identity_key = keys.secret_key().to_secret_bytes();
         let device_id = "test-device".to_string();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-
-        let manager = SessionManager::new(pubkey, identity_key, device_id, pubkey, tx, None, None);
+        let (manager, _tx, _rx) = new_manager(pubkey, identity_key, device_id, pubkey, None, None);
 
         let peer = Keys::generate().public_key();
         let peer_hex = hex::encode(peer.to_bytes());

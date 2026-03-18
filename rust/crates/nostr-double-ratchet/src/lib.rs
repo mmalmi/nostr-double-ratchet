@@ -50,7 +50,10 @@ pub use session::{
     Session, SessionInitInput, SessionReceiveInput, SessionReceiveMeta, SessionReceiveResult,
     SessionSendInput, SessionSendResult,
 };
-pub use session_manager::{AcceptInviteResult, SessionManager, SessionManagerEvent};
+pub use session_manager::{
+    emit_session_manager_output, AcceptInviteResult, ManagerOutput, SessionManager, SessionManagerEffect,
+    SessionManagerNotification, SessionManagerEvent,
+};
 pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};
 pub use types::*;

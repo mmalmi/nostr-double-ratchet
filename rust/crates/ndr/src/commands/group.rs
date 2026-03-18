@@ -1,10 +1,11 @@
 use anyhow::Result;
-use crossbeam_channel::{Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
-    CreateGroupOptions, FanoutGroupMetadataOptions, FileStorageAdapter, GroupManager,
-    GroupManagerOptions, GroupSendEvent, ManagedSession as Session, SessionManager,
-    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, REACTION_KIND,
+    emit_session_manager_output, CreateGroupOptions, FanoutGroupMetadataOptions,
+    FileStorageAdapter, GroupManager, GroupManagerOptions, GroupSendEvent,
+    ManagedSession as Session, SessionManager, SessionManagerEvent, StorageAdapter,
+    CHAT_MESSAGE_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -77,6 +78,7 @@ struct PairwiseSessionEventQueue<'a> {
     my_owner_pubkey_hex: &'a str,
     storage: &'a Storage,
     session_manager: &'a SessionManager,
+    session_manager_tx: &'a Sender<SessionManagerEvent>,
     session_manager_rx: &'a Receiver<SessionManagerEvent>,
     queued_events: &'a mut Vec<nostr::Event>,
 }
@@ -84,6 +86,7 @@ struct PairwiseSessionEventQueue<'a> {
 fn import_chats_into_session_manager(
     storage: &Storage,
     manager: &SessionManager,
+    manager_tx: &Sender<SessionManagerEvent>,
     my_owner_pubkey_hex: &str,
 ) -> Result<()> {
     let known: std::collections::HashMap<(String, String), String> = manager
@@ -105,7 +108,7 @@ fn import_chats_into_session_manager(
             Ok(pk) => pk,
             Err(_) => continue,
         };
-        manager.setup_user(owner_pubkey);
+        emit_session_manager_output(manager_tx, manager.setup_user(owner_pubkey))?;
 
         let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
         if known
@@ -182,7 +185,11 @@ fn sync_member_chats_from_session_manager(
 fn build_session_manager(
     config: &Config,
     storage: &Storage,
-) -> Result<(SessionManager, Receiver<SessionManagerEvent>)> {
+) -> Result<(
+    SessionManager,
+    Sender<SessionManagerEvent>,
+    Receiver<SessionManagerEvent>,
+)> {
     let our_private_key = config.private_key_bytes()?;
     let our_pubkey_hex = config.public_key()?;
     let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
@@ -199,17 +206,16 @@ fn build_session_manager(
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        tx,
         Some(session_manager_store),
         None,
     );
-    manager.init()?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
+    emit_session_manager_output(&tx, manager.init()?)?;
+    import_chats_into_session_manager(storage, &manager, &tx, &owner_pubkey_hex)?;
 
     // Drop any initial SessionManager events (device invite publication, subscribe requests, etc).
     // Group commands only care about publishing ratchet message events that they explicitly send.
     while rx.try_recv().is_ok() {}
-    Ok((manager, rx))
+    Ok((manager, tx, rx))
 }
 
 fn drain_session_manager_message_events(rx: &Receiver<SessionManagerEvent>) -> Vec<nostr::Event> {
@@ -281,12 +287,14 @@ async fn fan_out_metadata(
     client.connect().await;
 
     let mut group_manager = build_group_manager(config, storage)?;
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let (session_manager, session_manager_tx, session_manager_rx) =
+        build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
+        session_manager_tx: &session_manager_tx,
         session_manager_rx: &session_manager_rx,
         queued_events: &mut pairwise_events,
     };
@@ -371,12 +379,17 @@ fn queue_pairwise_session_events_for_recipient(
         import_chats_into_session_manager(
             queue.storage,
             queue.session_manager,
+            queue.session_manager_tx,
             queue.my_owner_pubkey_hex,
         )?;
-        let event_ids = queue
+        let event_ids = match queue
             .session_manager
             .send_event_recipient_only(recipient_owner, rumor.clone())
-            .unwrap_or_default();
+        {
+            Ok(output) => emit_session_manager_output(queue.session_manager_tx, output)
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
         let drained = drain_session_manager_message_events(queue.session_manager_rx);
         sync_member_chats_from_session_manager(
             queue.storage,
@@ -452,12 +465,14 @@ pub async fn create(
     client.connect().await;
 
     let mut group_manager = build_group_manager(config, storage)?;
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let (session_manager, session_manager_tx, session_manager_rx) =
+        build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
+        session_manager_tx: &session_manager_tx,
         session_manager_rx: &session_manager_rx,
         queued_events: &mut pairwise_events,
     };
@@ -751,12 +766,14 @@ pub async fn send_message(
         .upsert_group(group.data.clone())
         .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
 
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let (session_manager, session_manager_tx, session_manager_rx) =
+        build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
+        session_manager_tx: &session_manager_tx,
         session_manager_rx: &session_manager_rx,
         queued_events: &mut pairwise_events,
     };
@@ -868,12 +885,14 @@ pub async fn react(
         .upsert_group(group.data.clone())
         .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
 
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let (session_manager, session_manager_tx, session_manager_rx) =
+        build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
+        session_manager_tx: &session_manager_tx,
         session_manager_rx: &session_manager_rx,
         queued_events: &mut pairwise_events,
     };
@@ -966,12 +985,14 @@ pub async fn rotate_sender_key(
         .upsert_group(group.data.clone())
         .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
 
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let (session_manager, session_manager_tx, session_manager_rx) =
+        build_session_manager(config, storage)?;
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
+        session_manager_tx: &session_manager_tx,
         session_manager_rx: &session_manager_rx,
         queued_events: &mut pairwise_events,
     };

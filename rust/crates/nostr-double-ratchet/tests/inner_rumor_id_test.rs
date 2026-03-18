@@ -2,17 +2,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use nostr::nips::nip44::{self, Version};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    utils::kdf, Header, InMemoryStorage, Invite, ManagedInvite, ManagedSession as Session,
-    SessionManager, SessionManagerEvent, MESSAGE_EVENT_KIND,
+    emit_session_manager_output, utils::kdf, Header, InMemoryStorage, Invite, ManagedInvite,
+    ManagedSession as Session, SessionManager, SessionManagerEvent, MESSAGE_EVENT_KIND,
 };
 use sha2::{Digest, Sha256};
 
 fn drain_events(rx: &Receiver<SessionManagerEvent>) {
     while rx.try_recv().is_ok() {}
+}
+
+fn emit<T>(tx: &Sender<SessionManagerEvent>, output: nostr_double_ratchet::ManagerOutput<T>) -> T {
+    emit_session_manager_output(tx, output).unwrap()
 }
 
 fn recv_decrypted_message(rx: &Receiver<SessionManagerEvent>) -> String {
@@ -205,12 +209,11 @@ fn test_session_manager_delivers_messages_with_recomputed_inner_id() {
         alice_keys.secret_key().to_secret_bytes(),
         hex::encode(alice_keys.public_key().to_bytes()),
         alice_keys.public_key(),
-        tx,
         Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
         None,
     );
 
-    manager.init().unwrap();
+    emit(&tx, manager.init().unwrap());
 
     // Import session with Bob
     manager
@@ -225,7 +228,7 @@ fn test_session_manager_delivers_messages_with_recomputed_inner_id() {
 
     let bad_inner = build_bad_id_rumor_json(bob_keys.public_key());
     let bad_outer = craft_outer_from_plaintext(&mut bob_session, &bad_inner, 10);
-    manager.process_received_event(bad_outer);
+    emit(&tx, manager.process_received_event(bad_outer));
 
     let delivered = recv_decrypted_message(&rx);
     let rumor: serde_json::Value = serde_json::from_str(&delivered).unwrap();

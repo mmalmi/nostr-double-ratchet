@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
-use nostr_double_ratchet::ManagedInvite;
+use nostr_double_ratchet::{emit_session_manager_output, ManagedInvite};
 
 use crate::commands::owner_claim::resolve_verified_owner_pubkey;
 use crate::config::Config;
@@ -215,13 +215,12 @@ fn persist_session_in_session_manager(
         our_private_key,
         config.public_key()?,
         owner_pubkey,
-        sm_tx,
         Some(sm_store),
         None,
     );
-    manager.init()?;
+    emit_session_manager_output(&sm_tx, manager.init()?)?;
     manager.import_session_state(peer_pubkey, device_id, state)?;
-    manager.setup_user(peer_pubkey);
+    emit_session_manager_output(&sm_tx, manager.setup_user(peer_pubkey))?;
     Ok(())
 }
 

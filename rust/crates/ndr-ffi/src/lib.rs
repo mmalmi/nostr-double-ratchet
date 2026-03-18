@@ -11,6 +11,7 @@ use nostr_double_ratchet::{
     AppKeys, CreateGroupOptions, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent,
     GroupManager, GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, ManagedInvite,
     ManagedSession, SessionManager, SessionManagerEvent, SessionState, StorageAdapter,
+    emit_session_manager_output,
 };
 
 mod error;
@@ -495,6 +496,15 @@ pub struct SessionManagerHandle {
     group_manager: Mutex<GroupManager>,
 }
 
+impl SessionManagerHandle {
+    fn emit_output<T>(
+        &self,
+        output: nostr_double_ratchet::ManagerOutput<T>,
+    ) -> Result<T, NdrError> {
+        Ok(emit_session_manager_output(&self.event_tx, output)?)
+    }
+}
+
 #[uniffi::export]
 impl SessionManagerHandle {
     /// Create a new session manager with an internal event queue.
@@ -519,7 +529,6 @@ impl SessionManagerHandle {
             our_identity_key,
             device_id,
             owner_pubkey,
-            tx.clone(),
             Some(storage.clone()),
             None,
         );
@@ -565,7 +574,6 @@ impl SessionManagerHandle {
             our_identity_key,
             device_id,
             owner_pubkey,
-            tx.clone(),
             Some(storage.clone()),
             None,
         );
@@ -588,7 +596,7 @@ impl SessionManagerHandle {
     /// Initialize the session manager (loads state, creates device invite, subscribes).
     pub fn init(&self) -> Result<(), NdrError> {
         let manager = self.inner.lock().unwrap();
-        manager.init()?;
+        self.emit_output(manager.init()?)?;
         Ok(())
     }
 
@@ -596,8 +604,8 @@ impl SessionManagerHandle {
     pub fn setup_user(&self, user_pubkey_hex: String) -> Result<(), NdrError> {
         let user_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&user_pubkey_hex)?;
         let manager = self.inner.lock().unwrap();
-        manager.init()?;
-        manager.setup_user(user_pubkey);
+        self.emit_output(manager.init()?)?;
+        self.emit_output(manager.setup_user(user_pubkey))?;
         Ok(())
     }
 
@@ -617,8 +625,8 @@ impl SessionManagerHandle {
             .transpose()?;
 
         let manager = self.inner.lock().unwrap();
-        manager.init()?;
-        let accepted = manager.accept_invite(&invite, owner_pubkey_hint)?;
+        self.emit_output(manager.init()?)?;
+        let accepted = self.emit_output(manager.accept_invite(&invite, owner_pubkey_hint)?)?;
 
         Ok(SessionManagerAcceptInviteResult {
             owner_pubkey_hex: accepted.owner_pubkey.to_hex(),
@@ -642,8 +650,8 @@ impl SessionManagerHandle {
             .transpose()?;
 
         let manager = self.inner.lock().unwrap();
-        manager.init()?;
-        let accepted = manager.accept_invite(&invite, owner_pubkey_hint)?;
+        self.emit_output(manager.init()?)?;
+        let accepted = self.emit_output(manager.accept_invite(&invite, owner_pubkey_hint)?)?;
 
         Ok(SessionManagerAcceptInviteResult {
             owner_pubkey_hex: accepted.owner_pubkey.to_hex(),
@@ -666,7 +674,7 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_text(recipient, text, options)?)
+        Ok(self.emit_output(manager.send_text(recipient, text, options)?)?)
     }
 
     /// Send a text message and return both the stable inner (rumor) id and the
@@ -684,7 +692,7 @@ impl SessionManagerHandle {
             ttl_seconds: None,
         });
         let (inner_id, outer_event_ids) =
-            manager.send_text_with_inner_id(recipient, text, options)?;
+            self.emit_output(manager.send_text_with_inner_id(recipient, text, options)?)?;
         Ok(SendTextResult {
             inner_id,
             outer_event_ids,
@@ -773,7 +781,7 @@ impl SessionManagerHandle {
             .map(|id| id.to_string())
             .unwrap_or_default();
 
-        let outer_event_ids = manager.send_event(recipient, event)?;
+        let outer_event_ids = self.emit_output(manager.send_event(recipient, event)?)?;
 
         Ok(SendTextResult {
             inner_id,
@@ -805,7 +813,10 @@ impl SessionManagerHandle {
         let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                                  rumor: &nostr::UnsignedEvent|
          -> nostr_double_ratchet::Result<()> {
-            session_manager.send_event(recipient_owner, rumor.clone())?;
+            emit_session_manager_output(
+                &self.event_tx,
+                session_manager.send_event(recipient_owner, rumor.clone())?,
+            )?;
             Ok(())
         };
 
@@ -878,7 +889,10 @@ impl SessionManagerHandle {
         let mut send_pairwise = |recipient_owner: nostr::PublicKey,
                                  rumor: &nostr::UnsignedEvent|
          -> nostr_double_ratchet::Result<()> {
-            session_manager.send_event(recipient_owner, rumor.clone())?;
+            emit_session_manager_output(
+                &self.event_tx,
+                session_manager.send_event(recipient_owner, rumor.clone())?,
+            )?;
             Ok(())
         };
 
@@ -963,7 +977,7 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_receipt(recipient, &receipt_type, message_ids, options)?)
+        Ok(self.emit_output(manager.send_receipt(recipient, &receipt_type, message_ids, options)?)?)
     }
 
     /// Send a typing indicator.
@@ -978,7 +992,7 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_typing(recipient, options)?)
+        Ok(self.emit_output(manager.send_typing(recipient, options)?)?)
     }
 
     /// Send an emoji reaction (kind 7) to a specific message id.
@@ -995,7 +1009,7 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(manager.send_reaction(recipient, message_id, emoji, options)?)
+        Ok(self.emit_output(manager.send_reaction(recipient, message_id, emoji, options)?)?)
     }
 
     /// Import a session state for a peer.
@@ -1033,7 +1047,7 @@ impl SessionManagerHandle {
     pub fn process_event(&self, event_json: String) -> Result<(), NdrError> {
         let event: nostr::Event = serde_json::from_str(&event_json)?;
         let manager = self.inner.lock().unwrap();
-        manager.process_received_event(event);
+        self.emit_output(manager.process_received_event(event))?;
         Ok(())
     }
 

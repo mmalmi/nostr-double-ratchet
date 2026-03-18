@@ -1,6 +1,7 @@
 use anyhow::Result;
 use nostr_double_ratchet::{
-    FileStorageAdapter, Invite, SessionManager, SessionManagerEvent, StorageAdapter,
+    emit_session_manager_output, FileStorageAdapter, Invite, SessionManager, SessionManagerEvent,
+    StorageAdapter,
     INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
 };
 use std::sync::Arc;
@@ -20,6 +21,7 @@ fn build_session_manager(
     storage: &Storage,
 ) -> Result<(
     SessionManager,
+    crossbeam_channel::Sender<SessionManagerEvent>,
     crossbeam_channel::Receiver<SessionManagerEvent>,
     nostr::Keys,
     String,
@@ -40,19 +42,19 @@ fn build_session_manager(
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        sm_tx,
         Some(session_manager_store),
         None,
     );
-    manager.init()?;
+    emit_session_manager_output(&sm_tx, manager.init()?)?;
 
     let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
-    Ok((manager, sm_rx, keys, owner_pubkey_hex))
+    Ok((manager, sm_tx, sm_rx, keys, owner_pubkey_hex))
 }
 
 fn import_chats_into_session_manager(
     storage: &Storage,
     manager: &SessionManager,
+    manager_tx: &crossbeam_channel::Sender<SessionManagerEvent>,
     my_owner_pubkey_hex: &str,
 ) -> Result<()> {
     let known: std::collections::HashMap<(String, String), String> = manager
@@ -74,7 +76,7 @@ fn import_chats_into_session_manager(
             Ok(pk) => pk,
             Err(_) => continue,
         };
-        manager.setup_user(owner_pubkey);
+        emit_session_manager_output(manager_tx, manager.setup_user(owner_pubkey))?;
 
         let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
         if known
@@ -175,9 +177,9 @@ pub(super) async fn join_via_invite(
     config: &Config,
     storage: &Storage,
 ) -> Result<PublicInviteJoinResult> {
-    let (manager, manager_rx, signing_keys, owner_pubkey_hex) =
+    let (manager, manager_tx, manager_rx, signing_keys, owner_pubkey_hex) =
         build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
+    import_chats_into_session_manager(storage, &manager, &manager_tx, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
     if let Some(claimed_owner_pubkey) = invite.owner_public_key {
@@ -185,16 +187,20 @@ pub(super) async fn join_via_invite(
             if let Some(snapshot) =
                 fetch_latest_app_keys_snapshot(&client, claimed_owner_pubkey).await?
             {
-                manager.ingest_app_keys_snapshot(
-                    claimed_owner_pubkey,
-                    snapshot.app_keys,
-                    snapshot.created_at,
-                );
+                emit_session_manager_output(
+                    &manager_tx,
+                    manager.ingest_app_keys_snapshot(
+                        claimed_owner_pubkey,
+                        snapshot.app_keys,
+                        snapshot.created_at,
+                    ),
+                )?;
             }
         }
     }
 
-    let accepted = manager.accept_invite(&invite, invite.owner_public_key)?;
+    let accepted =
+        emit_session_manager_output(&manager_tx, manager.accept_invite(&invite, invite.owner_public_key)?)?;
     let response_event = flush_session_manager_events(&manager_rx, &signing_keys, &client).await?;
 
     let chat = upsert_chat_from_session_manager(

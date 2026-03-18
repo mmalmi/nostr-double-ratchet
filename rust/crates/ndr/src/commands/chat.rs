@@ -1,6 +1,7 @@
 use anyhow::Result;
 use nostr_double_ratchet::{
-    FileStorageAdapter, SessionManager, SessionManagerEvent, StorageAdapter,
+    emit_session_manager_output, FileStorageAdapter, SessionManager, SessionManagerEvent,
+    StorageAdapter,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -178,12 +179,11 @@ fn delete_session_manager_chat(
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        sm_tx,
         Some(session_manager_store),
         None,
     );
-    manager.init()?;
-    manager.delete_chat(their_pubkey)?;
+    emit_session_manager_output(&sm_tx, manager.init()?)?;
+    emit_session_manager_output(&sm_tx, manager.delete_chat(their_pubkey)?)?;
     Ok(())
 }
 
@@ -267,11 +267,10 @@ pub async fn ttl(
         our_private_key,
         our_pubkey_hex,
         owner_pubkey,
-        sm_tx,
         Some(session_manager_store),
         None,
     );
-    manager.init()?;
+    emit_session_manager_output(&sm_tx, manager.init()?)?;
 
     // Import the current selected session so we can send via SessionManager.
     let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
@@ -284,7 +283,8 @@ pub async fn ttl(
         })?;
     manager.import_session_state(recipient, Some(device_id), state)?;
 
-    let event_ids = manager.send_chat_settings(recipient, ttl_to_send)?;
+    let event_ids =
+        emit_session_manager_output(&sm_tx, manager.send_chat_settings(recipient, ttl_to_send)?)?;
 
     let client = connect_client(config).await?;
     let signing_keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
