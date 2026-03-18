@@ -40,6 +40,21 @@ pub(crate) async fn fetch_latest_app_keys_snapshot(
     relays: &[String],
     owner_pubkey: nostr::PublicKey,
 ) -> Result<Option<nostr_double_ratchet::AppKeysSnapshot>> {
+    fetch_latest_app_keys_snapshot_with_timeout(
+        client,
+        relays,
+        owner_pubkey,
+        Duration::from_secs(3),
+    )
+    .await
+}
+
+pub(crate) async fn fetch_latest_app_keys_snapshot_with_timeout(
+    client: &Client,
+    relays: &[String],
+    owner_pubkey: nostr::PublicKey,
+    timeout: Duration,
+) -> Result<Option<nostr_double_ratchet::AppKeysSnapshot>> {
     let filter = Filter::new()
         .kind(nostr::Kind::Custom(
             nostr_double_ratchet::APP_KEYS_EVENT_KIND as u16,
@@ -47,13 +62,8 @@ pub(crate) async fn fetch_latest_app_keys_snapshot(
         .author(owner_pubkey)
         .limit(20);
 
-    let events = crate::nostr_client::fetch_events_best_effort(
-        client,
-        relays,
-        filter,
-        Duration::from_secs(3),
-    )
-    .await?;
+    let events =
+        crate::nostr_client::fetch_events_best_effort(client, relays, filter, timeout).await?;
 
     Ok(nostr_double_ratchet::select_latest_app_keys_from_events(
         events.iter(),

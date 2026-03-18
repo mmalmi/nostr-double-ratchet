@@ -7,7 +7,8 @@ use nostr_double_ratchet::{
 };
 
 use crate::commands::owner_claim::{
-    fetch_latest_app_keys, fetch_latest_app_keys_snapshot, resolve_verified_owner_pubkey,
+    fetch_latest_app_keys, fetch_latest_app_keys_snapshot,
+    fetch_latest_app_keys_snapshot_with_timeout, resolve_verified_owner_pubkey,
 };
 use crate::config::Config;
 use crate::nostr_client::{
@@ -251,6 +252,9 @@ async fn refresh_peer_app_keys_snapshots(
     my_owner_pubkey_hex: &str,
     chat_id: Option<&str>,
 ) -> Result<()> {
+    const APP_KEYS_POLL_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+    const DEVICE_INVITE_POLL_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
     let chats = if let Some(id) = chat_id {
         vec![storage
             .get_chat(id)?
@@ -271,7 +275,13 @@ async fn refresh_peer_app_keys_snapshots(
             continue;
         };
 
-        if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, relays, owner_pubkey).await?
+        if let Some(snapshot) = fetch_latest_app_keys_snapshot_with_timeout(
+            client,
+            relays,
+            owner_pubkey,
+            APP_KEYS_POLL_FETCH_TIMEOUT,
+        )
+        .await?
         {
             let sibling_devices: Vec<nostr::PublicKey> = snapshot
                 .app_keys
@@ -299,7 +309,7 @@ async fn refresh_peer_app_keys_snapshots(
                     ))
                     .authors(sibling_devices.clone())
                     .limit(50),
-                std::time::Duration::from_secs(3),
+                DEVICE_INVITE_POLL_FETCH_TIMEOUT,
             )
             .await?;
 
@@ -329,8 +339,16 @@ async fn refresh_pending_invite_response_app_keys(
     client: &nostr_sdk::Client,
     relays: &[String],
 ) -> Result<()> {
+    const APP_KEYS_POLL_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
     for owner_pubkey in session_manager.pending_invite_response_owner_pubkeys() {
-        if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, relays, owner_pubkey).await?
+        if let Some(snapshot) = fetch_latest_app_keys_snapshot_with_timeout(
+            client,
+            relays,
+            owner_pubkey,
+            APP_KEYS_POLL_FETCH_TIMEOUT,
+        )
+        .await?
         {
             session_manager.ingest_app_keys_snapshot(
                 owner_pubkey,

@@ -2,6 +2,7 @@ use anyhow::Result;
 use nostr_sdk::{Client, Filter};
 
 const SUBSCRIBE_TIMEOUT_SECS: u64 = 3;
+const SEND_EVENT_TIMEOUT_SECS: u64 = 2;
 
 use crate::config::Config;
 
@@ -16,10 +17,53 @@ pub(crate) async fn connect_client(config: &Config) -> Result<Client> {
 }
 
 pub(crate) async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
-    match client.send_event(event).await {
-        Ok(_) => Ok(()),
-        Err(_) if should_ignore_publish_errors() => Ok(()),
-        Err(err) => Err(err.into()),
+    let relays = client.relays().await;
+    if relays.is_empty() {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(SEND_EVENT_TIMEOUT_SECS),
+            client.send_event(event.clone()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(_)) if should_ignore_publish_errors() => return Ok(()),
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) if should_ignore_publish_errors() => return Ok(()),
+            Err(_) => anyhow::bail!("send_event timed out"),
+        }
+    }
+
+    let mut relay_urls: Vec<String> = relays.keys().map(|url| url.to_string()).collect();
+    relay_urls.sort();
+
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut any_success = false;
+
+    for relay in relay_urls {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(SEND_EVENT_TIMEOUT_SECS),
+            client.send_event_to([relay.as_str()], event.clone()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                any_success = true;
+            }
+            Ok(Err(err)) => {
+                last_error = Some(err.into());
+            }
+            Err(_) => {
+                last_error = Some(anyhow::anyhow!("send_event timed out for relay {}", relay));
+            }
+        }
+    }
+
+    if any_success || should_ignore_publish_errors() {
+        Ok(())
+    } else if let Some(err) = last_error {
+        Err(err)
+    } else {
+        Err(anyhow::anyhow!("failed to publish event to any relay"))
     }
 }
 
@@ -84,7 +128,7 @@ pub(crate) async fn fetch_events_best_effort(
 
     for relay in relays {
         match tokio::time::timeout(
-            timeout + std::time::Duration::from_secs(1),
+            timeout + std::time::Duration::from_millis(250),
             client.fetch_events_from([relay.as_str()], vec![filter.clone()], Some(timeout)),
         )
         .await

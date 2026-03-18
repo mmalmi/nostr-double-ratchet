@@ -6,7 +6,7 @@ use nostr_double_ratchet::{
     CHAT_MESSAGE_KIND, EXPIRATION_TAG, MESSAGE_EVENT_KIND,
 };
 
-use crate::commands::owner_claim::fetch_latest_app_keys_snapshot;
+use crate::commands::owner_claim::fetch_latest_app_keys_snapshot_with_timeout;
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
@@ -242,10 +242,19 @@ async fn refresh_recipient_app_keys(
     use std::collections::HashSet;
     use tokio::time::{Duration, Instant};
 
+    const APP_KEYS_POLL_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
+
     let relays = config.resolved_relays();
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() <= deadline {
-        if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, &relays, recipient).await? {
+        if let Some(snapshot) = fetch_latest_app_keys_snapshot_with_timeout(
+            client,
+            &relays,
+            recipient,
+            APP_KEYS_POLL_FETCH_TIMEOUT,
+        )
+        .await?
+        {
             let sibling_devices: HashSet<nostr::PublicKey> = snapshot
                 .app_keys
                 .get_all_devices()
@@ -272,6 +281,8 @@ async fn process_recipient_device_invites(
     use nostr_sdk::Filter;
     use tokio::time::{Duration, Instant};
 
+    const DEVICE_INVITE_POLL_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
+
     if sibling_devices.is_empty() {
         return Ok(());
     }
@@ -290,7 +301,7 @@ async fn process_recipient_device_invites(
                 ))
                 .authors(sibling_devices.iter().copied().collect::<Vec<_>>())
                 .limit(50),
-            Duration::from_secs(3),
+            DEVICE_INVITE_POLL_FETCH_TIMEOUT,
         )
         .await?;
 
