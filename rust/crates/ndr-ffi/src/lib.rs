@@ -12,7 +12,7 @@ use nostr_double_ratchet::{
     GroupManager, GroupManagerOptions, GroupSendEvent, InMemoryStorage, Invite, ManagedInvite,
     ManagedSession, SessionManager, SessionManagerEvent, SessionState, StorageAdapter,
     initialize_session_manager, persist_and_emit_session_manager_output,
-    persist_session_manager_output,
+    persist_session_manager_output, select_latest_app_keys_from_events,
 };
 
 mod error;
@@ -196,6 +196,72 @@ pub fn parse_app_keys_event(event_json: String) -> Result<Vec<FfiDeviceEntry>, N
             created_at: d.created_at,
         })
         .collect())
+}
+
+/// Resolve the latest authorized device list from a set of AppKeys event JSON strings.
+#[uniffi::export]
+pub fn resolve_latest_app_keys_devices(
+    event_jsons: Vec<String>,
+) -> Result<Vec<FfiDeviceEntry>, NdrError> {
+    let events: Vec<nostr::Event> = event_jsons
+        .iter()
+        .filter_map(|json| serde_json::from_str(json).ok())
+        .collect();
+
+    let snapshot = select_latest_app_keys_from_events(events.iter())
+        .ok_or_else(|| NdrError::InvalidEvent("No valid AppKeys events found".to_string()))?;
+
+    Ok(snapshot
+        .app_keys
+        .get_all_devices()
+        .into_iter()
+        .map(|d| FfiDeviceEntry {
+            identity_pubkey_hex: hex::encode(d.identity_pubkey.to_bytes()),
+            created_at: d.created_at,
+        })
+        .collect())
+}
+
+/// Resolve conversation routing candidates for a decrypted rumor.
+///
+/// Returns an ordered list of candidate pubkeys that could identify the conversation
+/// peer. The caller should check each candidate against known sessions.
+#[uniffi::export]
+pub fn resolve_conversation_candidate_pubkeys(
+    owner_pubkey_hex: String,
+    rumor_pubkey_hex: String,
+    rumor_tags: Vec<Vec<String>>,
+    sender_pubkey_hex: String,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Extract "p" tag values from the rumor as potential conversation peers
+    for tag in &rumor_tags {
+        if tag.len() >= 2 && tag[0] == "p" {
+            let pubkey = tag[1].to_lowercase();
+            if !pubkey.is_empty()
+                && pubkey != owner_pubkey_hex
+                && pubkey != rumor_pubkey_hex
+                && seen.insert(pubkey.clone())
+            {
+                candidates.push(pubkey);
+            }
+        }
+    }
+
+    // Then the sender (authenticated session peer)
+    let sender = sender_pubkey_hex.to_lowercase();
+    if !sender.is_empty() && sender != owner_pubkey_hex && seen.insert(sender.clone()) {
+        candidates.push(sender);
+    }
+
+    // Finally fall back to owner as last resort
+    if seen.insert(owner_pubkey_hex.clone()) {
+        candidates.push(owner_pubkey_hex);
+    }
+
+    candidates
 }
 
 /// FFI wrapper for Invite.
