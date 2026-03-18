@@ -1,4 +1,5 @@
-import { Filter, VerifiedEvent, UnsignedEvent, verifyEvent } from "nostr-tools"
+import { Filter, VerifiedEvent, UnsignedEvent, getPublicKey, verifyEvent } from "nostr-tools"
+import * as nip44 from "nostr-tools/nip44"
 import { applyAppKeysSnapshot } from "./multiDevice"
 import { APP_KEYS_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
 
@@ -58,6 +59,33 @@ export interface DeviceEntry {
   createdAt: number
 }
 
+export interface DeviceLabels {
+  deviceLabel?: string
+  clientLabel?: string
+  updatedAt: number
+}
+
+interface DeviceLabelsEntry extends DeviceLabels {
+  identityPubkey: string
+}
+
+interface EncryptedAppKeysContent {
+  type: "app-keys-labels"
+  v: 1
+  deviceLabels: DeviceLabelsEntry[]
+}
+
+const isDeviceLabelsEntry = (value: unknown): value is DeviceLabelsEntry => {
+  if (!value || typeof value !== "object") return false
+  const entry = value as Partial<DeviceLabelsEntry>
+  return (
+    typeof entry.identityPubkey === "string" &&
+    typeof entry.updatedAt === "number" &&
+    (entry.deviceLabel === undefined || typeof entry.deviceLabel === "string") &&
+    (entry.clientLabel === undefined || typeof entry.clientLabel === "string")
+  )
+}
+
 /**
  * Manages a consolidated list of device invites (kind 30078, d-tag "double-ratchet/app-keys").
  * Single atomic event containing all device invites for a user.
@@ -68,9 +96,13 @@ export interface DeviceEntry {
  */
 export class AppKeys {
   private devices: Map<string, DeviceEntry> = new Map()
+  private deviceLabels: Map<string, DeviceLabels> = new Map()
 
-  constructor(devices: DeviceEntry[] = []) {
+  constructor(devices: DeviceEntry[] = [], deviceLabels: DeviceLabelsEntry[] = []) {
     devices.forEach((device) => this.devices.set(device.identityPubkey, device))
+    deviceLabels.forEach(({ identityPubkey, ...labels }) => {
+      this.deviceLabels.set(identityPubkey, labels)
+    })
   }
 
   /**
@@ -93,6 +125,7 @@ export class AppKeys {
 
   removeDevice(identityPubkey: string): void {
     this.devices.delete(identityPubkey)
+    this.deviceLabels.delete(identityPubkey)
   }
 
   getDevice(identityPubkey: string): DeviceEntry | undefined {
@@ -103,7 +136,87 @@ export class AppKeys {
     return Array.from(this.devices.values())
   }
 
-  getEvent(): UnsignedEvent {
+  setDeviceLabels(
+    identityPubkey: string,
+    labels: {
+      deviceLabel?: string
+      clientLabel?: string
+    },
+    updatedAt = now()
+  ): void {
+    this.deviceLabels.set(identityPubkey, {
+      deviceLabel: labels.deviceLabel,
+      clientLabel: labels.clientLabel,
+      updatedAt,
+    })
+  }
+
+  getDeviceLabels(identityPubkey: string): DeviceLabels | undefined {
+    return this.deviceLabels.get(identityPubkey)
+  }
+
+  getAllDeviceLabels(): DeviceLabelsEntry[] {
+    return Array.from(this.deviceLabels.entries()).map(([identityPubkey, labels]) => ({
+      identityPubkey,
+      ...labels,
+    }))
+  }
+
+  private getEncryptedContent(ownerPrivateKey?: Uint8Array): string {
+    const deviceLabels = this.getAllDeviceLabels().filter(({ identityPubkey }) =>
+      this.devices.has(identityPubkey)
+    )
+
+    if (deviceLabels.length === 0) {
+      return ""
+    }
+
+    if (!ownerPrivateKey) {
+      throw new Error("ownerPrivateKey is required to encrypt AppKeys labels")
+    }
+
+    const ownerPublicKey = getPublicKey(ownerPrivateKey)
+    const conversationKey = nip44.v2.utils.getConversationKey(
+      ownerPrivateKey,
+      ownerPublicKey
+    )
+    const plaintext: EncryptedAppKeysContent = {
+      type: "app-keys-labels",
+      v: 1,
+      deviceLabels,
+    }
+
+    return nip44.v2.encrypt(JSON.stringify(plaintext), conversationKey)
+  }
+
+  private loadEncryptedContent(content: string, ownerPrivateKey: Uint8Array): void {
+    if (!content) return
+
+    const ownerPublicKey = getPublicKey(ownerPrivateKey)
+    const conversationKey = nip44.v2.utils.getConversationKey(
+      ownerPrivateKey,
+      ownerPublicKey
+    )
+    const decrypted = nip44.v2.decrypt(content, conversationKey)
+    const payload = JSON.parse(decrypted) as Partial<EncryptedAppKeysContent>
+
+    if (payload.type !== "app-keys-labels" || payload.v !== 1) {
+      throw new Error("Unsupported AppKeys label payload")
+    }
+
+    const labelEntries = Array.isArray(payload.deviceLabels)
+      ? payload.deviceLabels.filter(isDeviceLabelsEntry)
+      : []
+
+    this.deviceLabels.clear()
+    labelEntries.forEach(({ identityPubkey, ...labels }) => {
+      if (this.devices.has(identityPubkey)) {
+        this.deviceLabels.set(identityPubkey, labels)
+      }
+    })
+  }
+
+  getEvent(ownerPrivateKey?: Uint8Array): UnsignedEvent {
     const deviceTags = this.getAllDevices().map((device) => [
       "device",
       device.identityPubkey,
@@ -113,7 +226,7 @@ export class AppKeys {
     return {
       kind: APP_KEYS_EVENT_KIND,
       pubkey: "", // Signer will set this
-      content: "",
+      content: this.getEncryptedContent(ownerPrivateKey),
       created_at: now(),
       tags: [
         ["d", APP_KEYS_D_TAG],
@@ -123,7 +236,7 @@ export class AppKeys {
     }
   }
 
-  static fromEvent(event: VerifiedEvent): AppKeys {
+  static fromEvent(event: VerifiedEvent, ownerPrivateKey?: Uint8Array): AppKeys {
     if (!event.sig) {
       throw new Error("Event is not signed")
     }
@@ -143,20 +256,27 @@ export class AppKeys {
         createdAt: parseInt(createdAt, 10) || event.created_at,
       }))
 
-    return new AppKeys(devices)
+    const appKeys = new AppKeys(devices)
+    if (ownerPrivateKey && event.content) {
+      appKeys.loadEncryptedContent(event.content, ownerPrivateKey)
+    }
+
+    return appKeys
   }
 
   serialize(): string {
     return JSON.stringify({
       devices: this.getAllDevices(),
+      deviceLabels: this.getAllDeviceLabels(),
     })
   }
 
   static deserialize(json: string): AppKeys {
     const data = JSON.parse(json) as {
       devices: DeviceEntry[]
+      deviceLabels?: DeviceLabelsEntry[]
     }
-    return new AppKeys(data.devices)
+    return new AppKeys(data.devices, data.deviceLabels || [])
   }
 
   merge(other: AppKeys): AppKeys {
@@ -170,7 +290,24 @@ export class AppKeys {
         return map
       }, new Map<string, DeviceEntry>())
 
-    return new AppKeys(Array.from(mergedDevices.values()))
+    const mergedLabels = [...this.deviceLabels.entries(), ...other.deviceLabels.entries()]
+      .reduce((map, [identityPubkey, labels]) => {
+        const existing = map.get(identityPubkey)
+        if (!existing || labels.updatedAt > existing.updatedAt) {
+          map.set(identityPubkey, labels)
+        }
+        return map
+      }, new Map<string, DeviceLabels>())
+
+    const mergedDeviceKeys = new Set(mergedDevices.keys())
+    const deviceLabels = Array.from(mergedLabels.entries())
+      .filter(([identityPubkey]) => mergedDeviceKeys.has(identityPubkey))
+      .map(([identityPubkey, labels]) => ({
+        identityPubkey,
+        ...labels,
+      }))
+
+    return new AppKeys(Array.from(mergedDevices.values()), deviceLabels)
   }
 
   /**

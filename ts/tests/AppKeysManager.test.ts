@@ -504,6 +504,29 @@ describe("AppKeysManager - Authority", () => {
       expect(device).toBeDefined()
       expect(device?.identityPubkey).toBe(delegateIdentityPubkey)
     })
+
+    it("publishes encrypted device labels instead of plaintext when ownerIdentityKey is available", async () => {
+      const ownerIdentityKey = generateSecretKey()
+      const manager = new AppKeysManager({
+        nostrPublish,
+        ownerIdentityKey,
+      })
+      await manager.init()
+
+      const payload: DelegatePayload = {
+        identityPubkey: getPublicKey(generateSecretKey()),
+        deviceLabel: "Sirius MacBook",
+        clientLabel: "NDR Desktop",
+      }
+
+      manager.addDevice(payload)
+      await manager.publish()
+
+      expect(publishedEvents).toHaveLength(1)
+      expect(publishedEvents[0].content).toBeTruthy()
+      expect(publishedEvents[0].content).not.toContain("Sirius MacBook")
+      expect(publishedEvents[0].content).not.toContain("NDR Desktop")
+    })
   })
 
   describe("revokeDevice()", () => {

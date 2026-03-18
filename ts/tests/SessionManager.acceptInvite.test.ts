@@ -243,7 +243,7 @@ describe("SessionManager.acceptInvite", () => {
     const ownerAppKeys = new AppKeys()
     ownerAppKeys.addDevice({ identityPubkey: ownerPublicKey, createdAt: Math.floor(Date.now() / 1000) })
     relay.storeAndDeliver(
-      finalizeEvent(ownerAppKeys.getEvent(ownerPublicKey), ownerSecretKey) as VerifiedEvent
+      finalizeEvent(ownerAppKeys.getEvent(), ownerSecretKey) as VerifiedEvent
     )
 
     const webDeviceSecretKey = generateSecretKey()

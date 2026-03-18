@@ -1,6 +1,6 @@
-use crate::{AppKeys, DeviceEntry, Result, StorageAdapter};
+use crate::{AppKeys, DeviceEntry, DeviceLabels, Error, Result, StorageAdapter};
 use crate::{InMemoryStorage, NostrPubSub};
-use nostr::PublicKey;
+use nostr::{Keys, PublicKey};
 use std::sync::Arc;
 
 pub struct AppKeysManager {
@@ -69,6 +69,34 @@ impl AppKeysManager {
         Ok(())
     }
 
+    pub fn set_device_labels(
+        &mut self,
+        identity_pubkey: PublicKey,
+        device_label: Option<String>,
+        client_label: Option<String>,
+    ) -> Result<()> {
+        if self.app_keys.is_none() {
+            self.app_keys = Some(AppKeys::new(Vec::new()));
+        }
+        let serialized = if let Some(app_keys) = self.app_keys.as_mut() {
+            app_keys.set_device_labels(identity_pubkey, device_label, client_label, None);
+            Some(app_keys.serialize()?)
+        } else {
+            None
+        };
+        if let Some(serialized) = serialized {
+            let key = self.app_keys_key();
+            self.storage.put(&key, serialized)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_device_labels(&self, identity_pubkey: &PublicKey) -> Option<&DeviceLabels> {
+        self.app_keys
+            .as_ref()
+            .and_then(|app_keys| app_keys.get_device_labels(identity_pubkey))
+    }
+
     pub fn revoke_device(&mut self, identity_pubkey: &PublicKey) -> Result<()> {
         let serialized = if let Some(app_keys) = self.app_keys.as_mut() {
             app_keys.remove_device(identity_pubkey);
@@ -93,7 +121,21 @@ impl AppKeysManager {
 
     pub fn publish(&self, owner_pubkey: PublicKey) -> Result<()> {
         if let Some(app_keys) = self.app_keys.as_ref() {
+            if !app_keys.get_all_device_labels().is_empty() {
+                return Err(Error::Encryption(
+                    "AppKeys labels require publish_with_keys() so they can be encrypted"
+                        .to_string(),
+                ));
+            }
             let event = app_keys.get_event(owner_pubkey);
+            self.pubsub.publish(event)?;
+        }
+        Ok(())
+    }
+
+    pub fn publish_with_keys(&self, owner_keys: &Keys) -> Result<()> {
+        if let Some(app_keys) = self.app_keys.as_ref() {
+            let event = app_keys.get_encrypted_event(owner_keys)?;
             self.pubsub.publish(event)?;
         }
         Ok(())

@@ -1,5 +1,5 @@
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
-import { AppKeys, buildAppKeysFilter, DeviceEntry } from "./AppKeys"
+import { AppKeys, buildAppKeysFilter, DeviceEntry, DeviceLabels } from "./AppKeys"
 import { Invite } from "./Invite"
 import { NostrSubscribe, NostrPublish, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
@@ -7,6 +7,8 @@ import { SessionManager } from "./SessionManager"
 
 export interface DelegatePayload {
   identityPubkey: string
+  deviceLabel?: string
+  clientLabel?: string
 }
 
 /**
@@ -15,6 +17,7 @@ export interface DelegatePayload {
 export interface AppKeysManagerOptions {
   nostrPublish: NostrPublish
   storage?: StorageAdapter
+  ownerIdentityKey?: Uint8Array
 }
 
 /**
@@ -35,6 +38,7 @@ export interface DelegateManagerOptions {
 export class AppKeysManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
+  private readonly ownerIdentityKey?: Uint8Array
 
   private appKeys: AppKeys | null = null
   private initialized = false
@@ -47,6 +51,7 @@ export class AppKeysManager {
   constructor(options: AppKeysManagerOptions) {
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
+    this.ownerIdentityKey = options.ownerIdentityKey
   }
 
   async init(): Promise<void> {
@@ -83,7 +88,32 @@ export class AppKeysManager {
       createdAt: Math.floor(Date.now() / 1000),
     }
     this.appKeys.addDevice(device)
+    if (payload.deviceLabel || payload.clientLabel) {
+      this.appKeys.setDeviceLabels(payload.identityPubkey, {
+        deviceLabel: payload.deviceLabel,
+        clientLabel: payload.clientLabel,
+      })
+    }
     this.saveAppKeys(this.appKeys).catch(() => {})
+  }
+
+  setDeviceLabels(
+    identityPubkey: string,
+    labels: {
+      deviceLabel?: string
+      clientLabel?: string
+    }
+  ): void {
+    if (!this.appKeys) {
+      this.appKeys = new AppKeys()
+    }
+
+    this.appKeys.setDeviceLabels(identityPubkey, labels)
+    this.saveAppKeys(this.appKeys).catch(() => {})
+  }
+
+  getDeviceLabels(identityPubkey: string): DeviceLabels | undefined {
+    return this.appKeys?.getDeviceLabels(identityPubkey)
   }
 
   /**
@@ -106,7 +136,7 @@ export class AppKeysManager {
       this.appKeys = new AppKeys()
     }
 
-    const event = this.appKeys.getEvent()
+    const event = this.appKeys.getEvent(this.ownerIdentityKey)
     await this.nostrPublish(event)
   }
 

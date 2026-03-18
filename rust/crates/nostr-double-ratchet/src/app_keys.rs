@@ -1,5 +1,7 @@
 use crate::{Error, Result, APP_KEYS_EVENT_KIND};
-use nostr::{Event, EventBuilder, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use base64::Engine;
+use nostr::nips::nip44;
+use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -20,9 +22,37 @@ impl DeviceEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLabels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_label: Option<String>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredDeviceLabels {
+    identity_pubkey: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_label: Option<String>,
+    updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedAppKeysContent {
+    #[serde(rename = "type")]
+    payload_type: String,
+    v: u8,
+    device_labels: Vec<StoredDeviceLabels>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppKeys {
     devices: HashMap<PublicKey, DeviceEntry>,
+    device_labels: HashMap<PublicKey, DeviceLabels>,
 }
 
 impl AppKeys {
@@ -31,7 +61,10 @@ impl AppKeys {
         for device in devices {
             map.insert(device.identity_pubkey, device);
         }
-        Self { devices: map }
+        Self {
+            devices: map,
+            device_labels: HashMap::new(),
+        }
     }
 
     pub fn add_device(&mut self, device: DeviceEntry) {
@@ -40,6 +73,7 @@ impl AppKeys {
 
     pub fn remove_device(&mut self, identity_pubkey: &PublicKey) {
         self.devices.remove(identity_pubkey);
+        self.device_labels.remove(identity_pubkey);
     }
 
     pub fn get_device(&self, identity_pubkey: &PublicKey) -> Option<&DeviceEntry> {
@@ -50,7 +84,35 @@ impl AppKeys {
         self.devices.values().cloned().collect()
     }
 
-    pub fn get_event(&self, owner_pubkey: PublicKey) -> UnsignedEvent {
+    pub fn set_device_labels(
+        &mut self,
+        identity_pubkey: PublicKey,
+        device_label: Option<String>,
+        client_label: Option<String>,
+        updated_at: Option<u64>,
+    ) {
+        self.device_labels.insert(
+            identity_pubkey,
+            DeviceLabels {
+                device_label,
+                client_label,
+                updated_at: updated_at.unwrap_or_else(current_unix_timestamp),
+            },
+        );
+    }
+
+    pub fn get_device_labels(&self, identity_pubkey: &PublicKey) -> Option<&DeviceLabels> {
+        self.device_labels.get(identity_pubkey)
+    }
+
+    pub fn get_all_device_labels(&self) -> Vec<(PublicKey, DeviceLabels)> {
+        self.device_labels
+            .iter()
+            .map(|(identity_pubkey, labels)| (*identity_pubkey, labels.clone()))
+            .collect()
+    }
+
+    fn build_unsigned_event(&self, owner_pubkey: PublicKey, content: String) -> UnsignedEvent {
         let mut tags = Vec::new();
         let d_tag =
             Tag::parse(&["d".to_string(), APP_KEYS_D_TAG.to_string()]).unwrap_or_else(|_| {
@@ -73,15 +135,44 @@ impl AppKeys {
             tags.push(device_tag);
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        EventBuilder::new(Kind::from(APP_KEYS_EVENT_KIND as u16), "")
+        EventBuilder::new(Kind::from(APP_KEYS_EVENT_KIND as u16), content)
             .tags(tags)
-            .custom_created_at(Timestamp::from(now))
+            .custom_created_at(Timestamp::from(current_unix_timestamp()))
             .build(owner_pubkey)
+    }
+
+    pub fn get_event(&self, owner_pubkey: PublicKey) -> UnsignedEvent {
+        self.build_unsigned_event(owner_pubkey, String::new())
+    }
+
+    pub fn get_encrypted_event(&self, owner_keys: &Keys) -> Result<UnsignedEvent> {
+        if self.device_labels.is_empty() {
+            return Ok(self.get_event(owner_keys.public_key()));
+        }
+
+        let conversation_key =
+            nip44::v2::ConversationKey::derive(owner_keys.secret_key(), &owner_keys.public_key());
+        let payload = EncryptedAppKeysContent {
+            payload_type: "app-keys-labels".to_string(),
+            v: 1,
+            device_labels: self
+                .get_all_device_labels()
+                .into_iter()
+                .filter(|(identity_pubkey, _)| self.devices.contains_key(identity_pubkey))
+                .map(|(identity_pubkey, labels)| StoredDeviceLabels {
+                    identity_pubkey: hex::encode(identity_pubkey.to_bytes()),
+                    device_label: labels.device_label,
+                    client_label: labels.client_label,
+                    updated_at: labels.updated_at,
+                })
+                .collect(),
+        };
+
+        let payload_json = serde_json::to_string(&payload)?;
+        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, &payload_json)?;
+        let content = base64::engine::general_purpose::STANDARD.encode(&encrypted_bytes);
+
+        Ok(self.build_unsigned_event(owner_keys.public_key(), content))
     }
 
     pub fn from_event(event: &Event) -> Result<Self> {
@@ -122,6 +213,12 @@ impl AppKeys {
         Ok(AppKeys::new(devices))
     }
 
+    pub fn from_event_with_labels(event: &Event, owner_keys: &Keys) -> Result<Self> {
+        let mut app_keys = Self::from_event(event)?;
+        app_keys.load_encrypted_labels(event, owner_keys)?;
+        Ok(app_keys)
+    }
+
     pub fn serialize(&self) -> Result<String> {
         #[derive(Serialize)]
         struct StoredDevice {
@@ -131,6 +228,8 @@ impl AppKeys {
         #[derive(Serialize)]
         struct StoredAppKeys {
             devices: Vec<StoredDevice>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            device_labels: Vec<StoredDeviceLabels>,
         }
 
         let devices = self
@@ -142,7 +241,21 @@ impl AppKeys {
             })
             .collect();
 
-        Ok(serde_json::to_string(&StoredAppKeys { devices })?)
+        let device_labels = self
+            .get_all_device_labels()
+            .into_iter()
+            .map(|(identity_pubkey, labels)| StoredDeviceLabels {
+                identity_pubkey: hex::encode(identity_pubkey.to_bytes()),
+                device_label: labels.device_label,
+                client_label: labels.client_label,
+                updated_at: labels.updated_at,
+            })
+            .collect();
+
+        Ok(serde_json::to_string(&StoredAppKeys {
+            devices,
+            device_labels,
+        })?)
     }
 
     pub fn deserialize(json: &str) -> Result<Self> {
@@ -154,6 +267,8 @@ impl AppKeys {
         #[derive(Deserialize)]
         struct StoredAppKeys {
             devices: Vec<StoredDevice>,
+            #[serde(default)]
+            device_labels: Vec<StoredDeviceLabels>,
         }
 
         let data: StoredAppKeys = serde_json::from_str(json)?;
@@ -167,7 +282,21 @@ impl AppKeys {
             })
             .collect();
 
-        Ok(AppKeys::new(devices))
+        let mut app_keys = AppKeys::new(devices);
+        for labels in data.device_labels {
+            if let Ok(pubkey) = crate::utils::pubkey_from_hex(&labels.identity_pubkey) {
+                app_keys.device_labels.insert(
+                    pubkey,
+                    DeviceLabels {
+                        device_label: labels.device_label,
+                        client_label: labels.client_label,
+                        updated_at: labels.updated_at,
+                    },
+                );
+            }
+        }
+
+        Ok(app_keys)
     }
 
     pub fn merge(&self, other: &AppKeys) -> AppKeys {
@@ -188,8 +317,70 @@ impl AppKeys {
                 .or_insert(device);
         }
 
-        AppKeys { devices: merged }
+        let mut merged_labels = HashMap::new();
+        for (identity_pubkey, labels) in self.device_labels.iter().chain(other.device_labels.iter())
+        {
+            merged_labels
+                .entry(*identity_pubkey)
+                .and_modify(|existing: &mut DeviceLabels| {
+                    if labels.updated_at > existing.updated_at {
+                        *existing = labels.clone();
+                    }
+                })
+                .or_insert_with(|| labels.clone());
+        }
+
+        merged_labels.retain(|identity_pubkey, _| merged.contains_key(identity_pubkey));
+
+        AppKeys {
+            devices: merged,
+            device_labels: merged_labels,
+        }
     }
+
+    fn load_encrypted_labels(&mut self, event: &Event, owner_keys: &Keys) -> Result<()> {
+        if event.content.is_empty() {
+            return Ok(());
+        }
+
+        let conversation_key =
+            nip44::v2::ConversationKey::derive(owner_keys.secret_key(), &owner_keys.public_key());
+        let ciphertext_bytes = base64::engine::general_purpose::STANDARD
+            .decode(event.content.as_bytes())
+            .map_err(|e| Error::Decryption(format!("Base64 decode error: {}", e)))?;
+        let plaintext_bytes = nip44::v2::decrypt_to_bytes(&conversation_key, &ciphertext_bytes)?;
+        let payload = serde_json::from_slice::<EncryptedAppKeysContent>(&plaintext_bytes)?;
+
+        if payload.payload_type != "app-keys-labels" || payload.v != 1 {
+            return Err(Error::InvalidEvent(
+                "Unsupported AppKeys label payload".to_string(),
+            ));
+        }
+
+        self.device_labels.clear();
+        for labels in payload.device_labels {
+            let pubkey = crate::utils::pubkey_from_hex(&labels.identity_pubkey)?;
+            if self.devices.contains_key(&pubkey) {
+                self.device_labels.insert(
+                    pubkey,
+                    DeviceLabels {
+                        device_label: labels.device_label,
+                        client_label: labels.client_label,
+                        updated_at: labels.updated_at,
+                    },
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn current_unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 pub fn is_app_keys_event(event: &Event) -> bool {

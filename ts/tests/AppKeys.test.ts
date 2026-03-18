@@ -183,6 +183,46 @@ describe('AppKeys', () => {
 
       expect(() => AppKeys.fromEvent(unsignedEvent)).toThrow('Event is not signed')
     })
+
+    it('encrypts device labels into event content instead of plaintext', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const device = createTestDevice()
+      const list = new AppKeys([device])
+
+      list.setDeviceLabels(device.identityPubkey, {
+        deviceLabel: 'Sirius MacBook',
+        clientLabel: 'NDR Desktop',
+      })
+
+      const event = list.getEvent(ownerPrivateKey)
+
+      expect(event.content).toBeTruthy()
+      expect(event.content).not.toContain('Sirius MacBook')
+      expect(event.content).not.toContain('NDR Desktop')
+    })
+
+    it('roundtrips encrypted device labels for owner-key devices only', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const device = createTestDevice()
+      const list = new AppKeys([device])
+
+      list.setDeviceLabels(device.identityPubkey, {
+        deviceLabel: 'Sirius MacBook',
+        clientLabel: 'NDR Desktop',
+      })
+
+      const signedEvent = finalizeEvent(list.getEvent(ownerPrivateKey), ownerPrivateKey)
+
+      const parsedWithoutKey = AppKeys.fromEvent(signedEvent)
+      expect(parsedWithoutKey.getDeviceLabels(device.identityPubkey)).toBeUndefined()
+
+      const parsedWithKey = AppKeys.fromEvent(signedEvent, ownerPrivateKey)
+      expect(parsedWithKey.getDeviceLabels(device.identityPubkey)).toEqual({
+        deviceLabel: 'Sirius MacBook',
+        clientLabel: 'NDR Desktop',
+        updatedAt: expect.any(Number),
+      })
+    })
   })
 
   describe('serialization for persistence', () => {
@@ -206,6 +246,24 @@ describe('AppKeys', () => {
       const restored = AppKeys.deserialize(json)
 
       expect(restored.getAllDevices()).toHaveLength(0)
+    })
+
+    it('should serialize and deserialize device labels for local persistence', () => {
+      const device = createTestDevice()
+      const list = new AppKeys([device])
+
+      list.setDeviceLabels(device.identityPubkey, {
+        deviceLabel: 'Office Laptop',
+        clientLabel: 'NDR Web',
+      })
+
+      const restored = AppKeys.deserialize(list.serialize())
+
+      expect(restored.getDeviceLabels(device.identityPubkey)).toEqual({
+        deviceLabel: 'Office Laptop',
+        clientLabel: 'NDR Web',
+        updatedAt: expect.any(Number),
+      })
     })
   })
 
@@ -274,6 +332,34 @@ describe('AppKeys', () => {
       const merged = list1.merge(list2)
 
       expect(merged.getDevice(identityPubkey)?.createdAt).toBe(1000)
+    })
+
+    it('should prefer newer device labels during merge for same identityPubkey', () => {
+      const identityPubkey = getPublicKey(generateSecretKey())
+      const device: DeviceEntry = {
+        identityPubkey,
+        createdAt: 1000,
+      }
+
+      const older = new AppKeys([device])
+      older.setDeviceLabels(identityPubkey, {
+        deviceLabel: 'Old Name',
+        clientLabel: 'Old Client',
+      }, 100)
+
+      const newer = new AppKeys([device])
+      newer.setDeviceLabels(identityPubkey, {
+        deviceLabel: 'New Name',
+        clientLabel: 'New Client',
+      }, 200)
+
+      const merged = older.merge(newer)
+
+      expect(merged.getDeviceLabels(identityPubkey)).toEqual({
+        deviceLabel: 'New Name',
+        clientLabel: 'New Client',
+        updatedAt: 200,
+      })
     })
   })
 

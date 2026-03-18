@@ -20,7 +20,7 @@ pub mod types;
 pub mod user_record;
 pub mod utils;
 
-pub use app_keys::{is_app_keys_event, AppKeys, DeviceEntry};
+pub use app_keys::{is_app_keys_event, AppKeys, DeviceEntry, DeviceLabels};
 pub use app_keys_manager::AppKeysManager;
 pub use delegate_manager::{DelegateManager, DelegatePayload};
 pub use error::{Error, Result};
