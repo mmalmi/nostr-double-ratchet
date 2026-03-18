@@ -675,8 +675,9 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        let (inner_id, outer_event_ids) =
-            self.runtime.send_text_with_inner_id(recipient, text, options)?;
+        let (inner_id, outer_event_ids) = self
+            .runtime
+            .send_text_with_inner_id(recipient, text, options)?;
         Ok(SendTextResult {
             inner_id,
             outer_event_ids,
@@ -791,42 +792,42 @@ impl SessionManagerHandle {
         let member_refs: Vec<&str> = member_owner_pubkeys.iter().map(String::as_str).collect();
         let should_fanout = fanout_metadata.unwrap_or(true);
 
-        self.runtime.with_group_context(|session_manager, group_manager, _| {
-            let mut send_pairwise =
-                |recipient_owner: nostr::PublicKey,
-                 rumor: &nostr::UnsignedEvent|
+        self.runtime
+            .with_group_context(|session_manager, group_manager, _| {
+                let mut send_pairwise = |recipient_owner: nostr::PublicKey,
+                                         rumor: &nostr::UnsignedEvent|
                  -> nostr_double_ratchet::Result<()> {
                     session_manager.send_event(recipient_owner, rumor.clone())?;
                     Ok(())
                 };
 
-            let mut opts = CreateGroupOptions {
-                send_pairwise: None,
-                fanout_metadata: should_fanout,
-                now_ms,
-            };
-            if should_fanout {
-                opts.send_pairwise = Some(&mut send_pairwise);
-            }
+                let mut opts = CreateGroupOptions {
+                    send_pairwise: None,
+                    fanout_metadata: should_fanout,
+                    now_ms,
+                };
+                if should_fanout {
+                    opts.send_pairwise = Some(&mut send_pairwise);
+                }
 
-            let created = group_manager.create_group(&name, &member_refs, opts)?;
-            let metadata_rumor_json = created
-                .metadata_rumor
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?;
+                let created = group_manager.create_group(&name, &member_refs, opts)?;
+                let metadata_rumor_json = created
+                    .metadata_rumor
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
 
-            Ok(GroupCreateResult {
-                group: group_data_to_ffi_group_data(created.group),
-                metadata_rumor_json,
-                fanout: GroupCreateFanout {
-                    enabled: created.fanout.enabled,
-                    attempted: created.fanout.attempted as u64,
-                    succeeded: created.fanout.succeeded,
-                    failed: created.fanout.failed,
-                },
+                Ok(GroupCreateResult {
+                    group: group_data_to_ffi_group_data(created.group),
+                    metadata_rumor_json,
+                    fanout: GroupCreateFanout {
+                        enabled: created.fanout.enabled,
+                        attempted: created.fanout.attempted as u64,
+                        succeeded: created.fanout.succeeded,
+                        failed: created.fanout.failed,
+                    },
+                })
             })
-        })
     }
 
     /// Remove a group from the embedded GroupManager.
@@ -866,13 +867,12 @@ impl SessionManagerHandle {
 
         self.runtime
             .with_group_context(|session_manager, group_manager, event_tx| {
-                let mut send_pairwise =
-                    |recipient_owner: nostr::PublicKey,
-                     rumor: &nostr::UnsignedEvent|
-                     -> nostr_double_ratchet::Result<()> {
-                        session_manager.send_event(recipient_owner, rumor.clone())?;
-                        Ok(())
-                    };
+                let mut send_pairwise = |recipient_owner: nostr::PublicKey,
+                                         rumor: &nostr::UnsignedEvent|
+                 -> nostr_double_ratchet::Result<()> {
+                    session_manager.send_event(recipient_owner, rumor.clone())?;
+                    Ok(())
+                };
 
                 let mut publish_outer = |outer: &nostr::Event| -> nostr_double_ratchet::Result<()> {
                     event_tx
@@ -937,13 +937,11 @@ impl SessionManagerHandle {
         event_json: String,
     ) -> Result<Option<GroupDecryptedResult>, NdrError> {
         let event: nostr::Event = serde_json::from_str(&event_json)?;
-        Ok(self
-            .runtime
-            .with_group_context(|_, group_manager, _| {
-                group_manager
-                    .handle_outer_event(&event)
-                    .map(group_decrypted_to_result)
-            }))
+        Ok(self.runtime.with_group_context(|_, group_manager, _| {
+            group_manager
+                .handle_outer_event(&event)
+                .map(group_decrypted_to_result)
+        }))
     }
 
     /// Send a delivery/read receipt for messages.
@@ -959,10 +957,12 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(self
-            .runtime
-            .session_manager()
-            .send_receipt(recipient, &receipt_type, message_ids, options)?)
+        Ok(self.runtime.session_manager().send_receipt(
+            recipient,
+            &receipt_type,
+            message_ids,
+            options,
+        )?)
     }
 
     /// Send a typing indicator.
@@ -976,7 +976,10 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(self.runtime.session_manager().send_typing(recipient, options)?)
+        Ok(self
+            .runtime
+            .session_manager()
+            .send_typing(recipient, options)?)
     }
 
     /// Send an emoji reaction (kind 7) to a specific message id.
@@ -1044,68 +1047,68 @@ impl SessionManagerHandle {
         let mut events = Vec::new();
 
         for event in self.runtime.drain_events() {
-                    let pubsub_event = match event {
-                        SessionManagerEvent::Publish(unsigned) => PubSubEvent {
-                            kind: "publish".to_string(),
-                            subid: None,
-                            filter_json: None,
-                            event_json: Some(serde_json::to_string(&unsigned)?),
-                            sender_pubkey_hex: None,
-                            content: None,
-                            event_id: None,
-                        },
-                        SessionManagerEvent::PublishSigned(signed) => PubSubEvent {
-                            kind: "publish_signed".to_string(),
-                            subid: None,
-                            filter_json: None,
-                            event_json: Some(serde_json::to_string(&signed)?),
-                            sender_pubkey_hex: None,
-                            content: None,
-                            event_id: None,
-                        },
-                        SessionManagerEvent::Subscribe { subid, filter_json } => PubSubEvent {
-                            kind: "subscribe".to_string(),
-                            subid: Some(subid),
-                            filter_json: Some(filter_json),
-                            event_json: None,
-                            sender_pubkey_hex: None,
-                            content: None,
-                            event_id: None,
-                        },
-                        SessionManagerEvent::Unsubscribe(subid) => PubSubEvent {
-                            kind: "unsubscribe".to_string(),
-                            subid: Some(subid),
-                            filter_json: None,
-                            event_json: None,
-                            sender_pubkey_hex: None,
-                            content: None,
-                            event_id: None,
-                        },
-                        SessionManagerEvent::DecryptedMessage {
-                            sender,
-                            content,
-                            event_id,
-                            ..
-                        } => PubSubEvent {
-                            kind: "decrypted_message".to_string(),
-                            subid: None,
-                            filter_json: None,
-                            event_json: None,
-                            sender_pubkey_hex: Some(sender.to_hex()),
-                            content: Some(content),
-                            event_id,
-                        },
-                        SessionManagerEvent::ReceivedEvent(event) => PubSubEvent {
-                            kind: "received_event".to_string(),
-                            subid: None,
-                            filter_json: None,
-                            event_json: Some(serde_json::to_string(&event)?),
-                            sender_pubkey_hex: None,
-                            content: None,
-                            event_id: None,
-                        },
-                    };
-                    events.push(pubsub_event);
+            let pubsub_event = match event {
+                SessionManagerEvent::Publish(unsigned) => PubSubEvent {
+                    kind: "publish".to_string(),
+                    subid: None,
+                    filter_json: None,
+                    event_json: Some(serde_json::to_string(&unsigned)?),
+                    sender_pubkey_hex: None,
+                    content: None,
+                    event_id: None,
+                },
+                SessionManagerEvent::PublishSigned(signed) => PubSubEvent {
+                    kind: "publish_signed".to_string(),
+                    subid: None,
+                    filter_json: None,
+                    event_json: Some(serde_json::to_string(&signed)?),
+                    sender_pubkey_hex: None,
+                    content: None,
+                    event_id: None,
+                },
+                SessionManagerEvent::Subscribe { subid, filter_json } => PubSubEvent {
+                    kind: "subscribe".to_string(),
+                    subid: Some(subid),
+                    filter_json: Some(filter_json),
+                    event_json: None,
+                    sender_pubkey_hex: None,
+                    content: None,
+                    event_id: None,
+                },
+                SessionManagerEvent::Unsubscribe(subid) => PubSubEvent {
+                    kind: "unsubscribe".to_string(),
+                    subid: Some(subid),
+                    filter_json: None,
+                    event_json: None,
+                    sender_pubkey_hex: None,
+                    content: None,
+                    event_id: None,
+                },
+                SessionManagerEvent::DecryptedMessage {
+                    sender,
+                    content,
+                    event_id,
+                    ..
+                } => PubSubEvent {
+                    kind: "decrypted_message".to_string(),
+                    subid: None,
+                    filter_json: None,
+                    event_json: None,
+                    sender_pubkey_hex: Some(sender.to_hex()),
+                    content: Some(content),
+                    event_id,
+                },
+                SessionManagerEvent::ReceivedEvent(event) => PubSubEvent {
+                    kind: "received_event".to_string(),
+                    subid: None,
+                    filter_json: None,
+                    event_json: Some(serde_json::to_string(&event)?),
+                    sender_pubkey_hex: None,
+                    content: None,
+                    event_id: None,
+                },
+            };
+            events.push(pubsub_event);
         }
 
         Ok(events)

@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
-    FileStorageAdapter, NdrRuntime, OneToManyChannel, Session, SessionManager,
-    SessionManagerEvent,
+    FileStorageAdapter, NdrRuntime, OneToManyChannel, Session, SessionManager, SessionManagerEvent,
     StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND,
     RECEIPT_KIND, TYPING_KIND,
 };
@@ -198,6 +197,52 @@ fn sync_chats_from_session_manager(
     Ok(())
 }
 
+fn collect_chat_pubkeys_with_session_manager(
+    storage: &Storage,
+    session_manager: &SessionManager,
+    chat_id: Option<&str>,
+) -> Result<Vec<nostr::PublicKey>> {
+    let chats = if let Some(id) = chat_id {
+        vec![storage
+            .get_chat(id)?
+            .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?]
+    } else {
+        storage.list_chats()?
+    };
+
+    let mut owners = std::collections::HashSet::new();
+    for chat in &chats {
+        owners.insert(chat.their_pubkey.clone());
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut pubkeys = Vec::new();
+    for pubkey in collect_chat_pubkeys(storage, chat_id)? {
+        if seen.insert(pubkey.to_hex()) {
+            pubkeys.push(pubkey);
+        }
+    }
+
+    for (owner, _device_id, state) in session_manager.export_active_sessions() {
+        if !owners.contains(&owner.to_hex()) {
+            continue;
+        }
+
+        for maybe_pubkey in [
+            state.their_current_nostr_public_key,
+            state.their_next_nostr_public_key,
+        ] {
+            if let Some(pubkey) = maybe_pubkey {
+                if seen.insert(pubkey.to_hex()) {
+                    pubkeys.push(pubkey);
+                }
+            }
+        }
+    }
+
+    Ok(pubkeys)
+}
+
 async fn refresh_peer_app_keys_snapshots(
     storage: &Storage,
     session_manager: &SessionManager,
@@ -228,11 +273,51 @@ async fn refresh_peer_app_keys_snapshots(
 
         if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, relays, owner_pubkey).await?
         {
+            let sibling_devices: Vec<nostr::PublicKey> = snapshot
+                .app_keys
+                .get_all_devices()
+                .into_iter()
+                .map(|device| device.identity_pubkey)
+                .filter(|device_pubkey| *device_pubkey != owner_pubkey)
+                .collect();
             session_manager.ingest_app_keys_snapshot(
                 owner_pubkey,
                 snapshot.app_keys,
                 snapshot.created_at,
             );
+
+            if sibling_devices.is_empty() {
+                continue;
+            }
+
+            let invite_events = fetch_events_best_effort(
+                client,
+                relays,
+                nostr_sdk::Filter::new()
+                    .kind(nostr::Kind::Custom(
+                        nostr_double_ratchet::INVITE_EVENT_KIND as u16,
+                    ))
+                    .authors(sibling_devices.clone())
+                    .limit(50),
+                std::time::Duration::from_secs(3),
+            )
+            .await?;
+
+            for event in invite_events {
+                if !sibling_devices.contains(&event.pubkey) {
+                    continue;
+                }
+
+                let expected_d = format!("double-ratchet/invites/{}", event.pubkey.to_hex());
+                let matches_device_invite = event.tags.iter().any(|tag| {
+                    let parts = tag.as_slice();
+                    parts.first().map(|value| value.as_str()) == Some("d")
+                        && parts.get(1).map(|value| value.as_str()) == Some(expected_d.as_str())
+                });
+                if matches_device_invite {
+                    session_manager.process_received_event(event);
+                }
+            }
         }
     }
 
@@ -838,13 +923,8 @@ pub async fn listen(
 
     let mut config = config.clone();
     let chat_id_owned = chat_id.map(|s| s.to_string());
-    let (
-        runtime,
-        my_pubkey,
-        my_pubkey_key,
-        owner_pubkey_hex,
-        owner_pubkey,
-    ) = build_session_manager(&config, storage)?;
+    let (runtime, my_pubkey, my_pubkey_key, owner_pubkey_hex, owner_pubkey) =
+        build_session_manager(&config, storage)?;
     let session_manager = runtime.session_manager();
     // Clean up stale discovery queue entries (older than 24 hours).
     let _ = session_manager.cleanup_discovery_queue(24 * 60 * 60 * 1000);
@@ -956,7 +1036,8 @@ pub async fn listen(
          group_sender_map: &GroupSenderMap,
          since: nostr::Timestamp|
          -> Result<FilterState> {
-            let pubkeys_to_watch = collect_chat_pubkeys(storage, chat_id)?;
+            let pubkeys_to_watch =
+                collect_chat_pubkeys_with_session_manager(storage, &session_manager, chat_id)?;
             let subscribed_pubkeys: HashSet<String> =
                 pubkeys_to_watch.iter().map(|pk| pk.to_hex()).collect();
 
@@ -1651,12 +1732,16 @@ pub async fn listen(
                             storage.delete_invite(&stored_invite.id)?;
 
                             // Update subscription for new chat's ephemeral keys
-                            let new_pubkeys =
-                                collect_chat_pubkeys(storage, chat_id_owned.as_deref())?;
+                            let new_pubkeys = collect_chat_pubkeys_with_session_manager(
+                                storage,
+                                &session_manager,
+                                chat_id_owned.as_deref(),
+                            )?;
                             if !new_pubkeys.is_empty() {
                                 let new_filter = Filter::new()
                                     .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                                    .authors(new_pubkeys.clone());
+                                    .authors(new_pubkeys.clone())
+                                    .since(since_timestamp);
                                 subscribe_filters_best_effort(&client, &relays, vec![new_filter])
                                     .await?;
                                 subscribed_pubkeys =
@@ -1895,11 +1980,16 @@ pub async fn listen(
                         }
 
                         // Update subscription for new chat's keys.
-                        let new_pubkeys = collect_chat_pubkeys(storage, chat_id_owned.as_deref())?;
+                        let new_pubkeys = collect_chat_pubkeys_with_session_manager(
+                            storage,
+                            &session_manager,
+                            chat_id_owned.as_deref(),
+                        )?;
                         if !new_pubkeys.is_empty() {
                             let new_filter = Filter::new()
                                 .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                                .authors(new_pubkeys.clone());
+                                .authors(new_pubkeys.clone())
+                                .since(since_timestamp);
                             subscribe_filters_best_effort(&client, &relays, vec![new_filter])
                                 .await?;
                             subscribed_pubkeys = new_pubkeys.iter().map(|pk| pk.to_hex()).collect();
@@ -2751,8 +2841,11 @@ pub async fn listen(
 
                             // KEY FIX: Update subscription after receiving a message
                             // because the ratchet may have rotated ephemeral keys
-                            let new_pubkeys =
-                                collect_chat_pubkeys(storage, chat_id_owned.as_deref())?;
+                            let new_pubkeys = collect_chat_pubkeys_with_session_manager(
+                                storage,
+                                &session_manager,
+                                chat_id_owned.as_deref(),
+                            )?;
                             let new_pubkey_set: HashSet<String> =
                                 new_pubkeys.iter().map(|pk| pk.to_hex()).collect();
 
@@ -2760,7 +2853,8 @@ pub async fn listen(
                                 // Keys changed, resubscribe
                                 let new_filter = Filter::new()
                                     .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                                    .authors(new_pubkeys.clone());
+                                    .authors(new_pubkeys.clone())
+                                    .since(since_timestamp);
                                 subscribe_filters_best_effort(&client, &relays, vec![new_filter])
                                     .await?;
                                 subscribed_pubkeys = new_pubkey_set;

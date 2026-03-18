@@ -2,8 +2,8 @@ use anyhow::Result;
 
 use nostr::Tag;
 use nostr_double_ratchet::{
-    FileStorageAdapter, NdrRuntime, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
-    EXPIRATION_TAG, MESSAGE_EVENT_KIND,
+    FileStorageAdapter, NdrRuntime, SessionManager, SessionManagerEvent, StorageAdapter,
+    CHAT_MESSAGE_KIND, EXPIRATION_TAG, MESSAGE_EVENT_KIND,
 };
 
 use crate::commands::owner_claim::fetch_latest_app_keys_snapshot;
@@ -56,14 +56,7 @@ async fn resolve_or_join_chat(
     }
 }
 
-fn build_runtime(
-    config: &Config,
-    storage: &Storage,
-) -> Result<(
-    NdrRuntime,
-    nostr::Keys,
-    String,
-)> {
+fn build_runtime(config: &Config, storage: &Storage) -> Result<(NdrRuntime, nostr::Keys, String)> {
     let our_private_key = config.private_key_bytes()?;
     let our_pubkey_hex = config.public_key()?;
     let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
@@ -231,11 +224,10 @@ async fn flush_session_manager_message_events(
             | SessionManagerEvent::DecryptedMessage { .. } => continue,
         };
 
-        if signed.kind.as_u16() != MESSAGE_EVENT_KIND as u16 {
-            continue;
-        }
         send_event_or_ignore(client, signed.clone()).await?;
-        message_events.push(signed);
+        if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
+            message_events.push(signed);
+        }
     }
 
     Ok(message_events)
@@ -254,15 +246,15 @@ async fn refresh_recipient_app_keys(
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() <= deadline {
         if let Some(snapshot) = fetch_latest_app_keys_snapshot(client, &relays, recipient).await? {
-        let sibling_devices: HashSet<nostr::PublicKey> = snapshot
-            .app_keys
-            .get_all_devices()
-            .into_iter()
-            .map(|device| device.identity_pubkey)
-            .filter(|device_pubkey| *device_pubkey != recipient)
-            .collect();
+            let sibling_devices: HashSet<nostr::PublicKey> = snapshot
+                .app_keys
+                .get_all_devices()
+                .into_iter()
+                .map(|device| device.identity_pubkey)
+                .filter(|device_pubkey| *device_pubkey != recipient)
+                .collect();
 
-        runtime.ingest_app_keys_snapshot(recipient, snapshot.app_keys, snapshot.created_at);
+            runtime.ingest_app_keys_snapshot(recipient, snapshot.app_keys, snapshot.created_at);
             return Ok(sibling_devices);
         }
 

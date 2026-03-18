@@ -66,7 +66,8 @@ impl NdrRuntime {
         owner_pubkey_hint: Option<PublicKey>,
     ) -> Result<AcceptInviteResult> {
         self.session_manager.init()?;
-        self.session_manager.accept_invite(invite, owner_pubkey_hint)
+        self.session_manager
+            .accept_invite(invite, owner_pubkey_hint)
     }
 
     pub fn send_text(
@@ -126,8 +127,13 @@ impl NdrRuntime {
         self.session_manager.send_typing(recipient, options)
     }
 
-    pub fn send_chat_settings(&self, recipient: PublicKey, ttl_seconds: u64) -> Result<Vec<String>> {
-        self.session_manager.send_chat_settings(recipient, ttl_seconds)
+    pub fn send_chat_settings(
+        &self,
+        recipient: PublicKey,
+        ttl_seconds: u64,
+    ) -> Result<Vec<String>> {
+        self.session_manager
+            .send_chat_settings(recipient, ttl_seconds)
     }
 
     pub fn import_session_state(
