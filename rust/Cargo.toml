@@ -4,6 +4,7 @@ members = [
     "crates/nostr-double-ratchet",
     "crates/ndr",
     "crates/ndr-ffi",
+    "crates/v2/core",
 ]
 
 [workspace.package]
