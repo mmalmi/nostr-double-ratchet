@@ -1,8 +1,9 @@
 use crate::{
     apply_app_keys_snapshot, is_app_keys_event, resolve_invite_owner_routing, AppKeys,
-    AppKeysSnapshotDecision, DeviceEntry, InMemoryStorage, Invite, ManagedInvite, ManagedSession,
-    MessageQueue, NostrPubSub, OneToManyChannel, Result, SenderKeyDistribution, SenderKeyState,
-    StorageAdapter, UserRecord,
+    AppKeysSnapshotDecision, DeviceEntry, InMemoryStorage, Invite, InviteAcceptInput,
+    InviteProcessResponseInput, InviteProcessResponseResult, MessageQueue, NostrPubSub,
+    OneToManyChannel, Result, SenderKeyDistribution, SenderKeyState, Session, SessionReceiveInput,
+    SessionReceiveResult, SessionSendInput, StorageAdapter, UserRecord,
     GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 };
 use nostr::{Keys, PublicKey, Tag, UnsignedEvent};
@@ -122,6 +123,7 @@ pub struct SessionManager {
     discovery_queue: MessageQueue,
     invite_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
     app_keys_subscriptions: Arc<Mutex<HashSet<PublicKey>>>,
+    session_subscriptions: Arc<Mutex<HashMap<PublicKey, String>>>,
     pending_acceptances: Arc<Mutex<HashSet<PublicKey>>>,
     default_send_options: Arc<Mutex<Option<crate::SendOptions>>>,
     peer_send_options: Arc<Mutex<HashMap<PublicKey, crate::SendOptions>>>,
@@ -134,10 +136,10 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    fn session_can_receive(session: &ManagedSession) -> bool {
-        session.session.state.receiving_chain_key.is_some()
-            || session.session.state.their_current_nostr_public_key.is_some()
-            || session.session.state.receiving_chain_message_number > 0
+    fn session_can_receive(session: &Session) -> bool {
+        session.state.receiving_chain_key.is_some()
+            || session.state.their_current_nostr_public_key.is_some()
+            || session.state.receiving_chain_message_number > 0
     }
 
     fn with_user_records<R: Send + 'static>(
@@ -145,6 +147,147 @@ impl SessionManager {
         f: impl FnOnce(&mut HashMap<PublicKey, UserRecord>) -> R + Send + 'static,
     ) -> R {
         self.user_records.call(f)
+    }
+
+    fn session_author_pubkeys(session: &Session) -> HashSet<PublicKey> {
+        let mut authors = HashSet::new();
+        if let Some(pk) = session.state.their_current_nostr_public_key {
+            authors.insert(pk);
+        }
+        if let Some(pk) = session.state.their_next_nostr_public_key {
+            authors.insert(pk);
+        }
+        authors
+    }
+
+    fn refresh_session_subscriptions(&self) {
+        let wanted = self.with_user_records(|records| {
+            let mut authors = HashSet::new();
+            for user_record in records.values() {
+                for device_record in user_record.device_records.values() {
+                    if let Some(session) = device_record.active_session.as_ref() {
+                        authors.extend(Self::session_author_pubkeys(session));
+                    }
+                    for session in &device_record.inactive_sessions {
+                        authors.extend(Self::session_author_pubkeys(session));
+                    }
+                }
+            }
+            authors
+        });
+
+        let mut subscriptions = self.session_subscriptions.lock().unwrap();
+        let existing: Vec<PublicKey> = subscriptions.keys().copied().collect();
+
+        for pubkey in existing {
+            if wanted.contains(&pubkey) {
+                continue;
+            }
+
+            if let Some(subid) = subscriptions.remove(&pubkey) {
+                let _ = self.pubsub.unsubscribe(subid);
+            }
+        }
+
+        for pubkey in wanted {
+            if subscriptions.contains_key(&pubkey) {
+                continue;
+            }
+
+            let filter = crate::pubsub::build_filter()
+                .kinds(vec![crate::MESSAGE_EVENT_KIND as u64])
+                .authors(vec![pubkey])
+                .build();
+
+            let Ok(filter_json) = serde_json::to_string(&filter) else {
+                continue;
+            };
+            let subid = format!("session-{}", uuid::Uuid::new_v4());
+            if self.pubsub.subscribe(subid.clone(), filter_json).is_ok() {
+                subscriptions.insert(pubkey, subid);
+            }
+        }
+    }
+
+    fn subscribe_to_invite_responses(&self, invite: &Invite) -> Result<String> {
+        let filter = crate::pubsub::build_filter()
+            .kinds(vec![crate::INVITE_RESPONSE_KIND as u64])
+            .pubkeys(vec![invite.inviter_ephemeral_public_key])
+            .build();
+
+        let filter_json = serde_json::to_string(&filter)?;
+        let subid = format!("invite-response-{}", uuid::Uuid::new_v4());
+        self.pubsub.subscribe(subid.clone(), filter_json)?;
+        Ok(subid)
+    }
+
+    fn subscribe_to_user_invites(&self, user_pubkey: PublicKey) -> Result<String> {
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::from(crate::INVITE_EVENT_KIND as u16))
+            .authors(vec![user_pubkey])
+            .custom_tag(
+                nostr::types::filter::SingleLetterTag::lowercase(nostr::types::filter::Alphabet::L),
+                ["double-ratchet/invites"],
+            );
+
+        let filter_json = serde_json::to_string(&filter)?;
+        let subid = format!("invite-user-{}", uuid::Uuid::new_v4());
+        self.pubsub.subscribe(subid.clone(), filter_json)?;
+        Ok(subid)
+    }
+
+    fn send_with_session(session: &mut Session, event: UnsignedEvent) -> Result<nostr::Event> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let output = session.send_event(SessionSendInput {
+            inner_event: event,
+            now_secs: now.as_secs(),
+            now_ms: now.as_millis() as u64,
+        })?;
+        *session = output.next;
+        Ok(output.outer_event)
+    }
+
+    fn receive_with_session(session: &mut Session, event: &nostr::Event) -> Result<Option<String>> {
+        let replacement_next_nostr_private_key = Keys::generate().secret_key().to_secret_bytes();
+        match session.receive_event(SessionReceiveInput {
+            outer_event: event.clone(),
+            replacement_next_nostr_private_key,
+        }) {
+            SessionReceiveResult::NotForThisSession { .. } => Ok(None),
+            SessionReceiveResult::Decrypted {
+                next, plaintext, ..
+            } => {
+                *session = next;
+                Ok(Some(plaintext))
+            }
+            SessionReceiveResult::InvalidRelevant { error, .. } => Err(error),
+        }
+    }
+
+    fn accept_invite_session(&self, invite: &Invite) -> Result<(Session, nostr::Event)> {
+        let invitee_session_key = Keys::generate().secret_key().to_secret_bytes();
+        let invitee_next_nostr_private_key = Keys::generate().secret_key().to_secret_bytes();
+        let envelope_sender_private_key = Keys::generate().secret_key().to_secret_bytes();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let two_days = 2 * 24 * 60 * 60;
+        let response_created_at = now - (rand::random::<u64>() % two_days);
+
+        let accepted = invite.accept(InviteAcceptInput {
+            invitee_public_key: self.our_public_key,
+            invitee_identity_private_key: self.our_identity_key,
+            invitee_session_private_key: invitee_session_key,
+            invitee_next_nostr_private_key,
+            envelope_sender_private_key,
+            response_created_at,
+            device_id: Some(self.device_id.clone()),
+            owner_public_key: Some(self.owner_public_key),
+        })?;
+
+        Ok((accepted.session, accepted.response_event))
     }
 
     pub fn set_default_send_options(&self, options: Option<crate::SendOptions>) -> Result<()> {
@@ -276,6 +419,7 @@ impl SessionManager {
             discovery_queue,
             invite_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             app_keys_subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            session_subscriptions: Arc::new(Mutex::new(HashMap::new())),
             pending_acceptances: Arc::new(Mutex::new(HashSet::new())),
             default_send_options: Arc::new(Mutex::new(None)),
             peer_send_options: Arc::new(Mutex::new(HashMap::new())),
@@ -356,7 +500,7 @@ impl SessionManager {
         });
 
         // Subscribe to invite responses using Invite's own filter (with #p tag)
-        ManagedInvite::new(invite.clone()).listen_with_pubsub(self.pubsub.as_ref())?;
+        self.subscribe_to_invite_responses(&invite)?;
 
         // Publish our invite (signed with device identity key)
         if let Ok(unsigned) = invite.get_event() {
@@ -366,39 +510,24 @@ impl SessionManager {
             }
         }
 
-        // Sessions manage their own kind 1060 subscriptions
-        let active_device_ids = self.with_user_records({
-            let pubsub = self.pubsub.clone();
-            move |records| {
-                for user_record in records.values_mut() {
-                    for device_record in user_record.device_records.values_mut() {
-                        if let Some(ref mut session) = device_record.active_session {
-                            session.set_pubsub(pubsub.clone());
-                            let _ = session.subscribe_to_messages();
-                        }
-                        for session in &mut device_record.inactive_sessions {
-                            session.set_pubsub(pubsub.clone());
-                            let _ = session.subscribe_to_messages();
-                        }
-                    }
-                }
+        self.refresh_session_subscriptions();
 
-                records
-                    .values()
-                    .flat_map(|user_record| {
-                        user_record
-                            .device_records
-                            .iter()
-                            .filter_map(|(device_id, device_record)| {
-                                device_record
-                                    .active_session
-                                    .as_ref()
-                                    .map(|_| device_id.clone())
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>()
-            }
+        let active_device_ids = self.with_user_records(move |records| {
+            records
+                .values()
+                .flat_map(|user_record| {
+                    user_record
+                        .device_records
+                        .iter()
+                        .filter_map(|(device_id, device_record)| {
+                            device_record
+                                .active_session
+                                .as_ref()
+                                .map(|_| device_id.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
         });
 
         for device_id in active_device_ids {
@@ -663,9 +792,7 @@ impl SessionManager {
         device_id: Option<String>,
         state: crate::SessionState,
     ) -> Result<()> {
-        let mut session = ManagedSession::new(state, "imported".to_string());
-        session.set_pubsub(self.pubsub.clone());
-        let _ = session.subscribe_to_messages();
+        let session = Session::new(state);
 
         self.with_user_records(move |records| {
             let user_record = records
@@ -674,6 +801,7 @@ impl SessionManager {
             user_record.upsert_session(device_id.as_deref(), session);
         });
 
+        self.refresh_session_subscriptions();
         let _ = self.store_user_record(&peer_pubkey);
         Ok(())
     }
@@ -686,9 +814,7 @@ impl SessionManager {
             let user_record = records.get_mut(&peer_pubkey)?;
 
             let mut sessions = user_record.get_active_sessions_mut();
-            sessions
-                .first_mut()
-                .map(|session| session.session.state.clone())
+            sessions.first_mut().map(|session| session.state.clone())
         }))
     }
 
@@ -699,7 +825,7 @@ impl SessionManager {
             for (owner_pubkey, user_record) in records.iter() {
                 for (device_id, device_record) in user_record.device_records.iter() {
                     if let Some(session) = &device_record.active_session {
-                        out.push((*owner_pubkey, device_id.clone(), session.session.state.clone()));
+                        out.push((*owner_pubkey, device_id.clone(), session.state.clone()));
                     }
                 }
             }
@@ -720,7 +846,7 @@ impl SessionManager {
                             &hex::encode(user_pk.to_bytes())[..16],
                             device_id
                         ));
-                        if let Some(our_current) = &session.session.state.our_current_nostr_key {
+                        if let Some(our_current) = &session.state.our_current_nostr_key {
                             output.push_str(&format!(
                                 "  our_current:    {}\n",
                                 &hex::encode(our_current.public_key.to_bytes())[..16]
@@ -730,10 +856,10 @@ impl SessionManager {
                         }
                         output.push_str(&format!(
                             "  our_next:       {}\n",
-                            &hex::encode(session.session.state.our_next_nostr_key.public_key.to_bytes())
+                            &hex::encode(session.state.our_next_nostr_key.public_key.to_bytes())
                                 [..16]
                         ));
-                        if let Some(their_current) = session.session.state.their_current_nostr_public_key {
+                        if let Some(their_current) = session.state.their_current_nostr_public_key {
                             output.push_str(&format!(
                                 "  their_current:  {}\n",
                                 &hex::encode(their_current.to_bytes())[..16]
@@ -741,7 +867,7 @@ impl SessionManager {
                         } else {
                             output.push_str("  their_current:  None\n");
                         }
-                        if let Some(their_next) = session.session.state.their_next_nostr_public_key {
+                        if let Some(their_next) = session.state.their_next_nostr_public_key {
                             output.push_str(&format!(
                                 "  their_next:     {}\n",
                                 &hex::encode(their_next.to_bytes())[..16]
@@ -799,16 +925,20 @@ impl SessionManager {
                 continue;
             }
 
-            let Ok(Some(response)) =
-                ManagedInvite::new(invite.clone()).process_invite_response(&event, our_identity_key)
+            let inviter_next_nostr_private_key = Keys::generate().secret_key().to_secret_bytes();
+            let InviteProcessResponseResult::Accepted { meta, .. } =
+                invite.process_response(InviteProcessResponseInput {
+                    event: event.clone(),
+                    inviter_identity_private_key: our_identity_key,
+                    inviter_next_nostr_private_key,
+                })
             else {
                 continue;
             };
 
             owners.insert(
-                response
-                    .owner_public_key
-                    .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity)),
+                meta.owner_public_key
+                    .unwrap_or_else(|| self.resolve_to_owner(&meta.invitee_identity)),
             );
         }
 
@@ -908,8 +1038,8 @@ impl SessionManager {
                     (
                         session.can_send(),
                         SessionManager::session_can_receive(session),
-                        session.session.state.sending_chain_message_number,
-                        session.session.state.receiving_chain_message_number,
+                        session.state.sending_chain_message_number,
+                        session.state.receiving_chain_message_number,
                     )
                 });
 
@@ -932,8 +1062,8 @@ impl SessionManager {
                     if SessionManager::session_can_receive(session) {
                         any_receive_capable = true;
                     }
-                    if session.session.state.sending_chain_message_number > 0
-                        || session.session.state.receiving_chain_message_number > 0
+                    if session.state.sending_chain_message_number > 0
+                        || session.state.receiving_chain_message_number > 0
                     {
                         any_session_has_activity = true;
                     }
@@ -1003,21 +1133,13 @@ impl SessionManager {
         }
 
         let result = (|| -> Result<AcceptInviteResult> {
-            let (mut session, response_event) = ManagedInvite::new(invite.clone()).accept_with_owner(
-                self.our_public_key,
-                self.our_identity_key,
-                Some(self.device_id.clone()),
-                Some(self.owner_public_key),
-            )?;
+            let (mut session, response_event) = self.accept_invite_session(invite)?;
 
             self.pubsub.publish_signed(response_event)?;
 
             let invite_bootstrap_messages = self.build_bootstrap_messages(owner_pubkey);
             let invite_bootstrap_events =
                 SessionManager::sign_bootstrap_schedule(&mut session, &invite_bootstrap_messages);
-
-            session.set_pubsub(self.pubsub.clone());
-            let _ = session.subscribe_to_messages();
 
             self.with_user_records({
                 let device_id = device_id.clone();
@@ -1056,6 +1178,7 @@ impl SessionManager {
                 }
             });
 
+            self.refresh_session_subscriptions();
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             let _ = self.store_user_record(&owner_pubkey);
             self.send_message_history(owner_pubkey, &device_id);
@@ -1223,6 +1346,7 @@ impl SessionManager {
         let mut event_ids = Vec::new();
         let inner_event_id = event.id.as_ref().map(|id| id.to_string());
         let mut published_device_ids: Vec<String> = Vec::new();
+        let mut updated_sessions = false;
 
         for (owner, device_id) in device_targets {
             let cached_app_keys = self.cached_app_keys.lock().unwrap().get(&owner).cloned();
@@ -1252,16 +1376,21 @@ impl SessionManager {
                         .device_records
                         .get_mut(&device_id)
                         .and_then(|device_record| device_record.active_session.as_mut())
-                        .and_then(|session| session.send_event(event).ok())
+                        .and_then(|session| SessionManager::send_with_session(session, event).ok())
                 }
             });
 
             if let Some(signed_event) = maybe_signed_event {
+                updated_sessions = true;
                 event_ids.push(signed_event.id.to_string());
                 if self.pubsub.publish_signed(signed_event).is_ok() {
                     published_device_ids.push(device_id.clone());
                 }
             }
+        }
+
+        if updated_sessions {
+            self.refresh_session_subscriptions();
         }
 
         if let Some(ref id) = inner_event_id {
@@ -1313,17 +1442,15 @@ impl SessionManager {
 
             let mut known_device_ids = Vec::new();
             for (device_id, device_record) in user_record.device_records.drain() {
-                if let Some(session) = device_record.active_session {
-                    session.close();
-                }
-                for session in device_record.inactive_sessions {
-                    session.close();
-                }
+                let _ = device_record.active_session;
+                let _ = device_record.inactive_sessions;
                 known_device_ids.push(device_id);
             }
 
             (known_device_ids, user_record.known_device_identities)
         });
+
+        self.refresh_session_subscriptions();
 
         let mut known_device_pubkeys: Vec<PublicKey> = Vec::new();
         for device_id in &known_device_ids {
@@ -2033,29 +2160,26 @@ impl SessionManager {
     fn install_invite_response_session(
         &self,
         event_id: String,
-        response: crate::InviteResponse,
+        session: Session,
+        meta: crate::InviteResponseMeta,
     ) -> bool {
-        if response.invitee_identity == self.our_public_key {
+        if meta.invitee_identity == self.our_public_key {
             return false;
         }
 
-        let owner_pubkey = response
+        let owner_pubkey = meta
             .owner_public_key
-            .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
+            .unwrap_or_else(|| self.resolve_to_owner(&meta.invitee_identity));
 
-        if !self.is_device_authorized(owner_pubkey, response.invitee_identity) {
+        if !self.is_device_authorized(owner_pubkey, meta.invitee_identity) {
             return false;
         }
 
-        self.record_known_device_identity(owner_pubkey, response.invitee_identity);
+        self.record_known_device_identity(owner_pubkey, meta.invitee_identity);
 
-        let device_id = response
+        let device_id = meta
             .device_id
-            .unwrap_or_else(|| hex::encode(response.invitee_identity.to_bytes()));
-
-        let mut session = response.session;
-        session.set_pubsub(self.pubsub.clone());
-        let _ = session.subscribe_to_messages();
+            .unwrap_or_else(|| hex::encode(meta.invitee_identity.to_bytes()));
 
         self.with_user_records({
             let device_id = device_id.clone();
@@ -2068,6 +2192,7 @@ impl SessionManager {
             }
         });
 
+        self.refresh_session_subscriptions();
         let _ = self.store_user_record(&owner_pubkey);
         self.send_message_history(owner_pubkey, &device_id);
         let _ = self.flush_message_queue(&device_id);
@@ -2114,20 +2239,26 @@ impl SessionManager {
                 continue;
             }
 
-            let Ok(Some(response)) =
-                ManagedInvite::new(invite.clone()).process_invite_response(&event, our_identity_key)
+            let inviter_next_nostr_private_key = Keys::generate().secret_key().to_secret_bytes();
+            let InviteProcessResponseResult::Accepted { session, meta, .. } = invite
+                .process_response(InviteProcessResponseInput {
+                    event: event.clone(),
+                    inviter_identity_private_key: our_identity_key,
+                    inviter_next_nostr_private_key,
+                })
             else {
                 continue;
             };
 
-            let resolved_owner = response
+            let resolved_owner = meta
                 .owner_public_key
-                .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
+                .unwrap_or_else(|| self.resolve_to_owner(&meta.invitee_identity));
             if resolved_owner != owner_pubkey {
                 continue;
             }
 
-            let installed = self.install_invite_response_session(event.id.to_string(), response);
+            let installed =
+                self.install_invite_response_session(event.id.to_string(), session, meta);
             eprintln!(
                 "[sm] retry_pending_invite_response event={} owner={} installed={}",
                 event.id,
@@ -2196,7 +2327,7 @@ impl SessionManager {
             return;
         }
 
-        let _ = ManagedInvite::from_user_with_pubsub(device_pubkey, self.pubsub.as_ref());
+        let _ = self.subscribe_to_user_invites(device_pubkey);
     }
 
     fn upsert_device_record(record: &mut UserRecord, device_id: &str) {
@@ -2285,7 +2416,9 @@ impl SessionManager {
                 let mut pending = Vec::new();
                 for entry in entries {
                     let maybe_event_id = entry.event.id.as_ref().map(|id| id.to_string());
-                    if let Ok(signed_event) = session.send_event(entry.event) {
+                    if let Ok(signed_event) =
+                        SessionManager::send_with_session(session, entry.event)
+                    {
                         pending.push((entry.id, maybe_event_id, signed_event));
                     }
                 }
@@ -2299,6 +2432,7 @@ impl SessionManager {
             }
         }
 
+        let any_sent = !sent.is_empty();
         for (entry_id, maybe_event_id) in sent {
             if let Some(event_id) = maybe_event_id {
                 let _ = self
@@ -2309,6 +2443,9 @@ impl SessionManager {
             }
         }
 
+        if any_sent {
+            self.refresh_session_subscriptions();
+        }
         let _ = self.store_user_record(&owner_pubkey);
         Ok(())
     }
@@ -2376,13 +2513,17 @@ impl SessionManager {
 
                 history
                     .into_iter()
-                    .filter_map(|event| session.send_event(event).ok())
+                    .filter_map(|event| SessionManager::send_with_session(session, event).ok())
                     .collect::<Vec<_>>()
             }
         });
 
+        let any_signed_history = !signed_history.is_empty();
         for signed_event in signed_history {
             let _ = self.pubsub.publish_signed(signed_event);
+        }
+        if any_signed_history {
+            self.refresh_session_subscriptions();
         }
         let _ = self.store_user_record(&owner_pubkey);
     }
@@ -2393,13 +2534,11 @@ impl SessionManager {
             .unwrap()
             .as_secs()
             + INVITE_BOOTSTRAP_EXPIRATION_SECONDS;
-        let expiration = match Tag::parse(&[
-            crate::EXPIRATION_TAG.to_string(),
-            expires_at.to_string(),
-        ]) {
-            Ok(tag) => tag,
-            Err(_) => return Vec::new(),
-        };
+        let expiration =
+            match Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()]) {
+                Ok(tag) => tag,
+                Err(_) => return Vec::new(),
+            };
 
         let mut bootstrap_messages = Vec::new();
         for _ in INVITE_BOOTSTRAP_RETRY_DELAYS_MS {
@@ -2418,12 +2557,14 @@ impl SessionManager {
     }
 
     fn sign_bootstrap_schedule(
-        session: &mut ManagedSession,
+        session: &mut Session,
         bootstrap_messages: &[UnsignedEvent],
     ) -> Vec<nostr::Event> {
         let mut bootstrap_events = Vec::new();
         for bootstrap in bootstrap_messages {
-            let Ok(signed_bootstrap) = session.send_event(bootstrap.clone()) else {
+            let Ok(signed_bootstrap) =
+                SessionManager::send_with_session(session, bootstrap.clone())
+            else {
                 break;
             };
             bootstrap_events.push(signed_bootstrap);
@@ -2478,6 +2619,7 @@ impl SessionManager {
         });
 
         if !bootstrap_events.is_empty() {
+            self.refresh_session_subscriptions();
             self.publish_bootstrap_schedule(bootstrap_events);
             let _ = self.store_user_record(&owner_pubkey);
         }
@@ -2491,22 +2633,14 @@ impl SessionManager {
                     return false;
                 };
 
-                if let Some(device_record) = user_record.device_records.remove(&device_id) {
-                    if let Some(session) = device_record.active_session {
-                        session.close();
-                    }
-                    for session in device_record.inactive_sessions {
-                        session.close();
-                    }
-                    return true;
-                }
-
-                false
+                user_record.device_records.remove(&device_id).is_some()
             }
         });
         if !removed {
             return;
         }
+
+        self.refresh_session_subscriptions();
 
         if let Ok(device_pk) = crate::utils::pubkey_from_hex(device_id) {
             self.delegate_to_owner.lock().unwrap().remove(&device_pk);
@@ -2649,21 +2783,11 @@ impl SessionManager {
                 };
 
                 if let Some(state) = device.active_session {
-                    let mut session =
-                        ManagedSession::new(state, format!("session-{}", device.device_id));
-                    session.set_pubsub(self.pubsub.clone());
-                    let _ = session.subscribe_to_messages();
-                    device_record.active_session = Some(session);
+                    device_record.active_session = Some(Session::new(state));
                 }
 
                 for state in device.inactive_sessions {
-                    let mut session = ManagedSession::new(
-                        state,
-                        format!("session-{}-inactive", device.device_id),
-                    );
-                    session.set_pubsub(self.pubsub.clone());
-                    let _ = session.subscribe_to_messages();
-                    device_record.inactive_sessions.push(session);
+                    device_record.inactive_sessions.push(Session::new(state));
                 }
 
                 crate::UserRecord::compact_duplicate_sessions(&mut device_record);
@@ -2737,16 +2861,24 @@ impl SessionManager {
             }
 
             if let Some(state) = self.invite_state.lock().unwrap().as_ref() {
-                match ManagedInvite::new(state.invite.clone())
-                    .process_invite_response(&event, state.our_identity_key)
-                {
-                    Ok(Some(response)) => {
-                        if !self.install_invite_response_session(event.id.to_string(), response) {
+                let inviter_next_nostr_private_key =
+                    Keys::generate().secret_key().to_secret_bytes();
+                match state.invite.process_response(InviteProcessResponseInput {
+                    event: event.clone(),
+                    inviter_identity_private_key: state.our_identity_key,
+                    inviter_next_nostr_private_key,
+                }) {
+                    InviteProcessResponseResult::Accepted { session, meta, .. } => {
+                        if !self.install_invite_response_session(
+                            event.id.to_string(),
+                            session,
+                            meta,
+                        ) {
                             self.queue_pending_invite_response(event.clone());
                         }
                     }
-                    Ok(None) => {}
-                    Err(_) => {}
+                    InviteProcessResponseResult::NotForThisInvite { .. } => {}
+                    InviteProcessResponseResult::InvalidRelevant { .. } => {}
                 }
             }
             return;
@@ -2776,7 +2908,9 @@ impl SessionManager {
                             };
 
                             if let Some(ref mut session) = device_record.active_session {
-                                if let Ok(Some(plaintext)) = session.receive(&event) {
+                                if let Ok(Some(plaintext)) =
+                                    SessionManager::receive_with_session(session, &event)
+                                {
                                     return Some((*owner_pubkey, plaintext, device_id.clone()));
                                 }
                             }
@@ -2784,7 +2918,9 @@ impl SessionManager {
                             for idx in 0..device_record.inactive_sessions.len() {
                                 let plaintext_opt = {
                                     let session = &mut device_record.inactive_sessions[idx];
-                                    session.receive(&event).ok().flatten()
+                                    SessionManager::receive_with_session(session, &event)
+                                        .ok()
+                                        .flatten()
                                 };
 
                                 if let Some(plaintext) = plaintext_opt {
@@ -2804,6 +2940,7 @@ impl SessionManager {
             });
 
             if let Some((owner_pubkey, plaintext, device_id)) = decrypted {
+                self.refresh_session_subscriptions();
                 let sender_device = if let Ok(sender_pk) = crate::utils::pubkey_from_hex(&device_id)
                 {
                     let sender_owner = self.resolve_to_owner(&sender_pk);
