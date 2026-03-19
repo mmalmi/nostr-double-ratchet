@@ -106,24 +106,6 @@ pub struct StoredGroupSenderKeys {
     pub states: Vec<nostr_double_ratchet::SenderKeyState>,
 }
 
-/// Stored mapping from a group member's identity pubkey to their per-group outer "sender event" pubkey.
-///
-/// For our own identity, we also store the private key so we can publish events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredGroupSender {
-    pub group_id: String,
-    /// The member's device identity pubkey (hex). (Stable per device.)
-    pub identity_pubkey: String,
-    /// The member's owner pubkey (hex). When missing, assume `identity_pubkey` (single-device).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_pubkey: Option<String>,
-    /// The per-group outer pubkey used to author group message events (hex).
-    pub sender_event_pubkey: String,
-    /// Only present for our own identity.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sender_event_secret_key: Option<String>,
-}
-
 /// File-based storage (agent-friendly - can read JSON directly)
 pub struct Storage {
     #[allow(dead_code)]
@@ -781,46 +763,6 @@ impl Storage {
         }
         let content = fs::read_to_string(path)?;
         Ok(Some(serde_json::from_str(&content)?))
-    }
-
-    // === Group sender (outer pubkey) operations ===
-
-    fn group_sender_path(&self, group_id: &str, identity_pubkey: &str) -> PathBuf {
-        self.group_senders_dir
-            .join(group_id)
-            .join(format!("{}.json", identity_pubkey))
-    }
-
-    pub fn upsert_group_sender(&self, sender: &StoredGroupSender) -> Result<()> {
-        let dir = self.group_senders_dir.join(&sender.group_id);
-        fs::create_dir_all(&dir)?;
-
-        let path = self.group_sender_path(&sender.group_id, &sender.identity_pubkey);
-        write_json_pretty_atomic(&path, sender)
-    }
-
-    pub fn list_group_senders(&self, group_id: &str) -> Result<Vec<StoredGroupSender>> {
-        let dir = self.group_senders_dir.join(group_id);
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            if entry
-                .path()
-                .extension()
-                .map(|e| e == "json")
-                .unwrap_or(false)
-            {
-                let content = fs::read_to_string(entry.path())?;
-                if let Ok(sender) = serde_json::from_str::<StoredGroupSender>(&content) {
-                    out.push(sender);
-                }
-            }
-        }
-        out.sort_by(|a, b| a.identity_pubkey.cmp(&b.identity_pubkey));
-        Ok(out)
     }
 
     // === Group sender key operations ===

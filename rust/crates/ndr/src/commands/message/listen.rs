@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
-    FileStorageAdapter, NdrRuntime, OneToManyChannel, Session, SessionManager, SessionManagerEvent,
-    StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND,
-    RECEIPT_KIND, TYPING_KIND,
+    group::GroupData, FileStorageAdapter, GroupDecryptedEvent, NdrRuntime,
+    Session, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
+    CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 
 use crate::commands::owner_claim::{
@@ -20,7 +20,7 @@ use crate::state_sync::{
     select_canonical_session, GroupMetadataApplyOutcome,
 };
 use crate::storage::{
-    Storage, StoredChat, StoredGroupMessage, StoredGroupSender, StoredMessage, StoredReaction,
+    Storage, StoredChat, StoredGroupMessage, StoredMessage, StoredReaction,
 };
 
 use super::common::{
@@ -460,11 +460,107 @@ async fn backfill_recent_pairwise_session_messages(
     Ok(())
 }
 
+fn accepted_runtime_groups(storage: &Storage) -> Result<Vec<GroupData>> {
+    let mut groups: Vec<GroupData> = storage
+        .list_groups()?
+        .into_iter()
+        .filter(|group| group.data.accepted == Some(true))
+        .map(|group| group.data)
+        .collect();
+    groups.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(groups)
+}
+
+fn sync_runtime_groups(runtime: &NdrRuntime, storage: &Storage) -> Result<()> {
+    Ok(runtime.sync_groups(accepted_runtime_groups(storage)?)?)
+}
+
+fn apply_runtime_group_event(
+    decrypted: &GroupDecryptedEvent,
+    storage: &Storage,
+    output: &Output,
+) -> Result<()> {
+    let decrypted_event_value = serde_json::to_value(&decrypted.inner)?;
+    let rumor_kind = decrypted.inner.kind.as_u16() as u32;
+    let sender_pubkey_hex = decrypted
+        .sender_owner_pubkey
+        .unwrap_or(decrypted.sender_device_pubkey)
+        .to_hex();
+    let sender_device_pubkey_hex = decrypted.sender_device_pubkey.to_hex();
+    let timestamp = decrypted.outer_created_at;
+    let content = decrypted.inner.content.clone();
+
+    if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
+        let now_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let expires_at = extract_expiration_tag_seconds(&decrypted_event_value);
+        if is_expired(expires_at, now_seconds) {
+            return Ok(());
+        }
+
+        let stored = StoredGroupMessage {
+            id: decrypted.outer_event_id.clone(),
+            group_id: decrypted.group_id.clone(),
+            sender_pubkey: sender_pubkey_hex.clone(),
+            content: content.clone(),
+            timestamp,
+            is_outgoing: false,
+            expires_at,
+        };
+        storage.save_group_message(&stored)?;
+        output.event(
+            "group_message",
+            serde_json::json!({
+                "group_id": decrypted.group_id,
+                "message_id": decrypted.outer_event_id,
+                "sender_pubkey": sender_pubkey_hex,
+                "sender_device_pubkey": sender_device_pubkey_hex,
+                "content": content,
+                "timestamp": timestamp,
+            }),
+        );
+        return Ok(());
+    }
+
+    if rumor_kind == REACTION_KIND {
+        let message_id = extract_e_tag(&decrypted_event_value);
+        output.event(
+            "group_reaction",
+            serde_json::json!({
+                "group_id": decrypted.group_id,
+                "sender_pubkey": sender_pubkey_hex,
+                "sender_device_pubkey": sender_device_pubkey_hex,
+                "message_id": message_id,
+                "emoji": content,
+                "timestamp": timestamp,
+            }),
+        );
+        return Ok(());
+    }
+
+    if rumor_kind == TYPING_KIND {
+        output.event(
+            "group_typing",
+            serde_json::json!({
+                "group_id": decrypted.group_id,
+                "sender_pubkey": sender_pubkey_hex,
+                "sender_device_pubkey": sender_device_pubkey_hex,
+                "timestamp": timestamp,
+            }),
+        );
+    }
+
+    Ok(())
+}
+
 async fn backfill_recent_group_sender_events(
     client: &nostr_sdk::Client,
     relays: &[String],
+    runtime: &NdrRuntime,
     sender_event_pubkey: &nostr::PublicKey,
-    pending_group_sender_events: &mut std::collections::HashMap<(String, u32), Vec<nostr::Event>>,
+    storage: &Storage,
+    output: &Output,
     seen_event_ids: &mut std::collections::HashSet<String>,
     seen_event_ids_order: &mut std::collections::VecDeque<String>,
 ) -> Result<()> {
@@ -481,9 +577,6 @@ async fn backfill_recent_group_sender_events(
         fetch_events_best_effort(client, relays, filter, std::time::Duration::from_secs(3)).await?;
     events.sort_by_key(|event| (event.created_at.as_u64(), event.id.to_hex()));
 
-    let one_to_many = OneToManyChannel::default();
-    let sender_event_pubkey_hex = sender_event_pubkey.to_hex();
-
     for event in events {
         let event_id = event.id.to_hex();
         if seen_event_ids.contains(&event_id) {
@@ -497,21 +590,46 @@ async fn backfill_recent_group_sender_events(
             }
         }
 
-        let parsed = match one_to_many.parse_outer_content(&event.content) {
-            Ok(parsed) => parsed,
-            Err(_) => continue,
-        };
-        if parsed.ciphertext.is_empty() {
-            continue;
+        if let Some(decrypted) = runtime.group_handle_outer_event(&event) {
+            apply_runtime_group_event(&decrypted, storage, output)?;
         }
-
-        pending_group_sender_events
-            .entry((sender_event_pubkey_hex.clone(), parsed.key_id))
-            .or_default()
-            .push(event);
     }
 
     Ok(())
+}
+
+async fn sync_group_outer_subscriptions(
+    runtime: &NdrRuntime,
+    client: &nostr_sdk::Client,
+    relays: &[String],
+    storage: &Storage,
+    output: &Output,
+    seen_event_ids: &mut std::collections::HashSet<String>,
+    seen_event_ids_order: &mut std::collections::VecDeque<String>,
+) -> Result<std::collections::HashSet<String>> {
+    use nostr_double_ratchet::MESSAGE_EVENT_KIND;
+    use nostr_sdk::Filter;
+
+    let plan = runtime.group_outer_subscription_plan();
+    for sender_event_pubkey in &plan.added_authors {
+        let sender_filter = Filter::new()
+            .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
+            .authors(vec![*sender_event_pubkey]);
+        subscribe_filters_best_effort(client, relays, vec![sender_filter]).await?;
+        backfill_recent_group_sender_events(
+            client,
+            relays,
+            runtime,
+            sender_event_pubkey,
+            storage,
+            output,
+            seen_event_ids,
+            seen_event_ids_order,
+        )
+        .await?;
+    }
+
+    Ok(plan.authors.into_iter().map(|pk| pk.to_hex()).collect())
 }
 
 struct SessionManagerDecrypted {
@@ -1051,46 +1169,6 @@ pub async fn listen(
         Ok(channels)
     };
 
-    // sender_event_pubkey -> (group_id, sender_owner_pubkey, sender_device_pubkey)
-    type GroupSenderMap = HashMap<String, (String, String, String)>;
-
-    // Helper to build per-sender outer pubkey map from groups
-    let build_group_sender_map = |storage: &Storage| -> Result<GroupSenderMap> {
-        let mut map = HashMap::new();
-        for group in storage.list_groups()? {
-            if group.data.accepted != Some(true) {
-                continue;
-            }
-
-            // Only accept mappings for current members (prevents removed members from continuing to send).
-            let members = &group.data.members;
-            for sender in storage.list_group_senders(&group.data.id)? {
-                if sender.group_id != group.data.id {
-                    continue;
-                }
-                let owner_pubkey_hex = sender
-                    .owner_pubkey
-                    .as_deref()
-                    .unwrap_or(sender.identity_pubkey.as_str());
-                if !members.contains(&owner_pubkey_hex.to_string()) {
-                    continue;
-                }
-                if nostr::PublicKey::from_hex(&sender.sender_event_pubkey).is_err() {
-                    continue;
-                }
-                map.insert(
-                    sender.sender_event_pubkey.clone(),
-                    (
-                        group.data.id.clone(),
-                        owner_pubkey_hex.to_string(),
-                        sender.identity_pubkey.clone(),
-                    ),
-                );
-            }
-        }
-        Ok(map)
-    };
-
     // Helper to build filters from current state
     // Limit relay backfill to recent events to avoid replaying entire history on restart.
     let since_timestamp = {
@@ -1105,7 +1183,6 @@ pub async fn listen(
         |storage: &Storage,
          chat_id: Option<&str>,
          channel_map: &HashMap<String, (nostr_double_ratchet::SharedChannel, String)>,
-         group_sender_map: &GroupSenderMap,
          since: nostr::Timestamp|
          -> Result<FilterState> {
             let pubkeys_to_watch =
@@ -1124,10 +1201,7 @@ pub async fn listen(
                 );
             }
 
-            let group_sender_pubkeys: Vec<nostr::PublicKey> = group_sender_map
-                .keys()
-                .filter_map(|hex| nostr::PublicKey::from_hex(hex).ok())
-                .collect();
+            let group_sender_pubkeys = runtime.group_known_sender_event_pubkeys();
             let group_sender_pubkeys_hex: HashSet<String> =
                 group_sender_pubkeys.iter().map(|pk| pk.to_hex()).collect();
             if !group_sender_pubkeys.is_empty() {
@@ -1211,9 +1285,8 @@ pub async fn listen(
         };
 
     // Build initial filters
-    let one_to_many = OneToManyChannel::default();
     let mut channel_map = build_channel_map(storage)?;
-    let mut group_sender_map = build_group_sender_map(storage)?;
+    sync_runtime_groups(&runtime, storage)?;
     let (
         mut filters,
         mut subscribed_pubkeys,
@@ -1225,7 +1298,6 @@ pub async fn listen(
         storage,
         chat_id,
         &channel_map,
-        &group_sender_map,
         since_timestamp,
     )?;
     let mut last_refresh = Instant::now();
@@ -1246,7 +1318,6 @@ pub async fn listen(
 
     // If we receive per-sender published group messages before the sender-key distribution, keep
     // them here and retry when the distribution arrives.
-    let mut pending_group_sender_events: HashMap<(String, u32), Vec<nostr::Event>> = HashMap::new();
     // If a newly linked device sends its first message before we have processed that device's
     // invite response, keep the outer event here and retry it after session bootstrap lands.
     let mut pending_session_manager_message_events: HashMap<String, nostr::Event> = HashMap::new();
@@ -1305,6 +1376,16 @@ pub async fn listen(
             connected = true;
         }
         subscribe_filters_best_effort(&client, &relays, filters.clone()).await?;
+        subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
+            &runtime,
+            &client,
+            &relays,
+            storage,
+            output,
+            &mut seen_event_ids,
+            &mut seen_event_ids_order,
+        )
+        .await?;
         refresh_peer_app_keys_snapshots(
             storage,
             &session_manager,
@@ -1367,20 +1448,19 @@ pub async fn listen(
 
         import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
         sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+        sync_runtime_groups(&runtime, storage)?;
         channel_map = build_channel_map(storage)?;
-        group_sender_map = build_group_sender_map(storage)?;
         let (
             new_filters,
             new_pubkeys,
             new_invite_pubkeys,
             new_channel_pubkeys,
-            new_group_sender_pubkeys,
+            _new_group_sender_pubkeys,
             new_peer_app_keys_pubkeys,
         ) = build_filters(
             storage,
             chat_id_owned.as_deref(),
             &channel_map,
-            &group_sender_map,
             since_timestamp,
         )?;
         if !new_filters.is_empty() {
@@ -1388,13 +1468,22 @@ pub async fn listen(
             subscribed_pubkeys = new_pubkeys;
             subscribed_invite_pubkeys = new_invite_pubkeys;
             subscribed_channel_pubkeys = new_channel_pubkeys;
-            subscribed_group_sender_pubkeys = new_group_sender_pubkeys;
             subscribed_peer_app_keys_pubkeys = new_peer_app_keys_pubkeys;
             if !connected {
                 client.connect().await;
                 connected = true;
             }
             subscribe_filters_best_effort(&client, &relays, filters.clone()).await?;
+            subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
+                &runtime,
+                &client,
+                &relays,
+                storage,
+                output,
+                &mut seen_event_ids,
+                &mut seen_event_ids_order,
+            )
+            .await?;
             refresh_peer_app_keys_snapshots(
                 storage,
                 &session_manager,
@@ -1495,8 +1584,8 @@ pub async fn listen(
                 )
                 .await?;
             }
+            sync_runtime_groups(&runtime, storage)?;
             channel_map = build_channel_map(storage)?;
-            group_sender_map = build_group_sender_map(storage)?;
             let (
                 new_filters,
                 new_pubkeys,
@@ -1508,7 +1597,6 @@ pub async fn listen(
                 storage,
                 chat_id_owned.as_deref(),
                 &channel_map,
-                &group_sender_map,
                 since_timestamp,
             )?;
             if !new_filters.is_empty()
@@ -1523,9 +1611,18 @@ pub async fn listen(
                 subscribed_pubkeys = new_pubkeys;
                 subscribed_invite_pubkeys = new_invite_pubkeys;
                 subscribed_channel_pubkeys = new_channel_pubkeys;
-                subscribed_group_sender_pubkeys = new_group_sender_pubkeys;
                 subscribed_peer_app_keys_pubkeys = new_peer_app_keys_pubkeys;
                 subscribe_filters_best_effort(&client, &relays, filters.clone()).await?;
+                subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
+                    &runtime,
+                    &client,
+                    &relays,
+                    storage,
+                    output,
+                    &mut seen_event_ids,
+                    &mut seen_event_ids_order,
+                )
+                .await?;
                 backfill_recent_pairwise_session_messages(
                     &session_manager,
                     &runtime,
@@ -2083,150 +2180,10 @@ pub async fn listen(
 
             // Handle messages
             if event_kind == MESSAGE_EVENT_KIND {
-                // === Per-sender published group message ===
-                let sender_event_pubkey_hex = event.pubkey.to_hex();
-                if let Some((group_id, sender_owner_pubkey_hex, sender_device_pubkey_hex)) =
-                    group_sender_map.get(&sender_event_pubkey_hex).cloned()
-                {
-                    if event.verify().is_err() {
-                        continue;
-                    }
-
-                    let parsed = match one_to_many.parse_outer_content(&event.content) {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-                    let key_id = parsed.key_id;
-                    let n = parsed.message_number;
-                    let ciphertext = parsed.ciphertext;
-
-                    if ciphertext.is_empty() {
-                        continue;
-                    };
-
-                    let Some(group) = storage.get_group(&group_id)? else {
-                        continue;
-                    };
-                    if group.data.accepted != Some(true) {
-                        continue;
-                    }
-                    if !group.data.members.contains(&sender_owner_pubkey_hex) {
-                        continue;
-                    }
-
-                    let Some(mut st) = storage.get_group_sender_key_state(
-                        &group_id,
-                        &sender_device_pubkey_hex,
-                        key_id,
-                    )?
-                    else {
-                        pending_group_sender_events
-                            .entry((sender_event_pubkey_hex.clone(), key_id))
-                            .or_default()
-                            .push(*event);
-                        continue;
-                    };
-
-                    let plaintext_json = match st.decrypt_from_bytes(n, &ciphertext) {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-                    storage.upsert_group_sender_key_state(
-                        &group_id,
-                        &sender_device_pubkey_hex,
-                        &st,
-                    )?;
-
-                    let decrypted_event: serde_json::Value =
-                        match serde_json::from_str(&plaintext_json) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-
-                    let rumor_kind = decrypted_event["kind"]
-                        .as_u64()
-                        .unwrap_or(CHAT_MESSAGE_KIND as u64)
-                        as u32;
-                    let content = decrypted_event["content"]
-                        .as_str()
-                        .unwrap_or(&plaintext_json)
-                        .to_string();
-
-                    let timestamp = event.created_at.as_u64();
-                    let now_seconds = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)?
-                        .as_secs();
-                    let expires_at = extract_expiration_tag_seconds(&decrypted_event);
-
-                    if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
-                        if is_expired(expires_at, now_seconds) {
-                            continue;
-                        }
-                        let msg_id = event.id.to_hex();
-                        let stored = StoredGroupMessage {
-                            id: msg_id.clone(),
-                            group_id: group_id.clone(),
-                            sender_pubkey: sender_owner_pubkey_hex.clone(),
-                            content: content.clone(),
-                            timestamp,
-                            is_outgoing: false,
-                            expires_at,
-                        };
-                        storage.save_group_message(&stored)?;
-
-                        output.event(
-                            "group_message",
-                            serde_json::json!({
-                                "group_id": group_id,
-                                "message_id": msg_id,
-                                "sender_pubkey": sender_owner_pubkey_hex,
-                                "sender_device_pubkey": sender_device_pubkey_hex,
-                                "content": content,
-                                "timestamp": timestamp,
-                            }),
-                        );
-                    } else if rumor_kind == REACTION_KIND {
-                        let message_id = extract_e_tag(&decrypted_event);
-                        output.event(
-                            "group_reaction",
-                            serde_json::json!({
-                                "group_id": group_id,
-                                "sender_pubkey": sender_owner_pubkey_hex,
-                                "sender_device_pubkey": sender_device_pubkey_hex,
-                                "message_id": message_id,
-                                "emoji": content,
-                                "timestamp": timestamp,
-                            }),
-                        );
-                    } else if rumor_kind == TYPING_KIND {
-                        output.event(
-                            "group_typing",
-                            serde_json::json!({
-                                "group_id": group_id,
-                                "sender_pubkey": sender_owner_pubkey_hex,
-                                "sender_device_pubkey": sender_device_pubkey_hex,
-                                "timestamp": timestamp,
-                            }),
-                        );
-                    }
-
+                if let Some(decrypted) = runtime.group_handle_outer_event(&event) {
+                    apply_runtime_group_event(&decrypted, storage, output)?;
                     continue;
                 }
-
-                let maybe_unmapped_group_outer = if event.verify().is_ok() {
-                    one_to_many
-                        .parse_outer_content(&event.content)
-                        .ok()
-                        .and_then(|parsed| {
-                            (!parsed.ciphertext.is_empty()).then_some((
-                                sender_event_pubkey_hex.clone(),
-                                parsed.key_id,
-                                (*event).clone(),
-                            ))
-                        })
-                } else {
-                    None
-                };
 
                 let mut decrypted_current_event = false;
                 for chat in storage.list_chats()? {
@@ -2353,6 +2310,7 @@ pub async fn listen(
                                                     storage.save_chat(&updated_chat)?;
                                                 }
                                             }
+                                            sync_runtime_groups(&runtime, storage)?;
                                         }
                                     }
                                 } else if rumor_kind == GROUP_SENDER_KEY_DISTRIBUTION_KIND {
@@ -2369,97 +2327,46 @@ pub async fn listen(
                                         continue;
                                     }
 
-                                    let Some(group) = storage.get_group(gid)? else {
+                                    let Ok(from_owner_pubkey) =
+                                        nostr::PublicKey::from_hex(&from_pubkey_hex)
+                                    else {
                                         continue;
                                     };
-                                    if !group.data.members.contains(&from_pubkey_hex) {
-                                        continue;
-                                    }
-
-                                    let sender_device_pubkey_hex = chat
+                                    let sender_device_pubkey = chat
                                         .device_id
-                                        .clone()
-                                        .filter(|d| nostr::PublicKey::from_hex(d).is_ok())
-                                        .unwrap_or_else(|| from_pubkey_hex.clone());
+                                        .as_ref()
+                                        .and_then(|device_id| {
+                                            nostr::PublicKey::from_hex(device_id).ok()
+                                        })
+                                        .unwrap_or(from_owner_pubkey);
+                                    let sender_device_pubkey_hex = sender_device_pubkey.to_hex();
 
-                                    // Learn/update the sender's per-group outer pubkey mapping.
-                                    if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey
+                                    sync_runtime_groups(&runtime, storage)?;
+                                    let runtime_event = match serde_json::from_str::<
+                                        nostr::UnsignedEvent,
+                                    >(&decrypted_event_json)
                                     {
-                                        if let Ok(sender_event_pk) =
-                                            nostr::PublicKey::from_hex(sender_event_pubkey)
-                                        {
-                                            storage.upsert_group_sender(&StoredGroupSender {
-                                                group_id: gid.clone(),
-                                                identity_pubkey: sender_device_pubkey_hex.clone(),
-                                                owner_pubkey: Some(from_pubkey_hex.clone()),
-                                                sender_event_pubkey: sender_event_pubkey.clone(),
-                                                sender_event_secret_key: None,
-                                            })?;
-
-                                            group_sender_map.insert(
-                                                sender_event_pubkey.clone(),
-                                                (
-                                                    gid.clone(),
-                                                    from_pubkey_hex.clone(),
-                                                    sender_device_pubkey_hex.clone(),
-                                                ),
-                                            );
-
-                                            let sender_event_hex = sender_event_pk.to_hex();
-                                            if !subscribed_group_sender_pubkeys
-                                                .contains(&sender_event_hex)
-                                            {
-                                                let sender_filter = Filter::new()
-                                                    .kind(nostr::Kind::Custom(
-                                                        MESSAGE_EVENT_KIND as u16,
-                                                    ))
-                                                    .authors(vec![sender_event_pk]);
-                                                subscribe_filters_best_effort(
-                                                    &client,
-                                                    &relays,
-                                                    vec![sender_filter],
-                                                )
-                                                .await?;
-                                                subscribed_group_sender_pubkeys
-                                                    .insert(sender_event_hex);
-                                            }
-
-                                            // The sender may publish their first group message
-                                            // immediately after distributing a sender key. Backfill
-                                            // recent outer events so we do not miss that first
-                                            // message while the new subscription propagates.
-                                            backfill_recent_group_sender_events(
-                                                &client,
-                                                &relays,
-                                                &sender_event_pk,
-                                                &mut pending_group_sender_events,
-                                                &mut seen_event_ids,
-                                                &mut seen_event_ids_order,
-                                            )
-                                            .await?;
-                                        }
+                                        Ok(event) => event,
+                                        Err(_) => continue,
+                                    };
+                                    let drained = runtime.group_handle_incoming_session_event(
+                                        &runtime_event,
+                                        from_owner_pubkey,
+                                        Some(sender_device_pubkey),
+                                    );
+                                    for decrypted in drained {
+                                        apply_runtime_group_event(&decrypted, storage, output)?;
                                     }
-
-                                    // Don't overwrite an existing progressed state (would break decrypt).
-                                    if storage
-                                        .get_group_sender_key_state(
-                                            gid,
-                                            &sender_device_pubkey_hex,
-                                            dist.key_id,
-                                        )?
-                                        .is_none()
-                                    {
-                                        let state = nostr_double_ratchet::SenderKeyState::new(
-                                            dist.key_id,
-                                            dist.chain_key,
-                                            dist.iteration,
-                                        );
-                                        storage.upsert_group_sender_key_state(
-                                            gid,
-                                            &sender_device_pubkey_hex,
-                                            &state,
-                                        )?;
-                                    }
+                                    subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
+                                        &runtime,
+                                        &client,
+                                        &relays,
+                                        storage,
+                                        output,
+                                        &mut seen_event_ids,
+                                        &mut seen_event_ids_order,
+                                    )
+                                    .await?;
 
                                     // Retry any pending SharedChannel messages for this (group,sender,key_id).
                                     let pending_key = (
@@ -2595,153 +2502,6 @@ pub async fn listen(
                                                                     "timestamp": timestamp,
                                                                 }),
                                                             );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Retry any pending per-sender published messages for this (sender_event_pubkey,key_id).
-                                    if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey
-                                    {
-                                        let pending_key =
-                                            (sender_event_pubkey.clone(), dist.key_id);
-                                        if let Some(mut pending) =
-                                            pending_group_sender_events.remove(&pending_key)
-                                        {
-                                            // Best-effort: process in message-number order.
-                                            pending.sort_by_key(|e| {
-                                                one_to_many
-                                                    .parse_outer_content(&e.content)
-                                                    .map(|p| p.message_number as u64)
-                                                    .unwrap_or(0)
-                                            });
-
-                                            for outer in pending {
-                                                if outer.verify().is_err() {
-                                                    continue;
-                                                }
-
-                                                let parsed = match one_to_many
-                                                    .parse_outer_content(&outer.content)
-                                                {
-                                                    Ok(p) => p,
-                                                    Err(_) => continue,
-                                                };
-                                                let key_id = parsed.key_id;
-                                                let n = parsed.message_number;
-                                                let ciphertext = parsed.ciphertext;
-
-                                                if ciphertext.is_empty() {
-                                                    continue;
-                                                }
-                                                if key_id != dist.key_id {
-                                                    continue;
-                                                }
-
-                                                if let Some(mut st) = storage
-                                                    .get_group_sender_key_state(
-                                                        gid,
-                                                        &sender_device_pubkey_hex,
-                                                        key_id,
-                                                    )?
-                                                {
-                                                    if let Ok(plaintext_json) =
-                                                        st.decrypt_from_bytes(n, &ciphertext)
-                                                    {
-                                                        storage.upsert_group_sender_key_state(
-                                                            gid,
-                                                            &sender_device_pubkey_hex,
-                                                            &st,
-                                                        )?;
-
-                                                        if let Ok(decrypted_event) =
-                                                            serde_json::from_str::<serde_json::Value>(
-                                                                &plaintext_json,
-                                                            )
-                                                        {
-                                                            let rumor_kind = decrypted_event["kind"]
-                                                                .as_u64()
-                                                                .unwrap_or(CHAT_MESSAGE_KIND as u64)
-                                                                as u32;
-                                                            let content = decrypted_event
-                                                                ["content"]
-                                                                .as_str()
-                                                                .unwrap_or(&plaintext_json)
-                                                                .to_string();
-
-                                                            let timestamp =
-                                                                outer.created_at.as_u64();
-                                                            let now_seconds =
-                                                                std::time::SystemTime::now()
-                                                                    .duration_since(
-                                                                        std::time::UNIX_EPOCH,
-                                                                    )?
-                                                                    .as_secs();
-                                                            let expires_at =
-                                                                extract_expiration_tag_seconds(
-                                                                    &decrypted_event,
-                                                                );
-
-                                                            if rumor_kind == CHAT_MESSAGE_KIND
-                                                                || rumor_kind == 14
-                                                            {
-                                                                if is_expired(
-                                                                    expires_at,
-                                                                    now_seconds,
-                                                                ) {
-                                                                    continue;
-                                                                }
-                                                                let msg_id = outer.id.to_hex();
-                                                                let stored = StoredGroupMessage {
-                                                                    id: msg_id.clone(),
-                                                                    group_id: gid.clone(),
-                                                                    sender_pubkey: from_pubkey_hex
-                                                                        .clone(),
-                                                                    content: content.clone(),
-                                                                    timestamp,
-                                                                    is_outgoing: false,
-                                                                    expires_at,
-                                                                };
-                                                                storage
-                                                                    .save_group_message(&stored)?;
-                                                                output.event(
-                                                                    "group_message",
-                                                                    serde_json::json!({
-                                                                        "group_id": gid,
-                                                                        "message_id": msg_id,
-                                                                        "sender_pubkey": from_pubkey_hex,
-                                                                        "sender_device_pubkey": sender_device_pubkey_hex,
-                                                                        "content": content,
-                                                                        "timestamp": timestamp,
-                                                                    }),
-                                                                );
-                                                            } else if rumor_kind == REACTION_KIND {
-                                                                let message_id =
-                                                                    extract_e_tag(&decrypted_event);
-                                                                output.event(
-                                                                    "group_reaction",
-                                                                    serde_json::json!({
-                                                                        "group_id": gid,
-                                                                        "sender_pubkey": from_pubkey_hex,
-                                                                        "sender_device_pubkey": sender_device_pubkey_hex,
-                                                                        "message_id": message_id,
-                                                                        "emoji": content,
-                                                                        "timestamp": timestamp,
-                                                                    }),
-                                                                );
-                                                            } else if rumor_kind == TYPING_KIND {
-                                                                output.event(
-                                                                    "group_typing",
-                                                                    serde_json::json!({
-                                                                        "group_id": gid,
-                                                                        "sender_pubkey": from_pubkey_hex,
-                                                                        "sender_device_pubkey": sender_device_pubkey_hex,
-                                                                        "timestamp": timestamp,
-                                                                    }),
-                                                                );
-                                                            }
                                                         }
                                                     }
                                                 }
@@ -2952,18 +2712,6 @@ pub async fn listen(
                     }
                 }
 
-                // If this looks like a per-sender published group outer event but we don't yet
-                // have the sender_event_pubkey mapping (i.e. sender key distribution not processed
-                // yet), stash it so we can decrypt it once we learn (sender_event_pubkey,key_id).
-                if let Some((sender_event_pubkey, key_id, outer_event)) =
-                    maybe_unmapped_group_outer.filter(|_| !decrypted_current_event)
-                {
-                    pending_group_sender_events
-                        .entry((sender_event_pubkey, key_id))
-                        .or_default()
-                        .push(outer_event);
-                }
-
                 if !session_group_decrypts.is_empty() {
                     for (
                         sender_owner_pubkey,
@@ -3058,6 +2806,7 @@ pub async fn listen(
                                         GroupMetadataApplyOutcome::Ignored
                                         | GroupMetadataApplyOutcome::Rejected => {}
                                     }
+                                    sync_runtime_groups(&runtime, storage)?;
                                 }
                             }
                             used_group_routed_fallback = true;
@@ -3073,193 +2822,36 @@ pub async fn listen(
                                 continue;
                             }
 
-                            let Some(group) = storage.get_group(&gid)? else {
-                                continue;
-                            };
-                            if !group.data.members.contains(&from_pubkey_hex) {
-                                continue;
-                            }
+                            let sender_device_pubkey = sender_device_pubkey
+                                .unwrap_or(*sender_owner_pubkey);
+                            let sender_device_pubkey_hex = sender_device_pubkey.to_hex();
 
-                            let sender_device_pubkey_hex = sender_device_pubkey
-                                .as_ref()
-                                .map(|pk| pk.to_hex())
-                                .unwrap_or_else(|| from_pubkey_hex.clone());
-
-                            if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey {
-                                if let Ok(sender_event_pk) =
-                                    nostr::PublicKey::from_hex(sender_event_pubkey)
-                                {
-                                    storage.upsert_group_sender(&StoredGroupSender {
-                                        group_id: gid.clone(),
-                                        identity_pubkey: sender_device_pubkey_hex.clone(),
-                                        owner_pubkey: Some(from_pubkey_hex.clone()),
-                                        sender_event_pubkey: sender_event_pubkey.clone(),
-                                        sender_event_secret_key: None,
-                                    })?;
-
-                                    group_sender_map.insert(
-                                        sender_event_pubkey.clone(),
-                                        (
-                                            gid.clone(),
-                                            from_pubkey_hex.clone(),
-                                            sender_device_pubkey_hex.clone(),
-                                        ),
-                                    );
-
-                                    let sender_event_hex = sender_event_pk.to_hex();
-                                    if !subscribed_group_sender_pubkeys.contains(&sender_event_hex)
-                                    {
-                                        let sender_filter = Filter::new()
-                                            .kind(nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16))
-                                            .authors(vec![sender_event_pk]);
-                                        subscribe_filters_best_effort(
-                                            &client,
-                                            &relays,
-                                            vec![sender_filter],
-                                        )
-                                        .await?;
-                                        subscribed_group_sender_pubkeys.insert(sender_event_hex);
-                                    }
-
-                                    // Group members can publish their first sender-key message
-                                    // before this new sender-event subscription is fully live.
-                                    // Backfill recent outer events so acceptance/restarts still
-                                    // recover that initial message burst.
-                                    backfill_recent_group_sender_events(
-                                        &client,
-                                        &relays,
-                                        &sender_event_pk,
-                                        &mut pending_group_sender_events,
-                                        &mut seen_event_ids,
-                                        &mut seen_event_ids_order,
-                                    )
-                                    .await?;
-                                }
-                            }
-
-                            if storage
-                                .get_group_sender_key_state(
-                                    &gid,
-                                    &sender_device_pubkey_hex,
-                                    dist.key_id,
-                                )?
-                                .is_none()
+                            sync_runtime_groups(&runtime, storage)?;
+                            let runtime_event = match serde_json::from_str::<
+                                nostr::UnsignedEvent,
+                            >(content_json)
                             {
-                                let state = nostr_double_ratchet::SenderKeyState::new(
-                                    dist.key_id,
-                                    dist.chain_key,
-                                    dist.iteration,
-                                );
-                                storage.upsert_group_sender_key_state(
-                                    &gid,
-                                    &sender_device_pubkey_hex,
-                                    &state,
-                                )?;
+                                Ok(event) => event,
+                                Err(_) => continue,
+                            };
+                            let drained = runtime.group_handle_incoming_session_event(
+                                &runtime_event,
+                                *sender_owner_pubkey,
+                                Some(sender_device_pubkey),
+                            );
+                            for decrypted in drained {
+                                apply_runtime_group_event(&decrypted, storage, output)?;
                             }
-
-                            if let Some(ref sender_event_pubkey) = dist.sender_event_pubkey {
-                                let pending_key = (sender_event_pubkey.clone(), dist.key_id);
-                                if let Some(mut pending) =
-                                    pending_group_sender_events.remove(&pending_key)
-                                {
-                                    pending.sort_by_key(|e| {
-                                        one_to_many
-                                            .parse_outer_content(&e.content)
-                                            .map(|p| p.message_number as u64)
-                                            .unwrap_or(0)
-                                    });
-
-                                    for outer in pending {
-                                        if outer.verify().is_err() {
-                                            continue;
-                                        }
-                                        let parsed =
-                                            match one_to_many.parse_outer_content(&outer.content) {
-                                                Ok(p) => p,
-                                                Err(_) => continue,
-                                            };
-                                        if parsed.key_id != dist.key_id
-                                            || parsed.ciphertext.is_empty()
-                                        {
-                                            continue;
-                                        }
-
-                                        if let Some(mut st) = storage.get_group_sender_key_state(
-                                            &gid,
-                                            &sender_device_pubkey_hex,
-                                            parsed.key_id,
-                                        )? {
-                                            if let Ok(plaintext_json) = st.decrypt_from_bytes(
-                                                parsed.message_number,
-                                                &parsed.ciphertext,
-                                            ) {
-                                                storage.upsert_group_sender_key_state(
-                                                    &gid,
-                                                    &sender_device_pubkey_hex,
-                                                    &st,
-                                                )?;
-                                                if let Ok(inner_event) =
-                                                    serde_json::from_str::<serde_json::Value>(
-                                                        &plaintext_json,
-                                                    )
-                                                {
-                                                    let inner_kind = inner_event["kind"]
-                                                        .as_u64()
-                                                        .unwrap_or(CHAT_MESSAGE_KIND as u64)
-                                                        as u32;
-                                                    let inner_content = inner_event["content"]
-                                                        .as_str()
-                                                        .unwrap_or(&plaintext_json)
-                                                        .to_string();
-                                                    if inner_kind == CHAT_MESSAGE_KIND
-                                                        || inner_kind == 14
-                                                    {
-                                                        let now_seconds =
-                                                            std::time::SystemTime::now()
-                                                                .duration_since(
-                                                                    std::time::UNIX_EPOCH,
-                                                                )?
-                                                                .as_secs();
-                                                        let expires_at =
-                                                            extract_expiration_tag_seconds(
-                                                                &inner_event,
-                                                            );
-                                                        if is_expired(expires_at, now_seconds) {
-                                                            continue;
-                                                        }
-                                                        let msg_id = outer.id.to_hex();
-                                                        storage.save_group_message(
-                                                            &StoredGroupMessage {
-                                                                id: msg_id.clone(),
-                                                                group_id: gid.clone(),
-                                                                sender_pubkey: from_pubkey_hex
-                                                                    .clone(),
-                                                                content: inner_content.clone(),
-                                                                timestamp: outer
-                                                                    .created_at
-                                                                    .as_u64(),
-                                                                is_outgoing: false,
-                                                                expires_at,
-                                                            },
-                                                        )?;
-                                                        output.event(
-                                                            "group_message",
-                                                            serde_json::json!({
-                                                                "group_id": gid,
-                                                                "message_id": msg_id,
-                                                                "sender_pubkey": from_pubkey_hex,
-                                                                "sender_device_pubkey": sender_device_pubkey_hex,
-                                                                "content": inner_content,
-                                                                "timestamp": outer.created_at.as_u64(),
-                                                            }),
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
+                                &runtime,
+                                &client,
+                                &relays,
+                                storage,
+                                output,
+                                &mut seen_event_ids,
+                                &mut seen_event_ids_order,
+                            )
+                            .await?;
 
                             output.event(
                                 "group_sender_key",

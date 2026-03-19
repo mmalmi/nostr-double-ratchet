@@ -1,11 +1,13 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
-use nostr::PublicKey;
+use nostr::{Event, PublicKey, UnsignedEvent};
 
 use crate::{
-    AcceptInviteResult, AppKeys, GroupManager, GroupManagerOptions, InMemoryStorage, Invite,
-    Result, SendOptions, SessionManager, SessionManagerEvent, StorageAdapter,
+    group::GroupData, AcceptInviteResult, AppKeys, GroupDecryptedEvent, GroupManager,
+    GroupManagerOptions, GroupOuterSubscriptionPlan, InMemoryStorage, Invite, Result, SendOptions,
+    SessionManager, SessionManagerEvent, StorageAdapter,
 };
 
 pub struct NdrRuntime {
@@ -192,6 +194,53 @@ impl NdrRuntime {
         f(&self.session_manager, &mut group_manager, &self.event_tx)
     }
 
+    pub fn sync_groups(&self, groups: Vec<GroupData>) -> Result<()> {
+        self.with_group_context(|_, group_manager, _| {
+            let next_group_ids: HashSet<String> = groups.iter().map(|group| group.id.clone()).collect();
+            let stale_group_ids: Vec<String> = group_manager
+                .managed_group_ids()
+                .into_iter()
+                .filter(|group_id| !next_group_ids.contains(group_id))
+                .collect();
+
+            for group in groups {
+                group_manager.upsert_group(group)?;
+            }
+            for group_id in stale_group_ids {
+                group_manager.remove_group(&group_id);
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn group_known_sender_event_pubkeys(&self) -> Vec<PublicKey> {
+        self.with_group_context(|_, group_manager, _| group_manager.known_sender_event_pubkeys())
+    }
+
+    pub fn group_outer_subscription_plan(&self) -> GroupOuterSubscriptionPlan {
+        self.with_group_context(|_, group_manager, _| group_manager.outer_subscription_plan())
+    }
+
+    pub fn group_handle_incoming_session_event(
+        &self,
+        event: &UnsignedEvent,
+        from_owner_pubkey: PublicKey,
+        from_sender_device_pubkey: Option<PublicKey>,
+    ) -> Vec<GroupDecryptedEvent> {
+        self.with_group_context(|_, group_manager, _| {
+            group_manager.handle_incoming_session_event(
+                event,
+                from_owner_pubkey,
+                from_sender_device_pubkey,
+            )
+        })
+    }
+
+    pub fn group_handle_outer_event(&self, outer: &Event) -> Option<GroupDecryptedEvent> {
+        self.with_group_context(|_, group_manager, _| group_manager.handle_outer_event(outer))
+    }
+
     pub fn drain_events(&self) -> Vec<SessionManagerEvent> {
         let event_rx = self.event_rx.lock().unwrap();
         event_rx.try_iter().collect()
@@ -201,6 +250,8 @@ impl NdrRuntime {
 #[cfg(test)]
 mod tests {
     use nostr::Keys;
+
+    use crate::group::create_group_data;
 
     use super::NdrRuntime;
 
@@ -236,5 +287,35 @@ mod tests {
 
         runtime.init().unwrap();
         runtime.setup_user(bob.public_key()).unwrap();
+    }
+
+    #[test]
+    fn runtime_sync_groups_replaces_stale_group_set() {
+        let alice = Keys::generate();
+        let runtime = NdrRuntime::new(
+            alice.public_key(),
+            alice.secret_key().secret_bytes(),
+            alice.public_key().to_hex(),
+            alice.public_key(),
+            None,
+            None,
+        );
+
+        let group_one = create_group_data("One", &alice.public_key().to_hex(), &[]);
+        let group_two = create_group_data("Two", &alice.public_key().to_hex(), &[]);
+
+        runtime
+            .sync_groups(vec![group_one.clone(), group_two.clone()])
+            .unwrap();
+
+        let initial_group_ids = runtime
+            .with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
+        assert_eq!(initial_group_ids, vec![group_one.id.clone(), group_two.id.clone()]);
+
+        runtime.sync_groups(vec![group_two.clone()]).unwrap();
+
+        let updated_group_ids = runtime
+            .with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
+        assert_eq!(updated_group_ids, vec![group_two.id]);
     }
 }

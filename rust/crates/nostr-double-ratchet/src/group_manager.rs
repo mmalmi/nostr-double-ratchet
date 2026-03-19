@@ -184,6 +184,12 @@ impl GroupManager {
         self.group_to_sender_events.remove(group_id);
     }
 
+    pub fn managed_group_ids(&self) -> Vec<String> {
+        let mut group_ids: Vec<String> = self.groups.keys().cloned().collect();
+        group_ids.sort();
+        group_ids
+    }
+
     /// Return all sender-event pubkeys currently known across managed groups.
     ///
     /// This includes mappings learned from local sends and from incoming sender-key
