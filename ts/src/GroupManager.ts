@@ -11,7 +11,13 @@ import {
 import { OneToManyChannel } from "./OneToManyChannel";
 import type { SenderKeyDistribution } from "./SenderKey";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
-import { CHAT_MESSAGE_KIND, type NostrSubscribe, type Rumor, type Unsubscribe } from "./types";
+import {
+  CHAT_MESSAGE_KIND,
+  type NostrFetch,
+  type NostrSubscribe,
+  type Rumor,
+  type Unsubscribe,
+} from "./types";
 
 export interface GroupManagerErrorContext {
   operation:
@@ -34,8 +40,12 @@ export interface GroupManagerOptions {
   storage?: StorageAdapter;
   oneToMany?: OneToManyChannel;
   nostrSubscribe?: NostrSubscribe;
+  nostrFetch?: NostrFetch;
   onDecryptedEvent?: (event: GroupDecryptedEvent) => void;
   onError?: (error: unknown, context: GroupManagerErrorContext) => void;
+  outerBackfillLookbackSeconds?: number;
+  outerBackfillDurationMs?: number;
+  outerBackfillRetryDelaysMs?: number[];
 }
 
 export interface CreateGroupOptions {
@@ -99,18 +109,29 @@ export class GroupManager {
   private readonly storage: StorageAdapter;
   private readonly oneToMany: OneToManyChannel;
   private readonly nostrSubscribe?: NostrSubscribe;
+  private readonly nostrFetch?: NostrFetch;
   private readonly onDecryptedEvent?: (event: GroupDecryptedEvent) => void;
   private readonly onError?: (error: unknown, context: GroupManagerErrorContext) => void;
   private readonly suppressLocalDeviceEcho: boolean;
+  private readonly outerBackfillLookbackSeconds: number;
+  private readonly outerBackfillDurationMs: number;
+  private readonly outerBackfillRetryDelaysMs: number[];
 
   private readonly groups = new Map<string, Group>();
   private readonly senderEventToGroup = new Map<string, string>();
   private readonly groupToSenderEvents = new Map<string, Set<string>>();
   private readonly pendingOuterBySenderEvent = new Map<string, VerifiedEvent[]>();
+  private readonly seenOuterEventIds = new Set<string>();
+  private readonly seenOuterEventOrder: string[] = [];
 
   private outerUnsubscribe: Unsubscribe | null = null;
   private outerAuthorsKey = "";
+  private outerAuthors: string[] = [];
+  private readonly outerBackfillUnsubscribes = new Set<Unsubscribe>();
+  private readonly outerBackfillTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly maxPendingPerSenderEvent = 128;
+  private readonly maxSeenOuterEventIds = 4096;
+  private operationQueue: Promise<void> = Promise.resolve();
 
   constructor(opts: GroupManagerOptions) {
     this.ourOwnerPubkey = opts.ourOwnerPubkey;
@@ -118,29 +139,47 @@ export class GroupManager {
     this.storage = opts.storage || new InMemoryStorageAdapter();
     this.oneToMany = opts.oneToMany || OneToManyChannel.default();
     this.nostrSubscribe = opts.nostrSubscribe;
+    this.nostrFetch = opts.nostrFetch;
     this.onDecryptedEvent = opts.onDecryptedEvent;
     this.onError = opts.onError;
     this.suppressLocalDeviceEcho = opts.suppressLocalDeviceEcho ?? true;
+    this.outerBackfillLookbackSeconds = opts.outerBackfillLookbackSeconds ?? 3600;
+    this.outerBackfillDurationMs = opts.outerBackfillDurationMs ?? 2000;
+    this.outerBackfillRetryDelaysMs = this.normalizeRetryDelays(
+      opts.outerBackfillRetryDelaysMs ?? [0, 500, 1500]
+    );
+  }
+
+  private enqueueOperation<T>(action: () => Promise<T>): Promise<T> {
+    const previous = this.operationQueue;
+    const result = previous.catch(() => undefined).then(action);
+    this.operationQueue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 
   async upsertGroup(data: GroupData): Promise<void> {
-    const groupId = data.id;
-    let group = this.groups.get(groupId);
-    if (!group) {
-      group = new Group({
-        data,
-        ourOwnerPubkey: this.ourOwnerPubkey,
-        ourDevicePubkey: this.ourDevicePubkey,
-        storage: this.storage,
-        oneToMany: this.oneToMany,
-      });
-      this.groups.set(groupId, group);
-    } else {
-      group.setData(data);
-    }
+    await this.enqueueOperation(async () => {
+      const groupId = data.id;
+      let group = this.groups.get(groupId);
+      if (!group) {
+        group = new Group({
+          data,
+          ourOwnerPubkey: this.ourOwnerPubkey,
+          ourDevicePubkey: this.ourDevicePubkey,
+          storage: this.storage,
+          oneToMany: this.oneToMany,
+        });
+        this.groups.set(groupId, group);
+      } else {
+        group.setData(data);
+      }
 
-    await this.refreshGroupSenderMappings(groupId);
-    await this.syncOuterSubscription();
+      await this.refreshGroupSenderMappings(groupId);
+      await this.syncOuterSubscription();
+    });
   }
 
   removeGroup(groupId: string): void {
@@ -169,11 +208,15 @@ export class GroupManager {
     }
     this.outerUnsubscribe = null;
     this.outerAuthorsKey = "";
+    this.outerAuthors = [];
+    this.clearOuterBackfills();
 
     this.groups.clear();
     this.senderEventToGroup.clear();
     this.groupToSenderEvents.clear();
     this.pendingOuterBySenderEvent.clear();
+    this.seenOuterEventIds.clear();
+    this.seenOuterEventOrder.length = 0;
   }
 
   /**
@@ -189,75 +232,92 @@ export class GroupManager {
     memberOwnerPubkeys: string[],
     opts: CreateGroupOptions = {}
   ): Promise<CreateGroupResult> {
-    const group = createGroupData(name, this.ourOwnerPubkey, memberOwnerPubkeys);
-    await this.upsertGroup(group);
+    return this.enqueueOperation(async () => {
+      const group = createGroupData(name, this.ourOwnerPubkey, memberOwnerPubkeys);
+      let existing = this.groups.get(group.id);
+      if (!existing) {
+        existing = new Group({
+          data: group,
+          ourOwnerPubkey: this.ourOwnerPubkey,
+          ourDevicePubkey: this.ourDevicePubkey,
+          storage: this.storage,
+          oneToMany: this.oneToMany,
+        });
+        this.groups.set(group.id, existing);
+      } else {
+        existing.setData(group);
+      }
 
-    const fanoutMetadata = opts.fanoutMetadata ?? true;
-    if (!fanoutMetadata) {
+      await this.refreshGroupSenderMappings(group.id);
+      await this.syncOuterSubscription();
+
+      const fanoutMetadata = opts.fanoutMetadata ?? true;
+      if (!fanoutMetadata) {
+        return {
+          group,
+          fanout: {
+            enabled: false,
+            attempted: 0,
+            succeeded: [],
+            failed: [],
+          },
+        };
+      }
+
+      if (!opts.sendPairwise) {
+        throw new Error("sendPairwise is required when fanoutMetadata is enabled");
+      }
+
+      const nowMs = opts.nowMs ?? Date.now();
+      const metadataRumor: Rumor = {
+        kind: GROUP_METADATA_KIND,
+        content: buildGroupMetadataContent(group),
+        created_at: Math.floor(nowMs / 1000),
+        tags: [
+          ["l", group.id],
+          ["ms", String(nowMs)],
+        ],
+        pubkey: this.ourDevicePubkey,
+        id: "",
+      };
+      metadataRumor.id = getEventHash(metadataRumor);
+
+      const recipients = group.members.filter((pubkey) => pubkey !== this.ourOwnerPubkey);
+      const deliveries = await Promise.allSettled(
+        recipients.map(async (recipient) => {
+          const rumorForRecipient: Rumor = {
+            ...metadataRumor,
+            tags: [...metadataRumor.tags, ["p", recipient]],
+          };
+          rumorForRecipient.id = getEventHash(rumorForRecipient);
+          await opts.sendPairwise!(recipient, rumorForRecipient);
+          return recipient;
+        })
+      );
+
+      const succeeded: string[] = [];
+      const failed: string[] = [];
+      for (let i = 0; i < deliveries.length; i += 1) {
+        const result = deliveries[i]!;
+        const recipient = recipients[i]!;
+        if (result.status === "fulfilled") {
+          succeeded.push(recipient);
+        } else {
+          failed.push(recipient);
+        }
+      }
+
       return {
         group,
+        metadataRumor,
         fanout: {
-          enabled: false,
-          attempted: 0,
-          succeeded: [],
-          failed: [],
+          enabled: true,
+          attempted: recipients.length,
+          succeeded,
+          failed,
         },
       };
-    }
-
-    if (!opts.sendPairwise) {
-      throw new Error("sendPairwise is required when fanoutMetadata is enabled");
-    }
-
-    const nowMs = opts.nowMs ?? Date.now();
-    const metadataRumor: Rumor = {
-      kind: GROUP_METADATA_KIND,
-      content: buildGroupMetadataContent(group),
-      created_at: Math.floor(nowMs / 1000),
-      tags: [
-        ["l", group.id],
-        ["ms", String(nowMs)],
-      ],
-      pubkey: this.ourDevicePubkey,
-      id: "",
-    };
-    metadataRumor.id = getEventHash(metadataRumor);
-
-    const recipients = group.members.filter((pubkey) => pubkey !== this.ourOwnerPubkey);
-    const deliveries = await Promise.allSettled(
-      recipients.map(async (recipient) => {
-        const rumorForRecipient: Rumor = {
-          ...metadataRumor,
-          tags: [...metadataRumor.tags, ["p", recipient]],
-        };
-        rumorForRecipient.id = getEventHash(rumorForRecipient);
-        await opts.sendPairwise!(recipient, rumorForRecipient);
-        return recipient;
-      })
-    );
-
-    const succeeded: string[] = [];
-    const failed: string[] = [];
-    for (let i = 0; i < deliveries.length; i += 1) {
-      const result = deliveries[i]!;
-      const recipient = recipients[i]!;
-      if (result.status === "fulfilled") {
-        succeeded.push(recipient);
-      } else {
-        failed.push(recipient);
-      }
-    }
-
-    return {
-      group,
-      metadataRumor,
-      fanout: {
-        enabled: true,
-        attempted: recipients.length,
-        succeeded,
-        failed,
-      },
-    };
+    });
   }
 
   async sendMessage(
@@ -280,40 +340,44 @@ export class GroupManager {
     event: { kind: number; content: string; tags?: string[][] },
     opts: { sendPairwise: PairwiseSend; publishOuter: PublishOuter; nowMs?: number }
   ): Promise<{ outer: VerifiedEvent; inner: Rumor }> {
-    const group = this.groups.get(groupId);
-    if (!group) {
-      throw new Error(`Unknown group: ${groupId}`);
-    }
+    return this.enqueueOperation(async () => {
+      const group = this.groups.get(groupId);
+      if (!group) {
+        throw new Error(`Unknown group: ${groupId}`);
+      }
 
-    try {
-      const result = await group.sendEvent(event, opts);
-      await this.refreshGroupSenderMappings(groupId);
-      await this.syncOuterSubscription();
-      return result;
-    } catch (error) {
-      this.reportError(error, { operation: "sendEvent", groupId });
-      throw error;
-    }
+      try {
+        const result = await group.sendEvent(event, opts);
+        await this.refreshGroupSenderMappings(groupId);
+        await this.syncOuterSubscription();
+        return result;
+      } catch (error) {
+        this.reportError(error, { operation: "sendEvent", groupId });
+        throw error;
+      }
+    });
   }
 
   async rotateSenderKey(
     groupId: string,
     opts: { sendPairwise: PairwiseSend; nowMs?: number }
   ): Promise<SenderKeyDistribution> {
-    const group = this.groups.get(groupId);
-    if (!group) {
-      throw new Error(`Unknown group: ${groupId}`);
-    }
+    return this.enqueueOperation(async () => {
+      const group = this.groups.get(groupId);
+      if (!group) {
+        throw new Error(`Unknown group: ${groupId}`);
+      }
 
-    try {
-      const result = await group.rotateSenderKey(opts);
-      await this.refreshGroupSenderMappings(groupId);
-      await this.syncOuterSubscription();
-      return result;
-    } catch (error) {
-      this.reportError(error, { operation: "rotateSenderKey", groupId });
-      throw error;
-    }
+      try {
+        const result = await group.rotateSenderKey(opts);
+        await this.refreshGroupSenderMappings(groupId);
+        await this.syncOuterSubscription();
+        return result;
+      } catch (error) {
+        this.reportError(error, { operation: "rotateSenderKey", groupId });
+        throw error;
+      }
+    });
   }
 
   async handleIncomingSessionEvent(
@@ -321,89 +385,95 @@ export class GroupManager {
     fromOwnerPubkey: string,
     fromSenderDevicePubkey?: string
   ): Promise<GroupDecryptedEvent[]> {
-    const taggedGroupId = getFirstTagValue(event.tags, "l");
-    let groupId = taggedGroupId;
-    let distribution: SenderKeyDistribution | null = null;
+    return this.enqueueOperation(async () => {
+      const taggedGroupId = getFirstTagValue(event.tags, "l");
+      let groupId = taggedGroupId;
+      let distribution: SenderKeyDistribution | null = null;
 
-    if (event.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND) {
-      distribution = parseSenderKeyDistribution(event.content);
-      if (distribution?.groupId) {
-        groupId = distribution.groupId;
+      if (event.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND) {
+        distribution = parseSenderKeyDistribution(event.content);
+        if (distribution?.groupId) {
+          groupId = distribution.groupId;
+        }
       }
-    }
 
-    if (!groupId) return [];
-    const group = this.groups.get(groupId);
-    if (!group) return [];
+      if (!groupId) return [];
+      const group = this.groups.get(groupId);
+      if (!group) return [];
 
-    try {
-      const drainedFromGroup = await group.handleIncomingSessionEvent(
-        event,
-        fromOwnerPubkey,
-        fromSenderDevicePubkey
-      );
-
-      const drainedFromManagerQueue: GroupDecryptedEvent[] = [];
-
-      if (distribution?.senderEventPubkey && isHex32(distribution.senderEventPubkey)) {
-        this.bindSenderEventToGroup(groupId, distribution.senderEventPubkey);
-        const drained = await this.drainPendingOuterForSenderEvent(
-          distribution.senderEventPubkey,
-          group
+      try {
+        const drainedFromGroup = await group.handleIncomingSessionEvent(
+          event,
+          fromOwnerPubkey,
+          fromSenderDevicePubkey
         );
-        drainedFromManagerQueue.push(...drained);
+
+        const drainedFromManagerQueue: GroupDecryptedEvent[] = [];
+
+        if (distribution?.senderEventPubkey && isHex32(distribution.senderEventPubkey)) {
+          this.bindSenderEventToGroup(groupId, distribution.senderEventPubkey);
+          const drained = await this.drainPendingOuterForSenderEvent(
+            distribution.senderEventPubkey,
+            group
+          );
+          drainedFromManagerQueue.push(...drained);
+        }
+
+        await this.refreshGroupSenderMappings(groupId);
+        await this.syncOuterSubscription();
+
+        const all = this.routeIncomingEvents([...drainedFromGroup, ...drainedFromManagerQueue]);
+        this.emitDecryptedEvents(all);
+        return all;
+      } catch (error) {
+        this.reportError(error, { operation: "handleIncomingSessionEvent", groupId, eventId: event.id });
+        return [];
       }
-
-      await this.refreshGroupSenderMappings(groupId);
-      await this.syncOuterSubscription();
-
-      const all = this.routeIncomingEvents([...drainedFromGroup, ...drainedFromManagerQueue]);
-      this.emitDecryptedEvents(all);
-      return all;
-    } catch (error) {
-      this.reportError(error, { operation: "handleIncomingSessionEvent", groupId, eventId: event.id });
-      return [];
-    }
+    });
   }
 
   async handleOuterEvent(outer: VerifiedEvent): Promise<GroupDecryptedEvent | null> {
-    if (outer.kind !== this.oneToMany.outerEventKind()) return null;
+    return this.enqueueOperation(async () => {
+      if (outer.kind !== this.oneToMany.outerEventKind()) return null;
+      if (this.hasSeenOuterEvent(outer.id)) return null;
+      this.rememberOuterEvent(outer.id);
 
-    const senderEventPubkey = outer.pubkey;
-    const groupId = this.senderEventToGroup.get(senderEventPubkey);
-    if (!groupId) {
-      this.queuePendingOuter(senderEventPubkey, outer);
-      return null;
-    }
-
-    const group = this.groups.get(groupId);
-    if (!group) {
-      this.queuePendingOuter(senderEventPubkey, outer);
-      return null;
-    }
-
-    try {
-      const decrypted = await group.handleOuterEvent(outer);
-      if (decrypted && this.shouldDropLocalEcho(decrypted)) {
+      const senderEventPubkey = outer.pubkey;
+      const groupId = this.senderEventToGroup.get(senderEventPubkey);
+      if (!groupId) {
+        this.queuePendingOuter(senderEventPubkey, outer);
         return null;
       }
-      if (decrypted) {
-        this.emitDecryptedEvents([decrypted]);
+
+      const group = this.groups.get(groupId);
+      if (!group) {
+        this.queuePendingOuter(senderEventPubkey, outer);
+        return null;
       }
-      return decrypted;
-    } catch (error) {
-      this.reportError(error, {
-        operation: "handleOuterEvent",
-        groupId,
-        senderEventPubkey,
-        eventId: outer.id,
-      });
-      return null;
-    }
+
+      try {
+        const decrypted = await group.handleOuterEvent(outer);
+        if (decrypted && this.shouldDropLocalEcho(decrypted)) {
+          return null;
+        }
+        if (decrypted) {
+          this.emitDecryptedEvents([decrypted]);
+        }
+        return decrypted;
+      } catch (error) {
+        this.reportError(error, {
+          operation: "handleOuterEvent",
+          groupId,
+          senderEventPubkey,
+          eventId: outer.id,
+        });
+        return null;
+      }
+    });
   }
 
   async syncOuterSubscription(): Promise<void> {
-    if (!this.nostrSubscribe) return;
+    if (!this.nostrSubscribe && !this.nostrFetch) return;
 
     let authors = Array.from(this.senderEventToGroup.keys());
     if (this.suppressLocalDeviceEcho && authors.length > 0) {
@@ -411,6 +481,7 @@ export class GroupManager {
       authors = authors.filter((author) => !localSenderEvents.has(author));
     }
     authors.sort();
+    const addedAuthors = authors.filter((author) => !this.outerAuthors.includes(author));
     const authorsKey = authors.join(",");
     if (authorsKey === this.outerAuthorsKey) return;
 
@@ -421,8 +492,14 @@ export class GroupManager {
     }
     this.outerUnsubscribe = null;
     this.outerAuthorsKey = authorsKey;
+    this.outerAuthors = authors;
 
     if (authors.length === 0) return;
+
+    if (!this.nostrSubscribe) {
+      this.startOuterBackfill(addedAuthors);
+      return;
+    }
 
     try {
       this.outerUnsubscribe = this.nostrSubscribe(
@@ -440,9 +517,132 @@ export class GroupManager {
           });
         }
       );
+      this.startOuterBackfill(addedAuthors);
     } catch (error) {
       this.reportError(error, { operation: "syncOuterSubscription" });
     }
+  }
+
+  private startOuterBackfill(addedAuthors: string[]): void {
+    if ((!this.nostrSubscribe && !this.nostrFetch) || addedAuthors.length === 0) return;
+    if (this.outerBackfillLookbackSeconds <= 0) return;
+    if (!this.nostrFetch && this.outerBackfillDurationMs <= 0) return;
+
+    for (const delayMs of this.outerBackfillRetryDelaysMs) {
+      if (delayMs <= 0) {
+        void this.runOuterBackfillAttempt(addedAuthors);
+        continue;
+      }
+
+      const timer = setTimeout(() => {
+        this.outerBackfillTimers.delete(timer);
+        void this.runOuterBackfillAttempt(addedAuthors);
+      }, delayMs);
+      this.outerBackfillTimers.add(timer);
+    }
+  }
+
+  private currentBackfillAuthors(candidateAuthors: string[]): string[] {
+    const authors = Array.from(
+      new Set(
+        candidateAuthors.filter(
+          (author) => author && this.senderEventToGroup.has(author) && this.outerAuthors.includes(author)
+        )
+      )
+    ).sort();
+    return authors;
+  }
+
+  private async runOuterBackfillAttempt(candidateAuthors: string[]): Promise<void> {
+    const authors = this.currentBackfillAuthors(candidateAuthors);
+    if (authors.length === 0) return;
+
+    if (this.nostrFetch) {
+      await this.fetchOuterBackfill(authors);
+      return;
+    }
+
+    this.openOuterBackfillSubscription(authors);
+  }
+
+  private async fetchOuterBackfill(authors: string[]): Promise<void> {
+    if (!this.nostrFetch) return;
+
+    const since = Math.max(0, Math.floor(Date.now() / 1000) - this.outerBackfillLookbackSeconds);
+
+    try {
+      const events = await this.nostrFetch({
+        kinds: [this.oneToMany.outerEventKind()],
+        authors,
+        since,
+      });
+      for (const event of this.sortOuterEvents(events)) {
+        await this.handleOuterEvent(event).catch((error) => {
+          this.reportError(error, {
+            operation: "handleOuterEvent",
+            senderEventPubkey: event.pubkey,
+            eventId: event.id,
+          });
+        });
+      }
+    } catch (error) {
+      this.reportError(error, { operation: "syncOuterSubscription" });
+    }
+  }
+
+  private openOuterBackfillSubscription(authors: string[]): void {
+    if (!this.nostrSubscribe) return;
+
+    const since = Math.max(0, Math.floor(Date.now() / 1000) - this.outerBackfillLookbackSeconds);
+
+    try {
+      const unsubscribe = this.nostrSubscribe(
+        {
+          kinds: [this.oneToMany.outerEventKind()],
+          authors,
+          since,
+        },
+        (event) => {
+          void this.handleOuterEvent(event).catch((error) => {
+            this.reportError(error, {
+              operation: "handleOuterEvent",
+              senderEventPubkey: event.pubkey,
+              eventId: event.id,
+            });
+          });
+        }
+      );
+
+      this.outerBackfillUnsubscribes.add(unsubscribe);
+      const timer = setTimeout(() => {
+        this.outerBackfillTimers.delete(timer);
+        this.outerBackfillUnsubscribes.delete(unsubscribe);
+        try {
+          unsubscribe();
+        } catch {
+          // ignore teardown errors
+        }
+      }, this.outerBackfillDurationMs);
+      this.outerBackfillTimers.add(timer);
+    } catch (error) {
+      this.reportError(error, { operation: "syncOuterSubscription" });
+    }
+  }
+
+  private clearOuterBackfills(): void {
+    for (const timer of this.outerBackfillTimers) {
+      clearTimeout(timer);
+    }
+    this.outerBackfillTimers.clear();
+
+    for (const unsubscribe of this.outerBackfillUnsubscribes) {
+      try {
+        unsubscribe();
+      } catch {
+        // ignore teardown errors
+      }
+    }
+    this.outerBackfillUnsubscribes.clear();
   }
 
   private emitDecryptedEvents(events: GroupDecryptedEvent[]): void {
@@ -550,5 +750,63 @@ export class GroupManager {
       })
     );
     return local;
+  }
+
+  private normalizeRetryDelays(delays: number[]): number[] {
+    const normalized = Array.from(
+      new Set(
+        delays
+          .filter((delay) => Number.isFinite(delay) && delay >= 0)
+          .map((delay) => Math.floor(delay))
+      )
+    ).sort((a, b) => a - b);
+    return normalized.length > 0 ? normalized : [0];
+  }
+
+  private hasSeenOuterEvent(eventId: string): boolean {
+    return this.seenOuterEventIds.has(eventId);
+  }
+
+  private rememberOuterEvent(eventId: string): void {
+    if (this.seenOuterEventIds.has(eventId)) return;
+    this.seenOuterEventIds.add(eventId);
+    this.seenOuterEventOrder.push(eventId);
+
+    while (this.seenOuterEventOrder.length > this.maxSeenOuterEventIds) {
+      const oldest = this.seenOuterEventOrder.shift();
+      if (oldest) {
+        this.seenOuterEventIds.delete(oldest);
+      }
+    }
+  }
+
+  private sortOuterEvents(events: VerifiedEvent[]): VerifiedEvent[] {
+    return [...events].sort((a, b) => {
+      if (a.pubkey !== b.pubkey) return a.pubkey.localeCompare(b.pubkey);
+
+      let aKeyId = 0;
+      let bKeyId = 0;
+      let aMessageNumber = 0;
+      let bMessageNumber = 0;
+      try {
+        const parsed = this.oneToMany.parseOuterContent(a.content);
+        aKeyId = parsed.keyId;
+        aMessageNumber = parsed.messageNumber;
+      } catch {
+        // ignore malformed content in ordering
+      }
+      try {
+        const parsed = this.oneToMany.parseOuterContent(b.content);
+        bKeyId = parsed.keyId;
+        bMessageNumber = parsed.messageNumber;
+      } catch {
+        // ignore malformed content in ordering
+      }
+
+      if (aKeyId !== bKeyId) return aKeyId - bKeyId;
+      if (aMessageNumber !== bMessageNumber) return aMessageNumber - bMessageNumber;
+      if (a.created_at !== b.created_at) return a.created_at - b.created_at;
+      return a.id.localeCompare(b.id);
+    });
   }
 }

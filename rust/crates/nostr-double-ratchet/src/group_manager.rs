@@ -58,6 +58,12 @@ pub struct GroupDecryptedEvent {
     pub inner: UnsignedEvent,
 }
 
+#[derive(Debug, Clone)]
+pub struct GroupOuterSubscriptionPlan {
+    pub authors: Vec<PublicKey>,
+    pub added_authors: Vec<PublicKey>,
+}
+
 type SendPairwise<'a> = &'a mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>;
 
 pub struct CreateGroupOptions<'a> {
@@ -115,6 +121,7 @@ pub struct GroupManager {
     sender_event_to_group: HashMap<PublicKey, String>,
     group_to_sender_events: HashMap<String, HashSet<PublicKey>>,
     pending_outer_by_sender_event: HashMap<PublicKey, Vec<Event>>,
+    subscribed_sender_events: HashSet<PublicKey>,
     max_pending_per_sender_event: usize,
     suppress_local_device_echo: bool,
 }
@@ -132,6 +139,7 @@ impl GroupManager {
             sender_event_to_group: HashMap::new(),
             group_to_sender_events: HashMap::new(),
             pending_outer_by_sender_event: HashMap::new(),
+            subscribed_sender_events: HashSet::new(),
             max_pending_per_sender_event: 128,
             suppress_local_device_echo: true,
         }
@@ -204,6 +212,24 @@ impl GroupManager {
         values.sort_by_key(|pk| pk.to_hex());
         values.dedup();
         values
+    }
+
+    pub fn outer_subscription_plan(&mut self) -> GroupOuterSubscriptionPlan {
+        let authors = self.known_sender_event_pubkeys();
+        let next: HashSet<PublicKey> = authors.iter().copied().collect();
+        let mut added_authors: Vec<PublicKey> = authors
+            .iter()
+            .copied()
+            .filter(|pubkey| !self.subscribed_sender_events.contains(pubkey))
+            .collect();
+        added_authors.sort_by_key(|pubkey| pubkey.to_hex());
+        added_authors.dedup();
+        self.subscribed_sender_events = next;
+
+        GroupOuterSubscriptionPlan {
+            authors,
+            added_authors,
+        }
     }
 
     /// High-level helper:
@@ -1523,4 +1549,96 @@ fn first_tag_value(tags: &nostr::Tags, key: &str) -> Option<String> {
 
 fn parse_tag(parts: &[String]) -> Result<Tag> {
     Tag::parse(parts).map_err(|e| Error::InvalidEvent(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::Keys;
+
+    use super::*;
+
+    fn make_group(group_id: &str, members: Vec<String>, admins: Vec<String>) -> GroupData {
+        GroupData {
+            id: group_id.to_string(),
+            name: "test".to_string(),
+            description: None,
+            picture: None,
+            members,
+            admins,
+            created_at: 1_700_000_000_000,
+            secret: None,
+            accepted: Some(true),
+        }
+    }
+
+    #[test]
+    fn outer_subscription_plan_tracks_new_sender_event_pubkeys() {
+        let group_id = "group-outer-plan";
+
+        let alice_owner = Keys::generate();
+        let bob_owner = Keys::generate();
+        let alice_device = Keys::generate();
+        let bob_device = Keys::generate();
+
+        let mut sender = GroupManager::new(GroupManagerOptions {
+            our_owner_pubkey: alice_owner.public_key(),
+            our_device_pubkey: alice_device.public_key(),
+            storage: Some(Arc::new(InMemoryStorage::new())),
+            one_to_many: None,
+        });
+        sender
+            .upsert_group(make_group(
+                group_id,
+                vec![alice_owner.public_key().to_hex(), bob_owner.public_key().to_hex()],
+                vec![alice_owner.public_key().to_hex()],
+            ))
+            .unwrap();
+
+        let mut receiver = GroupManager::new(GroupManagerOptions {
+            our_owner_pubkey: bob_owner.public_key(),
+            our_device_pubkey: bob_device.public_key(),
+            storage: Some(Arc::new(InMemoryStorage::new())),
+            one_to_many: None,
+        });
+        receiver
+            .upsert_group(make_group(
+                group_id,
+                vec![alice_owner.public_key().to_hex(), bob_owner.public_key().to_hex()],
+                vec![alice_owner.public_key().to_hex()],
+            ))
+            .unwrap();
+
+        let mut distribution: Option<UnsignedEvent> = None;
+        let mut publish_outer = |_event: &Event| Ok(());
+        sender
+            .send_message(
+                group_id,
+                "hello",
+                &mut |_recipient, rumor| {
+                    distribution = Some(rumor.clone());
+                    Ok(())
+                },
+                &mut publish_outer,
+                Some(1_700_000_000_000),
+            )
+            .unwrap();
+
+        let empty_plan = receiver.outer_subscription_plan();
+        assert!(empty_plan.authors.is_empty());
+        assert!(empty_plan.added_authors.is_empty());
+
+        receiver.handle_incoming_session_event(
+            &distribution.expect("distribution rumor"),
+            alice_owner.public_key(),
+            Some(alice_device.public_key()),
+        );
+
+        let first_plan = receiver.outer_subscription_plan();
+        assert_eq!(first_plan.authors.len(), 1);
+        assert_eq!(first_plan.added_authors, first_plan.authors);
+
+        let second_plan = receiver.outer_subscription_plan();
+        assert_eq!(second_plan.authors, first_plan.authors);
+        assert!(second_plan.added_authors.is_empty());
+    }
 }

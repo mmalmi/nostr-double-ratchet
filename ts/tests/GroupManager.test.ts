@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Filter, VerifiedEvent } from "nostr-tools";
 import { generateSecretKey, getPublicKey } from "nostr-tools";
 
@@ -10,8 +10,8 @@ import {
   type GroupData,
 } from "../src/Group";
 import { InMemoryStorageAdapter } from "../src/StorageAdapter";
-import { REACTION_KIND } from "../src/types";
-import type { NostrSubscribe, Rumor } from "../src/types";
+import { CHAT_MESSAGE_KIND, REACTION_KIND, TYPING_KIND } from "../src/types";
+import type { NostrFetch, NostrSubscribe, Rumor } from "../src/types";
 
 function makeGroup(groupId: string, members: string[], admins: string[]): GroupData {
   return {
@@ -171,9 +171,11 @@ describe("GroupManager", () => {
     expect(received).toEqual(["hello group"]);
 
     // Manager should now subscribe to this sender-event author for future outers.
-    const latestFilter = filters.at(-1);
-    expect(latestFilter?.kinds).toEqual([outer!.kind]);
-    expect(latestFilter?.authors).toEqual([outer!.pubkey]);
+    const liveFilter = filters.find((filter) => !("since" in filter));
+    expect(liveFilter?.kinds).toEqual([outer!.kind]);
+    expect(liveFilter?.authors).toEqual([outer!.pubkey]);
+    const backfillFilter = filters.find((filter) => "since" in filter);
+    expect(backfillFilter?.authors).toEqual([outer!.pubkey]);
   });
 
   it("sendMessage uses device pubkey for inner rumor and sends distribution once", async () => {
@@ -244,6 +246,101 @@ describe("GroupManager", () => {
     expect(sent.inner.tags.some((tag) => tag[0] === "l" && tag[1] === groupId)).toBe(true);
   });
 
+  it("serializes concurrent same-group sends so typing does not race the first message", async () => {
+    const groupId = "group-manager-concurrent-send";
+
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+    const bobDevicePk = getPublicKey(generateSecretKey());
+
+    const sender = new GroupManager({
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+    const receiver = new GroupManager({
+      ourOwnerPubkey: bobOwnerPk,
+      ourDevicePubkey: bobDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    await sender.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await receiver.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+
+    const pairwise: Rumor[] = [];
+    const published: VerifiedEvent[] = [];
+
+    await Promise.all([
+      sender.sendEvent(
+        groupId,
+        {
+          kind: TYPING_KIND,
+          content: "typing",
+          tags: [],
+        },
+        {
+          sendPairwise: async (_recipient, rumor) => {
+            pairwise.push(rumor);
+          },
+          publishOuter: async (outer) => {
+            published.push(outer);
+          },
+        }
+      ),
+      sender.sendEvent(
+        groupId,
+        {
+          kind: CHAT_MESSAGE_KIND,
+          content: "hello after typing",
+          tags: [],
+        },
+        {
+          sendPairwise: async (_recipient, rumor) => {
+            pairwise.push(rumor);
+          },
+          publishOuter: async (outer) => {
+            published.push(outer);
+          },
+        }
+      ),
+    ]);
+
+    expect(pairwise).toHaveLength(1);
+    expect(published).toHaveLength(2);
+
+    const parseOuterMessageNumber = (content: string): number => {
+      const bytes = Buffer.from(content, "base64");
+      return bytes.readUInt32BE(4);
+    };
+
+    const orderedOuterEvents = [...published].sort(
+      (a, b) =>
+        parseOuterMessageNumber(a.content) - parseOuterMessageNumber(b.content)
+    );
+
+    expect(orderedOuterEvents.map((event) => parseOuterMessageNumber(event.content))).toEqual([
+      0, 1,
+    ]);
+
+    const received: Array<{ kind: number; content: string }> = [];
+    await receiver.handleIncomingSessionEvent(pairwise[0]!, aliceOwnerPk, aliceDevicePk);
+    for (const outer of orderedOuterEvents) {
+      const decrypted = await receiver.handleOuterEvent(outer);
+      if (decrypted) {
+        received.push({
+          kind: decrypted.inner.kind,
+          content: decrypted.inner.content,
+        });
+      }
+    }
+
+    expect(received).toEqual([
+      { kind: TYPING_KIND, content: "typing" },
+      { kind: CHAT_MESSAGE_KIND, content: "hello after typing" },
+    ]);
+  });
+
   it("re-subscribes outer authors when new sender-event pubkeys are learned", async () => {
     const groupAId = "group-a";
     const groupBId = "group-b";
@@ -307,14 +404,198 @@ describe("GroupManager", () => {
     });
 
     await manager.handleIncomingSessionEvent(distA!, aliceOwnerPk, aliceDevicePk);
-    expect(filters).toHaveLength(1);
-    expect(filters[0]!.authors).toEqual([outerA!.pubkey]);
+    const liveFiltersAfterA = filters.filter((filter) => !("since" in filter));
+    expect(liveFiltersAfterA).toHaveLength(1);
+    expect(liveFiltersAfterA[0]!.authors).toEqual([outerA!.pubkey]);
     expect(unsubscribeCalls).toBe(0);
 
     await manager.handleIncomingSessionEvent(distB!, aliceOwnerPk, aliceDevicePk);
-    expect(filters).toHaveLength(2);
-    expect(filters[1]!.authors).toEqual([outerA!.pubkey, outerB!.pubkey].sort());
+    const liveFiltersAfterB = filters.filter((filter) => !("since" in filter));
+    expect(liveFiltersAfterB).toHaveLength(2);
+    expect(liveFiltersAfterB[1]!.authors).toEqual([outerA!.pubkey, outerB!.pubkey].sort());
     expect(unsubscribeCalls).toBe(1);
+  });
+
+  it("backfills recent outer events when a sender-event pubkey is learned after publish", async () => {
+    const groupId = "group-manager-backfill";
+
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+    const bobDevicePk = getPublicKey(generateSecretKey());
+
+    const alice = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    const subscriptions: Array<{
+      filter: Filter;
+      onEvent: (event: VerifiedEvent) => void;
+    }> = [];
+    const received: string[] = [];
+
+    const manager = new GroupManager({
+      ourOwnerPubkey: bobOwnerPk,
+      ourDevicePubkey: bobDevicePk,
+      storage: new InMemoryStorageAdapter(),
+      nostrSubscribe: ((filter, onEvent) => {
+        subscriptions.push({ filter, onEvent });
+        return () => {};
+      }) as NostrSubscribe,
+      onDecryptedEvent: (event) => {
+        received.push(event.inner.content);
+      },
+    });
+
+    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+
+    let distribution: Rumor | null = null;
+    let outer: VerifiedEvent | null = null;
+    await alice.sendMessage("late group reply", {
+      sendPairwise: async (_to, rumor) => {
+        distribution = rumor;
+      },
+      publishOuter: async (event) => {
+        outer = event;
+      },
+    });
+
+    await manager.handleIncomingSessionEvent(distribution!, aliceOwnerPk, aliceDevicePk);
+
+    const backfillSubscription = subscriptions.find((entry) => "since" in entry.filter);
+    expect(backfillSubscription).toBeDefined();
+
+    backfillSubscription!.onEvent(outer!);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(received).toEqual(["late group reply"]);
+  });
+
+  it("retries outer backfill after learning a sender-event pubkey", async () => {
+    vi.useFakeTimers();
+    try {
+      const groupId = "group-manager-backfill-retry";
+
+      const aliceOwnerPk = getPublicKey(generateSecretKey());
+      const bobOwnerPk = getPublicKey(generateSecretKey());
+      const aliceDevicePk = getPublicKey(generateSecretKey());
+      const bobDevicePk = getPublicKey(generateSecretKey());
+
+      const alice = new Group({
+        data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+        ourOwnerPubkey: aliceOwnerPk,
+        ourDevicePubkey: aliceDevicePk,
+        storage: new InMemoryStorageAdapter(),
+      });
+
+      let distribution: Rumor | null = null;
+      let outer: VerifiedEvent | null = null;
+      await alice.sendMessage("retried group reply", {
+        sendPairwise: async (_to, rumor) => {
+          distribution = rumor;
+        },
+        publishOuter: async (event) => {
+          outer = event;
+        },
+      });
+
+      let backfillCalls = 0;
+      const received: string[] = [];
+      const manager = new GroupManager({
+        ourOwnerPubkey: bobOwnerPk,
+        ourDevicePubkey: bobDevicePk,
+        storage: new InMemoryStorageAdapter(),
+        outerBackfillDurationMs: 10,
+        outerBackfillRetryDelaysMs: [0, 25],
+        nostrSubscribe: ((filter, onEvent) => {
+          if ("since" in filter) {
+            backfillCalls += 1;
+            if (backfillCalls === 2) {
+              onEvent(outer!);
+            }
+          }
+          return () => {};
+        }) as NostrSubscribe,
+        onDecryptedEvent: (event) => {
+          received.push(event.inner.content);
+        },
+      });
+
+      await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+      await manager.handleIncomingSessionEvent(distribution!, aliceOwnerPk, aliceDevicePk);
+
+      expect(received).toEqual([]);
+      await vi.advanceTimersByTimeAsync(30);
+
+      expect(backfillCalls).toBe(2);
+      expect(received).toEqual(["retried group reply"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fetches and orders recent outer events for newly learned sender-event pubkeys", async () => {
+    const groupId = "group-manager-fetch-backfill";
+
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+    const bobDevicePk = getPublicKey(generateSecretKey());
+
+    const alice = new Group({
+      data: makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    let distribution: Rumor | null = null;
+    const published: VerifiedEvent[] = [];
+    await alice.sendMessage("fetch backfill #1", {
+      sendPairwise: async (_to, rumor) => {
+        distribution = rumor;
+      },
+      publishOuter: async (outer) => {
+        published.push(outer);
+      },
+    });
+    await alice.sendMessage("fetch backfill #2", {
+      sendPairwise: async () => {},
+      publishOuter: async (outer) => {
+        published.push(outer);
+      },
+    });
+
+    const received: string[] = [];
+    const fetchCalls: Array<{ authors?: string[]; since?: number }> = [];
+
+    const manager = new GroupManager({
+      ourOwnerPubkey: bobOwnerPk,
+      ourDevicePubkey: bobDevicePk,
+      storage: new InMemoryStorageAdapter(),
+      outerBackfillRetryDelaysMs: [0],
+      nostrFetch: (async (filter) => {
+        fetchCalls.push({
+          authors: Array.isArray(filter.authors) ? [...filter.authors] : undefined,
+          since: typeof filter.since === "number" ? filter.since : undefined,
+        });
+        return [published[1]!, published[0]!];
+      }) as NostrFetch,
+      onDecryptedEvent: (event) => {
+        received.push(event.inner.content);
+      },
+    });
+
+    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.handleIncomingSessionEvent(distribution!, aliceOwnerPk, aliceDevicePk);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls.every((call) => call.authors?.length === 1)).toBe(true);
+    expect(received).toEqual(["fetch backfill #1", "fetch backfill #2"]);
   });
 
   it("suppresses local-device one-to-many outer echoes by default", async () => {
@@ -400,15 +681,16 @@ describe("GroupManager", () => {
       aliceDevicePk
     );
     expect(drained).toEqual([]);
-    expect(filters).toHaveLength(1);
-    expect(filters[0]!.authors).toEqual([firstOuter!.pubkey]);
+    const liveFilters = filters.filter((filter) => !("since" in filter));
+    expect(liveFilters).toHaveLength(1);
+    expect(liveFilters[0]!.authors).toEqual([firstOuter!.pubkey]);
 
     const before = await manager.handleOuterEvent(firstOuter!);
     expect(before?.inner.content).toBe("before-revocation");
 
     await manager.upsertGroup(makeGroup(groupId, [bobOwnerPk], [bobOwnerPk]));
     expect(unsubscribeCalls).toBe(1);
-    expect(filters).toHaveLength(1);
+    expect(filters.filter((filter) => !("since" in filter))).toHaveLength(1);
 
     let secondOuter: VerifiedEvent | null = null;
     await alice.sendMessage("after-revocation", {
@@ -434,6 +716,6 @@ describe("GroupManager", () => {
       aliceDevicePk
     );
     expect(drainedAfterRemoval).toEqual([]);
-    expect(filters).toHaveLength(1);
+    expect(filters.filter((filter) => !("since" in filter))).toHaveLength(1);
   });
 });

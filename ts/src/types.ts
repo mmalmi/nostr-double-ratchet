@@ -66,6 +66,7 @@ export type Unsubscribe = () => void;
  * Function that subscribes to Nostr events matching a filter and calls onEvent for each event.
  */
 export type NostrSubscribe = (_filter: Filter, _onEvent: (_e: VerifiedEvent) => void) => Unsubscribe;
+export type NostrFetch = (_filter: Filter) => Promise<VerifiedEvent[]>;
 export type EncryptFunction = (_plaintext: string, _pubkey: string) => Promise<string>;
 export type DecryptFunction = (_ciphertext: string, _pubkey: string) => Promise<string>;
 

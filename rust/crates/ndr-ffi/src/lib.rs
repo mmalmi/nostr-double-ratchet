@@ -125,6 +125,13 @@ pub struct GroupDecryptedResult {
     pub inner_event_id: String,
 }
 
+/// Shared outer-subscription sync plan for group sender-event authors.
+#[derive(uniffi::Record)]
+pub struct GroupOuterSubscriptionPlanResult {
+    pub authors: Vec<String>,
+    pub added_authors: Vec<String>,
+}
+
 /// Generate a new keypair.
 #[uniffi::export]
 pub fn generate_keypair() -> FfiKeyPair {
@@ -844,6 +851,18 @@ impl SessionManagerHandle {
                 .into_iter()
                 .map(|pk| pk.to_hex())
                 .collect()
+        })
+    }
+
+    /// Return the current group outer authors and which ones were newly added
+    /// since the last sync plan request for this handle.
+    pub fn group_outer_subscription_plan(&self) -> GroupOuterSubscriptionPlanResult {
+        self.runtime.with_group_context(|_, group_manager, _| {
+            let plan = group_manager.outer_subscription_plan();
+            GroupOuterSubscriptionPlanResult {
+                authors: plan.authors.into_iter().map(|pk| pk.to_hex()).collect(),
+                added_authors: plan.added_authors.into_iter().map(|pk| pk.to_hex()).collect(),
+            }
         })
     }
 
