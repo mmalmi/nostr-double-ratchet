@@ -156,6 +156,38 @@ pub fn derive_public_key(privkey_hex: String) -> Result<String, NdrError> {
 pub struct FfiDeviceEntry {
     pub identity_pubkey_hex: String,
     pub created_at: u64,
+    pub device_label: Option<String>,
+    pub client_label: Option<String>,
+}
+
+fn ffi_device_entry_from_app_keys(app_keys: &AppKeys, device: DeviceEntry) -> FfiDeviceEntry {
+    let labels = app_keys.get_device_labels(&device.identity_pubkey);
+    FfiDeviceEntry {
+        identity_pubkey_hex: hex::encode(device.identity_pubkey.to_bytes()),
+        created_at: device.created_at,
+        device_label: labels.and_then(|label| label.device_label.clone()),
+        client_label: labels.and_then(|label| label.client_label.clone()),
+    }
+}
+
+fn owner_keys_from_privkey_hex(owner_privkey_hex: &str) -> Result<nostr::Keys, NdrError> {
+    let owner_privkey = parse_private_key(owner_privkey_hex)?;
+    let owner_sk = nostr::SecretKey::from_slice(&owner_privkey)
+        .map_err(|e| NdrError::InvalidKey(e.to_string()))?;
+    Ok(nostr::Keys::new(owner_sk))
+}
+
+fn parse_app_keys_for_owner(
+    event: &nostr::Event,
+    owner_privkey_hex: Option<&str>,
+) -> Result<AppKeys, NdrError> {
+    match owner_privkey_hex {
+        Some(privkey_hex) => {
+            let owner_keys = owner_keys_from_privkey_hex(privkey_hex)?;
+            Ok(AppKeys::from_event_with_labels(event, &owner_keys)?)
+        }
+        None => Ok(AppKeys::from_event(event)?),
+    }
 }
 
 /// Create a signed AppKeys event JSON for publishing to relays.
@@ -166,39 +198,59 @@ pub fn create_signed_app_keys_event(
     devices: Vec<FfiDeviceEntry>,
 ) -> Result<String, NdrError> {
     let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
-    let owner_privkey = parse_private_key(&owner_privkey_hex)?;
-    let owner_sk = nostr::SecretKey::from_slice(&owner_privkey)
-        .map_err(|e| NdrError::InvalidKey(e.to_string()))?;
+    let owner_keys = owner_keys_from_privkey_hex(&owner_privkey_hex)?;
+    if owner_keys.public_key() != owner_pubkey {
+        return Err(NdrError::InvalidKey(
+            "owner pubkey does not match owner private key".to_string(),
+        ));
+    }
 
     let entries = devices
-        .into_iter()
+        .iter()
         .filter_map(|d| {
             let pk = nostr_double_ratchet::utils::pubkey_from_hex(&d.identity_pubkey_hex).ok()?;
             Some(DeviceEntry::new(pk, d.created_at))
         })
         .collect::<Vec<_>>();
 
-    let app_keys = AppKeys::new(entries);
-    let unsigned = app_keys.get_event(owner_pubkey);
-    let keys = nostr::Keys::new(owner_sk);
+    let mut app_keys = AppKeys::new(entries);
+    for device in devices {
+        let Ok(identity_pubkey) =
+            nostr_double_ratchet::utils::pubkey_from_hex(&device.identity_pubkey_hex)
+        else {
+            continue;
+        };
+
+        if device.device_label.is_none() && device.client_label.is_none() {
+            continue;
+        }
+
+        app_keys.set_device_labels(
+            identity_pubkey,
+            device.device_label,
+            device.client_label,
+            None,
+        );
+    }
+    let unsigned = app_keys.get_encrypted_event(&owner_keys)?;
     let signed = unsigned
-        .sign_with_keys(&keys)
+        .sign_with_keys(&owner_keys)
         .map_err(|e| NdrError::Serialization(e.to_string()))?;
     Ok(serde_json::to_string(&signed)?)
 }
 
 /// Parse an AppKeys event JSON and return the contained device entries.
 #[uniffi::export]
-pub fn parse_app_keys_event(event_json: String) -> Result<Vec<FfiDeviceEntry>, NdrError> {
+pub fn parse_app_keys_event(
+    event_json: String,
+    owner_privkey_hex: Option<String>,
+) -> Result<Vec<FfiDeviceEntry>, NdrError> {
     let event: nostr::Event = serde_json::from_str(&event_json)?;
-    let app_keys = AppKeys::from_event(&event)?;
+    let app_keys = parse_app_keys_for_owner(&event, owner_privkey_hex.as_deref())?;
     Ok(app_keys
         .get_all_devices()
         .into_iter()
-        .map(|d| FfiDeviceEntry {
-            identity_pubkey_hex: hex::encode(d.identity_pubkey.to_bytes()),
-            created_at: d.created_at,
-        })
+        .map(|d| ffi_device_entry_from_app_keys(&app_keys, d))
         .collect())
 }
 
@@ -206,14 +258,40 @@ pub fn parse_app_keys_event(event_json: String) -> Result<Vec<FfiDeviceEntry>, N
 #[uniffi::export]
 pub fn resolve_latest_app_keys_devices(
     event_jsons: Vec<String>,
+    owner_privkey_hex: Option<String>,
 ) -> Result<Vec<FfiDeviceEntry>, NdrError> {
     let events = event_jsons
         .iter()
         .filter_map(|event_json| serde_json::from_str::<nostr::Event>(event_json).ok())
         .collect::<Vec<_>>();
 
-    let Some(snapshot) = nostr_double_ratchet::select_latest_app_keys_from_events(events.iter())
-    else {
+    let mut latest: Option<nostr_double_ratchet::AppKeysSnapshot> = None;
+
+    for event in events.iter() {
+        if !nostr_double_ratchet::is_app_keys_event(event) {
+            continue;
+        }
+
+        let Ok(app_keys) = parse_app_keys_for_owner(event, owner_privkey_hex.as_deref()) else {
+            continue;
+        };
+
+        latest = Some(match latest.as_ref() {
+            Some(current) => nostr_double_ratchet::apply_app_keys_snapshot(
+                Some(&current.app_keys),
+                current.created_at,
+                &app_keys,
+                event.created_at.as_u64(),
+            ),
+            None => nostr_double_ratchet::AppKeysSnapshot {
+                decision: nostr_double_ratchet::AppKeysSnapshotDecision::Advanced,
+                app_keys,
+                created_at: event.created_at.as_u64(),
+            },
+        });
+    }
+
+    let Some(snapshot) = latest else {
         return Ok(Vec::new());
     };
 
@@ -221,10 +299,7 @@ pub fn resolve_latest_app_keys_devices(
         .app_keys
         .get_all_devices()
         .into_iter()
-        .map(|d| FfiDeviceEntry {
-            identity_pubkey_hex: hex::encode(d.identity_pubkey.to_bytes()),
-            created_at: d.created_at,
-        })
+        .map(|d| ffi_device_entry_from_app_keys(&snapshot.app_keys, d))
         .collect())
 }
 
@@ -1539,5 +1614,61 @@ mod tests {
             "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         });
         assert!(!session.is_dr_message(non_dr_event.to_string()));
+    }
+
+    #[test]
+    fn test_app_keys_labels_roundtrip() {
+        let owner = generate_keypair();
+        let laptop = generate_keypair();
+        let phone = generate_keypair();
+
+        let event_json = create_signed_app_keys_event(
+            owner.public_key_hex.clone(),
+            owner.private_key_hex.clone(),
+            vec![
+                FfiDeviceEntry {
+                    identity_pubkey_hex: laptop.public_key_hex.clone(),
+                    created_at: 1_700_000_000,
+                    device_label: Some("Sirius MacBook".to_string()),
+                    client_label: Some("Iris Chat Desktop".to_string()),
+                },
+                FfiDeviceEntry {
+                    identity_pubkey_hex: phone.public_key_hex.clone(),
+                    created_at: 1_700_000_100,
+                    device_label: Some("Linked device".to_string()),
+                    client_label: Some("Iris Chat Mobile".to_string()),
+                },
+            ],
+        )
+        .unwrap();
+
+        let parsed =
+            parse_app_keys_event(event_json.clone(), Some(owner.private_key_hex.clone())).unwrap();
+        let resolved =
+            resolve_latest_app_keys_devices(vec![event_json], Some(owner.private_key_hex)).unwrap();
+
+        for devices in [parsed, resolved] {
+            assert_eq!(devices.len(), 2);
+
+            let laptop_entry = devices
+                .iter()
+                .find(|entry| entry.identity_pubkey_hex == laptop.public_key_hex)
+                .unwrap();
+            assert_eq!(laptop_entry.device_label.as_deref(), Some("Sirius MacBook"));
+            assert_eq!(
+                laptop_entry.client_label.as_deref(),
+                Some("Iris Chat Desktop")
+            );
+
+            let phone_entry = devices
+                .iter()
+                .find(|entry| entry.identity_pubkey_hex == phone.public_key_hex)
+                .unwrap();
+            assert_eq!(phone_entry.device_label.as_deref(), Some("Linked device"));
+            assert_eq!(
+                phone_entry.client_label.as_deref(),
+                Some("Iris Chat Mobile")
+            );
+        }
     }
 }
