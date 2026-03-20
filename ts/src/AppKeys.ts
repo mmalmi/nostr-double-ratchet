@@ -75,15 +75,48 @@ interface EncryptedAppKeysContent {
   deviceLabels: DeviceLabelsEntry[]
 }
 
-const isDeviceLabelsEntry = (value: unknown): value is DeviceLabelsEntry => {
-  if (!value || typeof value !== "object") return false
-  const entry = value as Partial<DeviceLabelsEntry>
-  return (
-    typeof entry.identityPubkey === "string" &&
-    typeof entry.updatedAt === "number" &&
-    (entry.deviceLabel === undefined || typeof entry.deviceLabel === "string") &&
-    (entry.clientLabel === undefined || typeof entry.clientLabel === "string")
-  )
+type LegacyDeviceLabelsEntry = Partial<{
+  identityPubkey: unknown
+  identity_pubkey: unknown
+  deviceLabel: unknown
+  device_label: unknown
+  clientLabel: unknown
+  client_label: unknown
+  updatedAt: unknown
+  updated_at: unknown
+}>
+
+type LegacyEncryptedAppKeysContent = Partial<{
+  type: unknown
+  v: unknown
+  deviceLabels: unknown
+  device_labels: unknown
+}>
+
+const normalizeDeviceLabelsEntry = (value: unknown): DeviceLabelsEntry | null => {
+  if (!value || typeof value !== "object") return null
+  const entry = value as LegacyDeviceLabelsEntry
+  const identityPubkey = entry.identityPubkey ?? entry.identity_pubkey
+  const updatedAt = entry.updatedAt ?? entry.updated_at
+  const deviceLabel = entry.deviceLabel ?? entry.device_label
+  const clientLabel = entry.clientLabel ?? entry.client_label
+
+  if (typeof identityPubkey !== "string" || typeof updatedAt !== "number") {
+    return null
+  }
+  if (deviceLabel !== undefined && typeof deviceLabel !== "string") {
+    return null
+  }
+  if (clientLabel !== undefined && typeof clientLabel !== "string") {
+    return null
+  }
+
+  return {
+    identityPubkey,
+    updatedAt,
+    ...(deviceLabel !== undefined ? { deviceLabel } : {}),
+    ...(clientLabel !== undefined ? { clientLabel } : {}),
+  }
 }
 
 /**
@@ -198,15 +231,18 @@ export class AppKeys {
       ownerPublicKey
     )
     const decrypted = nip44.v2.decrypt(content, conversationKey)
-    const payload = JSON.parse(decrypted) as Partial<EncryptedAppKeysContent>
+    const payload = JSON.parse(decrypted) as LegacyEncryptedAppKeysContent
 
     if (payload.type !== "app-keys-labels" || payload.v !== 1) {
       throw new Error("Unsupported AppKeys label payload")
     }
 
-    const labelEntries = Array.isArray(payload.deviceLabels)
-      ? payload.deviceLabels.filter(isDeviceLabelsEntry)
-      : []
+    const rawLabelEntries = Array.isArray(payload.deviceLabels)
+      ? payload.deviceLabels
+      : Array.isArray(payload.device_labels) ? payload.device_labels : []
+    const labelEntries = rawLabelEntries
+      .map(normalizeDeviceLabelsEntry)
+      .filter((entry): entry is DeviceLabelsEntry => entry !== null)
 
     this.deviceLabels.clear()
     labelEntries.forEach(({ identityPubkey, ...labels }) => {

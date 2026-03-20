@@ -33,11 +33,21 @@ pub struct DeviceLabels {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredDeviceLabels {
+    #[serde(rename = "identityPubkey", alias = "identity_pubkey")]
     identity_pubkey: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "deviceLabel",
+        alias = "device_label",
+        skip_serializing_if = "Option::is_none"
+    )]
     device_label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "clientLabel",
+        alias = "client_label",
+        skip_serializing_if = "Option::is_none"
+    )]
     client_label: Option<String>,
+    #[serde(rename = "updatedAt", alias = "updated_at")]
     updated_at: u64,
 }
 
@@ -46,6 +56,7 @@ struct EncryptedAppKeysContent {
     #[serde(rename = "type")]
     payload_type: String,
     v: u8,
+    #[serde(rename = "deviceLabels", alias = "device_labels")]
     device_labels: Vec<StoredDeviceLabels>,
 }
 
