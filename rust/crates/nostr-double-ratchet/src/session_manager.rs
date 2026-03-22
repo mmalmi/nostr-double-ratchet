@@ -825,6 +825,8 @@ impl SessionManager {
             ));
         }
 
+        let explicit_same_device_owner_hint =
+            owner_pubkey_hint.is_some_and(|hint| hint == inviter_device_pubkey);
         let claimed_owner_pubkey = owner_pubkey_hint
             .or(invite.owner_public_key)
             .unwrap_or_else(|| self.resolve_to_owner(&inviter_device_pubkey));
@@ -908,6 +910,8 @@ impl SessionManager {
                         session.state.receiving_chain_message_number,
                     )
                 });
+                let has_any_session =
+                    active_session.is_some() || !device_record.inactive_sessions.is_empty();
 
                 let mut any_send_capable = active_session
                     .as_ref()
@@ -937,6 +941,7 @@ impl SessionManager {
 
                 Some((
                     active_session,
+                    has_any_session,
                     any_send_capable,
                     any_receive_capable,
                     any_session_has_activity,
@@ -944,7 +949,7 @@ impl SessionManager {
             }
         });
         if existing_device_session_info.is_some_and(
-            |(_, any_send_capable, any_receive_capable, any_session_has_activity)| {
+            |(_, _, any_send_capable, any_receive_capable, any_session_has_activity)| {
                 any_send_capable && (any_receive_capable || any_session_has_activity)
             },
         ) {
@@ -956,8 +961,33 @@ impl SessionManager {
                 created_new_session: false,
             });
         }
+        if explicit_same_device_owner_hint
+            && invite.purpose.as_deref() != Some("link")
+            && existing_device_session_info.is_some_and(
+                |(
+                    _,
+                    has_any_session,
+                    any_send_capable,
+                    any_receive_capable,
+                    any_session_has_activity,
+                )| {
+                    has_any_session
+                        && !any_send_capable
+                        && !any_receive_capable
+                        && !any_session_has_activity
+                },
+            )
+        {
+            self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
+            return Ok(AcceptInviteResult {
+                owner_pubkey,
+                inviter_device_pubkey,
+                device_id,
+                created_new_session: false,
+            });
+        }
         let replace_existing_active_session = existing_device_session_info.is_some_and(
-            |(active_session, _, _, any_session_has_activity)| {
+            |(active_session, _, _, _, any_session_has_activity)| {
                 active_session.is_some_and(
                     |(can_send, can_receive, sent_messages, received_messages)| {
                         can_send
@@ -970,7 +1000,7 @@ impl SessionManager {
             },
         );
         let replace_receive_only_active_session =
-            existing_device_session_info.is_some_and(|(active_session, _, _, _)| {
+            existing_device_session_info.is_some_and(|(active_session, _, _, _, _)| {
                 active_session.is_some_and(
                     |(can_send, can_receive, sent_messages, received_messages)| {
                         !can_send && can_receive && sent_messages == 0 && received_messages == 0

@@ -442,6 +442,148 @@ describe("SessionManager.acceptInvite", () => {
     expect(replayedAccepted.session).toBe(firstAccepted.session)
   })
 
+  it("reuses a same-device response-only import instead of forking on a mutual chat invite", async () => {
+    const relay = new MockRelay()
+
+    const aliceSecretKey = generateSecretKey()
+    const alicePublicKey = getPublicKey(aliceSecretKey)
+    const bobSecretKey = generateSecretKey()
+    const bobPublicKey = getPublicKey(bobSecretKey)
+    const aliceInviteKeys = {
+      ephemeralKeypair: generateEphemeralKeypair(),
+      sharedSecret: generateSharedSecret(),
+    }
+    const bobInviteKeys = {
+      ephemeralKeypair: generateEphemeralKeypair(),
+      sharedSecret: generateSharedSecret(),
+    }
+
+    const alice = new SessionManager(
+      alicePublicKey,
+      aliceSecretKey,
+      alicePublicKey,
+      createRelaySubscribe(relay),
+      createRelayPublish(relay, aliceSecretKey),
+      alicePublicKey,
+      aliceInviteKeys,
+      new InMemoryStorageAdapter()
+    )
+    await alice.init()
+
+    let shouldDropBootstrapUntilReverseAccept = true
+    const bobPublish = vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
+      const signedEvent =
+        "sig" in event && event.sig
+          ? (event as VerifiedEvent)
+          : (finalizeEvent(event as UnsignedEvent, bobSecretKey) as VerifiedEvent)
+      if (signedEvent.kind === 1060 && shouldDropBootstrapUntilReverseAccept) {
+      } else {
+        relay.storeAndDeliver(signedEvent)
+      }
+      return signedEvent as never
+    })
+
+    const bob = new SessionManager(
+      bobPublicKey,
+      bobSecretKey,
+      bobPublicKey,
+      createRelaySubscribe(relay),
+      bobPublish,
+      bobPublicKey,
+      bobInviteKeys,
+      new InMemoryStorageAdapter()
+    )
+    await bob.init()
+
+    const aliceInvite = new Invite(
+      aliceInviteKeys.ephemeralKeypair.publicKey,
+      aliceInviteKeys.sharedSecret,
+      alicePublicKey,
+      aliceInviteKeys.ephemeralKeypair.privateKey,
+      alicePublicKey,
+      1
+    )
+    const bobInvite = new Invite(
+      bobInviteKeys.ephemeralKeypair.publicKey,
+      bobInviteKeys.sharedSecret,
+      bobPublicKey,
+      bobInviteKeys.ephemeralKeypair.privateKey,
+      bobPublicKey,
+      1
+    )
+    const bobDeviceId = bobInvite.deviceId || bobInvite.inviter
+
+    await bob.acceptInvite(aliceInvite, {
+      ownerPublicKey: alicePublicKey,
+    })
+
+    await vi.waitFor(() => {
+      const bobRecord = alice.getUserRecords().get(bobPublicKey)
+      const importedDeviceRecord = bobRecord?.devices.get(bobDeviceId)
+      expect(importedDeviceRecord).toBeDefined()
+      expect(importedDeviceRecord?.activeSession).toBeFalsy()
+      expect((importedDeviceRecord?.inactiveSessions.length ?? 0) > 0).toBe(true)
+    }, { timeout: 5_000 })
+
+    const importedDeviceRecord = alice
+      .getUserRecords()
+      .get(bobPublicKey)
+      ?.devices
+      .get(bobDeviceId)
+    const importedSession = importedDeviceRecord?.inactiveSessions[0]
+    expect(importedSession).toBeDefined()
+
+    const inviteResponsesBeforeReverseAccept = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059).length
+
+    const reverseAccepted = await alice.acceptInvite(bobInvite, {
+      ownerPublicKey: bobPublicKey,
+    })
+
+    const inviteResponsesAfterReverseAccept = relay
+      .getAllEvents()
+      .filter((event) => event.kind === 1059).length
+    expect(inviteResponsesAfterReverseAccept).toBe(inviteResponsesBeforeReverseAccept)
+    expect(reverseAccepted.session).toBe(importedSession)
+
+    shouldDropBootstrapUntilReverseAccept = false
+
+    const bobToAlice = `mutual-same-device-bob-to-alice-${Date.now()}`
+    const aliceReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for Alice to receive same-device mutual invite message")),
+        10_000
+      )
+      const unsubscribe = alice.onEvent((event) => {
+        if (event.content !== bobToAlice) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await bob.sendMessage(alicePublicKey, bobToAlice)
+    await aliceReceived
+
+    const aliceToBob = `mutual-same-device-alice-to-bob-${Date.now()}`
+    const bobReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for Bob to receive same-device mutual invite reply")),
+        10_000
+      )
+      const unsubscribe = bob.onEvent((event) => {
+        if (event.content !== aliceToBob) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await alice.sendMessage(bobPublicKey, aliceToBob)
+    await bobReceived
+  }, 15_000)
+
   it("includes our owner claim in invite responses even before this device is authorized in AppKeys", async () => {
     const relay = new MockRelay()
 
