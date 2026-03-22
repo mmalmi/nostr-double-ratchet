@@ -38,12 +38,43 @@ CLI commands, or FFI wrappers.
   conversation routing so clients do not fork the same rumor/owner/sender heuristic.
 - `resolve_rumor_peer_pubkey(...)`: resolves the immediate peer for a rumor when callers only need
   the normalized peer identity rather than the full ordered candidate list.
+- `DirectMessageSubscriptionTracker` + `build_direct_message_backfill_filter(...)`: detect newly
+  added `session-current-*` / `session-next-*` authors and issue a short relay replay immediately
+  instead of waiting for a periodic sweep.
 
 AppKeys should be treated as an authorization timeline. Reduced AppKeys sets should only be
 published for explicit revocation or first-device bootstrap. Imported owner-key logins on a fresh
 device should either register that device or remain explicitly single-device. First-device
 bootstrap can proceed from locally published AppKeys; public-invite fanout for additional devices
 should wait until relays reflect the updated AppKeys snapshot.
+
+## Direct Message Catch-Up
+
+`SessionManager` and `NdrRuntime` emit subscribe/unsubscribe intent, but they do not fetch relay
+history for you. If a new direct-message author gets added to a session subscription, consume that
+signal immediately:
+
+```rust
+use nostr_double_ratchet::{
+    build_direct_message_backfill_filter, DirectMessageSubscriptionTracker, SessionManagerEvent,
+};
+
+let mut tracker = DirectMessageSubscriptionTracker::new();
+
+for event in runtime.drain_events() {
+    match &event {
+        SessionManagerEvent::Subscribe { .. } | SessionManagerEvent::Unsubscribe(_) => {
+            let added_authors = tracker.apply_session_event(&event);
+            if !added_authors.is_empty() {
+                let filter =
+                    build_direct_message_backfill_filter(added_authors, now_seconds - 15, 200);
+                // Hand `filter` to your relay client for a short replay/backfill.
+            }
+        }
+        _ => {}
+    }
+}
+```
 
 ## Group Model
 

@@ -59,6 +59,8 @@ code.
   candidates for self-sync and linked-device routing.
 - `resolveInviteOwnerRouting(...)`: preserve inviter owner/device attribution during invite
   acceptance, including the link-bootstrap exception and device-identity fallback.
+- `DirectMessageSubscriptionTracker` + `buildDirectMessageBackfillFilter(...)`: detect newly added
+  direct-message session authors and issue a short replay/backfill right away.
 - `resolveSessionPubkeyToOwner(...)` and `hasExistingSessionWithRecipient(...)`: normalize
   owner/device session bookkeeping instead of re-implementing user-record traversal.
 
@@ -68,6 +70,39 @@ startup. Imported owner-key or `nsec` logins on a fresh device should either reg
 device or remain explicitly single-device. First-device bootstrap can proceed from locally
 published AppKeys; public-invite fanout for an additional device should wait until relays echo the
 updated AppKeys timeline.
+
+## Direct Message Catch-Up
+
+The runtime/session manager decides which session authors should be live-subscribed, but your app
+still owns relay fetch/backfill. Wrap your `nostrSubscribe` implementation so newly added direct
+message authors trigger a short replay immediately:
+
+```typescript
+import {
+  buildDirectMessageBackfillFilter,
+  DirectMessageSubscriptionTracker,
+} from "nostr-double-ratchet"
+
+const tracker = new DirectMessageSubscriptionTracker()
+
+const trackedSubscribe = (filter, onEvent) => {
+  const { token, addedAuthors } = tracker.registerFilter(filter)
+  if (addedAuthors.length) {
+    const backfill = buildDirectMessageBackfillFilter(
+      addedAuthors,
+      Math.floor(Date.now() / 1000) - 15,
+      200
+    )
+    // Hand `backfill` to your relay fetch / short-lived subscription path.
+  }
+
+  const unsubscribe = nostrSubscribe(filter, onEvent)
+  return () => {
+    tracker.unregister(token)
+    unsubscribe()
+  }
+}
+```
 
 ## Security Properties
 

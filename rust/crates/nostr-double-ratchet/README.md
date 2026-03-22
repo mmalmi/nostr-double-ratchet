@@ -87,6 +87,13 @@ assert!(plaintext.is_some());
 Use NIP-40-style `["expiration", "<unix seconds>"]` tags in inner rumors.  
 `SessionManager` helpers support global, per-peer, and per-group defaults through `SendOptions`.
 
+## Direct Message Catch-Up
+
+`SessionManager` owns session routing and emits subscription intent, but the caller still owns
+relay history fetch. When a new `session-current-*` or `session-next-*` author appears, run a
+short replay/backfill immediately with `DirectMessageSubscriptionTracker` and
+`build_direct_message_backfill_filter(...)` instead of waiting for a periodic sweep.
+
 ## 1:1 Chat Settings Signaling
 
 - Kind: `CHAT_SETTINGS_KIND = 10448`

@@ -79,6 +79,9 @@ re-implementing policy ad hoc.
   fanout.
 - After device registration or revocation, clients should refresh bootstrap state,
   subscriptions, and session routing.
+- When a new direct-message session author appears in a `session-current-*` or
+  `session-next-*` subscription, clients should do an immediate short replay/backfill for that
+  author instead of waiting for the next periodic sweep.
 - Self-DM routing must consider owner pubkey, sender/session pubkey, rumor author pubkey, `p`
   tags, and known own-device AppKeys/session state together. Inner rumor `pubkey` alone is not
   enough.
@@ -88,12 +91,18 @@ re-implementing policy ad hoc.
 - Prefer the shared helpers over local policy forks:
 - TypeScript: `applyAppKeysSnapshot`, `evaluateDeviceRegistrationState`,
   `shouldRequireRelayRegistrationConfirmation`, `resolveConversationCandidatePubkeys`,
-  `resolveInviteOwnerRouting`,
+  `resolveInviteOwnerRouting`, `DirectMessageSubscriptionTracker`,
+  `buildDirectMessageBackfillFilter`,
   `resolveSessionPubkeyToOwner`, `hasExistingSessionWithRecipient`
 - Rust: `apply_app_keys_snapshot`, `select_latest_app_keys_from_events`,
   `evaluate_device_registration_state`, `should_require_relay_registration_confirmation`,
   `resolve_invite_owner_routing`, `resolve_conversation_candidate_pubkeys`,
+  `DirectMessageSubscriptionTracker`, `build_direct_message_backfill_filter`,
   `resolve_rumor_peer_pubkey`
+
+`NdrRuntime` and `SessionManager` own session state and subscription intent, but they do not own
+relay history fetch. Consumers should treat new direct-message subscription authors as a transport
+catch-up signal and run a short replay/backfill with the shared helpers above.
 
 ## Group Messaging Model
 

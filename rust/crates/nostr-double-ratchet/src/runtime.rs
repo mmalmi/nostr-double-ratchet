@@ -196,7 +196,8 @@ impl NdrRuntime {
 
     pub fn sync_groups(&self, groups: Vec<GroupData>) -> Result<()> {
         self.with_group_context(|_, group_manager, _| {
-            let next_group_ids: HashSet<String> = groups.iter().map(|group| group.id.clone()).collect();
+            let next_group_ids: HashSet<String> =
+                groups.iter().map(|group| group.id.clone()).collect();
             let stale_group_ids: Vec<String> = group_manager
                 .managed_group_ids()
                 .into_iter()
@@ -308,14 +309,17 @@ mod tests {
             .sync_groups(vec![group_one.clone(), group_two.clone()])
             .unwrap();
 
-        let initial_group_ids = runtime
-            .with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
-        assert_eq!(initial_group_ids, vec![group_one.id.clone(), group_two.id.clone()]);
+        let mut initial_group_ids =
+            runtime.with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
+        initial_group_ids.sort();
+        let mut expected_initial_group_ids = vec![group_one.id.clone(), group_two.id.clone()];
+        expected_initial_group_ids.sort();
+        assert_eq!(initial_group_ids, expected_initial_group_ids);
 
         runtime.sync_groups(vec![group_two.clone()]).unwrap();
 
-        let updated_group_ids = runtime
-            .with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
+        let updated_group_ids =
+            runtime.with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
         assert_eq!(updated_group_ids, vec![group_two.id]);
     }
 }

@@ -1,6 +1,7 @@
 pub mod app_keys;
 pub mod app_keys_manager;
 pub mod delegate_manager;
+pub mod direct_message_subscriptions;
 pub mod error;
 pub mod file_storage;
 pub mod group;
@@ -24,6 +25,10 @@ pub mod utils;
 pub use app_keys::{is_app_keys_event, AppKeys, DeviceEntry, DeviceLabels};
 pub use app_keys_manager::AppKeysManager;
 pub use delegate_manager::{DelegateManager, DelegatePayload};
+pub use direct_message_subscriptions::{
+    build_direct_message_backfill_filter, direct_message_subscription_authors,
+    DirectMessageSubscriptionTracker,
+};
 pub use error::{Error, Result};
 pub use file_storage::{DebouncedFileStorage, FileStorageAdapter};
 pub use group::*;
