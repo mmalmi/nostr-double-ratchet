@@ -340,6 +340,87 @@ fn test_replayed_invite_is_ignored_once_accept_bootstrap_uses_session() -> Resul
 }
 
 #[test]
+fn test_mutual_same_device_chat_invites_still_allow_bidirectional_messages() -> Result<()> {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let alice_device_id = alice_pubkey.to_hex();
+
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+    let bob_device_id = bob_pubkey.to_hex();
+
+    let alice_invite = Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None)?;
+    let bob_invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None)?;
+
+    let (alice_tx, alice_rx) = crossbeam_channel::unbounded();
+    let (bob_tx, bob_rx) = crossbeam_channel::unbounded();
+
+    let alice_mgr = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_device_id.clone(),
+        alice_pubkey,
+        alice_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+    let bob_mgr = SessionManager::new(
+        bob_pubkey,
+        bob_keys.secret_key().to_secret_bytes(),
+        bob_device_id.clone(),
+        bob_pubkey,
+        bob_tx,
+        Some(Arc::new(InMemoryStorage::new()) as Arc<dyn nostr_double_ratchet::StorageAdapter>),
+        None,
+    );
+
+    alice_mgr.init()?;
+    bob_mgr.init()?;
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    let bob_accept = bob_mgr.accept_invite(&alice_invite, Some(alice_pubkey))?;
+    assert!(bob_accept.created_new_session);
+    let (bob_response, _) = recv_invite_response_and_message_event(&bob_rx);
+    let (bob_owner, bob_remote_device_id) = import_session_from_response(
+        &alice_invite,
+        alice_keys.secret_key().to_secret_bytes(),
+        &alice_mgr,
+        &bob_response,
+    )?;
+    assert_eq!(bob_owner, bob_pubkey);
+    assert_eq!(bob_remote_device_id, bob_device_id);
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    let alice_accept = alice_mgr.accept_invite(&bob_invite, Some(bob_pubkey))?;
+    assert!(
+        !alice_accept.created_new_session,
+        "reverse invite from the same device should not fork the conversation path",
+    );
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    bob_mgr.send_text(alice_pubkey, "bob can still reach alice".to_string(), None)?;
+    let bob_sent = recv_message_events(&bob_rx, 1);
+    alice_mgr.process_received_event(bob_sent[0].clone());
+    let alice_decrypted =
+        recv_decrypted_containing(&alice_rx, "\"content\":\"bob can still reach alice\"");
+    assert!(alice_decrypted.contains("\"content\":\"bob can still reach alice\""));
+    drain_events(&alice_rx);
+    drain_events(&bob_rx);
+
+    alice_mgr.send_text(bob_pubkey, "alice can still reach bob".to_string(), None)?;
+    let alice_sent = recv_message_events(&alice_rx, 1);
+    bob_mgr.process_received_event(alice_sent[0].clone());
+    let bob_decrypted =
+        recv_decrypted_containing(&bob_rx, "\"content\":\"alice can still reach bob\"");
+    assert!(bob_decrypted.contains("\"content\":\"alice can still reach bob\""));
+
+    Ok(())
+}
+
+#[test]
 fn test_replayed_invite_ignored_after_send_only_session_is_used() -> Result<()> {
     let alice_keys = Keys::generate();
     let alice_pubkey = alice_keys.public_key();

@@ -70,6 +70,25 @@ export class SessionManager {
   private static readonly INVITE_BOOTSTRAP_EXPIRATION_SECONDS = 60
   private static readonly INVITE_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1500] as const
 
+  private static sessionCanSend(session: Session): boolean {
+    return Boolean(session.state.theirNextNostrPublicKey && session.state.ourCurrentNostrKey)
+  }
+
+  private static sessionCanReceive(session: Session): boolean {
+    return Boolean(
+      session.state.receivingChainKey ||
+      session.state.theirCurrentNostrPublicKey ||
+      session.state.receivingChainMessageNumber > 0
+    )
+  }
+
+  private static sessionHasActivity(session: Session): boolean {
+    return (
+      session.state.sendingChainMessageNumber > 0 ||
+      session.state.receivingChainMessageNumber > 0
+    )
+  }
+
   // Versioning
   private readonly storageVersion = "1"
   private readonly versionPrefix: string
@@ -855,6 +874,7 @@ export class SessionManager {
       throw new Error("Cannot accept invite from this device")
     }
 
+    const explicitSameDeviceOwnerHint = options.ownerPublicKey === deviceId
     const claimedOwnerPublicKey =
       options.ownerPublicKey ||
       invite.ownerPubkey ||
@@ -900,9 +920,32 @@ export class SessionManager {
     }
 
     const existingRecord = userRecord.devices.get(deviceId)
-    const existingSession = existingRecord?.activeSession
-    if (existingRecord?.hasEstablishedActiveSession() && existingSession) {
-      return { ownerPublicKey, deviceId, session: existingSession }
+    const existingSessions = [
+      ...(existingRecord?.activeSession ? [existingRecord.activeSession] : []),
+      ...(existingRecord?.inactiveSessions ?? []),
+    ]
+    const reusableEstablishedSession = existingSessions.find(
+      (session) =>
+        SessionManager.sessionCanSend(session) &&
+        (SessionManager.sessionCanReceive(session) || SessionManager.sessionHasActivity(session))
+    )
+    if (reusableEstablishedSession) {
+      return { ownerPublicKey, deviceId, session: reusableEstablishedSession }
+    }
+
+    const hasAnySession = existingSessions.length > 0
+    const hasDormantImportedPlaceholder =
+      explicitSameDeviceOwnerHint &&
+      invite.purpose !== "link" &&
+      hasAnySession &&
+      existingSessions.every(
+        (session) =>
+          !SessionManager.sessionCanSend(session) &&
+          !SessionManager.sessionCanReceive(session) &&
+          !SessionManager.sessionHasActivity(session)
+      )
+    if (hasDormantImportedPlaceholder) {
+      return { ownerPublicKey, deviceId, session: existingSessions[0] }
     }
 
     const encryptor =
