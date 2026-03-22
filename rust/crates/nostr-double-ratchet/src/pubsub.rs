@@ -280,6 +280,8 @@ pub struct FilterBuilder {
     kinds: Vec<Kind>,
     authors: Vec<PublicKey>,
     pubkeys: Vec<PublicKey>,
+    since: Option<u64>,
+    limit: Option<usize>,
 }
 
 impl FilterBuilder {
@@ -288,6 +290,8 @@ impl FilterBuilder {
             kinds: Vec::new(),
             authors: Vec::new(),
             pubkeys: Vec::new(),
+            since: None,
+            limit: None,
         }
     }
 
@@ -306,6 +310,16 @@ impl FilterBuilder {
         self
     }
 
+    pub fn since(mut self, since: u64) -> Self {
+        self.since = Some(since);
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
     pub fn build(self) -> Filter {
         let mut filter = Filter::new();
         if !self.kinds.is_empty() {
@@ -316,6 +330,12 @@ impl FilterBuilder {
         }
         if !self.pubkeys.is_empty() {
             filter = filter.pubkeys(self.pubkeys);
+        }
+        if let Some(since) = self.since {
+            filter = filter.since(nostr::Timestamp::from(since));
+        }
+        if let Some(limit) = self.limit {
+            filter = filter.limit(limit);
         }
         filter
     }
