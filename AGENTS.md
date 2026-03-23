@@ -5,10 +5,11 @@
 - All actions should preserve and expand these values.
 
 ## Git / Remotes
-- Prefer `git-remote-htree` for sharing.
-  - Push: `git push htree master`
-  - Pull: `git pull htree://npub_of_someone/nostr-double-ratchet`
-- Avoid GitHub as a dependency for collaboration.
+- Prefer `git-remote-htree` for sharing and canonical publishing.
+  - Hashtree-first repos: use `origin=htree://self/reponame` and rename any GitHub remote to `github`.
+  - GitHub-PR repos: keep your GitHub fork as `origin`, the canonical GitHub repo as `upstream`, and keep `htree` alongside them.
+  - Push/pull explicitly when needed, for example `git push origin master` in a hashtree-first repo or `git push htree master` in a GitHub-PR repo.
+- Avoid making GitHub the only collaboration path, but keep GitHub remotes when the repo is used for GitHub PRs.
 
 ## Branching
 - Commit directly to `master` (no feature branches unless explicitly requested).
@@ -37,7 +38,7 @@
 3. Run tests (should fail)
 4. Implement + fix until tests pass
 5. Commit
-6. Push to `htree`
+6. Push to hashtree unless the task is specifically about a GitHub PR or mirror
 
 ## Quality Bar
 - Fix build warnings and failing tests even if unrelated to your changes.

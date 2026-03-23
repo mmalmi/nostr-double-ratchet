@@ -2,6 +2,8 @@
 
 # nostr-double-ratchet
 
+> Main development is on [decentralized git](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-double-ratchet): `htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-double-ratchet`
+
 End-to-end encrypted messaging primitives for Nostr, implemented in TypeScript and Rust.
 
 Used by [chat.iris.to](https://chat.iris.to) and by CLI tooling in this repo.
