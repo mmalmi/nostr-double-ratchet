@@ -326,6 +326,34 @@ async fn send_group_message_until_received(
     None
 }
 
+async fn send_direct_message_until_received(
+    sender_dir: &Path,
+    recipient: &str,
+    text: &str,
+    receiver_stdout: &mut BufReader<tokio::process::ChildStdout>,
+    attempts: usize,
+    timeout_per_attempt: Duration,
+) -> Option<serde_json::Value> {
+    for attempt in 0..attempts {
+        let _ = run_ndr(sender_dir, &["send", recipient, text]).await;
+        if let Some(event) = read_until_event_with_content(
+            receiver_stdout,
+            "message",
+            Some(text),
+            timeout_per_attempt,
+        )
+        .await
+        {
+            return Some(event);
+        }
+
+        if attempt + 1 < attempts {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    None
+}
+
 async fn wait_for_chat_with_pubkey(
     data_dir: &Path,
     target_pubkey: &str,
@@ -954,15 +982,12 @@ async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
                 );
 
                 let kickoff = format!("kickoff-{}-{}", invitee.name, inviter.name);
-                let _ = run_ndr(
+                let kickoff_event = send_direct_message_until_received(
                     invitee.primary_dir.path(),
-                    &["send", &inviter.owner_pubkey, &kickoff],
-                )
-                .await;
-                let kickoff_event = read_until_event_with_content(
+                    &inviter.owner_pubkey,
+                    &kickoff,
                     &mut primary_listeners[i].stdout,
-                    "message",
-                    Some(&kickoff),
+                    3,
                     Duration::from_secs(10),
                 )
                 .await
@@ -997,15 +1022,12 @@ async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
                     continue;
                 }
                 let kickoff = format!("secondary-kickoff-{}-{}", users[i].name, users[j].name);
-                let _ = run_ndr(
+                let kickoff_event = send_direct_message_until_received(
                     users[i].secondary_dir.path(),
-                    &["send", &users[j].owner_pubkey, &kickoff],
-                )
-                .await;
-                let kickoff_event = read_until_event_with_content(
+                    &users[j].owner_pubkey,
+                    &kickoff,
                     &mut primary_listeners[j].stdout,
-                    "message",
-                    Some(&kickoff),
+                    3,
                     Duration::from_secs(10),
                 )
                 .await
