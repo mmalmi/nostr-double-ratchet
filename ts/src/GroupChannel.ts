@@ -446,6 +446,14 @@ export class Group {
     return rumor;
   }
 
+  private senderKeyRecipientOwnerPubkeys(): string[] {
+    return Array.from(
+      new Set(
+        this.memberOwnerPubkeys.filter((pubkey) => typeof pubkey === "string" && pubkey.length > 0)
+      )
+    );
+  }
+
   /**
    * Rotate our sender key (new keyId + chain key) and distribute it to group members.
    */
@@ -461,9 +469,10 @@ export class Group {
     const dist = this.buildDistribution(nowSeconds, senderEventPubkey, state);
     const rumor = this.buildDistributionRumor(nowSeconds, nowMs, dist);
 
-    // Best-effort fanout (skip ourselves).
+    // Include our owner so sibling devices on the same account can decrypt
+    // subsequent outer messages in self-only and multi-device group chats.
     await Promise.allSettled(
-      this.memberOwnerPubkeys.filter((pk) => pk !== this.ourOwnerPubkey).map((pk) => opts.sendPairwise(pk, rumor))
+      this.senderKeyRecipientOwnerPubkeys().map((pk) => opts.sendPairwise(pk, rumor))
     );
 
     return dist;
@@ -493,7 +502,7 @@ export class Group {
       const dist = this.buildDistribution(nowSeconds, senderEventPubkey, senderKey);
       const rumor = this.buildDistributionRumor(nowSeconds, nowMs, dist);
       await Promise.allSettled(
-        this.memberOwnerPubkeys.filter((pk) => pk !== this.ourOwnerPubkey).map((pk) => opts.sendPairwise(pk, rumor))
+        this.senderKeyRecipientOwnerPubkeys().map((pk) => opts.sendPairwise(pk, rumor))
       );
     }
 

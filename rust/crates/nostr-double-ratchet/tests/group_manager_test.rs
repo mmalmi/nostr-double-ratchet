@@ -371,12 +371,14 @@ fn send_message_uses_device_pubkey_and_distributes_sender_key_once() {
         .unwrap();
 
     assert_eq!(sent.inner.pubkey, alice_device);
-    assert_eq!(pairwise_first.len(), 1);
+    assert_eq!(pairwise_first.len(), 2);
     assert_eq!(
         pairwise_first[0].kind,
         Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16)
     );
     assert_eq!(pairwise_first[0].pubkey, alice_device);
+    assert_eq!(pairwise_first[1].kind, pairwise_first[0].kind);
+    assert_eq!(pairwise_first[1].pubkey, pairwise_first[0].pubkey);
     assert_eq!(published_first.len(), 1);
     let known_sender_events = manager.known_sender_event_pubkeys();
     assert_eq!(
@@ -408,6 +410,67 @@ fn send_message_uses_device_pubkey_and_distributes_sender_key_once() {
 
     assert_eq!(pairwise_second.len(), 0);
     assert_eq!(published_second.len(), 1);
+}
+
+#[test]
+fn same_owner_sibling_device_can_decrypt_group_message_after_self_distribution() {
+    let group_id = "group-manager-same-owner";
+
+    let owner = Keys::generate().public_key();
+    let device_a = Keys::generate().public_key();
+    let device_b = Keys::generate().public_key();
+
+    let storage_a: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let storage_b: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+
+    let mut sender = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: owner,
+        our_device_pubkey: device_a,
+        storage: Some(storage_a),
+        one_to_many: None,
+    });
+    let mut receiver = GroupManager::new(GroupManagerOptions {
+        our_owner_pubkey: owner,
+        our_device_pubkey: device_b,
+        storage: Some(storage_b),
+        one_to_many: None,
+    });
+
+    let group = make_group(group_id, &[owner], &[owner]);
+    sender.upsert_group(group.clone()).unwrap();
+    receiver.upsert_group(group).unwrap();
+
+    let mut pairwise: Vec<(PublicKey, UnsignedEvent)> = Vec::new();
+    let mut outer: Option<Event> = None;
+    let mut send_pairwise = |recipient: PublicKey, rumor: &UnsignedEvent| {
+        pairwise.push((recipient, rumor.clone()));
+        Ok(())
+    };
+    let mut publish_outer = |event: &Event| {
+        outer = Some(event.clone());
+        Ok(())
+    };
+
+    sender
+        .send_message(
+            group_id,
+            "hello sibling device",
+            &mut send_pairwise,
+            &mut publish_outer,
+            Some(1_700_000_300_000),
+        )
+        .unwrap();
+
+    assert_eq!(pairwise.len(), 1);
+    assert_eq!(pairwise[0].0, owner);
+
+    let drained = receiver.handle_incoming_session_event(&pairwise[0].1, owner, Some(device_a));
+    assert!(drained.is_empty());
+
+    let decrypted = receiver
+        .handle_outer_event(outer.as_ref().expect("outer event"))
+        .expect("sibling device should decrypt outer message");
+    assert_eq!(decrypted.inner.content, "hello sibling device");
 }
 
 #[test]

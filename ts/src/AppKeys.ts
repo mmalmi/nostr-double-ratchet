@@ -205,7 +205,7 @@ export class AppKeys {
     }
 
     if (!ownerPrivateKey) {
-      throw new Error("ownerPrivateKey is required to encrypt AppKeys labels")
+      return ""
     }
 
     const ownerPublicKey = getPublicKey(ownerPrivateKey)

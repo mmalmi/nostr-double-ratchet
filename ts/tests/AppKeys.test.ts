@@ -201,6 +201,19 @@ describe('AppKeys', () => {
       expect(event.content).not.toContain('NDR Desktop')
     })
 
+    it('omits encrypted label content when owner private key is unavailable', () => {
+      const device = createTestDevice()
+      const list = new AppKeys([device])
+
+      list.setDeviceLabels(device.identityPubkey, {
+        deviceLabel: 'Sirius MacBook',
+        clientLabel: 'NDR Desktop',
+      })
+
+      expect(() => list.getEvent()).not.toThrow()
+      expect(list.getEvent().content).toBe('')
+    })
+
     it('roundtrips encrypted device labels for owner-key devices only', () => {
       const ownerPrivateKey = generateSecretKey()
       const device = createTestDevice()

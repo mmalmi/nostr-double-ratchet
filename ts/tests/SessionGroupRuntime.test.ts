@@ -118,4 +118,116 @@ describe("SessionGroupRuntime", () => {
       bobGroups.close();
     }
   });
+
+  it("delivers same-owner group messages to a sibling device via sender-key self-copy", async () => {
+    const ownerPubkey = getPublicKey(generateSecretKey());
+    const deviceAPubkey = getPublicKey(generateSecretKey());
+    const deviceBPubkey = getPublicKey(generateSecretKey());
+
+    const deviceASessionManager = new FakeSessionManager(
+      ownerPubkey,
+      deviceAPubkey,
+    );
+    const deviceBSessionManager = new FakeSessionManager(
+      ownerPubkey,
+      deviceBPubkey,
+    );
+    deviceASessionManager.peer = deviceBSessionManager;
+    deviceBSessionManager.peer = deviceASessionManager;
+
+    const deviceAGroups = new SessionGroupRuntime({
+      sessionManager: deviceASessionManager as never,
+      ourOwnerPubkey: ownerPubkey,
+      ourDevicePubkey: deviceAPubkey,
+      nostrSubscribe: () => () => {},
+      nostrPublish: async (event) => event as never,
+    });
+    const deviceBGroups = new SessionGroupRuntime({
+      sessionManager: deviceBSessionManager as never,
+      ourOwnerPubkey: ownerPubkey,
+      ourDevicePubkey: deviceBPubkey,
+      nostrSubscribe: () => () => {},
+      nostrPublish: async (event) => event as never,
+    });
+
+    try {
+      const created = await deviceAGroups.createGroup("Self Group", [], {
+        fanoutMetadata: false,
+      });
+      await deviceBGroups.syncGroups([created.group]);
+
+      const sent = await deviceAGroups.sendGroupMessage(
+        created.group.id,
+        "hello sibling device",
+      );
+      const decrypted = await deviceBGroups
+        .getGroupManager()!
+        .handleOuterEvent(sent.outer);
+
+      expect(decrypted?.inner.content).toBe("hello sibling device");
+    } finally {
+      deviceAGroups.close();
+      deviceBGroups.close();
+    }
+  });
+
+  it("emits pairwise group-tagged sender-copy rumors from another device", async () => {
+    const ownerPubkey = getPublicKey(generateSecretKey());
+    const deviceAPubkey = getPublicKey(generateSecretKey());
+    const deviceBPubkey = getPublicKey(generateSecretKey());
+
+    const deviceASessionManager = new FakeSessionManager(
+      ownerPubkey,
+      deviceAPubkey,
+    );
+    const deviceBSessionManager = new FakeSessionManager(
+      ownerPubkey,
+      deviceBPubkey,
+    );
+    deviceASessionManager.peer = deviceBSessionManager;
+    deviceBSessionManager.peer = deviceASessionManager;
+
+    const deviceAGroups = new SessionGroupRuntime({
+      sessionManager: deviceASessionManager as never,
+      ourOwnerPubkey: ownerPubkey,
+      ourDevicePubkey: deviceAPubkey,
+      nostrSubscribe: () => () => {},
+      nostrPublish: async (event) => event as never,
+    });
+    const deviceBGroups = new SessionGroupRuntime({
+      sessionManager: deviceBSessionManager as never,
+      ourOwnerPubkey: ownerPubkey,
+      ourDevicePubkey: deviceBPubkey,
+      nostrSubscribe: () => () => {},
+      nostrPublish: async (event) => event as never,
+    });
+
+    try {
+      const created = await deviceAGroups.createGroup("Self Group", [], {
+        fanoutMetadata: false,
+      });
+      await deviceBGroups.syncGroups([created.group]);
+
+      const seen: Rumor[] = [];
+      const stop = deviceBGroups.onGroupEvent((event) => {
+        seen.push(event.inner);
+      });
+
+      const rumor: Rumor = {
+        kind: 14,
+        content: "pairwise fallback",
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["l", created.group.id], ["ms", String(Date.now())]],
+        pubkey: deviceAPubkey,
+        id: crypto.randomUUID(),
+      };
+      await deviceASessionManager.sendEvent(ownerPubkey, rumor);
+
+      expect(seen.map((event) => event.content)).toContain("pairwise fallback");
+      stop();
+    } finally {
+      deviceAGroups.close();
+      deviceBGroups.close();
+    }
+  });
 });

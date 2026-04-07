@@ -21,12 +21,17 @@ import {
   type AcceptInviteOptions,
   type AcceptInviteResult,
   type OnEventCallback,
+  type SendMessageOptions,
 } from "./SessionManager";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
 import {
+  type ChatSettingsPayloadV1,
+  type ExpirationOptions,
   type NostrFetch,
   type NostrPublish,
   type NostrSubscribe,
+  type ReceiptType,
+  type Rumor,
   type Unsubscribe,
 } from "./types";
 import {
@@ -366,6 +371,119 @@ export class NdrRuntime {
 
   onGroupEvent(callback: (event: GroupDecryptedEvent) => void): Unsubscribe {
     return this.groupController.onGroupEvent(callback);
+  }
+
+  async setupUser(userPubkey: string, ownerPubkey?: string): Promise<void> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    await manager.setupUser(userPubkey);
+  }
+
+  async sendEvent(
+    recipientPubkey: string,
+    event: Partial<Rumor>,
+    ownerPubkey?: string,
+  ): Promise<Rumor | undefined> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    return manager.sendEvent(recipientPubkey, event);
+  }
+
+  async sendMessage(
+    recipientPubkey: string,
+    content: string,
+    options: SendMessageOptions = {},
+    ownerPubkey?: string,
+  ): Promise<Rumor> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    return manager.sendMessage(recipientPubkey, content, options);
+  }
+
+  async sendChatSettings(
+    recipientPubkey: string,
+    messageTtlSeconds: ChatSettingsPayloadV1["messageTtlSeconds"],
+    ownerPubkey?: string,
+  ): Promise<Rumor> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    return manager.sendChatSettings(recipientPubkey, messageTtlSeconds);
+  }
+
+  async setChatSettingsForPeer(
+    peerPubkey: string,
+    messageTtlSeconds: ChatSettingsPayloadV1["messageTtlSeconds"],
+    ownerPubkey?: string,
+  ): Promise<Rumor> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    return manager.setChatSettingsForPeer(peerPubkey, messageTtlSeconds);
+  }
+
+  async sendReceipt(
+    recipientPubkey: string,
+    receiptType: ReceiptType,
+    messageIds: string[],
+    ownerPubkey?: string,
+  ): Promise<Rumor | undefined> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    return manager.sendReceipt(recipientPubkey, receiptType, messageIds);
+  }
+
+  async sendTyping(
+    recipientPubkey: string,
+    ownerPubkey?: string,
+  ): Promise<Rumor> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    return manager.sendTyping(recipientPubkey);
+  }
+
+  async setDefaultExpiration(
+    options: ExpirationOptions | undefined,
+    ownerPubkey?: string,
+  ): Promise<void> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    await manager.setDefaultExpiration(options);
+  }
+
+  async setExpirationForPeer(
+    peerPubkey: string,
+    options: ExpirationOptions | null | undefined,
+    ownerPubkey?: string,
+  ): Promise<void> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    await manager.setExpirationForPeer(peerPubkey, options);
+  }
+
+  async setExpirationForGroup(
+    groupId: string,
+    options: ExpirationOptions | null | undefined,
+    ownerPubkey?: string,
+  ): Promise<void> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    await manager.setExpirationForGroup(groupId, options);
+  }
+
+  async deleteChat(userPubkey: string, ownerPubkey?: string): Promise<void> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    await manager.deleteChat(userPubkey);
   }
 
   async resolveBaseAppKeys(
@@ -761,6 +879,18 @@ export class NdrRuntime {
       cleanup();
     }
     this.sessionEventCleanup.clear();
+  }
+
+  private resolveActiveOwnerPubkey(ownerPubkey?: string): string {
+    const resolvedOwnerPubkey =
+      ownerPubkey ||
+      this.state.ownerPubkey ||
+      this.delegateManager?.getOwnerPublicKey() ||
+      null;
+    if (!resolvedOwnerPubkey) {
+      throw new Error("Owner pubkey required to initialize SessionManager");
+    }
+    return resolvedOwnerPubkey;
   }
 
   private buildRegistrationPayload(

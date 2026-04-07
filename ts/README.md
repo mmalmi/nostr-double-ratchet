@@ -50,6 +50,7 @@ const runtime = new NdrRuntime({
 });
 
 await runtime.initForOwner(ownerPublicKey);
+await runtime.ensureCurrentDeviceRegistered(ownerPublicKey);
 
 runtime.onSessionEvent((event, from) => {
   console.log(`${from}: ${event.content}`);
@@ -58,9 +59,8 @@ runtime.onGroupEvent((event) => {
   console.log(`group ${event.groupId}: ${event.inner.content}`);
 });
 
-const sessionManager = await runtime.waitForSessionManager(ownerPublicKey);
 const groupManager = await runtime.waitForGroupManager(ownerPublicKey);
-await sessionManager.sendMessage(recipientPubkey, "Hello!");
+await runtime.sendMessage(recipientPubkey, "Hello!");
 
 const created = await runtime.createGroup("Friends", [recipientPubkey], {
   fanoutMetadata: false,
@@ -72,11 +72,20 @@ console.log(groupManager.managedGroupIds());
 `NdrRuntime` does not own your relay client. It still relies on your `nostrSubscribe`,
 `nostrFetch`, and `nostrPublish` functions.
 
+`initForOwner(...)` initializes the runtime for a specific owner/device identity. For owner-key
+logins that should participate in multi-device fanout, call
+`ensureCurrentDeviceRegistered(...)` or `registerCurrentDevice(...)` before treating private
+messaging as fully ready.
+
 ### Runtime Group API
 
 If you want the high-level path, keep groups on `NdrRuntime` instead of building a parallel
 group transport layer:
 
+- `setupUser(...)`
+- `sendEvent(...)`, `sendMessage(...)`
+- `sendReceipt(...)`, `sendTyping(...)`
+- `sendChatSettings(...)`, `setChatSettingsForPeer(...)`
 - `getGroupManager()` / `waitForGroupManager(ownerPubkey?)`
 - `onGroupEvent(...)`
 - `upsertGroup(...)`, `removeGroup(...)`, `syncGroups(...)`
@@ -158,6 +167,16 @@ startup. Imported owner-key or `nsec` logins on a fresh device should either reg
 device or remain explicitly single-device. First-device bootstrap can proceed from locally
 published AppKeys; public-invite fanout for an additional device should wait until relays echo the
 updated AppKeys timeline.
+
+## Tested References
+
+Treat the README as onboarding and the tests as behavioral source of truth for exact call order
+and edge cases.
+
+- `tests/NdrRuntime.test.ts`: canonical runtime init, registration, direct-message, and group flow
+- `tests/SessionGroupRuntime.test.ts`: group transport attached to an existing `SessionManager`
+- `tests/SessionManager.acceptInvite.test.ts`: invite acceptance and owner/device routing rules
+- `tests/directMessageSubscriptions.test.ts`: direct-message subscription/backfill helpers
 
 ## Direct Message Catch-Up
 

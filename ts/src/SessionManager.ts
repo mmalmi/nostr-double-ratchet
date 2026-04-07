@@ -57,6 +57,12 @@ export type {
   UserRecord,
 } from "./session-manager/types"
 
+export interface SendMessageOptions extends ExpirationOptions {
+  kind?: number
+  tags?: string[][]
+  expiration?: ExpirationOptions | null
+}
+
 type PendingInviteResponse = {
   eventId: string
   ownerPublicKey: string
@@ -1102,7 +1108,7 @@ export class SessionManager {
   async sendMessage(
     recipientPublicKey: string,
     content: string,
-    options: { kind?: number; tags?: string[][]; expiration?: ExpirationOptions | null } & ExpirationOptions = {}
+    options: SendMessageOptions = {}
   ): Promise<Rumor> {
     const { kind = CHAT_MESSAGE_KIND, tags = [] } = options
 

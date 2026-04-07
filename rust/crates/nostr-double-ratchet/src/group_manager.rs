@@ -761,9 +761,6 @@ impl GroupChannel {
         let rumor = self.build_distribution_rumor(now_seconds, now_ms, &distribution)?;
 
         for member_owner in &self.member_owner_pubkeys {
-            if member_owner == &self.our_owner_pubkey {
-                continue;
-            }
             send_pairwise(*member_owner, &rumor)?;
         }
 
@@ -795,9 +792,6 @@ impl GroupChannel {
                 self.build_distribution(now_seconds, sender_event_pubkey, &sender_key_state);
             let rumor = self.build_distribution_rumor(now_seconds, now_ms, &distribution)?;
             for member_owner in &self.member_owner_pubkeys {
-                if member_owner == &self.our_owner_pubkey {
-                    continue;
-                }
                 send_pairwise(*member_owner, &rumor)?;
             }
         }

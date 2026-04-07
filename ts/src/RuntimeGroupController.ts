@@ -3,7 +3,14 @@ import {
   type CreateGroupResult,
   type GroupData,
   type GroupDecryptedEvent,
+  GROUP_METADATA_KIND,
+  GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 } from "./Group";
+import {
+  classifyMessageOrigin,
+  isCrossDeviceSelfOrigin,
+  isSelfOrigin,
+} from "./MessageOrigin";
 import type { SessionManager } from "./SessionManager";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
 import {
@@ -161,6 +168,15 @@ export class SessionGroupRuntime {
     this.sessionBridgeCleanup = manager.onEvent((event, from, meta) => {
       const senderOwnerPubkey = meta?.senderOwnerPubkey || from;
       const senderDevicePubkey = meta?.senderDevicePubkey || event.pubkey;
+      if (this.shouldEmitPairwiseGroupEvent(event, senderDevicePubkey)) {
+        this.emitGroupEvent(
+          this.buildPairwiseGroupEvent(
+            event,
+            senderOwnerPubkey,
+            senderDevicePubkey,
+          ),
+        );
+      }
       void this.groupManager?.handleIncomingSessionEvent(
         event,
         senderOwnerPubkey,
@@ -252,6 +268,51 @@ export class SessionGroupRuntime {
   private clearSessionBridge(): void {
     this.sessionBridgeCleanup?.();
     this.sessionBridgeCleanup = null;
+  }
+
+  private shouldEmitPairwiseGroupEvent(
+    event: Rumor,
+    senderDevicePubkey: string,
+  ): boolean {
+    if (!event.tags?.some((tag) => tag[0] === "l" && typeof tag[1] === "string")) {
+      return false;
+    }
+    if (
+      event.kind === GROUP_METADATA_KIND ||
+      event.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND
+    ) {
+      return false;
+    }
+    return event.pubkey === senderDevicePubkey;
+  }
+
+  private buildPairwiseGroupEvent(
+    event: Rumor,
+    senderOwnerPubkey: string,
+    senderDevicePubkey: string,
+  ): GroupDecryptedEvent {
+    const groupId = event.tags?.find((tag) => tag[0] === "l")?.[1] || "";
+    const origin = classifyMessageOrigin({
+      ourOwnerPubkey: this.getOwnerPubkey() || "",
+      ourDevicePubkey: this.getCurrentDevicePubkey() || undefined,
+      senderOwnerPubkey,
+      senderDevicePubkey,
+    });
+
+    return {
+      groupId,
+      senderEventPubkey: senderDevicePubkey,
+      senderDevicePubkey,
+      senderOwnerPubkey,
+      origin,
+      isSelf: isSelfOrigin(origin),
+      isCrossDeviceSelf: isCrossDeviceSelfOrigin(origin),
+      outerEventId: event.id,
+      outerCreatedAt: event.created_at,
+      keyId: 0,
+      messageNumber: 0,
+      inner: event,
+    };
   }
 
   private emitGroupEvent(event: GroupDecryptedEvent): void {

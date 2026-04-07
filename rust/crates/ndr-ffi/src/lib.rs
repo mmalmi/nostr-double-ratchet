@@ -863,6 +863,25 @@ impl SessionManagerHandle {
         })
     }
 
+    /// Send an already-built rumor JSON to a recipient without rebuilding it.
+    ///
+    /// This preserves the original rumor pubkey, timestamp, tags, and id.
+    pub fn send_rumor_json(
+        &self,
+        recipient_pubkey_hex: String,
+        rumor_json: String,
+    ) -> Result<SendTextResult, NdrError> {
+        let recipient = nostr_double_ratchet::utils::pubkey_from_hex(&recipient_pubkey_hex)?;
+        let event: nostr::UnsignedEvent = serde_json::from_str(&rumor_json)?;
+        let inner_id = unsigned_event_id_string(&event);
+        let outer_event_ids = self.runtime.send_event(recipient, event)?;
+
+        Ok(SendTextResult {
+            inner_id,
+            outer_event_ids,
+        })
+    }
+
     /// Upsert group metadata into the embedded GroupManager.
     pub fn group_upsert(&self, group: FfiGroupData) -> Result<(), NdrError> {
         self.runtime.with_group_context(|_, group_manager, _| {
@@ -1659,6 +1678,71 @@ mod tests {
         assert!(created.group.members.contains(&kp.public_key_hex));
         assert!(created.metadata_rumor_json.is_some());
         assert!(created.fanout.enabled);
+    }
+
+    #[test]
+    fn test_send_rumor_json_preserves_inner_id() {
+        let alice = generate_keypair();
+        let bob = generate_keypair();
+        let sender_device = generate_keypair();
+
+        let manager = SessionManagerHandle::new(
+            alice.public_key_hex.clone(),
+            alice.private_key_hex.clone(),
+            alice.public_key_hex.clone(),
+            None,
+        )
+        .unwrap();
+        manager.init().unwrap();
+
+        let our_next = nostr::Keys::generate();
+        let state = SessionState {
+            root_key: [7u8; 32],
+            their_current_nostr_public_key: Some(
+                nostr_double_ratchet::utils::pubkey_from_hex(&bob.public_key_hex).unwrap(),
+            ),
+            their_next_nostr_public_key: None,
+            our_current_nostr_key: None,
+            our_next_nostr_key: nostr_double_ratchet::SerializableKeyPair {
+                public_key: our_next.public_key(),
+                private_key: our_next.secret_key().secret_bytes(),
+            },
+            receiving_chain_key: None,
+            sending_chain_key: Some([9u8; 32]),
+            sending_chain_message_number: 0,
+            receiving_chain_message_number: 0,
+            previous_sending_chain_message_count: 0,
+            skipped_keys: std::collections::HashMap::new(),
+        };
+
+        manager
+            .import_session_state(
+                bob.public_key_hex.clone(),
+                nostr_double_ratchet::utils::serialize_session_state(&state).unwrap(),
+                Some("bob-device".to_string()),
+            )
+            .unwrap();
+
+        let rumor = nostr::EventBuilder::new(nostr::Kind::Custom(14), "raw rumor")
+            .tags(vec![
+                nostr::Tag::parse(&["l".to_string(), "group-ffi-test".to_string()]).unwrap(),
+                nostr::Tag::parse(&["ms".to_string(), "1700000000000".to_string()]).unwrap(),
+            ])
+            .custom_created_at(nostr::Timestamp::from(1_700_000_000))
+            .build(nostr_double_ratchet::utils::pubkey_from_hex(
+                &sender_device.public_key_hex,
+            )
+            .unwrap());
+        let rumor_json = serde_json::to_string(&rumor).unwrap();
+
+        let send = manager
+            .send_rumor_json(bob.public_key_hex.clone(), rumor_json)
+            .unwrap();
+
+        assert_eq!(
+            send.inner_id,
+            rumor.id.as_ref().map(ToString::to_string).unwrap()
+        );
     }
 
     #[test]

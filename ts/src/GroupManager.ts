@@ -2,12 +2,22 @@ import { getEventHash, type VerifiedEvent } from "nostr-tools";
 
 import { Group, type GroupDecryptedEvent, type PairwiseSend, type PublishOuter } from "./GroupChannel";
 import {
+  applyMetadataUpdate,
   buildGroupMetadataContent,
   createGroupData,
   GROUP_METADATA_KIND,
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
   type GroupData,
+  type GroupMetadata,
+  parseGroupMetadata,
+  validateMetadataCreation,
+  validateMetadataUpdate,
 } from "./GroupMeta";
+import {
+  classifyMessageOrigin,
+  isCrossDeviceSelfOrigin,
+  isSelfOrigin,
+} from "./MessageOrigin";
 import { OneToManyChannel } from "./OneToManyChannel";
 import type { SenderKeyDistribution } from "./SenderKey";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
@@ -103,6 +113,12 @@ function parseSenderKeyDistribution(content: string): SenderKeyDistribution | nu
   }
 }
 
+interface PendingSessionEvent {
+  event: Rumor;
+  fromOwnerPubkey: string;
+  fromSenderDevicePubkey?: string;
+}
+
 export class GroupManager {
   private readonly ourOwnerPubkey: string;
   private readonly ourDevicePubkey: string;
@@ -121,6 +137,7 @@ export class GroupManager {
   private readonly senderEventToGroup = new Map<string, string>();
   private readonly groupToSenderEvents = new Map<string, Set<string>>();
   private readonly pendingOuterBySenderEvent = new Map<string, VerifiedEvent[]>();
+  private readonly pendingSessionByGroup = new Map<string, PendingSessionEvent[]>();
   private readonly seenOuterEventIds = new Set<string>();
   private readonly seenOuterEventOrder: string[] = [];
 
@@ -184,6 +201,7 @@ export class GroupManager {
 
   removeGroup(groupId: string): void {
     this.groups.delete(groupId);
+    this.pendingSessionByGroup.delete(groupId);
 
     const senderEvents = this.groupToSenderEvents.get(groupId);
     if (senderEvents) {
@@ -215,6 +233,7 @@ export class GroupManager {
     this.senderEventToGroup.clear();
     this.groupToSenderEvents.clear();
     this.pendingOuterBySenderEvent.clear();
+    this.pendingSessionByGroup.clear();
     this.seenOuterEventIds.clear();
     this.seenOuterEventOrder.length = 0;
   }
@@ -389,40 +408,56 @@ export class GroupManager {
       const taggedGroupId = getFirstTagValue(event.tags, "l");
       let groupId = taggedGroupId;
       let distribution: SenderKeyDistribution | null = null;
+      let metadata: GroupMetadata | null = null;
 
       if (event.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND) {
         distribution = parseSenderKeyDistribution(event.content);
         if (distribution?.groupId) {
           groupId = distribution.groupId;
         }
+      } else if (event.kind === GROUP_METADATA_KIND) {
+        metadata = parseGroupMetadata(event.content);
+        if (!groupId && metadata?.id) {
+          groupId = metadata.id;
+        }
       }
 
       if (!groupId) return [];
-      const group = this.groups.get(groupId);
-      if (!group) return [];
 
       try {
-        const drainedFromGroup = await group.handleIncomingSessionEvent(
-          event,
-          fromOwnerPubkey,
-          fromSenderDevicePubkey
-        );
-
-        const drainedFromManagerQueue: GroupDecryptedEvent[] = [];
-
-        if (distribution?.senderEventPubkey && isHex32(distribution.senderEventPubkey)) {
-          this.bindSenderEventToGroup(groupId, distribution.senderEventPubkey);
-          const drained = await this.drainPendingOuterForSenderEvent(
-            distribution.senderEventPubkey,
-            group
+        if (event.kind === GROUP_METADATA_KIND) {
+          const handled = await this.handleIncomingMetadataEvent(
+            groupId,
+            event,
+            fromOwnerPubkey,
+            fromSenderDevicePubkey,
+            metadata,
           );
-          drainedFromManagerQueue.push(...drained);
+          const all = this.routeIncomingEvents(handled);
+          this.emitDecryptedEvents(all);
+          return all;
         }
 
-        await this.refreshGroupSenderMappings(groupId);
-        await this.syncOuterSubscription();
+        const group = this.groups.get(groupId);
+        if (!group) {
+          this.queuePendingSessionEvent(
+            groupId,
+            event,
+            fromOwnerPubkey,
+            fromSenderDevicePubkey,
+          );
+          return [];
+        }
 
-        const all = this.routeIncomingEvents([...drainedFromGroup, ...drainedFromManagerQueue]);
+        const handled = await this.handleIncomingSessionEventForKnownGroup(
+          groupId,
+          group,
+          event,
+          fromOwnerPubkey,
+          fromSenderDevicePubkey,
+          distribution,
+        );
+        const all = this.routeIncomingEvents(handled);
         this.emitDecryptedEvents(all);
         return all;
       } catch (error) {
@@ -658,6 +693,182 @@ export class GroupManager {
     for (const event of events) {
       this.onDecryptedEvent(event);
     }
+  }
+
+  private queuePendingSessionEvent(
+    groupId: string,
+    event: Rumor,
+    fromOwnerPubkey: string,
+    fromSenderDevicePubkey?: string,
+  ): void {
+    const pending = this.pendingSessionByGroup.get(groupId) || [];
+    pending.push({
+      event,
+      fromOwnerPubkey,
+      fromSenderDevicePubkey,
+    });
+    this.pendingSessionByGroup.set(groupId, pending);
+  }
+
+  private async handleIncomingMetadataEvent(
+    groupId: string,
+    event: Rumor,
+    fromOwnerPubkey: string,
+    fromSenderDevicePubkey?: string,
+    metadata?: GroupMetadata | null,
+  ): Promise<GroupDecryptedEvent[]> {
+    const parsed = metadata ?? parseGroupMetadata(event.content);
+    if (!parsed) return [];
+
+    const synthetic = this.buildMetadataEvent(
+      groupId,
+      event,
+      fromOwnerPubkey,
+      fromSenderDevicePubkey,
+    );
+
+    const existing = this.groups.get(groupId);
+    if (existing) {
+      const result = validateMetadataUpdate(
+        existing.data,
+        parsed,
+        fromOwnerPubkey,
+        this.ourOwnerPubkey,
+      );
+      if (result === "reject") {
+        return [];
+      }
+      if (result === "removed") {
+        this.removeGroup(groupId);
+        return [synthetic];
+      }
+
+      existing.setData(applyMetadataUpdate(existing.data, parsed));
+    } else {
+      if (!validateMetadataCreation(parsed, fromOwnerPubkey, this.ourOwnerPubkey)) {
+        return [];
+      }
+
+      const group = new Group({
+        data: {
+          id: parsed.id,
+          name: parsed.name,
+          members: parsed.members,
+          admins: parsed.admins,
+          createdAt: event.created_at * 1000,
+          ...(parsed.description ? { description: parsed.description } : {}),
+          ...(parsed.picture ? { picture: parsed.picture } : {}),
+          ...(parsed.secret ? { secret: parsed.secret } : {}),
+          accepted: false,
+        },
+        ourOwnerPubkey: this.ourOwnerPubkey,
+        ourDevicePubkey: this.ourDevicePubkey,
+        storage: this.storage,
+        oneToMany: this.oneToMany,
+      });
+      this.groups.set(groupId, group);
+    }
+
+    await this.refreshGroupSenderMappings(groupId);
+    await this.syncOuterSubscription();
+
+    const drained = await this.drainPendingSessionEvents(groupId);
+    return [synthetic, ...drained];
+  }
+
+  private buildMetadataEvent(
+    groupId: string,
+    event: Rumor,
+    fromOwnerPubkey: string,
+    fromSenderDevicePubkey?: string,
+  ): GroupDecryptedEvent {
+    const senderDevicePubkey = fromSenderDevicePubkey || event.pubkey;
+    const origin = classifyMessageOrigin({
+      ourOwnerPubkey: this.ourOwnerPubkey,
+      ourDevicePubkey: this.ourDevicePubkey,
+      senderOwnerPubkey: fromOwnerPubkey,
+      senderDevicePubkey,
+    });
+
+    return {
+      groupId,
+      senderEventPubkey: senderDevicePubkey,
+      senderDevicePubkey,
+      senderOwnerPubkey: fromOwnerPubkey,
+      origin,
+      isSelf: isSelfOrigin(origin),
+      isCrossDeviceSelf: isCrossDeviceSelfOrigin(origin),
+      outerEventId: event.id,
+      outerCreatedAt: event.created_at,
+      keyId: 0,
+      messageNumber: 0,
+      inner: event,
+    };
+  }
+
+  private async drainPendingSessionEvents(groupId: string): Promise<GroupDecryptedEvent[]> {
+    const pending = this.pendingSessionByGroup.get(groupId);
+    if (!pending || pending.length === 0) {
+      return [];
+    }
+    this.pendingSessionByGroup.delete(groupId);
+
+    const group = this.groups.get(groupId);
+    if (!group) {
+      return [];
+    }
+
+    const drained: GroupDecryptedEvent[] = [];
+    for (const queued of pending) {
+      const distribution =
+        queued.event.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND
+          ? parseSenderKeyDistribution(queued.event.content)
+          : null;
+      drained.push(
+        ...(
+          await this.handleIncomingSessionEventForKnownGroup(
+            groupId,
+            group,
+            queued.event,
+            queued.fromOwnerPubkey,
+            queued.fromSenderDevicePubkey,
+            distribution,
+          )
+        ),
+      );
+    }
+
+    return drained;
+  }
+
+  private async handleIncomingSessionEventForKnownGroup(
+    groupId: string,
+    group: Group,
+    event: Rumor,
+    fromOwnerPubkey: string,
+    fromSenderDevicePubkey?: string,
+    distribution?: SenderKeyDistribution | null,
+  ): Promise<GroupDecryptedEvent[]> {
+    const drainedFromGroup = await group.handleIncomingSessionEvent(
+      event,
+      fromOwnerPubkey,
+      fromSenderDevicePubkey,
+    );
+
+    const drainedFromManagerQueue: GroupDecryptedEvent[] = [];
+    if (distribution?.senderEventPubkey && isHex32(distribution.senderEventPubkey)) {
+      this.bindSenderEventToGroup(groupId, distribution.senderEventPubkey);
+      const drained = await this.drainPendingOuterForSenderEvent(
+        distribution.senderEventPubkey,
+        group,
+      );
+      drainedFromManagerQueue.push(...drained);
+    }
+
+    await this.refreshGroupSenderMappings(groupId);
+    await this.syncOuterSubscription();
+
+    return [...drainedFromGroup, ...drainedFromManagerQueue];
   }
 
   private bindSenderEventToGroup(groupId: string, senderEventPubkey: string): void {

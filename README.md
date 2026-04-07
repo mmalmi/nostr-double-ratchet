@@ -45,6 +45,10 @@ Add-ons around those layers:
 
 Use `NdrRuntime` when you want one concrete app-facing surface for:
 
+- `setupUser(...)`
+- `sendEvent(...)`, `sendMessage(...)`
+- `sendReceipt(...)`, `sendTyping(...)`
+- `sendChatSettings(...)`, `setChatSettingsForPeer(...)`
 - `waitForSessionManager(...)` and `onSessionEvent(...)`
 - `getGroupManager()` / `waitForGroupManager(...)`
 - `onGroupEvent(...)`
@@ -187,6 +191,9 @@ cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
 # ndr (CLI + e2e + cross-language)
 cargo test -p ndr --manifest-path rust/Cargo.toml
 ```
+
+For exact integration behavior, treat the README as onboarding and the runtime/invite/e2e tests
+as the behavioral source of truth.
 
 ## Multi-Device Test Policy
 

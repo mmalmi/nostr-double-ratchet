@@ -178,6 +178,88 @@ describe("GroupManager", () => {
     expect(backfillFilter?.authors).toEqual([outer!.pubkey]);
   });
 
+  it("creates an unknown group from pairwise metadata and drains queued distribution state", async () => {
+    const aliceOwnerPk = getPublicKey(generateSecretKey());
+    const bobOwnerPk = getPublicKey(generateSecretKey());
+    const aliceDevicePk = getPublicKey(generateSecretKey());
+    const bobDevicePk = getPublicKey(generateSecretKey());
+
+    const aliceManager = new GroupManager({
+      ourOwnerPubkey: aliceOwnerPk,
+      ourDevicePubkey: aliceDevicePk,
+      storage: new InMemoryStorageAdapter(),
+    });
+
+    const received: Array<{ kind: number; content: string }> = [];
+    const bobManager = new GroupManager({
+      ourOwnerPubkey: bobOwnerPk,
+      ourDevicePubkey: bobDevicePk,
+      storage: new InMemoryStorageAdapter(),
+      onDecryptedEvent: (event) => {
+        received.push({
+          kind: event.inner.kind,
+          content: event.inner.content,
+        });
+      },
+    });
+
+    let metadataRumor: Rumor | null = null;
+    const created = await aliceManager.createGroup("Remote Group", [bobOwnerPk], {
+      sendPairwise: async (_recipient, rumor) => {
+        metadataRumor = rumor;
+      },
+    });
+
+    let distributionRumor: Rumor | null = null;
+    let outer: VerifiedEvent | null = null;
+    await aliceManager.sendMessage(created.group.id, "hello from alice", {
+      sendPairwise: async (_recipient, rumor) => {
+        distributionRumor = rumor;
+      },
+      publishOuter: async (event) => {
+        outer = event;
+      },
+    });
+
+    expect(metadataRumor?.kind).toBe(GROUP_METADATA_KIND);
+    expect(distributionRumor?.kind).toBe(GROUP_SENDER_KEY_DISTRIBUTION_KIND);
+    expect(outer).not.toBeNull();
+
+    const beforeMetadata = await bobManager.handleIncomingSessionEvent(
+      distributionRumor!,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
+    expect(beforeMetadata).toEqual([]);
+
+    const beforeMapping = await bobManager.handleOuterEvent(outer!);
+    expect(beforeMapping).toBeNull();
+
+    const drained = await bobManager.handleIncomingSessionEvent(
+      metadataRumor!,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
+
+    expect(bobManager.managedGroupIds()).toEqual([created.group.id]);
+    expect(drained.map((event) => event.inner.kind)).toEqual([
+      GROUP_METADATA_KIND,
+      CHAT_MESSAGE_KIND,
+    ]);
+    expect(drained[0]!.inner.content).toBe(metadataRumor!.content);
+    expect(drained[1]!.inner.content).toBe("hello from alice");
+    expect(received).toEqual([
+      {
+        kind: GROUP_METADATA_KIND,
+        content: metadataRumor!.content,
+      },
+      {
+        kind: CHAT_MESSAGE_KIND,
+        content: "hello from alice",
+      },
+    ]);
+  });
+
   it("sendMessage uses device pubkey for inner rumor and sends distribution once", async () => {
     const groupId = "group-manager-send";
 
@@ -193,12 +275,12 @@ describe("GroupManager", () => {
 
     await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
 
-    const pairwise: Rumor[] = [];
+    const pairwise: Array<{ recipient: string; rumor: Rumor }> = [];
     const published: VerifiedEvent[] = [];
 
     const sent = await manager.sendMessage(groupId, "from-device", {
-      sendPairwise: async (_to, rumor) => {
-        pairwise.push(rumor);
+      sendPairwise: async (recipient, rumor) => {
+        pairwise.push({ recipient, rumor });
       },
       publishOuter: async (outer) => {
         published.push(outer);
@@ -206,9 +288,13 @@ describe("GroupManager", () => {
     });
 
     expect(sent.inner.pubkey).toBe(aliceDevicePk);
-    expect(pairwise).toHaveLength(1);
-    expect(pairwise[0]!.kind).toBe(GROUP_SENDER_KEY_DISTRIBUTION_KIND);
-    expect(pairwise[0]!.pubkey).toBe(aliceDevicePk);
+    expect(pairwise).toHaveLength(2);
+    expect(pairwise.map((entry) => entry.recipient).sort()).toEqual([
+      aliceOwnerPk,
+      bobOwnerPk,
+    ].sort());
+    expect(pairwise.every((entry) => entry.rumor.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND)).toBe(true);
+    expect(pairwise.every((entry) => entry.rumor.pubkey === aliceDevicePk)).toBe(true);
     expect(published).toHaveLength(1);
   });
 
@@ -268,7 +354,7 @@ describe("GroupManager", () => {
     await sender.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
     await receiver.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
 
-    const pairwise: Rumor[] = [];
+    const pairwise: Array<{ recipient: string; rumor: Rumor }> = [];
     const published: VerifiedEvent[] = [];
 
     await Promise.all([
@@ -280,8 +366,8 @@ describe("GroupManager", () => {
           tags: [],
         },
         {
-          sendPairwise: async (_recipient, rumor) => {
-            pairwise.push(rumor);
+          sendPairwise: async (recipient, rumor) => {
+            pairwise.push({ recipient, rumor });
           },
           publishOuter: async (outer) => {
             published.push(outer);
@@ -296,8 +382,8 @@ describe("GroupManager", () => {
           tags: [],
         },
         {
-          sendPairwise: async (_recipient, rumor) => {
-            pairwise.push(rumor);
+          sendPairwise: async (recipient, rumor) => {
+            pairwise.push({ recipient, rumor });
           },
           publishOuter: async (outer) => {
             published.push(outer);
@@ -306,7 +392,11 @@ describe("GroupManager", () => {
       ),
     ]);
 
-    expect(pairwise).toHaveLength(1);
+    expect(pairwise).toHaveLength(2);
+    expect(pairwise.map((entry) => entry.recipient).sort()).toEqual([
+      aliceOwnerPk,
+      bobOwnerPk,
+    ].sort());
     expect(published).toHaveLength(2);
 
     const parseOuterMessageNumber = (content: string): number => {
@@ -324,7 +414,7 @@ describe("GroupManager", () => {
     ]);
 
     const received: Array<{ kind: number; content: string }> = [];
-    await receiver.handleIncomingSessionEvent(pairwise[0]!, aliceOwnerPk, aliceDevicePk);
+    await receiver.handleIncomingSessionEvent(pairwise[0]!.rumor, aliceOwnerPk, aliceDevicePk);
     for (const outer of orderedOuterEvents) {
       const decrypted = await receiver.handleOuterEvent(outer);
       if (decrypted) {
