@@ -102,6 +102,48 @@ let session_states = manager.get_message_push_session_states(peer_owner_pubkey_h
 - `get_message_push_session_states(peer)` returns session-state JSON snapshots plus tracked sender
   pubkeys and receiving-capability flags for push-routing repair flows.
 
+### SessionManager App Loop
+
+Mobile integrations should usually treat `SessionManagerHandle` as the main surface, not bare
+`SessionHandle`. This is the path used by
+[`iris-chat-flutter`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-flutter).
+
+```rust
+let manager = SessionManagerHandle::new_with_storage_path(
+    our_pubkey_hex,
+    our_identity_privkey_hex,
+    device_id,
+    storage_path,
+    owner_pubkey_hex,
+)?;
+manager.init()?;
+manager.setup_user(peer_owner_pubkey_hex)?;
+
+for event in manager.drain_events()? {
+    match event.kind.as_str() {
+        "publish" | "publish_signed" => {
+            // Publish event.event_json to relays in the host app.
+        }
+        "subscribe" => {
+            // Open subscription event.subid + event.filter_json in the host app.
+        }
+        "unsubscribe" => {
+            // Close the matching subscription in the host app.
+        }
+        "decrypted_message" => {
+            // Deliver plaintext to the app.
+        }
+        _ => {}
+    }
+}
+
+// Feed relay events back into SessionManagerHandle.
+manager.process_event(event_json)?;
+```
+
+Native consumers use this shape: app-owned relay I/O, drain pubsub events after `init`,
+`setup_user`, send, and accept-invite calls, then feed relay events back with `process_event(...)`.
+
 ## Building for Mobile
 
 ### Android

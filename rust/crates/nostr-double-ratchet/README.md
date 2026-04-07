@@ -12,6 +12,19 @@ Rust library implementing Double Ratchet messaging for Nostr, including multi-de
 - Persistent storage adapters and message/discovery queues
 - TypeScript/Rust interop test coverage
 
+## Recommended Integration Paths
+
+There are two practical layers:
+
+- `Session`: smallest 1:1 primitive when the caller already owns bootstrap, persistence, and
+  transport.
+- `SessionManager` / `NdrRuntime`: recommended for real apps. These own multi-device routing,
+  invite handling, and group transport, but the caller still owns relay I/O.
+
+Current native consumers wrap `SessionManager` with an app-owned pubsub loop instead of using bare
+`Session`, for example
+[`iris-chat-flutter`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-flutter).
+
 ## Security Properties
 
 ### Confidentiality
@@ -81,6 +94,63 @@ let plaintext = bob.receive(&outer)?;
 assert!(plaintext.is_some());
 # Ok::<(), nostr_double_ratchet::Error>(())
 ```
+
+## Minimal Runtime Loop
+
+For app integration, `SessionManager` / `NdrRuntime` emit pubsub intent and the host app executes
+it.
+
+```rust
+use nostr::{Event, Keys};
+use nostr_double_ratchet::{NdrRuntime, SessionManagerEvent};
+
+let keys = Keys::generate();
+let runtime = NdrRuntime::new(
+    keys.public_key(),
+    keys.secret_key().secret_bytes(),
+    keys.public_key().to_hex(),
+    keys.public_key(),
+    None,
+    None,
+);
+
+runtime.init()?;
+
+for event in runtime.drain_events() {
+    match event {
+        SessionManagerEvent::Publish(unsigned) => {
+            // Sign/publish to relays in the host app.
+        }
+        SessionManagerEvent::PublishSigned(signed) => {
+            // Publish to relays in the host app.
+        }
+        SessionManagerEvent::Subscribe { subid, filter_json } => {
+            // Open a relay subscription in the host app.
+        }
+        SessionManagerEvent::Unsubscribe(subid) => {
+            // Close the matching relay subscription in the host app.
+        }
+        SessionManagerEvent::DecryptedMessage { sender, content, .. } => {
+            // Deliver plaintext to the app.
+        }
+        SessionManagerEvent::ReceivedEvent(_) => {}
+    }
+}
+
+// Feed relay events back into the manager.
+runtime.session_manager().process_received_event(relay_event);
+
+// Group outer events still need explicit handling.
+let maybe_group = runtime.group_handle_outer_event(&outer_event);
+# Ok::<(), nostr_double_ratchet::Error>(())
+```
+
+Two practical notes:
+
+- The host app still owns relay bootstrap/backfill around `setup_user(...)` and AppKeys/invite
+  fetches.
+- If you want the manager to advance immediately after your own publish, loop locally published
+  events back through `process_received_event(...)` instead of waiting for relay echo alone.
 
 ## Disappearing Messages
 

@@ -37,6 +37,36 @@ If you are unsure, start with `NdrRuntime`. Drop down to `SessionManager` only w
 keep more app-owned runtime structure, and use plain `Session` only when a small 1:1-only surface
 is actually the goal.
 
+## Minimal Integration Contract
+
+Reference web integrations:
+[`iris-client`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-client),
+[`iris-chat`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat).
+
+They use one `NdrRuntime` singleton over app-owned transport and persistent storage.
+
+```typescript
+type NostrSubscribe = (
+  filter: Filter,
+  onEvent: (event: VerifiedEvent) => void,
+) => () => void;
+
+type NostrFetch = (filter: Filter) => Promise<VerifiedEvent[]>;
+
+type NostrPublish = (
+  event: UnsignedEvent | VerifiedEvent,
+) => Promise<VerifiedEvent>;
+
+interface StorageAdapter {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+  put<T = unknown>(key: string, value: T): Promise<void>;
+  del(key: string): Promise<void>;
+  list(prefix?: string): Promise<string[]>;
+}
+```
+
+If you can provide those four pieces, start with `NdrRuntime`.
+
 ## Quick Start (`NdrRuntime`)
 
 ```typescript
@@ -77,6 +107,14 @@ logins that should participate in multi-device fanout, call
 `ensureCurrentDeviceRegistered(...)` or `registerCurrentDevice(...)` before treating private
 messaging as fully ready.
 
+`setupUser(peerPubkey)` is optional prewarm, not a hard prerequisite. Web consumers call it before
+opening a chat when they want subscriptions and bootstrap to start early, but `sendEvent(...)`
+already calls it internally and `sendMessage(...)` queues delivery if sessions are not ready yet.
+
+For groups, initialize the runtime/session path before `createGroup(...)` or `sendGroupEvent(...)`.
+If you want metadata fanout immediately instead of waiting for queue flush, prewarm peers with
+`setupUser(...)`.
+
 ### Runtime Group API
 
 If you want the high-level path, keep groups on `NdrRuntime` instead of building a parallel
@@ -93,6 +131,20 @@ group transport layer:
 - `sendGroupEvent(...)`, `sendGroupMessage(...)`
 
 `GroupManager` is still available directly when you want to own more of the app wiring yourself.
+
+## Reference Web Pattern
+
+Reference web integrations do this:
+
+1. Create one long-lived `NdrRuntime` per active identity with persistent storage.
+2. Wrap `nostrSubscribe` with `DirectMessageSubscriptionTracker` +
+   `buildDirectMessageBackfillFilter(...)` so newly added direct-message authors trigger a short
+   relay backfill immediately.
+3. Call `initForOwner(ownerPubkey)`, then `ensureCurrentDeviceRegistered(ownerPubkey)` or
+   `registerCurrentDevice(...)` when owner-key logins should participate in multi-device fanout.
+4. Attach `onSessionEvent(...)` / `onGroupEvent(...)` once for app lifetime.
+5. Optionally call `setupUser(peerPubkey)` before opening a chat or creating a group to prewarm
+   subscriptions and bootstrap.
 
 ## Mid-Level Setup (`SessionGroupRuntime`)
 
