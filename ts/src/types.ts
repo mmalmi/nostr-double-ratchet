@@ -76,7 +76,9 @@ export type DecryptFunction = (_ciphertext: string, _pubkey: string) => Promise<
  */
 export type IdentityKey = Uint8Array | { encrypt: EncryptFunction; decrypt: DecryptFunction };
 
-export type NostrPublish = (_event: UnsignedEvent) => Promise<VerifiedEvent>;
+export type NostrPublish = (
+  _event: UnsignedEvent | VerifiedEvent
+) => Promise<VerifiedEvent>;
 
 export type Rumor = UnsignedEvent & { id: string }
 

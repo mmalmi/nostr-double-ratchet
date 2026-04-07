@@ -132,6 +132,14 @@ pub struct GroupOuterSubscriptionPlanResult {
     pub added_authors: Vec<String>,
 }
 
+/// Session-state snapshot used to inspect message-push routing without reading storage files.
+#[derive(uniffi::Record)]
+pub struct MessagePushSessionStateResult {
+    pub state_json: String,
+    pub tracked_sender_pubkeys: Vec<String>,
+    pub has_receiving_capability: bool,
+}
+
 /// Generate a new keypair.
 #[uniffi::export]
 pub fn generate_keypair() -> FfiKeyPair {
@@ -936,7 +944,11 @@ impl SessionManagerHandle {
             let plan = group_manager.outer_subscription_plan();
             GroupOuterSubscriptionPlanResult {
                 authors: plan.authors.into_iter().map(|pk| pk.to_hex()).collect(),
-                added_authors: plan.added_authors.into_iter().map(|pk| pk.to_hex()).collect(),
+                added_authors: plan
+                    .added_authors
+                    .into_iter()
+                    .map(|pk| pk.to_hex())
+                    .collect(),
             }
         })
     }
@@ -1127,6 +1139,72 @@ impl SessionManagerHandle {
         } else {
             Ok(None)
         }
+    }
+
+    /// List peer owner pubkeys known from loaded state or persisted storage.
+    pub fn known_peer_owner_pubkeys(&self) -> Vec<String> {
+        self.runtime
+            .session_manager()
+            .known_peer_owner_pubkeys()
+            .into_iter()
+            .map(|pubkey| pubkey.to_hex())
+            .collect()
+    }
+
+    /// Return the persisted user-record snapshot JSON for a peer owner, if present.
+    pub fn get_stored_user_record_json(
+        &self,
+        peer_owner_pubkey_hex: String,
+    ) -> Result<Option<String>, NdrError> {
+        let peer_owner_pubkey =
+            nostr_double_ratchet::utils::pubkey_from_hex(&peer_owner_pubkey_hex)?;
+        Ok(self
+            .runtime
+            .session_manager()
+            .get_stored_user_record_json(peer_owner_pubkey)?)
+    }
+
+    /// Return the tracked message-push author pubkeys for a peer owner.
+    pub fn get_message_push_author_pubkeys(
+        &self,
+        peer_owner_pubkey_hex: String,
+    ) -> Result<Vec<String>, NdrError> {
+        let peer_owner_pubkey =
+            nostr_double_ratchet::utils::pubkey_from_hex(&peer_owner_pubkey_hex)?;
+        Ok(self
+            .runtime
+            .session_manager()
+            .get_message_push_author_pubkeys(peer_owner_pubkey)
+            .into_iter()
+            .map(|pubkey| pubkey.to_hex())
+            .collect())
+    }
+
+    /// Return pairwise session snapshots used for message-push routing for a peer owner.
+    pub fn get_message_push_session_states(
+        &self,
+        peer_owner_pubkey_hex: String,
+    ) -> Result<Vec<MessagePushSessionStateResult>, NdrError> {
+        let peer_owner_pubkey =
+            nostr_double_ratchet::utils::pubkey_from_hex(&peer_owner_pubkey_hex)?;
+        self.runtime
+            .session_manager()
+            .get_message_push_session_states(peer_owner_pubkey)
+            .into_iter()
+            .map(|snapshot| {
+                Ok(MessagePushSessionStateResult {
+                    state_json: nostr_double_ratchet::utils::serialize_session_state(
+                        &snapshot.state,
+                    )?,
+                    tracked_sender_pubkeys: snapshot
+                        .tracked_sender_pubkeys
+                        .into_iter()
+                        .map(|pubkey| pubkey.to_hex())
+                        .collect(),
+                    has_receiving_capability: snapshot.has_receiving_capability,
+                })
+            })
+            .collect()
     }
 
     /// Process a received Nostr event JSON.

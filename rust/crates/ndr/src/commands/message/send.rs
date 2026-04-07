@@ -6,9 +6,9 @@ use nostr_double_ratchet::{
     CHAT_MESSAGE_KIND, EXPIRATION_TAG, MESSAGE_EVENT_KIND,
 };
 
-use crate::commands::owner_claim::fetch_latest_app_keys_snapshot_with_timeout;
+use crate::commands::session_delivery::prepare_recipient_delivery_sessions as prepare_session_manager_delivery_sessions;
 use crate::config::Config;
-use crate::nostr_client::{connect_client, send_event_or_ignore};
+use crate::nostr_client::{connect_client, send_event_with_retry};
 use crate::output::Output;
 use crate::state_sync::select_canonical_session;
 use crate::storage::{Storage, StoredChat, StoredMessage, StoredReaction};
@@ -25,6 +25,11 @@ pub(super) struct PreparedSendMessage {
     pub(super) encrypted_event: nostr::Event,
     pub(super) timestamp: u64,
     pub(super) stored_message: StoredMessage,
+}
+
+struct FlushedSessionManagerEvents {
+    message_events: Vec<nostr::Event>,
+    published_any: bool,
 }
 
 async fn resolve_or_join_chat(
@@ -209,8 +214,12 @@ async fn flush_session_manager_message_events(
     runtime: &NdrRuntime,
     signing_keys: &nostr::Keys,
     client: &nostr_sdk::Client,
-) -> Result<Vec<nostr::Event>> {
+) -> Result<FlushedSessionManagerEvents> {
+    const MAX_DELIVERY_ATTEMPTS: usize = 20;
+    const DELIVERY_RETRY_MS: u64 = 100;
+
     let mut message_events = Vec::new();
+    let mut published_any = false;
 
     for event in runtime.drain_events() {
         let signed = match event {
@@ -224,110 +233,33 @@ async fn flush_session_manager_message_events(
             | SessionManagerEvent::DecryptedMessage { .. } => continue,
         };
 
-        send_event_or_ignore(client, signed.clone()).await?;
+        send_event_with_retry(
+            client,
+            signed.clone(),
+            MAX_DELIVERY_ATTEMPTS,
+            DELIVERY_RETRY_MS,
+        )
+        .await?;
+        published_any = true;
         if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
             message_events.push(signed);
         }
     }
 
-    Ok(message_events)
+    Ok(FlushedSessionManagerEvents {
+        message_events,
+        published_any,
+    })
 }
 
-async fn refresh_recipient_app_keys(
+async fn prepare_recipient_delivery_sessions(
     runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
     recipient: nostr::PublicKey,
-) -> Result<std::collections::HashSet<nostr::PublicKey>> {
-    use std::collections::HashSet;
-    use tokio::time::{Duration, Instant};
-
-    const APP_KEYS_POLL_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
-
-    let relays = config.resolved_relays();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() <= deadline {
-        if let Some(snapshot) = fetch_latest_app_keys_snapshot_with_timeout(
-            client,
-            &relays,
-            recipient,
-            APP_KEYS_POLL_FETCH_TIMEOUT,
-        )
-        .await?
-        {
-            let sibling_devices: HashSet<nostr::PublicKey> = snapshot
-                .app_keys
-                .get_all_devices()
-                .into_iter()
-                .map(|device| device.identity_pubkey)
-                .filter(|device_pubkey| *device_pubkey != recipient)
-                .collect();
-
-            runtime.ingest_app_keys_snapshot(recipient, snapshot.app_keys, snapshot.created_at);
-            return Ok(sibling_devices);
-        }
-
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    Ok(HashSet::new())
-}
-
-async fn process_recipient_device_invites(
-    runtime: &NdrRuntime,
-    client: &nostr_sdk::Client,
-    config: &Config,
-    sibling_devices: &std::collections::HashSet<nostr::PublicKey>,
 ) -> Result<()> {
-    use nostr_sdk::Filter;
-    use tokio::time::{Duration, Instant};
-
-    const DEVICE_INVITE_POLL_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
-
-    if sibling_devices.is_empty() {
-        return Ok(());
-    }
-
-    let relays = config.resolved_relays();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut processed = std::collections::HashSet::new();
-
-    while Instant::now() <= deadline {
-        let invite_events = crate::nostr_client::fetch_events_best_effort(
-            client,
-            &relays,
-            Filter::new()
-                .kind(nostr::Kind::Custom(
-                    nostr_double_ratchet::INVITE_EVENT_KIND as u16,
-                ))
-                .authors(sibling_devices.iter().copied().collect::<Vec<_>>())
-                .limit(50),
-            DEVICE_INVITE_POLL_FETCH_TIMEOUT,
-        )
-        .await?;
-
-        for event in invite_events {
-            if !sibling_devices.contains(&event.pubkey) {
-                continue;
-            }
-            let expected_d = format!("double-ratchet/invites/{}", event.pubkey.to_hex());
-            let matches_device_invite = event.tags.iter().any(|tag| {
-                let parts = tag.as_slice();
-                parts.first().map(|value| value.as_str()) == Some("d")
-                    && parts.get(1).map(|value| value.as_str()) == Some(expected_d.as_str())
-            });
-            if matches_device_invite && processed.insert(event.pubkey) {
-                runtime.session_manager().process_received_event(event);
-            }
-        }
-
-        if processed == *sibling_devices {
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    Ok(())
+    prepare_session_manager_delivery_sessions(runtime.session_manager(), client, config, recipient)
+        .await
 }
 
 #[cfg(test)]
@@ -537,12 +469,13 @@ pub(super) async fn send_message_impl(
     import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
-    let sibling_devices =
-        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
+    let bootstrap = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    if bootstrap.published_any {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let event_ids = runtime.send_event(recipient_pk, unsigned)?;
-    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
-    let published_events =
-        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    let published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
     sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     if let Some(updated_chat) = storage.get_chat_by_pubkey(&recipient_pk.to_hex())? {
@@ -569,7 +502,8 @@ pub(super) async fn send_message_impl(
         chat_id: chat.id,
         content: message.to_string(),
         timestamp: now_s,
-        event: published_events
+        event: published
+            .message_events
             .first()
             .map(nostr::JsonUtil::as_json)
             .unwrap_or_default(),
@@ -599,17 +533,18 @@ pub async fn react(
     import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
-    let sibling_devices =
-        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
+    let bootstrap = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    if bootstrap.published_any {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let event_ids = runtime.send_reaction(
         recipient_pk,
         message_id.to_string(),
         emoji.to_string(),
         None,
     )?;
-    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
-    let published_events =
-        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    let published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
     sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let pubkey = config.public_key()?;
@@ -617,7 +552,8 @@ pub async fn react(
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
 
-    let reaction_id = published_events
+    let reaction_id = published
+        .message_events
         .first()
         .map(|evt| evt.id.to_hex())
         .or_else(|| event_ids.first().cloned())
@@ -641,7 +577,8 @@ pub async fn react(
             "message_id": message_id,
             "emoji": emoji,
             "timestamp": timestamp,
-            "event": published_events
+            "event": published
+                .message_events
                 .first()
                 .map(nostr::JsonUtil::as_json)
                 .unwrap_or_default(),
@@ -683,12 +620,13 @@ pub async fn receipt(
     let message_ids_vec = message_ids.iter().map(|s| (*s).to_string()).collect();
 
     let client = connect_client(config).await?;
-    let sibling_devices =
-        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
+    let bootstrap = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    if bootstrap.published_any {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let _event_ids = runtime.send_receipt(recipient_pk, receipt_type, message_ids_vec, None)?;
-    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
-    let _published_events =
-        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    let _published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
     sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     output.success(
@@ -724,19 +662,21 @@ pub async fn typing(
     import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
-    let sibling_devices =
-        refresh_recipient_app_keys(&runtime, &client, config, recipient_pk).await?;
+    prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
+    let bootstrap = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    if bootstrap.published_any {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let _event_ids = runtime.send_typing(recipient_pk, None)?;
-    process_recipient_device_invites(&runtime, &client, config, &sibling_devices).await?;
-    let published_events =
-        flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
+    let published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
     sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     output.success(
         "typing",
         serde_json::json!({
             "chat_id": chat_id,
-            "event": published_events
+            "event": published
+                .message_events
                 .first()
                 .map(nostr::JsonUtil::as_json)
                 .unwrap_or_default(),

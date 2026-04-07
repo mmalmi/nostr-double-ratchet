@@ -29,7 +29,7 @@ fn tracker_returns_only_new_direct_message_authors() {
         format!(r#"{{"kinds":[1060],"authors":["{}"]}}"#, bob.to_hex()),
     );
     assert!(duplicate.is_empty());
-    assert_eq!(tracker.tracked_authors(), vec![alice, bob]);
+    assert_eq!(tracker.tracked_authors(), expected_authors);
 
     tracker.unregister_subscription("session-next-1");
     assert_eq!(tracker.tracked_authors(), vec![bob]);

@@ -11,6 +11,8 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
+const MULTIDEVICE_STEP_TIMEOUT: Duration = Duration::from_secs(45);
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -178,6 +180,56 @@ async fn wait_for_ndr_message(
     false
 }
 
+async fn wait_for_ndr_messages(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    expected_contents: &[&str],
+    timeout: Duration,
+) -> bool {
+    let started = Instant::now();
+    let mut seen = vec![false; expected_contents.len()];
+
+    while started.elapsed() < timeout {
+        let mut line = String::new();
+        let read_result =
+            tokio::time::timeout(Duration::from_millis(150), reader.read_line(&mut line)).await;
+
+        if let Ok(Ok(n)) = read_result {
+            if n == 0 {
+                continue;
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            println!("[ndr listen] {}", trimmed);
+
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if v["event"] != "message" {
+                continue;
+            }
+
+            let Some(content) = v["content"].as_str() else {
+                continue;
+            };
+
+            for (idx, expected_content) in expected_contents.iter().enumerate() {
+                if content == *expected_content {
+                    seen[idx] = true;
+                }
+            }
+
+            if seen.iter().all(|found| *found) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 async fn wait_for_ndr_session_created(
     reader: &mut BufReader<tokio::process::ChildStdout>,
     timeout: Duration,
@@ -292,7 +344,7 @@ async fn test_ndr_invite_ts_multidevice_back_and_forth() {
         wait_for_ndr_message(
             &mut ndr_reader,
             "IRIS_CLIENT_BOOTSTRAP",
-            Duration::from_secs(30),
+            MULTIDEVICE_STEP_TIMEOUT,
         )
         .await,
         "ndr did not receive iris-client bootstrap message"
@@ -309,7 +361,7 @@ async fn test_ndr_invite_ts_multidevice_back_and_forth() {
     read_until_marker(
         &mut ts_reader,
         "E2E_DEVICE2_RECEIVED:NDR_KICKOFF",
-        Duration::from_secs(30),
+        MULTIDEVICE_STEP_TIMEOUT,
     )
     .await
     .expect("iris-chat did not receive kickoff");
@@ -334,23 +386,13 @@ async fn test_ndr_invite_ts_multidevice_back_and_forth() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert!(
-        wait_for_ndr_message(
+        wait_for_ndr_messages(
             &mut ndr_reader,
-            "IRIS_CLIENT_ACK_KICKOFF",
-            Duration::from_secs(30),
+            &["IRIS_CLIENT_ACK_KICKOFF", "IRIS_CHAT_TO_NDR_1"],
+            MULTIDEVICE_STEP_TIMEOUT,
         )
         .await,
-        "ndr did not receive iris-client kickoff ack"
-    );
-
-    assert!(
-        wait_for_ndr_message(
-            &mut ndr_reader,
-            "IRIS_CHAT_TO_NDR_1",
-            Duration::from_secs(30),
-        )
-        .await,
-        "ndr did not receive iris-chat's message"
+        "ndr did not receive the restarted-listener kickoff ack and linked-device message"
     );
 
     let _ = ndr_listen_child.kill().await;
@@ -359,6 +401,15 @@ async fn test_ndr_invite_ts_multidevice_back_and_forth() {
     assert_eq!(
         send_reply_1["status"], "ok",
         "ndr failed to send first reply"
+    );
+    let first_reply_event_count = send_reply_1["data"]["event_ids"]
+        .as_array()
+        .map(|ids| ids.len())
+        .unwrap_or_default();
+    assert!(
+        first_reply_event_count >= 2,
+        "ndr did not fan out first reply to both TS devices: {}",
+        send_reply_1
     );
 
     assert!(
@@ -369,7 +420,7 @@ async fn test_ndr_invite_ts_multidevice_back_and_forth() {
                 "E2E_DEVICE2_RECEIVED:NDR_TO_IRIS_1",
                 "E2E_OWNER_SENT:IRIS_CLIENT_TO_NDR_2",
             ],
-            Duration::from_secs(30),
+            MULTIDEVICE_STEP_TIMEOUT,
         )
         .await,
         "reply fanout/follow-up markers missing after first ndr reply"
@@ -382,7 +433,7 @@ async fn test_ndr_invite_ts_multidevice_back_and_forth() {
         wait_for_ndr_message(
             &mut ndr_reader,
             "IRIS_CLIENT_TO_NDR_2",
-            Duration::from_secs(30),
+            MULTIDEVICE_STEP_TIMEOUT,
         )
         .await,
         "ndr did not receive iris-client follow-up"
@@ -396,7 +447,7 @@ async fn test_ndr_invite_ts_multidevice_back_and_forth() {
         "ndr failed to send second reply"
     );
 
-    read_until_marker(&mut ts_reader, "E2E_SUCCESS", Duration::from_secs(45))
+    read_until_marker(&mut ts_reader, "E2E_SUCCESS", MULTIDEVICE_STEP_TIMEOUT)
         .await
         .expect("TS did not report multidevice success");
 

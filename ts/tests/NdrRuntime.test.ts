@@ -177,4 +177,53 @@ describe("NdrRuntime", () => {
     expect(restartedRuntime.getState().registeredDevices).toHaveLength(1)
     expect(restartedRuntime.getState().hasLocalAppKeys).toBe(true)
   })
+
+  it("owns group transport alongside sessions on the high-level runtime path", async () => {
+    const relay = new MockRelay()
+
+    const aliceOwnerPrivateKey = generateSecretKey()
+    const aliceOwnerPubkey = getPublicKey(aliceOwnerPrivateKey)
+    const aliceRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: aliceOwnerPrivateKey,
+    })
+    await aliceRuntime.initForOwner(aliceOwnerPubkey)
+    await aliceRuntime.registerCurrentDevice({ ownerPubkey: aliceOwnerPubkey })
+
+    const bobOwnerPrivateKey = generateSecretKey()
+    const bobOwnerPubkey = getPublicKey(bobOwnerPrivateKey)
+    const bobRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: bobOwnerPrivateKey,
+    })
+    await bobRuntime.initForOwner(bobOwnerPubkey)
+    await bobRuntime.registerCurrentDevice({ ownerPubkey: bobOwnerPubkey })
+
+    await aliceRuntime.waitForSessionManager(aliceOwnerPubkey).then((manager) => {
+      return manager.setupUser(bobOwnerPubkey)
+    })
+    await bobRuntime.waitForSessionManager(bobOwnerPubkey).then((manager) => {
+      return manager.setupUser(aliceOwnerPubkey)
+    })
+
+    const created = await aliceRuntime.createGroup("Runtime Group", [bobOwnerPubkey], {
+      fanoutMetadata: false,
+    })
+    await bobRuntime.syncGroups([created.group], bobOwnerPubkey)
+    const sent = await aliceRuntime.sendGroupMessage(created.group.id, "hello group")
+    await tick()
+
+    expect(aliceRuntime.getState().groupManagerReady).toBe(true)
+    expect(bobRuntime.getState().groupManagerReady).toBe(true)
+    expect(aliceRuntime.getGroupManager()?.managedGroupIds()).toContain(created.group.id)
+    expect(bobRuntime.getGroupManager()?.managedGroupIds()).toContain(created.group.id)
+    expect(sent.inner.content).toBe("hello group")
+    expect(sent.inner.kind).toBe(14)
+    expect(sent.inner.tags).toContainEqual(["l", created.group.id])
+    expect(aliceRuntime.getGroupManager()?.knownSenderEventPubkeys().length).toBeGreaterThan(0)
+
+    await bobRuntime.syncGroups([], bobOwnerPubkey)
+    expect(bobRuntime.getGroupManager()?.managedGroupIds()).not.toContain(created.group.id)
+    expect(relay.getAllEvents().length).toBeGreaterThanOrEqual(2)
+  })
 })

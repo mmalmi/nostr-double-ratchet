@@ -89,28 +89,44 @@ async fn run_ndr(data_dir: &Path, args: &[&str]) -> serde_json::Value {
         data_dir.display(),
         args.join(" ")
     );
-    let mut cmd = ndr_command();
-    let output = tokio::time::timeout(
-        Duration::from_secs(90),
-        cmd.arg("--json")
-            .arg("--data-dir")
-            .arg(data_dir)
-            .args(args)
-            .output(),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("Timed out running command: {}", command))
-    .unwrap_or_else(|e| panic!("Failed to run ndr command '{}': {}", command, e));
+    for attempt in 0..3 {
+        let mut cmd = ndr_command();
+        let output = tokio::time::timeout(
+            Duration::from_secs(90),
+            cmd.arg("--json")
+                .arg("--data-dir")
+                .arg(data_dir)
+                .args(args)
+                .output(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("Timed out running command: {}", command))
+        .unwrap_or_else(|e| panic!("Failed to run ndr command '{}': {}", command, e));
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if !output.status.success() {
-        panic!("ndr failed: stdout={} stderr={}", stdout, stderr);
+        if output.status.success() {
+            return serde_json::from_str(&stdout).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to parse ndr output for '{}': {}\nOutput: {}",
+                    command, e, stdout
+                )
+            });
+        }
+
+        let transient_enoent = stderr.contains("No such file or directory (os error 2)");
+        if transient_enoent && attempt + 1 < 3 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            continue;
+        }
+
+        panic!(
+            "ndr failed for '{}': stdout={} stderr={}",
+            command, stdout, stderr
+        );
     }
-
-    serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("Failed to parse ndr output: {}\nOutput: {}", e, stdout))
+    unreachable!("run_ndr should either return or panic");
 }
 
 /// Start ndr listen in background and return (child, stdout_reader)
@@ -1447,6 +1463,7 @@ async fn test_group_chat_six_participants_everyone_receives() {
             );
             listeners.push(Listener { child, stdout });
         }
+        tokio::time::sleep(Duration::from_millis(750)).await;
 
         // Kickoff so inviters can send to invitees.
         for i in 0..participants.len() {

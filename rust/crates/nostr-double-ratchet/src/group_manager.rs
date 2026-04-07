@@ -1595,7 +1595,10 @@ mod tests {
         sender
             .upsert_group(make_group(
                 group_id,
-                vec![alice_owner.public_key().to_hex(), bob_owner.public_key().to_hex()],
+                vec![
+                    alice_owner.public_key().to_hex(),
+                    bob_owner.public_key().to_hex(),
+                ],
                 vec![alice_owner.public_key().to_hex()],
             ))
             .unwrap();
@@ -1609,7 +1612,10 @@ mod tests {
         receiver
             .upsert_group(make_group(
                 group_id,
-                vec![alice_owner.public_key().to_hex(), bob_owner.public_key().to_hex()],
+                vec![
+                    alice_owner.public_key().to_hex(),
+                    bob_owner.public_key().to_hex(),
+                ],
                 vec![alice_owner.public_key().to_hex()],
             ))
             .unwrap();

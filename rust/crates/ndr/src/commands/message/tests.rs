@@ -319,6 +319,125 @@ async fn test_send_fans_out_to_all_known_recipient_devices_in_session_manager() 
     assert_eq!(recipient_sends.get(&device2_id), Some(&1));
 }
 
+#[test]
+fn test_recipient_devices_missing_active_sessions_includes_owner_device_without_session() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let sender_keys = nostr::Keys::generate();
+    let our_device_id = sender_keys.public_key().to_hex();
+    let recipient_owner_keys = nostr::Keys::generate();
+    let recipient_secondary_keys = nostr::Keys::generate();
+    let recipient_owner = recipient_owner_keys.public_key();
+    let recipient_secondary = recipient_secondary_keys.public_key();
+    let recipient_secondary_id = recipient_secondary.to_hex();
+
+    let invite = nostr_double_ratchet::Invite::create_new(
+        recipient_secondary,
+        Some(recipient_secondary_id.clone()),
+        None,
+    )
+    .unwrap();
+    let (secondary_session, _) = invite
+        .accept_with_owner(
+            sender_keys.public_key(),
+            sender_keys.secret_key().to_secret_bytes(),
+            Some(our_device_id.clone()),
+            Some(sender_keys.public_key()),
+        )
+        .unwrap();
+
+    let session_manager_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> =
+        std::sync::Arc::new(
+            nostr_double_ratchet::FileStorageAdapter::new(
+                storage.data_dir().join("session_manager"),
+            )
+            .unwrap(),
+        );
+    let runtime = nostr_double_ratchet::NdrRuntime::new(
+        sender_keys.public_key(),
+        sender_keys.secret_key().to_secret_bytes(),
+        our_device_id,
+        sender_keys.public_key(),
+        Some(session_manager_store),
+        None,
+    );
+    runtime.init().unwrap();
+    runtime
+        .import_session_state(
+            recipient_owner,
+            Some(recipient_secondary_id),
+            secondary_session.state,
+        )
+        .unwrap();
+
+    let recipient_devices = std::collections::HashSet::from([recipient_secondary]);
+
+    let missing = crate::commands::session_delivery::recipient_devices_missing_active_sessions(
+        runtime.session_manager(),
+        recipient_owner,
+        &recipient_devices,
+    );
+
+    assert!(missing.contains(&recipient_owner));
+    assert!(!missing.contains(&recipient_secondary));
+}
+
+#[test]
+fn test_recipient_devices_missing_active_sessions_includes_non_send_capable_session() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let sender_keys = nostr::Keys::generate();
+    let our_device_id = sender_keys.public_key().to_hex();
+    let recipient_owner_keys = nostr::Keys::generate();
+    let recipient_owner = recipient_owner_keys.public_key();
+
+    let invite = nostr_double_ratchet::Invite::create_new(recipient_owner, None, None).unwrap();
+    let (mut receive_only_session, _) = invite
+        .accept_with_owner(
+            sender_keys.public_key(),
+            sender_keys.secret_key().to_secret_bytes(),
+            Some(our_device_id.clone()),
+            Some(sender_keys.public_key()),
+        )
+        .unwrap();
+    receive_only_session.state.our_current_nostr_key = None;
+
+    let session_manager_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> =
+        std::sync::Arc::new(
+            nostr_double_ratchet::FileStorageAdapter::new(
+                storage.data_dir().join("session_manager"),
+            )
+            .unwrap(),
+        );
+    let runtime = nostr_double_ratchet::NdrRuntime::new(
+        sender_keys.public_key(),
+        sender_keys.secret_key().to_secret_bytes(),
+        our_device_id,
+        sender_keys.public_key(),
+        Some(session_manager_store),
+        None,
+    );
+    runtime.init().unwrap();
+    runtime
+        .import_session_state(recipient_owner, None, receive_only_session.state)
+        .unwrap();
+
+    let recipient_devices = std::collections::HashSet::new();
+    let missing = crate::commands::session_delivery::recipient_devices_missing_active_sessions(
+        runtime.session_manager(),
+        recipient_owner,
+        &recipient_devices,
+    );
+
+    assert!(missing.contains(&recipient_owner));
+}
+
 #[tokio::test]
 async fn test_send_message_with_ttl_adds_expiration_tag() {
     init_test_env();

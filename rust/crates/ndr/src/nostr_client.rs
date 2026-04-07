@@ -16,7 +16,7 @@ pub(crate) async fn connect_client(config: &Config) -> Result<Client> {
     Ok(client)
 }
 
-pub(crate) async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
+async fn send_event_once(client: &Client, event: nostr::Event) -> Result<()> {
     let relays = client.relays().await;
     if relays.is_empty() {
         match tokio::time::timeout(
@@ -26,9 +26,7 @@ pub(crate) async fn send_event_or_ignore(client: &Client, event: nostr::Event) -
         .await
         {
             Ok(Ok(_)) => return Ok(()),
-            Ok(Err(_)) if should_ignore_publish_errors() => return Ok(()),
             Ok(Err(err)) => return Err(err.into()),
-            Err(_) if should_ignore_publish_errors() => return Ok(()),
             Err(_) => anyhow::bail!("send_event timed out"),
         }
     }
@@ -58,12 +56,94 @@ pub(crate) async fn send_event_or_ignore(client: &Client, event: nostr::Event) -
         }
     }
 
-    if any_success || should_ignore_publish_errors() {
+    if any_success {
         Ok(())
     } else if let Some(err) = last_error {
         Err(err)
     } else {
         Err(anyhow::anyhow!("failed to publish event to any relay"))
+    }
+}
+
+pub(crate) async fn send_event_or_ignore(client: &Client, event: nostr::Event) -> Result<()> {
+    match send_event_once(client, event).await {
+        Ok(()) => Ok(()),
+        Err(_) if should_ignore_publish_errors() => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+pub(crate) async fn send_event_with_retry(
+    client: &Client,
+    event: nostr::Event,
+    attempts: usize,
+    retry_ms: u64,
+) -> Result<()> {
+    let attempts = attempts.max(1);
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 0..attempts {
+        match send_event_once(client, event.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+            }
+        }
+
+        if attempt + 1 < attempts {
+            tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+        }
+    }
+
+    if should_ignore_publish_errors() {
+        Ok(())
+    } else if let Some(err) = last_error {
+        Err(err)
+    } else {
+        Err(anyhow::anyhow!("failed to publish event to any relay"))
+    }
+}
+
+pub(crate) async fn send_events_with_retry(
+    client: &Client,
+    events: &[nostr::Event],
+    attempts: usize,
+    retry_ms: u64,
+) -> Result<bool> {
+    if events.is_empty() {
+        return Ok(false);
+    }
+
+    let attempts = attempts.max(1);
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 0..attempts {
+        let mut all_ok = true;
+        for event in events {
+            if let Err(err) = send_event_once(client, event.clone()).await {
+                last_error = Some(err);
+                all_ok = false;
+                break;
+            }
+        }
+
+        if all_ok {
+            return Ok(true);
+        }
+
+        if attempt + 1 < attempts {
+            tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+        }
+    }
+
+    if should_ignore_publish_errors() {
+        Ok(false)
+    } else if let Some(err) = last_error {
+        Err(err)
+    } else {
+        Err(anyhow::anyhow!(
+            "failed to publish event batch to any relay"
+        ))
     }
 }
 

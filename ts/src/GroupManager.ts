@@ -523,6 +523,14 @@ export class GroupManager {
     }
   }
 
+  managedGroupIds(): string[] {
+    return Array.from(this.groups.keys()).sort();
+  }
+
+  knownSenderEventPubkeys(): string[] {
+    return Array.from(this.senderEventToGroup.keys()).sort();
+  }
+
   private startOuterBackfill(addedAuthors: string[]): void {
     if ((!this.nostrSubscribe && !this.nostrFetch) || addedAuthors.length === 0) return;
     if (this.outerBackfillLookbackSeconds <= 0) return;

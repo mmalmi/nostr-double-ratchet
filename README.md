@@ -24,8 +24,28 @@ For Windows/manual install options, see [Releases](https://github.com/mmalmi/nos
 - Multi-device identity model (owner key + device keys) with AppKeys
 - Invite and link flows for session bootstrapping
 - Group messaging with sender keys and one-to-many outer events
+- High-level `NdrRuntime` path that owns both session and group transport
 - Cross-language TS/Rust interoperability tests
 - Breaking changes are still possible while APIs settle
+
+## Integration Choices
+
+- `Session`: lowest-level primitive if your app already owns bootstrap, routing, and storage.
+- `SessionManager`: multi-device session orchestration without the runtime wrapper.
+- `SessionGroupRuntime`: attach group transport to an existing `SessionManager` without adopting the
+  full `NdrRuntime` surface.
+- `GroupManager`: direct group transport helper if you want to wire group state yourself.
+- `NdrRuntime`: the default high-level path for production apps. In TypeScript it now owns
+  `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`.
+
+Use `NdrRuntime` when you want one concrete app-facing surface for:
+
+- `waitForSessionManager(...)` and `onSessionEvent(...)`
+- `getGroupManager()` / `waitForGroupManager(...)`
+- `onGroupEvent(...)`
+- `upsertGroup(...)`, `removeGroup(...)`, `syncGroups(...)`
+- `createGroup(...)`
+- `sendGroupEvent(...)`, `sendGroupMessage(...)`
 
 ## Security Guarantees And Properties
 
@@ -125,10 +145,10 @@ Groups use a hybrid model:
 
 ## Implementations
 
-| Language | Directory | Package |
-|----------|-----------|---------|
-| TypeScript | [ts/](./ts) | [npm](https://www.npmjs.com/package/nostr-double-ratchet) |
-| Rust | [rust/](./rust) | [crates.io](https://crates.io/crates/nostr-double-ratchet) |
+| Language   | Directory       | Package                                                    |
+| ---------- | --------------- | ---------------------------------------------------------- |
+| TypeScript | [ts/](./ts)     | [npm](https://www.npmjs.com/package/nostr-double-ratchet)  |
+| Rust       | [rust/](./rust) | [crates.io](https://crates.io/crates/nostr-double-ratchet) |
 
 ## Mobile FFI (optional)
 

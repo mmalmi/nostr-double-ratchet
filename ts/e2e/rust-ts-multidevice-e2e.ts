@@ -162,23 +162,6 @@ async function main() {
   await relay.publish(accepted.event);
   log("E2E_INVITE_RESPONSE_PUBLISHED");
 
-  relay.subscribe({ kinds: [1060] }, (event: any) => {
-    if (ownerSession) {
-      try {
-        (ownerSession as any).handleNostrEvent(event);
-      } catch {
-        // ignore unrelated events
-      }
-    }
-    if (device2Session) {
-      try {
-        (device2Session as any).handleNostrEvent(event);
-      } catch {
-        // ignore unrelated events
-      }
-    }
-  });
-
   let sentByDevice2 = false;
   let sentOwnerBootstrap = false;
   let sentOwnerAck = false;

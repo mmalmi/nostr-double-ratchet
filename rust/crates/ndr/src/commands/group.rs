@@ -10,8 +10,9 @@ use nostr_sdk::Client;
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::commands::session_delivery::prepare_recipient_delivery_sessions as prepare_member_delivery_sessions;
 use crate::config::Config;
-use crate::nostr_client::send_event_or_ignore;
+use crate::nostr_client::{send_event_or_ignore, send_event_with_retry, send_events_with_retry};
 use crate::output::Output;
 use crate::state_sync::{
     extract_control_stamp_from_unsigned, select_canonical_session, ControlStamp,
@@ -212,6 +213,57 @@ fn build_session_manager(
     Ok((manager, rx))
 }
 
+async fn prepare_group_member_sessions(
+    members: &[String],
+    session_manager: &SessionManager,
+    client: &Client,
+    config: &Config,
+) -> Result<()> {
+    let my_owner_pubkey = config.owner_public_key_hex()?;
+    let mut recipient_pubkeys: Vec<nostr::PublicKey> = members
+        .iter()
+        .filter(|member| member.as_str() != my_owner_pubkey)
+        .filter_map(|member| nostr::PublicKey::from_hex(member).ok())
+        .collect();
+    recipient_pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
+    recipient_pubkeys.dedup_by_key(|pubkey| pubkey.to_hex());
+
+    for recipient in recipient_pubkeys {
+        prepare_member_delivery_sessions(session_manager, client, config, recipient).await?;
+    }
+
+    Ok(())
+}
+
+async fn publish_pending_session_manager_events(
+    client: &Client,
+    config: &Config,
+    rx: &Receiver<SessionManagerEvent>,
+) -> Result<bool> {
+    const MAX_DELIVERY_ATTEMPTS: usize = 20;
+    const DELIVERY_RETRY_MS: u64 = 100;
+
+    let signing_keys =
+        nostr::Keys::new(nostr::SecretKey::from_slice(&config.private_key_bytes()?)?);
+    let mut published_any = false;
+
+    loop {
+        let signed = match rx.try_recv() {
+            Ok(SessionManagerEvent::Publish(unsigned)) => unsigned
+                .sign_with_keys(&signing_keys)
+                .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?,
+            Ok(SessionManagerEvent::PublishSigned(signed)) => signed,
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        };
+
+        send_event_with_retry(client, signed, MAX_DELIVERY_ATTEMPTS, DELIVERY_RETRY_MS).await?;
+        published_any = true;
+    }
+
+    Ok(published_any)
+}
+
 fn drain_session_manager_message_events(rx: &Receiver<SessionManagerEvent>) -> Vec<nostr::Event> {
     let mut message_events = Vec::new();
 
@@ -228,37 +280,6 @@ fn drain_session_manager_message_events(rx: &Receiver<SessionManagerEvent>) -> V
     }
 
     message_events
-}
-
-async fn publish_events_with_retry(
-    client: &Client,
-    events: &[nostr::Event],
-    attempts: usize,
-    retry_ms: u64,
-) -> bool {
-    if events.is_empty() {
-        return false;
-    }
-
-    for attempt in 0..attempts {
-        let mut all_ok = true;
-        for ev in events {
-            if send_event_or_ignore(client, ev.clone()).await.is_err() {
-                all_ok = false;
-                break;
-            }
-        }
-
-        if all_ok {
-            return true;
-        }
-
-        if attempt + 1 < attempts {
-            tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
-        }
-    }
-
-    false
 }
 
 async fn fan_out_metadata(
@@ -282,6 +303,10 @@ async fn fan_out_metadata(
 
     let mut group_manager = build_group_manager(config, storage)?;
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    prepare_group_member_sessions(&group.members, &session_manager, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
@@ -317,7 +342,7 @@ async fn fan_out_metadata(
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
-    let _ = publish_events_with_retry(
+    let _ = send_events_with_retry(
         &client,
         &pairwise_events,
         MAX_DELIVERY_ATTEMPTS,
@@ -453,6 +478,10 @@ pub async fn create(
 
     let mut group_manager = build_group_manager(config, storage)?;
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    prepare_group_member_sessions(members, &session_manager, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
@@ -488,7 +517,7 @@ pub async fn create(
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
-    let _ = publish_events_with_retry(
+    let _ = send_events_with_retry(
         &client,
         &pairwise_events,
         MAX_DELIVERY_ATTEMPTS,
@@ -752,6 +781,10 @@ pub async fn send_message(
         .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
 
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    prepare_group_member_sessions(&group.data.members, &session_manager, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
@@ -794,14 +827,23 @@ pub async fn send_message(
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
-    let _ = publish_events_with_retry(
+    let _ = send_events_with_retry(
         &client,
         &pairwise_events,
         MAX_DELIVERY_ATTEMPTS,
         DELIVERY_RETRY_MS,
     )
     .await;
-    send_event_or_ignore(&client, sent.outer.clone()).await?;
+    if !pairwise_events.is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    send_event_with_retry(
+        &client,
+        sent.outer.clone(),
+        MAX_DELIVERY_ATTEMPTS,
+        DELIVERY_RETRY_MS,
+    )
+    .await?;
 
     // Store outgoing message using the outer event ID (stable across all recipients).
     let msg_id = sent.outer.id.to_hex();
@@ -869,6 +911,10 @@ pub async fn react(
         .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
 
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    prepare_group_member_sessions(&group.data.members, &session_manager, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
@@ -907,14 +953,23 @@ pub async fn react(
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
-    let _ = publish_events_with_retry(
+    let _ = send_events_with_retry(
         &client,
         &pairwise_events,
         MAX_DELIVERY_ATTEMPTS,
         DELIVERY_RETRY_MS,
     )
     .await;
-    send_event_or_ignore(&client, sent.outer).await?;
+    if !pairwise_events.is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    send_event_with_retry(
+        &client,
+        sent.outer,
+        MAX_DELIVERY_ATTEMPTS,
+        DELIVERY_RETRY_MS,
+    )
+    .await?;
 
     output.success(
         "group.react",
@@ -967,6 +1022,10 @@ pub async fn rotate_sender_key(
         .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
 
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    prepare_group_member_sessions(&group.data.members, &session_manager, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         my_owner_pubkey_hex: &my_owner_pubkey,
@@ -993,7 +1052,7 @@ pub async fn rotate_sender_key(
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
-    let _ = publish_events_with_retry(
+    let _ = send_events_with_retry(
         &client,
         &pairwise_events,
         MAX_DELIVERY_ATTEMPTS,

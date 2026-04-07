@@ -13,35 +13,114 @@ pnpm add nostr-double-ratchet
 - `Session`: low-level 1:1 ratchet session
 - `Invite`: handshake/bootstrap primitive
 - `SessionManager`: multi-device session orchestration and routing
+- `SessionGroupRuntime`: group transport bound to an existing `SessionManager`
 - `DelegateManager` / `AppKeysManager`: device lifecycle and owner authorization
+- `NdrRuntime`: high-level runtime that owns AppKeys, delegate/session state, and group transport
 - `Group`: sender-key group messaging helper (transport-agnostic)
 - `SharedChannel`: encrypted shared-channel primitive used by higher-level group bootstrap flows
 
-## Quick Start
+## Choose Your Layer
+
+- `Session`: use this when you already own invite/bootstrap, persistence, and relay transport.
+- `SessionManager`: use this when you want multi-device routing but still want to own app runtime wiring.
+- `SessionGroupRuntime`: use this when you already have a `SessionManager` and want the same group
+  transport surface as `NdrRuntime` without moving AppKeys/delegate/session ownership.
+- `NdrRuntime`: use this when you want the default high-level path for production apps. It owns
+  `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`.
+
+## Quick Start (`NdrRuntime`)
 
 ```typescript
-import { AppKeysManager, DelegateManager } from "nostr-double-ratchet"
+import { NdrRuntime } from "nostr-double-ratchet";
 
-// 1) Device identity
-const delegate = new DelegateManager({ nostrSubscribe, nostrPublish, storage })
-await delegate.init()
+const runtime = new NdrRuntime({
+  nostrSubscribe,
+  nostrPublish,
+  nostrFetch,
+  storage,
+});
 
-// 2) Owner-authorized device list (on owner-authority device)
-const appKeysManager = new AppKeysManager({ nostrPublish, storage })
-await appKeysManager.init()
-appKeysManager.addDevice(delegate.getRegistrationPayload())
-await appKeysManager.publish()
+await runtime.initForOwner(ownerPublicKey);
 
-// 3) Activate delegate and create SessionManager
-await delegate.activate(ownerPublicKey)
-const sessionManager = delegate.createSessionManager()
-await sessionManager.init()
+runtime.onSessionEvent((event, from) => {
+  console.log(`${from}: ${event.content}`);
+});
+runtime.onGroupEvent((event) => {
+  console.log(`group ${event.groupId}: ${event.inner.content}`);
+});
 
-// 4) Send and receive
-sessionManager.onEvent((event, from) => {
-  console.log(`${from}: ${event.content}`)
-})
-await sessionManager.sendMessage(recipientPubkey, "Hello!")
+const sessionManager = await runtime.waitForSessionManager(ownerPublicKey);
+const groupManager = await runtime.waitForGroupManager(ownerPublicKey);
+await sessionManager.sendMessage(recipientPubkey, "Hello!");
+
+const created = await runtime.createGroup("Friends", [recipientPubkey], {
+  fanoutMetadata: false,
+});
+await runtime.sendGroupMessage(created.group.id, "Hello group!");
+console.log(groupManager.managedGroupIds());
+```
+
+`NdrRuntime` does not own your relay client. It still relies on your `nostrSubscribe`,
+`nostrFetch`, and `nostrPublish` functions.
+
+### Runtime Group API
+
+If you want the high-level path, keep groups on `NdrRuntime` instead of building a parallel
+group transport layer:
+
+- `getGroupManager()` / `waitForGroupManager(ownerPubkey?)`
+- `onGroupEvent(...)`
+- `upsertGroup(...)`, `removeGroup(...)`, `syncGroups(...)`
+- `createGroup(...)`
+- `sendGroupEvent(...)`, `sendGroupMessage(...)`
+
+`GroupManager` is still available directly when you want to own more of the app wiring yourself.
+
+## Mid-Level Setup (`SessionGroupRuntime`)
+
+If your app already owns `SessionManager`, `SessionGroupRuntime` gives you the same group-focused
+API shape that `NdrRuntime` uses internally:
+
+```typescript
+import { SessionGroupRuntime } from "nostr-double-ratchet";
+
+const groups = new SessionGroupRuntime({
+  sessionManager,
+  ourOwnerPubkey: ownerPublicKey,
+  ourDevicePubkey: currentDevicePublicKey,
+  nostrSubscribe,
+  nostrPublish,
+  nostrFetch,
+});
+
+const created = await groups.createGroup("Friends", [recipientPubkey], {
+  fanoutMetadata: false,
+});
+await groups.sendGroupMessage(created.group.id, "Hello group!");
+
+groups.onGroupEvent((event) => {
+  console.log(event.groupId, event.inner.content);
+});
+```
+
+## Low-Level Setup (`SessionManager`)
+
+If you want multi-device sessions without the runtime wrapper, the lower-level flow remains:
+
+```typescript
+import { AppKeysManager, DelegateManager } from "nostr-double-ratchet";
+
+const delegate = new DelegateManager({ nostrSubscribe, nostrPublish, storage });
+await delegate.init();
+
+const appKeysManager = new AppKeysManager({ nostrPublish, storage });
+await appKeysManager.init();
+appKeysManager.addDevice(delegate.getRegistrationPayload());
+await appKeysManager.publish();
+
+await delegate.activate(ownerPublicKey);
+const sessionManager = delegate.createSessionManager();
+await sessionManager.init();
 ```
 
 ## Multi-Device Integration Contract
@@ -81,27 +160,27 @@ message authors trigger a short replay immediately:
 import {
   buildDirectMessageBackfillFilter,
   DirectMessageSubscriptionTracker,
-} from "nostr-double-ratchet"
+} from "nostr-double-ratchet";
 
-const tracker = new DirectMessageSubscriptionTracker()
+const tracker = new DirectMessageSubscriptionTracker();
 
 const trackedSubscribe = (filter, onEvent) => {
-  const { token, addedAuthors } = tracker.registerFilter(filter)
+  const { token, addedAuthors } = tracker.registerFilter(filter);
   if (addedAuthors.length) {
     const backfill = buildDirectMessageBackfillFilter(
       addedAuthors,
       Math.floor(Date.now() / 1000) - 15,
-      200
-    )
+      200,
+    );
     // Hand `backfill` to your relay fetch / short-lived subscription path.
   }
 
-  const unsubscribe = nostrSubscribe(filter, onEvent)
+  const unsubscribe = nostrSubscribe(filter, onEvent);
   return () => {
-    tracker.unregister(token)
-    unsubscribe()
-  }
-}
+    tracker.unregister(token);
+    unsubscribe();
+  };
+};
 ```
 
 ## Security Properties
@@ -139,18 +218,24 @@ const trackedSubscribe = (filter, onEvent) => {
 - Group messages are published once as one-to-many outer events (per sender device key).
 - Receiver attribution for group payloads is derived from authenticated distribution/session context, not inner rumor `pubkey`.
 - `createGroupData(...)` is a pure local constructor. `GroupManager.createGroup(...)` is the app-level helper that creates local group state and, by default, fans out metadata (kind 40) to members.
+- `NdrRuntime` now exposes the same high-level group path as Rust/FFI: `createGroup(...)`,
+  `sendGroupEvent(...)`, `sendGroupMessage(...)`, `syncGroups(...)`, and `onGroupEvent(...)`.
 
 ## Disappearing Messages (Expiration)
 
 Include NIP-40-style `["expiration", "<unix seconds>"]` on the inner rumor, or use helpers:
 
 ```typescript
-await sessionManager.sendMessage(recipientPubkey, "expires soon", { ttlSeconds: 60 })
-await sessionManager.setDefaultExpiration({ ttlSeconds: 60 })
-await sessionManager.setExpirationForPeer(recipientPubkey, { ttlSeconds: 120 })
-await sessionManager.setExpirationForGroup(groupId, { ttlSeconds: 30 })
-await sessionManager.setExpirationForPeer(recipientPubkey, null)
-await sessionManager.sendMessage(recipientPubkey, "persist", { expiration: null })
+await sessionManager.sendMessage(recipientPubkey, "expires soon", {
+  ttlSeconds: 60,
+});
+await sessionManager.setDefaultExpiration({ ttlSeconds: 60 });
+await sessionManager.setExpirationForPeer(recipientPubkey, { ttlSeconds: 120 });
+await sessionManager.setExpirationForGroup(groupId, { ttlSeconds: 30 });
+await sessionManager.setExpirationForPeer(recipientPubkey, null);
+await sessionManager.sendMessage(recipientPubkey, "persist", {
+  expiration: null,
+});
 ```
 
 The library does not purge local storage for you. Clients should enforce retention/UI behavior.
@@ -164,25 +249,25 @@ Encrypted settings rumor kind:
 - Settings events themselves do not expire
 
 ```ts
-await sessionManager.setChatSettingsForPeer(recipientPubkey, 60)
-await sessionManager.setChatSettingsForPeer(recipientPubkey, 0)
-sessionManager.setAutoAdoptChatSettings(false)
+await sessionManager.setChatSettingsForPeer(recipientPubkey, 60);
+await sessionManager.setChatSettingsForPeer(recipientPubkey, 0);
+sessionManager.setAutoAdoptChatSettings(false);
 ```
 
 ## Event Kinds
 
-| Kind | Constant | Purpose |
-|------|----------|---------|
-| 1060 | `MESSAGE_EVENT_KIND` | Encrypted outer event |
-| 30078 | `INVITE_EVENT_KIND` / `APP_KEYS_EVENT_KIND` | Device invite and AppKeys records |
-| 1059 | `INVITE_RESPONSE_KIND` | Encrypted invite response |
-| 14 | `CHAT_MESSAGE_KIND` | Inner chat message rumor |
-| 10448 | `CHAT_SETTINGS_KIND` | Inner chat-settings rumor |
-| 40 | `GROUP_METADATA_KIND` | Group metadata rumor |
-| 10445 | `GROUP_INVITE_RUMOR_KIND` | Group bootstrap invite rumor |
-| 10446 | `GROUP_SENDER_KEY_DISTRIBUTION_KIND` | Group sender-key distribution rumor |
-| 10447 | `GROUP_SENDER_KEY_MESSAGE_KIND` | Group sender-key message rumor kind constant |
-| 4 | `SHARED_CHANNEL_KIND` | Shared-channel transport event kind |
+| Kind  | Constant                                    | Purpose                                      |
+| ----- | ------------------------------------------- | -------------------------------------------- |
+| 1060  | `MESSAGE_EVENT_KIND`                        | Encrypted outer event                        |
+| 30078 | `INVITE_EVENT_KIND` / `APP_KEYS_EVENT_KIND` | Device invite and AppKeys records            |
+| 1059  | `INVITE_RESPONSE_KIND`                      | Encrypted invite response                    |
+| 14    | `CHAT_MESSAGE_KIND`                         | Inner chat message rumor                     |
+| 10448 | `CHAT_SETTINGS_KIND`                        | Inner chat-settings rumor                    |
+| 40    | `GROUP_METADATA_KIND`                       | Group metadata rumor                         |
+| 10445 | `GROUP_INVITE_RUMOR_KIND`                   | Group bootstrap invite rumor                 |
+| 10446 | `GROUP_SENDER_KEY_DISTRIBUTION_KIND`        | Group sender-key distribution rumor          |
+| 10447 | `GROUP_SENDER_KEY_MESSAGE_KIND`             | Group sender-key message rumor kind constant |
+| 4     | `SHARED_CHANNEL_KIND`                       | Shared-channel transport event kind          |
 
 ## Scalability And Tradeoffs
 

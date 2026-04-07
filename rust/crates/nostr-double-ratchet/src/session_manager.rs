@@ -34,6 +34,13 @@ pub struct AcceptInviteResult {
     pub created_new_session: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagePushSessionStateSnapshot {
+    pub state: crate::SessionState,
+    pub tracked_sender_pubkeys: Vec<PublicKey>,
+    pub has_receiving_capability: bool,
+}
+
 struct InviteState {
     invite: Invite,
     our_identity_key: [u8; 32],
@@ -134,9 +141,64 @@ pub struct SessionManager {
 
 impl SessionManager {
     fn session_can_receive(session: &crate::Session) -> bool {
-        session.state.receiving_chain_key.is_some()
-            || session.state.their_current_nostr_public_key.is_some()
-            || session.state.receiving_chain_message_number > 0
+        Self::session_state_can_receive(&session.state)
+    }
+
+    fn session_state_can_receive(state: &crate::SessionState) -> bool {
+        state.receiving_chain_key.is_some()
+            || state.their_current_nostr_public_key.is_some()
+            || state.receiving_chain_message_number > 0
+    }
+
+    fn session_state_tracked_sender_pubkeys(state: &crate::SessionState) -> Vec<PublicKey> {
+        let mut pubkeys = HashSet::new();
+        if let Some(pubkey) = state.their_current_nostr_public_key {
+            pubkeys.insert(pubkey);
+        }
+        if let Some(pubkey) = state.their_next_nostr_public_key {
+            pubkeys.insert(pubkey);
+        }
+
+        let mut pubkeys: Vec<PublicKey> = pubkeys.into_iter().collect();
+        pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
+        pubkeys
+    }
+
+    fn message_push_session_snapshots(
+        user_record: &UserRecord,
+    ) -> Vec<MessagePushSessionStateSnapshot> {
+        let mut snapshots = Vec::new();
+        let mut seen_states = HashSet::new();
+
+        for device in user_record.device_records.values() {
+            for session in device
+                .active_session
+                .iter()
+                .chain(device.inactive_sessions.iter())
+            {
+                let state = session.state.clone();
+                let Ok(state_json) = serde_json::to_string(&state) else {
+                    continue;
+                };
+                if !seen_states.insert(state_json) {
+                    continue;
+                }
+
+                snapshots.push(MessagePushSessionStateSnapshot {
+                    tracked_sender_pubkeys: Self::session_state_tracked_sender_pubkeys(&state),
+                    has_receiving_capability: Self::session_state_can_receive(&state),
+                    state,
+                });
+            }
+        }
+
+        snapshots
+            .sort_by_key(|snapshot| serde_json::to_string(&snapshot.state).unwrap_or_default());
+        snapshots
+    }
+
+    fn stored_user_record_json(user_record: &UserRecord) -> Result<String> {
+        Ok(serde_json::to_string(&user_record.to_stored())?)
     }
 
     fn with_user_records<R: Send + 'static>(
@@ -638,8 +700,87 @@ impl SessionManager {
         &self.device_id
     }
 
+    pub fn current_device_invite_response_pubkey(&self) -> Option<PublicKey> {
+        self.invite_state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|state| state.invite.inviter_ephemeral_public_key)
+    }
+
     pub fn get_user_pubkeys(&self) -> Vec<PublicKey> {
         self.with_user_records(|records| records.keys().copied().collect())
+    }
+
+    pub fn known_peer_owner_pubkeys(&self) -> Vec<PublicKey> {
+        let owner_public_key = self.owner_public_key;
+        let mut pubkeys = self.with_user_records(move |records| {
+            records
+                .keys()
+                .copied()
+                .filter(|pubkey| *pubkey != owner_public_key)
+                .collect::<HashSet<_>>()
+        });
+
+        if let Ok(stored_keys) = self.storage.list(&self.user_record_key_prefix()) {
+            let prefix = self.user_record_key_prefix();
+            for key in stored_keys {
+                let Some(pubkey_hex) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let Ok(pubkey) = crate::utils::pubkey_from_hex(pubkey_hex) else {
+                    continue;
+                };
+                if pubkey != owner_public_key {
+                    pubkeys.insert(pubkey);
+                }
+            }
+        }
+
+        let mut pubkeys: Vec<PublicKey> = pubkeys.into_iter().collect();
+        pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
+        pubkeys
+    }
+
+    pub fn get_stored_user_record_json(
+        &self,
+        peer_owner_pubkey: PublicKey,
+    ) -> Result<Option<String>> {
+        if let Some(json) = self.with_user_records(move |records| {
+            records
+                .get(&peer_owner_pubkey)
+                .map(Self::stored_user_record_json)
+                .transpose()
+        })? {
+            return Ok(Some(json));
+        }
+
+        let key = self.user_record_key(&peer_owner_pubkey);
+        Ok(self.storage.get(&key)?)
+    }
+
+    pub fn get_message_push_author_pubkeys(&self, peer_owner_pubkey: PublicKey) -> Vec<PublicKey> {
+        let mut pubkeys: Vec<PublicKey> = self
+            .get_message_push_session_states(peer_owner_pubkey)
+            .into_iter()
+            .flat_map(|snapshot| snapshot.tracked_sender_pubkeys)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
+        pubkeys
+    }
+
+    pub fn get_message_push_session_states(
+        &self,
+        peer_owner_pubkey: PublicKey,
+    ) -> Vec<MessagePushSessionStateSnapshot> {
+        self.with_user_records(move |records| {
+            records
+                .get(&peer_owner_pubkey)
+                .map(Self::message_push_session_snapshots)
+                .unwrap_or_default()
+        })
     }
 
     pub fn get_total_sessions(&self) -> usize {
@@ -1270,8 +1411,9 @@ impl SessionManager {
                     user_record
                         .device_records
                         .get_mut(&device_id)
-                        .and_then(|device_record| device_record.active_session.as_mut())
-                        .and_then(|session| session.send_event(event).ok())
+                        .and_then(|device_record| {
+                            SessionManager::send_event_with_best_session(device_record, event)
+                        })
                 }
             });
 
@@ -2145,13 +2287,7 @@ impl SessionManager {
                 continue;
             }
 
-            let installed = self.install_invite_response_session(event.id.to_string(), response);
-            eprintln!(
-                "[sm] retry_pending_invite_response event={} owner={} installed={}",
-                event.id,
-                owner_pubkey.to_hex(),
-                installed
-            );
+            let _ = self.install_invite_response_session(event.id.to_string(), response);
         }
     }
 
@@ -2296,14 +2432,13 @@ impl SessionManager {
                 else {
                     return Vec::new();
                 };
-                let Some(session) = device_record.active_session.as_mut() else {
-                    return Vec::new();
-                };
 
                 let mut pending = Vec::new();
                 for entry in entries {
                     let maybe_event_id = entry.event.id.as_ref().map(|id| id.to_string());
-                    if let Ok(signed_event) = session.send_event(entry.event) {
+                    if let Some(signed_event) =
+                        SessionManager::send_event_with_best_session(device_record, entry.event)
+                    {
                         pending.push((entry.id, maybe_event_id, signed_event));
                     }
                 }
@@ -2388,14 +2523,15 @@ impl SessionManager {
                 let Some(device_record) = user_record.device_records.get_mut(&device_id) else {
                     return Vec::new();
                 };
-                let Some(session) = device_record.active_session.as_mut() else {
-                    return Vec::new();
-                };
-
-                history
-                    .into_iter()
-                    .filter_map(|event| session.send_event(event).ok())
-                    .collect::<Vec<_>>()
+                let mut signed = Vec::new();
+                for event in history {
+                    if let Some(signed_event) =
+                        SessionManager::send_event_with_best_session(device_record, event)
+                    {
+                        signed.push(signed_event);
+                    }
+                }
+                signed
             }
         });
 
@@ -2486,10 +2622,16 @@ impl SessionManager {
                 let Some(device_record) = user_record.device_records.get_mut(&device_id) else {
                     return Vec::new();
                 };
-                let Some(session) = device_record.active_session.as_mut() else {
-                    return Vec::new();
-                };
-                SessionManager::sign_bootstrap_schedule(session, &bootstrap_messages)
+                let mut signed = Vec::new();
+                for bootstrap in bootstrap_messages {
+                    let Some(signed_bootstrap) =
+                        SessionManager::send_event_with_best_session(device_record, bootstrap)
+                    else {
+                        break;
+                    };
+                    signed.push(signed_bootstrap);
+                }
+                signed
             }
         });
 
@@ -2718,6 +2860,13 @@ impl SessionManager {
             return;
         };
 
+        SessionManager::promote_device_record_session_to_active(device_record, session_index);
+    }
+
+    fn promote_device_record_session_to_active(
+        device_record: &mut crate::DeviceRecord,
+        session_index: usize,
+    ) {
         if session_index >= device_record.inactive_sessions.len() {
             return;
         }
@@ -2732,6 +2881,31 @@ impl SessionManager {
         if device_record.inactive_sessions.len() > MAX_INACTIVE {
             device_record.inactive_sessions.truncate(MAX_INACTIVE);
         }
+    }
+
+    fn send_event_with_best_session(
+        device_record: &mut crate::DeviceRecord,
+        event: UnsignedEvent,
+    ) -> Option<nostr::Event> {
+        if let Some(ref mut session) = device_record.active_session {
+            if let Ok(signed_event) = session.send_event(event.clone()) {
+                return Some(signed_event);
+            }
+        }
+
+        for idx in 0..device_record.inactive_sessions.len() {
+            let signed_event = {
+                let session = &mut device_record.inactive_sessions[idx];
+                session.send_event(event.clone()).ok()
+            };
+
+            if let Some(signed_event) = signed_event {
+                SessionManager::promote_device_record_session_to_active(device_record, idx);
+                return Some(signed_event);
+            }
+        }
+
+        None
     }
 
     pub fn process_received_event(&self, event: nostr::Event) {
@@ -3052,6 +3226,112 @@ mod tests {
 
         let history = manager.message_history.lock().unwrap();
         assert!(history.is_empty());
+    }
+
+    #[test]
+    fn send_uses_send_capable_inactive_session_when_active_session_cannot_send() {
+        let alice_keys = Keys::generate();
+        let alice_pubkey = alice_keys.public_key();
+        let alice_device_id = alice_pubkey.to_hex();
+        let bob_keys = Keys::generate();
+        let bob_pubkey = bob_keys.public_key();
+        let bob_device_id = bob_pubkey.to_hex();
+
+        // Alice-created invite leaves Alice with a receive-first session after Bob accepts.
+        let alice_invite =
+            Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None).unwrap();
+        let (_bob_from_alice, alice_response) = alice_invite
+            .accept_with_owner(
+                bob_pubkey,
+                bob_keys.secret_key().to_secret_bytes(),
+                Some(bob_device_id.clone()),
+                Some(bob_pubkey),
+            )
+            .unwrap();
+        let alice_receive_only = alice_invite
+            .process_invite_response(&alice_response, alice_keys.secret_key().to_secret_bytes())
+            .unwrap()
+            .unwrap()
+            .session;
+        assert!(!alice_receive_only.can_send());
+
+        // Bob-created invite leaves Alice with a send-capable session after Alice accepts.
+        let bob_invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None).unwrap();
+        let (alice_send_capable, _bob_response) = bob_invite
+            .accept_with_owner(
+                alice_pubkey,
+                alice_keys.secret_key().to_secret_bytes(),
+                Some(alice_device_id.clone()),
+                Some(alice_pubkey),
+            )
+            .unwrap();
+        assert!(alice_send_capable.can_send());
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            alice_pubkey,
+            alice_keys.secret_key().to_secret_bytes(),
+            alice_device_id,
+            alice_pubkey,
+            tx,
+            None,
+            None,
+        );
+
+        manager.with_user_records({
+            let bob_device_id = bob_device_id.clone();
+            move |records| {
+                let user_record = records
+                    .entry(bob_pubkey)
+                    .or_insert_with(|| UserRecord::new(hex::encode(bob_pubkey.to_bytes())));
+                user_record.device_records.insert(
+                    bob_device_id.clone(),
+                    crate::DeviceRecord {
+                        device_id: bob_device_id,
+                        public_key: String::new(),
+                        active_session: Some(alice_receive_only),
+                        inactive_sessions: vec![alice_send_capable],
+                        created_at: 0,
+                        is_stale: false,
+                        stale_timestamp: None,
+                        last_activity: Some(0),
+                    },
+                );
+            }
+        });
+
+        let (_inner_id, published_ids) = manager
+            .send_text_with_inner_id(bob_pubkey, "fallback inactive".to_string(), None)
+            .unwrap();
+        assert_eq!(published_ids.len(), 1);
+
+        let events = drain_events(&rx);
+        assert!(
+            events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    SessionManagerEvent::PublishSigned(event)
+                        if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+                )
+            }),
+            "expected send to publish using promoted inactive session"
+        );
+
+        let (active_can_send, inactive_len) = manager.with_user_records(move |records| {
+            let device_record = records
+                .get(&bob_pubkey)
+                .and_then(|record| record.device_records.get(&bob_device_id))
+                .expect("device record");
+            (
+                device_record
+                    .active_session
+                    .as_ref()
+                    .is_some_and(|session| session.can_send()),
+                device_record.inactive_sessions.len(),
+            )
+        });
+        assert!(active_can_send);
+        assert_eq!(inactive_len, 1);
     }
 
     #[test]

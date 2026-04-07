@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
-    group::GroupData, FileStorageAdapter, GroupDecryptedEvent, NdrRuntime,
-    Session, SessionManager, SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND,
-    CHAT_SETTINGS_KIND, GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+    group::GroupData, FileStorageAdapter, GroupDecryptedEvent, NdrRuntime, Session, SessionManager,
+    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND,
+    GROUP_METADATA_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
 };
 
 use crate::commands::owner_claim::{
@@ -19,9 +19,7 @@ use crate::state_sync::{
     apply_chat_settings, apply_group_metadata, extract_control_stamp_from_value,
     select_canonical_session, GroupMetadataApplyOutcome,
 };
-use crate::storage::{
-    Storage, StoredChat, StoredGroupMessage, StoredMessage, StoredReaction,
-};
+use crate::storage::{Storage, StoredChat, StoredGroupMessage, StoredMessage, StoredReaction};
 
 use super::common::{
     collect_chat_pubkeys, extract_e_tag, extract_e_tags, extract_expiration_tag_seconds,
@@ -370,6 +368,7 @@ async fn backfill_recent_pairwise_session_messages(
     config: &Config,
     storage: &Storage,
     output: &Output,
+    subscribed_group_sender_pubkeys: &mut std::collections::HashSet<String>,
     subscribed_manager_filters: &mut std::collections::HashSet<String>,
     pending_events: &mut std::collections::HashMap<String, nostr::Event>,
     pending_order: &mut std::collections::VecDeque<String>,
@@ -422,11 +421,30 @@ async fn backfill_recent_pairwise_session_messages(
             subscribed_manager_filters,
         )
         .await?;
+        let handled_group_routed = apply_session_group_decrypts(
+            &session_manager_result.session_group_decrypts,
+            None,
+            runtime,
+            client,
+            relays,
+            config,
+            storage,
+            output,
+            subscribed_group_sender_pubkeys,
+            seen_event_ids,
+            seen_event_ids_order,
+        )
+        .await?;
         if session_manager_result.handled_any && !session_manager_result.current_event_group_routed
         {
             handled_any = true;
         }
-        if session_manager_result.handled_current {
+        if handled_group_routed {
+            handled_any = true;
+        }
+        if session_manager_result.handled_current
+            || session_manager_result.current_event_group_routed
+        {
             continue;
         }
 
@@ -452,8 +470,11 @@ async fn backfill_recent_pairwise_session_messages(
         config,
         storage,
         output,
+        subscribed_group_sender_pubkeys,
         subscribed_manager_filters,
         owner_pubkey_hex,
+        seen_event_ids,
+        seen_event_ids_order,
     )
     .await?;
 
@@ -473,6 +494,244 @@ fn accepted_runtime_groups(storage: &Storage) -> Result<Vec<GroupData>> {
 
 fn sync_runtime_groups(runtime: &NdrRuntime, storage: &Storage) -> Result<()> {
     Ok(runtime.sync_groups(accepted_runtime_groups(storage)?)?)
+}
+
+fn refresh_runtime_state_from_storage(
+    runtime: &NdrRuntime,
+    session_manager: &SessionManager,
+    storage: &Storage,
+    owner_pubkey_hex: &str,
+) -> Result<()> {
+    import_chats_into_session_manager(storage, session_manager, owner_pubkey_hex)?;
+    sync_chats_from_session_manager(storage, session_manager, owner_pubkey_hex)?;
+    sync_runtime_groups(runtime, storage)?;
+    Ok(())
+}
+
+async fn apply_session_group_decrypts(
+    session_group_decrypts: &[SessionGroupDecrypt],
+    skip_event_id: Option<&str>,
+    runtime: &NdrRuntime,
+    client: &nostr_sdk::Client,
+    relays: &[String],
+    config: &Config,
+    storage: &Storage,
+    output: &Output,
+    subscribed_group_sender_pubkeys: &mut std::collections::HashSet<String>,
+    seen_event_ids: &mut std::collections::HashSet<String>,
+    seen_event_ids_order: &mut std::collections::VecDeque<String>,
+) -> Result<bool> {
+    use nostr_double_ratchet::GROUP_SENDER_KEY_DISTRIBUTION_KIND;
+
+    let mut handled_any = false;
+
+    for (
+        sender_owner_pubkey,
+        sender_device_pubkey,
+        content_json,
+        group_event_id,
+        group_timestamp,
+    ) in session_group_decrypts
+    {
+        if skip_event_id.is_some_and(|skip| group_event_id.as_deref() == Some(skip)) {
+            continue;
+        }
+
+        let decrypted_event: serde_json::Value = match serde_json::from_str(content_json) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let Some(gid) = extract_group_id_tag(&decrypted_event) else {
+            continue;
+        };
+        let rumor_kind = decrypted_event["kind"]
+            .as_u64()
+            .unwrap_or(CHAT_MESSAGE_KIND as u64) as u32;
+        let content = decrypted_event["content"]
+            .as_str()
+            .unwrap_or(content_json)
+            .to_string();
+        let from_pubkey_hex = sender_owner_pubkey.to_hex();
+        let timestamp = *group_timestamp;
+
+        if rumor_kind == GROUP_METADATA_KIND {
+            if let Some(metadata) = nostr_double_ratchet::group::parse_group_metadata(&content) {
+                let my_owner_pubkey = config.owner_public_key_hex()?;
+                if let Some(stamp) = extract_control_stamp_from_value(
+                    &decrypted_event,
+                    group_event_id.as_deref(),
+                    timestamp,
+                ) {
+                    match apply_group_metadata(
+                        storage,
+                        &gid,
+                        &from_pubkey_hex,
+                        metadata,
+                        stamp,
+                        timestamp * 1000,
+                        &my_owner_pubkey,
+                    )? {
+                        GroupMetadataApplyOutcome::Updated { group: updated, .. } => {
+                            output.event(
+                                "group_metadata",
+                                serde_json::json!({
+                                    "group_id": gid,
+                                    "action": "updated",
+                                    "sender_pubkey": from_pubkey_hex,
+                                    "name": updated.name,
+                                    "members": updated.members,
+                                    "admins": updated.admins,
+                                }),
+                            );
+                        }
+                        GroupMetadataApplyOutcome::Removed => {
+                            output.event(
+                                "group_metadata",
+                                serde_json::json!({
+                                    "group_id": gid,
+                                    "action": "removed",
+                                    "sender_pubkey": from_pubkey_hex,
+                                }),
+                            );
+                        }
+                        GroupMetadataApplyOutcome::Created(group_data) => {
+                            output.event(
+                                "group_metadata",
+                                serde_json::json!({
+                                    "group_id": gid,
+                                    "action": "created",
+                                    "sender_pubkey": from_pubkey_hex,
+                                    "name": group_data.name,
+                                    "members": group_data.members,
+                                    "admins": group_data.admins,
+                                }),
+                            );
+                        }
+                        GroupMetadataApplyOutcome::Ignored
+                        | GroupMetadataApplyOutcome::Rejected => {}
+                    }
+                    sync_runtime_groups(runtime, storage)?;
+                }
+            }
+            handled_any = true;
+            continue;
+        }
+
+        if rumor_kind == GROUP_SENDER_KEY_DISTRIBUTION_KIND {
+            let dist =
+                match serde_json::from_str::<nostr_double_ratchet::SenderKeyDistribution>(&content)
+                {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+            if dist.group_id != gid {
+                continue;
+            }
+
+            let sender_device_pubkey = sender_device_pubkey.unwrap_or(*sender_owner_pubkey);
+            let sender_device_pubkey_hex = sender_device_pubkey.to_hex();
+
+            sync_runtime_groups(runtime, storage)?;
+            let runtime_event = match serde_json::from_str::<nostr::UnsignedEvent>(content_json) {
+                Ok(event) => event,
+                Err(_) => continue,
+            };
+            let drained = runtime.group_handle_incoming_session_event(
+                &runtime_event,
+                *sender_owner_pubkey,
+                Some(sender_device_pubkey),
+            );
+            for decrypted in drained {
+                apply_runtime_group_event(&decrypted, storage, output)?;
+            }
+            *subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
+                runtime,
+                client,
+                relays,
+                storage,
+                output,
+                seen_event_ids,
+                seen_event_ids_order,
+            )
+            .await?;
+
+            output.event(
+                "group_sender_key",
+                serde_json::json!({
+                    "group_id": gid,
+                    "sender_pubkey": from_pubkey_hex,
+                    "sender_device_pubkey": sender_device_pubkey_hex,
+                    "key_id": dist.key_id,
+                    "iteration": dist.iteration,
+                    "sender_event_pubkey": dist.sender_event_pubkey,
+                    "transport": "session",
+                }),
+            );
+            handled_any = true;
+            continue;
+        }
+
+        if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
+            let now_seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let expires_at = extract_expiration_tag_seconds(&decrypted_event);
+            if is_expired(expires_at, now_seconds) {
+                continue;
+            }
+            let msg_id = fallback_event_id(group_event_id.as_deref(), &decrypted_event);
+            storage.save_group_message(&StoredGroupMessage {
+                id: msg_id.clone(),
+                group_id: gid.clone(),
+                sender_pubkey: from_pubkey_hex.clone(),
+                content: content.clone(),
+                timestamp,
+                is_outgoing: false,
+                expires_at,
+            })?;
+            output.event(
+                "group_message",
+                serde_json::json!({
+                    "group_id": gid,
+                    "message_id": msg_id,
+                    "sender_pubkey": from_pubkey_hex,
+                    "content": content,
+                    "timestamp": timestamp,
+                }),
+            );
+            handled_any = true;
+            continue;
+        }
+
+        if rumor_kind == REACTION_KIND {
+            output.event(
+                "group_reaction",
+                serde_json::json!({
+                    "group_id": gid,
+                    "sender_pubkey": from_pubkey_hex,
+                    "message_id": extract_e_tag(&decrypted_event),
+                    "emoji": content,
+                    "timestamp": timestamp,
+                }),
+            );
+            handled_any = true;
+            continue;
+        }
+
+        if rumor_kind == TYPING_KIND {
+            output.event(
+                "group_typing",
+                serde_json::json!({
+                    "group_id": gid,
+                    "sender_pubkey": from_pubkey_hex,
+                    "timestamp": timestamp,
+                }),
+            );
+            handled_any = true;
+        }
+    }
+
+    Ok(handled_any)
 }
 
 fn apply_runtime_group_event(
@@ -575,7 +834,9 @@ async fn backfill_recent_group_sender_events(
         .since(nostr::Timestamp::from(now.saturating_sub(3600)));
     let mut events =
         fetch_events_best_effort(client, relays, filter, std::time::Duration::from_secs(3)).await?;
-    events.sort_by_key(|event| (event.created_at.as_u64(), event.id.to_hex()));
+    // Preserve relay order for same-second events. Sender-key messages are sequential, and
+    // tie-breaking by event id can reorder a warmup/distribution follow-up pair.
+    events.sort_by_key(|event| event.created_at.as_u64());
 
     for event in events {
         let event_id = event.id.to_hex();
@@ -824,8 +1085,11 @@ async fn retry_pending_session_manager_message_events(
     config: &Config,
     storage: &Storage,
     output: &Output,
+    subscribed_group_sender_pubkeys: &mut std::collections::HashSet<String>,
     subscribed_manager_filters: &mut std::collections::HashSet<String>,
     owner_pubkey_hex: &str,
+    seen_event_ids: &mut std::collections::HashSet<String>,
+    seen_event_ids_order: &mut std::collections::VecDeque<String>,
 ) -> Result<()> {
     if pending_events.is_empty() {
         return Ok(());
@@ -839,6 +1103,7 @@ async fn retry_pending_session_manager_message_events(
         let Some(event) = pending_events.get(&pending_id).cloned() else {
             continue;
         };
+        let relays = config.resolved_relays();
 
         let result = process_session_manager_event(
             &event,
@@ -850,11 +1115,28 @@ async fn retry_pending_session_manager_message_events(
             subscribed_manager_filters,
         )
         .await?;
+        let handled_group_routed = apply_session_group_decrypts(
+            &result.session_group_decrypts,
+            None,
+            runtime,
+            client,
+            &relays,
+            config,
+            storage,
+            output,
+            subscribed_group_sender_pubkeys,
+            seen_event_ids,
+            seen_event_ids_order,
+        )
+        .await?;
 
         if result.handled_any && !result.current_event_group_routed {
             handled_any = true;
         }
-        if result.handled_current {
+        if handled_group_routed {
+            handled_any = true;
+        }
+        if result.handled_current || result.current_event_group_routed {
             handled_ids.push(pending_id);
         }
     }
@@ -1119,8 +1401,7 @@ pub async fn listen(
     // Clean up stale discovery queue entries (older than 24 hours).
     let _ = session_manager.cleanup_discovery_queue(24 * 60 * 60 * 1000);
 
-    import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-    sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+    refresh_runtime_state_from_storage(&runtime, &session_manager, storage, &owner_pubkey_hex)?;
     let our_private_key = config.private_key_bytes()?;
 
     // Prepare client (don't connect until we have something to subscribe to)
@@ -1294,12 +1575,7 @@ pub async fn listen(
         mut subscribed_channel_pubkeys,
         mut subscribed_group_sender_pubkeys,
         mut subscribed_peer_app_keys_pubkeys,
-    ) = build_filters(
-        storage,
-        chat_id,
-        &channel_map,
-        since_timestamp,
-    )?;
+    ) = build_filters(storage, chat_id, &channel_map, since_timestamp)?;
     let mut last_refresh = Instant::now();
     let mut last_peer_app_keys_refresh =
         Instant::now() - Duration::from_millis(PEER_APP_KEYS_REFRESH_INTERVAL_MS);
@@ -1414,8 +1690,11 @@ pub async fn listen(
             &config,
             storage,
             output,
+            &mut subscribed_group_sender_pubkeys,
             &mut subscribed_manager_filters,
             &owner_pubkey_hex,
+            &mut seen_event_ids,
+            &mut seen_event_ids_order,
         )
         .await?;
         backfill_recent_pairwise_session_messages(
@@ -1427,6 +1706,7 @@ pub async fn listen(
             &config,
             storage,
             output,
+            &mut subscribed_group_sender_pubkeys,
             &mut subscribed_manager_filters,
             &mut pending_session_manager_message_events,
             &mut pending_session_manager_message_event_order,
@@ -1446,9 +1726,7 @@ pub async fn listen(
         // Drain fs events to avoid unbounded queue growth.
         while let Ok(()) = fs_rx.try_recv() {}
 
-        import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-        sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-        sync_runtime_groups(&runtime, storage)?;
+        refresh_runtime_state_from_storage(&runtime, &session_manager, storage, &owner_pubkey_hex)?;
         channel_map = build_channel_map(storage)?;
         let (
             new_filters,
@@ -1511,8 +1789,11 @@ pub async fn listen(
                 &config,
                 storage,
                 output,
+                &mut subscribed_group_sender_pubkeys,
                 &mut subscribed_manager_filters,
                 &owner_pubkey_hex,
+                &mut seen_event_ids,
+                &mut seen_event_ids_order,
             )
             .await?;
             backfill_recent_pairwise_session_messages(
@@ -1524,6 +1805,7 @@ pub async fn listen(
                 &config,
                 storage,
                 output,
+                &mut subscribed_group_sender_pubkeys,
                 &mut subscribed_manager_filters,
                 &mut pending_session_manager_message_events,
                 &mut pending_session_manager_message_event_order,
@@ -1579,8 +1861,11 @@ pub async fn listen(
                     &config,
                     storage,
                     output,
+                    &mut subscribed_group_sender_pubkeys,
                     &mut subscribed_manager_filters,
                     &owner_pubkey_hex,
+                    &mut seen_event_ids,
+                    &mut seen_event_ids_order,
                 )
                 .await?;
             }
@@ -1632,6 +1917,7 @@ pub async fn listen(
                     &config,
                     storage,
                     output,
+                    &mut subscribed_group_sender_pubkeys,
                     &mut subscribed_manager_filters,
                     &mut pending_session_manager_message_events,
                     &mut pending_session_manager_message_event_order,
@@ -1658,6 +1944,12 @@ pub async fn listen(
         };
 
         if let RelayPoolNotification::Event { event, .. } = notification {
+            refresh_runtime_state_from_storage(
+                &runtime,
+                &session_manager,
+                storage,
+                &owner_pubkey_hex,
+            )?;
             let current_event_id = event.id.to_hex();
             if seen_event_ids.contains(&current_event_id) {
                 continue;
@@ -1699,8 +1991,11 @@ pub async fn listen(
                     &config,
                     storage,
                     output,
+                    &mut subscribed_group_sender_pubkeys,
                     &mut subscribed_manager_filters,
                     &owner_pubkey_hex,
+                    &mut seen_event_ids,
+                    &mut seen_event_ids_order,
                 )
                 .await?;
             }
@@ -1894,8 +2189,11 @@ pub async fn listen(
                                 &config,
                                 storage,
                                 output,
+                                &mut subscribed_group_sender_pubkeys,
                                 &mut subscribed_manager_filters,
                                 &owner_pubkey_hex,
+                                &mut seen_event_ids,
+                                &mut seen_event_ids_order,
                             )
                             .await?;
                             storage.delete_invite(&stored_invite.id)?;
@@ -2240,7 +2538,7 @@ pub async fn listen(
                                         let my_owner_pubkey = config.owner_public_key_hex()?;
                                         let stamp = extract_control_stamp_from_value(
                                             &decrypted_event,
-                                            None,
+                                            Some(&event.id.to_hex()),
                                             timestamp,
                                         );
 
@@ -2342,13 +2640,13 @@ pub async fn listen(
                                     let sender_device_pubkey_hex = sender_device_pubkey.to_hex();
 
                                     sync_runtime_groups(&runtime, storage)?;
-                                    let runtime_event = match serde_json::from_str::<
-                                        nostr::UnsignedEvent,
-                                    >(&decrypted_event_json)
-                                    {
-                                        Ok(event) => event,
-                                        Err(_) => continue,
-                                    };
+                                    let runtime_event =
+                                        match serde_json::from_str::<nostr::UnsignedEvent>(
+                                            &decrypted_event_json,
+                                        ) {
+                                            Ok(event) => event,
+                                            Err(_) => continue,
+                                        };
                                     let drained = runtime.group_handle_incoming_session_event(
                                         &runtime_event,
                                         from_owner_pubkey,
@@ -2357,16 +2655,17 @@ pub async fn listen(
                                     for decrypted in drained {
                                         apply_runtime_group_event(&decrypted, storage, output)?;
                                     }
-                                    subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
-                                        &runtime,
-                                        &client,
-                                        &relays,
-                                        storage,
-                                        output,
-                                        &mut seen_event_ids,
-                                        &mut seen_event_ids_order,
-                                    )
-                                    .await?;
+                                    subscribed_group_sender_pubkeys =
+                                        sync_group_outer_subscriptions(
+                                            &runtime,
+                                            &client,
+                                            &relays,
+                                            storage,
+                                            output,
+                                            &mut seen_event_ids,
+                                            &mut seen_event_ids_order,
+                                        )
+                                        .await?;
 
                                     // Retry any pending SharedChannel messages for this (group,sender,key_id).
                                     let pending_key = (
@@ -2712,214 +3011,26 @@ pub async fn listen(
                     }
                 }
 
-                if !session_group_decrypts.is_empty() {
-                    for (
-                        sender_owner_pubkey,
-                        sender_device_pubkey,
-                        content_json,
-                        group_event_id,
-                        group_timestamp,
-                    ) in &session_group_decrypts
-                    {
-                        if decrypted_current_event
-                            && group_event_id.as_deref() == Some(current_event_id.as_str())
-                        {
-                            continue;
-                        }
-                        let decrypted_event: serde_json::Value =
-                            match serde_json::from_str(content_json) {
-                                Ok(v) => v,
-                                Err(_) => continue,
-                            };
-                        let Some(gid) = extract_group_id_tag(&decrypted_event) else {
-                            continue;
-                        };
-                        let rumor_kind = decrypted_event["kind"]
-                            .as_u64()
-                            .unwrap_or(CHAT_MESSAGE_KIND as u64)
-                            as u32;
-                        let content = decrypted_event["content"]
-                            .as_str()
-                            .unwrap_or(content_json)
-                            .to_string();
-                        let from_pubkey_hex = sender_owner_pubkey.to_hex();
-                        let timestamp = *group_timestamp;
-
-                        if rumor_kind == GROUP_METADATA_KIND {
-                            if let Some(metadata) =
-                                nostr_double_ratchet::group::parse_group_metadata(&content)
-                            {
-                                let my_owner_pubkey = config.owner_public_key_hex()?;
-                                if let Some(stamp) = extract_control_stamp_from_value(
-                                    &decrypted_event,
-                                    None,
-                                    timestamp,
-                                ) {
-                                    match apply_group_metadata(
-                                        storage,
-                                        &gid,
-                                        &from_pubkey_hex,
-                                        metadata,
-                                        stamp,
-                                        timestamp * 1000,
-                                        &my_owner_pubkey,
-                                    )? {
-                                        GroupMetadataApplyOutcome::Updated {
-                                            group: updated,
-                                            ..
-                                        } => {
-                                            output.event(
-                                                "group_metadata",
-                                                serde_json::json!({
-                                                    "group_id": gid,
-                                                    "action": "updated",
-                                                    "sender_pubkey": from_pubkey_hex,
-                                                    "name": updated.name,
-                                                    "members": updated.members,
-                                                    "admins": updated.admins,
-                                                }),
-                                            );
-                                        }
-                                        GroupMetadataApplyOutcome::Removed => {
-                                            output.event(
-                                                "group_metadata",
-                                                serde_json::json!({
-                                                    "group_id": gid,
-                                                    "action": "removed",
-                                                    "sender_pubkey": from_pubkey_hex,
-                                                }),
-                                            );
-                                        }
-                                        GroupMetadataApplyOutcome::Created(group_data) => {
-                                            output.event(
-                                                "group_metadata",
-                                                serde_json::json!({
-                                                    "group_id": gid,
-                                                    "action": "created",
-                                                    "sender_pubkey": from_pubkey_hex,
-                                                    "name": group_data.name,
-                                                    "members": group_data.members,
-                                                    "admins": group_data.admins,
-                                                }),
-                                            );
-                                        }
-                                        GroupMetadataApplyOutcome::Ignored
-                                        | GroupMetadataApplyOutcome::Rejected => {}
-                                    }
-                                    sync_runtime_groups(&runtime, storage)?;
-                                }
-                            }
-                            used_group_routed_fallback = true;
-                        } else if rumor_kind == GROUP_SENDER_KEY_DISTRIBUTION_KIND {
-                            let dist = match serde_json::from_str::<
-                                nostr_double_ratchet::SenderKeyDistribution,
-                            >(&content)
-                            {
-                                Ok(d) => d,
-                                Err(_) => continue,
-                            };
-                            if dist.group_id != gid {
-                                continue;
-                            }
-
-                            let sender_device_pubkey = sender_device_pubkey
-                                .unwrap_or(*sender_owner_pubkey);
-                            let sender_device_pubkey_hex = sender_device_pubkey.to_hex();
-
-                            sync_runtime_groups(&runtime, storage)?;
-                            let runtime_event = match serde_json::from_str::<
-                                nostr::UnsignedEvent,
-                            >(content_json)
-                            {
-                                Ok(event) => event,
-                                Err(_) => continue,
-                            };
-                            let drained = runtime.group_handle_incoming_session_event(
-                                &runtime_event,
-                                *sender_owner_pubkey,
-                                Some(sender_device_pubkey),
-                            );
-                            for decrypted in drained {
-                                apply_runtime_group_event(&decrypted, storage, output)?;
-                            }
-                            subscribed_group_sender_pubkeys = sync_group_outer_subscriptions(
-                                &runtime,
-                                &client,
-                                &relays,
-                                storage,
-                                output,
-                                &mut seen_event_ids,
-                                &mut seen_event_ids_order,
-                            )
-                            .await?;
-
-                            output.event(
-                                "group_sender_key",
-                                serde_json::json!({
-                                    "group_id": gid,
-                                    "sender_pubkey": from_pubkey_hex,
-                                    "sender_device_pubkey": sender_device_pubkey_hex,
-                                    "key_id": dist.key_id,
-                                    "iteration": dist.iteration,
-                                    "sender_event_pubkey": dist.sender_event_pubkey,
-                                    "transport": "session",
-                                }),
-                            );
-                            used_group_routed_fallback = true;
-                        } else if rumor_kind == CHAT_MESSAGE_KIND || rumor_kind == 14 {
-                            let now_seconds = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)?
-                                .as_secs();
-                            let expires_at = extract_expiration_tag_seconds(&decrypted_event);
-                            if is_expired(expires_at, now_seconds) {
-                                continue;
-                            }
-                            let msg_id =
-                                fallback_event_id(group_event_id.as_deref(), &decrypted_event);
-                            storage.save_group_message(&StoredGroupMessage {
-                                id: msg_id.clone(),
-                                group_id: gid.clone(),
-                                sender_pubkey: from_pubkey_hex.clone(),
-                                content: content.clone(),
-                                timestamp,
-                                is_outgoing: false,
-                                expires_at,
-                            })?;
-                            output.event(
-                                "group_message",
-                                serde_json::json!({
-                                    "group_id": gid,
-                                    "message_id": msg_id,
-                                    "sender_pubkey": from_pubkey_hex,
-                                    "content": content,
-                                    "timestamp": timestamp,
-                                }),
-                            );
-                            used_group_routed_fallback = true;
-                        } else if rumor_kind == REACTION_KIND {
-                            output.event(
-                                "group_reaction",
-                                serde_json::json!({
-                                    "group_id": gid,
-                                    "sender_pubkey": from_pubkey_hex,
-                                    "message_id": extract_e_tag(&decrypted_event),
-                                    "emoji": content,
-                                    "timestamp": timestamp,
-                                }),
-                            );
-                            used_group_routed_fallback = true;
-                        } else if rumor_kind == TYPING_KIND {
-                            output.event(
-                                "group_typing",
-                                serde_json::json!({
-                                    "group_id": gid,
-                                    "sender_pubkey": from_pubkey_hex,
-                                    "timestamp": timestamp,
-                                }),
-                            );
-                            used_group_routed_fallback = true;
-                        }
-                    }
+                if apply_session_group_decrypts(
+                    &session_group_decrypts,
+                    if decrypted_current_event {
+                        Some(current_event_id.as_str())
+                    } else {
+                        None
+                    },
+                    &runtime,
+                    &client,
+                    &relays,
+                    &config,
+                    storage,
+                    output,
+                    &mut subscribed_group_sender_pubkeys,
+                    &mut seen_event_ids,
+                    &mut seen_event_ids_order,
+                )
+                .await?
+                {
+                    used_group_routed_fallback = true;
                 }
             }
 

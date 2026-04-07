@@ -71,6 +71,37 @@ let candidates = resolve_conversation_candidate_pubkeys(
 - `resolve_conversation_candidate_pubkeys(...)` returns the ordered conversation candidates for a
   decrypted rumor, including self-DM and linked-device cases.
 
+### SessionManager Inspection
+
+`SessionManagerHandle` now exposes supported inspection APIs so mobile apps do not need to read
+`user_<peer>.json` files directly:
+
+```rust
+let manager = SessionManagerHandle::new_with_storage_path(
+    our_pubkey_hex,
+    our_identity_privkey_hex,
+    device_id,
+    storage_path,
+    owner_pubkey_hex,
+)?;
+manager.init()?;
+
+let peers = manager.known_peer_owner_pubkeys();
+let stored = manager.get_stored_user_record_json(peer_owner_pubkey_hex)?;
+let authors = manager.get_message_push_author_pubkeys(peer_owner_pubkey_hex)?;
+let session_states = manager.get_message_push_session_states(peer_owner_pubkey_hex)?;
+```
+
+- `known_peer_owner_pubkeys()` lists peer owner pubkeys known from loaded state or persisted
+  storage, so callers can enumerate peers before `init()` without relying on filenames.
+- `get_stored_user_record_json(peer)` returns the supported stored-user-record snapshot JSON for a
+  peer owner, matching the library's persisted record shape without requiring callers to know
+  filenames or storage layout.
+- `get_message_push_author_pubkeys(peer)` returns the deduplicated sender pubkeys tracked by that
+  peer's stored pairwise sessions.
+- `get_message_push_session_states(peer)` returns session-state JSON snapshots plus tracked sender
+  pubkeys and receiving-capability flags for push-routing repair flows.
+
 ## Building for Mobile
 
 ### Android
