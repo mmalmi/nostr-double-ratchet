@@ -1021,6 +1021,38 @@ async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
                 if i == j {
                     continue;
                 }
+                assert!(
+                    wait_for_known_peer_device_count(
+                        users[i].secondary_dir.path(),
+                        &users[j].owner_pubkey,
+                        2,
+                        Duration::from_secs(30),
+                    )
+                    .await,
+                    "{} secondary should learn both devices for {} before kickoff",
+                    users[i].name,
+                    users[j].name
+                );
+                assert!(
+                    wait_for_active_peer_device_sessions(
+                        users[i].secondary_dir.path(),
+                        &users[j].owner_pubkey,
+                        2,
+                        Duration::from_secs(30),
+                    )
+                    .await,
+                    "{} secondary should establish sessions to both devices for {} before kickoff",
+                    users[i].name,
+                    users[j].name
+                );
+            }
+        }
+
+        for i in 0..users.len() {
+            for j in 0..users.len() {
+                if i == j {
+                    continue;
+                }
                 let kickoff = format!("secondary-kickoff-{}-{}", users[i].name, users[j].name);
                 let kickoff_event = send_direct_message_until_received(
                     users[i].secondary_dir.path(),
