@@ -16,6 +16,15 @@ function makeGroup(groupId: string, members: string[], admins: string[]): GroupD
   };
 }
 
+function rumorForRecipient(
+  sent: Array<{ to: string; rumor: Rumor }>,
+  recipient: string,
+): Rumor {
+  const match = sent.find((entry) => entry.to === recipient);
+  expect(match).toBeDefined();
+  return match!.rumor;
+}
+
 describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
   it("publishes one outer event and fan-outs one sender-key distribution per member", async () => {
     const groupId = "group-1";
@@ -45,8 +54,10 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
       },
     });
 
-    // One distribution per *other* member.
-    expect(sent.map((s) => s.to).sort()).toEqual([bobOwnerPk, carolOwnerPk].sort());
+    // One distribution per member owner, including our own owner for sibling-device sender-copy.
+    expect(sent.map((s) => s.to).sort()).toEqual(
+      [aliceOwnerPk, bobOwnerPk, carolOwnerPk].sort(),
+    );
     expect(published).toHaveLength(1);
   });
 
@@ -86,14 +97,16 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
     });
 
     expect(outer).not.toBeNull();
-    expect(sent).toHaveLength(1);
+    expect(sent.map((s) => s.to).sort()).toEqual(
+      [aliceOwnerPk, bobOwnerPk].sort(),
+    );
 
     // Deliver outer first (missing distribution) -> should queue/pending.
     const early = await bob.handleOuterEvent(outer as any);
     expect(early).toBeNull();
 
     // Now deliver the distribution via the 1:1 session path.
-    const distRumor = sent[0]!.rumor;
+    const distRumor = rumorForRecipient(sent, bobOwnerPk);
     const rejected = await bob.handleIncomingSessionEvent(distRumor, aliceOwnerPk);
     expect(rejected).toHaveLength(0);
     const after = await bob.handleIncomingSessionEvent(distRumor, aliceOwnerPk, aliceDevicePk);
@@ -208,8 +221,10 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
     expect(await bob2.handleOuterEvent(outer as any)).toBeNull();
 
     // Deliver the same distribution to both devices (simulating SessionManager fanout).
-    expect(sent).toHaveLength(1);
-    const distRumor = sent[0]!.rumor;
+    expect(sent.map((s) => s.to).sort()).toEqual(
+      [aliceOwnerPk, bobOwnerPk].sort(),
+    );
+    const distRumor = rumorForRecipient(sent, bobOwnerPk);
     const r1 = await bob1.handleIncomingSessionEvent(distRumor, aliceOwnerPk, aliceDevicePk);
     const r2 = await bob2.handleIncomingSessionEvent(distRumor, aliceOwnerPk, aliceDevicePk);
 
@@ -252,13 +267,15 @@ describe("Group one-to-many (sender keys + OneToManyChannel)", () => {
       },
     });
 
-    expect(sent).toHaveLength(1);
+    expect(sent.map((s) => s.to).sort()).toEqual(
+      [aliceOwnerPk, bobOwnerPk].sort(),
+    );
     expect(outer).not.toBeNull();
 
     // Queue outer first.
     expect(await bob.handleOuterEvent(outer as any)).toBeNull();
 
-    const distRumor = sent[0]!.rumor;
+    const distRumor = rumorForRecipient(sent, bobOwnerPk);
 
     // Forged rumor pubkey does not match authenticated sender device context.
     const forgedRumor = { ...distRumor, pubkey: attackerDevicePk } as Rumor;

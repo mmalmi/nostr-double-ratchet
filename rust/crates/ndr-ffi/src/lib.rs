@@ -1729,10 +1729,10 @@ mod tests {
                 nostr::Tag::parse(&["ms".to_string(), "1700000000000".to_string()]).unwrap(),
             ])
             .custom_created_at(nostr::Timestamp::from(1_700_000_000))
-            .build(nostr_double_ratchet::utils::pubkey_from_hex(
-                &sender_device.public_key_hex,
-            )
-            .unwrap());
+            .build(
+                nostr_double_ratchet::utils::pubkey_from_hex(&sender_device.public_key_hex)
+                    .unwrap(),
+            );
         let rumor_json = serde_json::to_string(&rumor).unwrap();
 
         let send = manager
