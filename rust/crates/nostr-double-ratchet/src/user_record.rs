@@ -161,9 +161,7 @@ impl UserRecord {
             let is_duplicate = active_state
                 .as_ref()
                 .is_some_and(|state| *state == session.state)
-                || unique_states
-                    .iter()
-                    .any(|state: &SessionState| *state == session.state);
+                || unique_states.contains(&session.state);
 
             if is_duplicate {
                 session.close();

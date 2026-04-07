@@ -756,7 +756,7 @@ impl SessionManager {
         }
 
         let key = self.user_record_key(&peer_owner_pubkey);
-        Ok(self.storage.get(&key)?)
+        self.storage.get(&key)
     }
 
     pub fn get_message_push_author_pubkeys(&self, peer_owner_pubkey: PublicKey) -> Vec<PublicKey> {

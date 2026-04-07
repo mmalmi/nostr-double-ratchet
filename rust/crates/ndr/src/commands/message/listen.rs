@@ -1,3 +1,5 @@
+#![allow(clippy::needless_borrow, clippy::too_many_arguments)]
+
 use anyhow::{Context, Result};
 
 use nostr_double_ratchet::{
@@ -227,14 +229,15 @@ fn collect_chat_pubkeys_with_session_manager(
             continue;
         }
 
-        for maybe_pubkey in [
+        for pubkey in [
             state.their_current_nostr_public_key,
             state.their_next_nostr_public_key,
-        ] {
-            if let Some(pubkey) = maybe_pubkey {
-                if seen.insert(pubkey.to_hex()) {
-                    pubkeys.push(pubkey);
-                }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seen.insert(pubkey.to_hex()) {
+                pubkeys.push(pubkey);
             }
         }
     }
