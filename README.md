@@ -28,15 +28,20 @@ For Windows/manual install options, see [Releases](https://github.com/mmalmi/nos
 - Cross-language TS/Rust interoperability tests
 - Breaking changes are still possible while APIs settle
 
-## Integration Choices
+## Integration Modes
 
-- `Session`: lowest-level primitive if your app already owns bootstrap, routing, and storage.
-- `SessionManager`: multi-device session orchestration without the runtime wrapper.
-- `SessionGroupRuntime`: attach group transport to an existing `SessionManager` without adopting the
-  full `NdrRuntime` surface.
+| Mode | Use it when | What it owns |
+| --- | --- | --- |
+| `NdrRuntime` | You want the default production path with one app-facing surface for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager` in TypeScript. |
+| `SessionManager` | You want multi-device routing and storage, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and subscription intent. |
+| `Session` | You want the simplest 1:1 primitive and you already own invite/bootstrap, persistence, and transport. Good for negotiated 1:1 channels or other app-specific direct links. | Only the ratchet session state itself. |
+
+Add-ons around those layers:
+
+- `SessionGroupRuntime`: attach the same group transport surface that `NdrRuntime` uses to an
+  existing `SessionManager`.
 - `GroupManager`: direct group transport helper if you want to wire group state yourself.
-- `NdrRuntime`: the default high-level path for production apps. In TypeScript it now owns
-  `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`.
+- `Invite`: handshake/bootstrap primitive when you build around plain `Session`.
 
 Use `NdrRuntime` when you want one concrete app-facing surface for:
 
@@ -46,6 +51,12 @@ Use `NdrRuntime` when you want one concrete app-facing surface for:
 - `upsertGroup(...)`, `removeGroup(...)`, `syncGroups(...)`
 - `createGroup(...)`
 - `sendGroupEvent(...)`, `sendGroupMessage(...)`
+
+Use `SessionManager` when you want to keep your own app runtime, but you do not want to rebuild
+multi-device routing, device authorization, or session persistence yourself.
+
+Use plain `Session` when you want the smallest possible surface for 1:1 messaging and you do not
+need owner/device fanout, AppKeys-driven authorization, or runtime-managed group transport.
 
 ## Security Guarantees And Properties
 

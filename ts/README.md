@@ -19,14 +19,23 @@ pnpm add nostr-double-ratchet
 - `Group`: sender-key group messaging helper (transport-agnostic)
 - `SharedChannel`: encrypted shared-channel primitive used by higher-level group bootstrap flows
 
-## Choose Your Layer
+## Integration Modes
 
-- `Session`: use this when you already own invite/bootstrap, persistence, and relay transport.
-- `SessionManager`: use this when you want multi-device routing but still want to own app runtime wiring.
-- `SessionGroupRuntime`: use this when you already have a `SessionManager` and want the same group
-  transport surface as `NdrRuntime` without moving AppKeys/delegate/session ownership.
-- `NdrRuntime`: use this when you want the default high-level path for production apps. It owns
-  `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`.
+| Mode | Use it when | What it owns |
+| --- | --- | --- |
+| `NdrRuntime` | You want the default production path for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`. |
+| `SessionManager` | You want multi-device routing, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and subscription intent. |
+| `Session` | You want the smallest 1:1 primitive and already own invite/bootstrap, persistence, and relay transport. Good for negotiated 1:1 channels or app-specific direct links. | Only the ratchet session state itself. |
+
+Supporting pieces around those modes:
+
+- `SessionGroupRuntime`: add the same group transport surface that `NdrRuntime` uses to an
+  existing `SessionManager`.
+- `Invite`: bootstrap primitive when you build around plain `Session`.
+
+If you are unsure, start with `NdrRuntime`. Drop down to `SessionManager` only when you want to
+keep more app-owned runtime structure, and use plain `Session` only when a small 1:1-only surface
+is actually the goal.
 
 ## Quick Start (`NdrRuntime`)
 
