@@ -19,6 +19,7 @@ import WebSocket from "ws";
 
 import { AppKeys } from "../src/AppKeys";
 import { Invite } from "../src/Invite";
+import { MESSAGE_EVENT_KIND } from "../src/types";
 import { Session } from "../src/Session";
 
 const log = (msg: string) => {
@@ -107,12 +108,21 @@ async function main() {
   log(`E2E_DEVICE2_PUBKEY:${device2Pubkey}`);
 
   const subscribe = (filter: any, onEvent: (event: any) => void) => {
+    if (
+      Array.isArray(filter?.kinds) &&
+      filter.kinds.length === 1 &&
+      filter.kinds[0] === MESSAGE_EVENT_KIND
+    ) {
+      return () => {};
+    }
+
     relay.subscribe(filter, onEvent);
     return () => {};
   };
 
   let ownerSession: Session | null = null;
   let device2Session: Session | null = null;
+  const seenMessageEventIds = new Set<string>();
 
   const ownerReceived = new Set<string>();
   const device2Received = new Set<string>();
@@ -161,6 +171,31 @@ async function main() {
 
   await relay.publish(accepted.event);
   log("E2E_INVITE_RESPONSE_PUBLISHED");
+
+  relay.subscribe({ kinds: [MESSAGE_EVENT_KIND] }, (event: any) => {
+    if (typeof event?.id === "string") {
+      if (seenMessageEventIds.has(event.id)) {
+        return;
+      }
+      seenMessageEventIds.add(event.id);
+    }
+
+    if (ownerSession) {
+      try {
+        (ownerSession as any).handleNostrEvent(event);
+      } catch {
+        // Ignore unrelated events.
+      }
+    }
+
+    if (device2Session) {
+      try {
+        (device2Session as any).handleNostrEvent(event);
+      } catch {
+        // Ignore unrelated events.
+      }
+    }
+  });
 
   let sentByDevice2 = false;
   let sentOwnerBootstrap = false;
