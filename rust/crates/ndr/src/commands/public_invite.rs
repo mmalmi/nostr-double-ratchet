@@ -50,52 +50,6 @@ fn build_session_manager(
     Ok((manager, sm_rx, keys, owner_pubkey_hex))
 }
 
-fn import_chats_into_session_manager(
-    storage: &Storage,
-    manager: &SessionManager,
-    my_owner_pubkey_hex: &str,
-) -> Result<()> {
-    let known: std::collections::HashMap<(String, String), String> = manager
-        .export_active_sessions()
-        .into_iter()
-        .filter_map(|(owner, device_id, state)| {
-            serde_json::to_string(&state)
-                .ok()
-                .map(|json| ((owner.to_hex(), device_id), json))
-        })
-        .collect();
-
-    for chat in storage.list_chats()? {
-        if chat.their_pubkey == my_owner_pubkey_hex {
-            continue;
-        }
-
-        let owner_pubkey = match nostr::PublicKey::from_hex(&chat.their_pubkey) {
-            Ok(pk) => pk,
-            Err(_) => continue,
-        };
-        manager.setup_user(owner_pubkey);
-
-        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
-        if known
-            .get(&(owner_pubkey.to_hex(), device_id.clone()))
-            .is_some_and(|known_state| known_state == &chat.session_state)
-        {
-            continue;
-        }
-
-        let state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(state) => state,
-                Err(_) => continue,
-            };
-
-        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
-    }
-
-    Ok(())
-}
-
 fn upsert_chat_from_session_manager(
     storage: &Storage,
     manager: &SessionManager,
@@ -175,9 +129,8 @@ pub(super) async fn join_via_invite(
     config: &Config,
     storage: &Storage,
 ) -> Result<PublicInviteJoinResult> {
-    let (manager, manager_rx, signing_keys, owner_pubkey_hex) =
+    let (manager, manager_rx, signing_keys, _owner_pubkey_hex) =
         build_session_manager(config, storage)?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
     if let Some(claimed_owner_pubkey) = invite.owner_public_key {

@@ -491,7 +491,9 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Read { target, limit } => {
             commands::message::read(&target, limit, &storage, output).await
         }
-        Commands::Receive { event } => commands::message::receive(&event, &storage, output).await,
+        Commands::Receive { event } => {
+            commands::message::receive(&event, &config, &storage, output).await
+        }
         Commands::Contact(cmd) => match cmd {
             ContactCommands::Add { pubkey, name } => {
                 commands::contact::add(&pubkey, &name, &storage, output).await

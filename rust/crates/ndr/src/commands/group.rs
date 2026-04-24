@@ -3,8 +3,8 @@ use crossbeam_channel::{Receiver, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
     CreateGroupOptions, FanoutGroupMetadataOptions, FileStorageAdapter, GroupManager,
-    GroupManagerOptions, GroupSendEvent, Session, SessionManager, SessionManagerEvent,
-    StorageAdapter, CHAT_MESSAGE_KIND, REACTION_KIND,
+    GroupManagerOptions, GroupSendEvent, SessionManager, SessionManagerEvent, StorageAdapter,
+    CHAT_MESSAGE_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
@@ -75,57 +75,10 @@ struct GroupMessageList {
 }
 
 struct PairwiseSessionEventQueue<'a> {
-    my_owner_pubkey_hex: &'a str,
     storage: &'a Storage,
     session_manager: &'a SessionManager,
     session_manager_rx: &'a Receiver<SessionManagerEvent>,
     queued_events: &'a mut Vec<nostr::Event>,
-}
-
-fn import_chats_into_session_manager(
-    storage: &Storage,
-    manager: &SessionManager,
-    my_owner_pubkey_hex: &str,
-) -> Result<()> {
-    let known: std::collections::HashMap<(String, String), String> = manager
-        .export_active_sessions()
-        .into_iter()
-        .filter_map(|(owner, device_id, state)| {
-            serde_json::to_string(&state)
-                .ok()
-                .map(|json| ((owner.to_hex(), device_id), json))
-        })
-        .collect();
-
-    for chat in storage.list_chats()? {
-        if chat.their_pubkey == my_owner_pubkey_hex {
-            continue;
-        }
-
-        let owner_pubkey = match nostr::PublicKey::from_hex(&chat.their_pubkey) {
-            Ok(pk) => pk,
-            Err(_) => continue,
-        };
-        manager.setup_user(owner_pubkey);
-
-        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
-        if known
-            .get(&(owner_pubkey.to_hex(), device_id.clone()))
-            .is_some_and(|known_state| known_state == &chat.session_state)
-        {
-            continue;
-        }
-
-        let state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(state) => state,
-                Err(_) => continue,
-            };
-
-        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
-    }
-
-    Ok(())
 }
 
 fn sync_member_chats_from_session_manager(
@@ -205,7 +158,6 @@ fn build_session_manager(
         None,
     );
     manager.init()?;
-    import_chats_into_session_manager(storage, &manager, &owner_pubkey_hex)?;
 
     // Drop any initial SessionManager events (device invite publication, subscribe requests, etc).
     // Group commands only care about publishing ratchet message events that they explicitly send.
@@ -219,10 +171,8 @@ async fn prepare_group_member_sessions(
     client: &Client,
     config: &Config,
 ) -> Result<()> {
-    let my_owner_pubkey = config.owner_public_key_hex()?;
     let mut recipient_pubkeys: Vec<nostr::PublicKey> = members
         .iter()
-        .filter(|member| member.as_str() != my_owner_pubkey)
         .filter_map(|member| nostr::PublicKey::from_hex(member).ok())
         .collect();
     recipient_pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
@@ -288,8 +238,6 @@ async fn fan_out_metadata(
     config: &Config,
     storage: &Storage,
 ) -> Result<ControlStamp> {
-    let my_owner_pubkey = config.owner_public_key_hex()?;
-
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;
@@ -309,7 +257,6 @@ async fn fan_out_metadata(
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
-        my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
         session_manager_rx: &session_manager_rx,
@@ -393,12 +340,7 @@ fn queue_pairwise_session_events_for_recipient(
 
     let mut message_events: Vec<nostr::Event> = Vec::new();
     for attempt in 0..MAX_DELIVERY_ATTEMPTS {
-        import_chats_into_session_manager(
-            queue.storage,
-            queue.session_manager,
-            queue.my_owner_pubkey_hex,
-        )?;
-        let event_ids = queue
+        let _event_ids = queue
             .session_manager
             .send_event(recipient_owner, rumor.clone())
             .unwrap_or_default();
@@ -409,7 +351,7 @@ fn queue_pairwise_session_events_for_recipient(
             recipient_owner_hex,
         )?;
 
-        if !drained.is_empty() && !event_ids.is_empty() {
+        if !drained.is_empty() {
             message_events = drained;
             break;
         }
@@ -421,35 +363,6 @@ fn queue_pairwise_session_events_for_recipient(
 
     if !message_events.is_empty() {
         queue.queued_events.extend(message_events);
-        return Ok(());
-    }
-
-    let member_chats: Vec<_> = queue
-        .storage
-        .list_chats()?
-        .into_iter()
-        .filter(|c| c.their_pubkey == recipient_owner_hex)
-        .collect();
-
-    for chat in member_chats {
-        let session_state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(state) => state,
-                Err(_) => continue,
-            };
-
-        let mut session = Session::new(session_state, chat.id.clone());
-        let encrypted = match session.send_event(rumor.clone()) {
-            Ok(event) => event,
-            Err(_) => continue,
-        };
-
-        let mut updated_chat = chat.clone();
-        updated_chat.session_state = serde_json::to_string(&session.state)?;
-        queue.storage.save_chat(&updated_chat)?;
-
-        queue.queued_events.push(encrypted);
-        break;
     }
 
     Ok(())
@@ -478,13 +391,14 @@ pub async fn create(
 
     let mut group_manager = build_group_manager(config, storage)?;
     let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
-    prepare_group_member_sessions(members, &session_manager, &client, config).await?;
+    let mut delivery_members = members.to_vec();
+    delivery_members.push(my_owner_pubkey.clone());
+    prepare_group_member_sessions(&delivery_members, &session_manager, &client, config).await?;
     if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
-        my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
         session_manager_rx: &session_manager_rx,
@@ -787,7 +701,6 @@ pub async fn send_message(
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
-        my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
         session_manager_rx: &session_manager_rx,
@@ -893,8 +806,6 @@ pub async fn react(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let my_owner_pubkey = config.owner_public_key_hex()?;
-
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let now_ms = now.as_millis() as u64;
 
@@ -917,7 +828,6 @@ pub async fn react(
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
-        my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
         session_manager_rx: &session_manager_rx,
@@ -1003,8 +913,6 @@ pub async fn rotate_sender_key(
         anyhow::bail!("Group not accepted. Run: ndr group accept {}", id);
     }
 
-    let my_owner_pubkey = config.owner_public_key_hex()?;
-
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let now_ms = now.as_millis() as u64;
 
@@ -1028,7 +936,6 @@ pub async fn rotate_sender_key(
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
-        my_owner_pubkey_hex: &my_owner_pubkey,
         storage,
         session_manager: &session_manager,
         session_manager_rx: &session_manager_rx,

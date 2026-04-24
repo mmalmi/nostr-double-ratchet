@@ -472,6 +472,10 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn reload_from_storage(&self) -> Result<()> {
+        self.load_all_user_records()
+    }
+
     pub fn send_text(
         &self,
         recipient: PublicKey,
@@ -803,6 +807,9 @@ impl SessionManager {
         device_id: Option<String>,
         state: crate::SessionState,
     ) -> Result<()> {
+        let device_identity = device_id
+            .as_deref()
+            .and_then(|id| crate::utils::pubkey_from_hex(id).ok());
         let mut session = crate::Session::new(state, "imported".to_string());
         session.set_pubsub(self.pubsub.clone());
         let _ = session.subscribe_to_messages();
@@ -812,8 +819,26 @@ impl SessionManager {
                 .entry(peer_pubkey)
                 .or_insert_with(|| UserRecord::new(hex::encode(peer_pubkey.to_bytes())));
             user_record.upsert_session(device_id.as_deref(), session);
+            if let Some(device_id) = device_id.as_deref() {
+                if crate::utils::pubkey_from_hex(device_id).is_ok()
+                    && !user_record
+                        .known_device_identities
+                        .iter()
+                        .any(|known| known == device_id)
+                {
+                    user_record
+                        .known_device_identities
+                        .push(device_id.to_string());
+                }
+            }
         });
 
+        if let Some(device_identity) = device_identity {
+            self.delegate_to_owner
+                .lock()
+                .unwrap()
+                .insert(device_identity, peer_pubkey);
+        }
         let _ = self.store_user_record(&peer_pubkey);
         Ok(())
     }
@@ -1400,7 +1425,8 @@ impl SessionManager {
                             app_keys.get_device(&device_pk).is_some()
                         } else {
                             let device_hex = hex::encode(device_pk.to_bytes());
-                            user_record.known_device_identities.contains(&device_hex)
+                            user_record.device_records.contains_key(&device_hex)
+                                || user_record.known_device_identities.contains(&device_hex)
                         };
 
                         if !authorized {
@@ -2753,6 +2779,125 @@ impl SessionManager {
         }
     }
 
+    fn session_state_priority(state: &crate::SessionState) -> (u8, u32, u32, u32) {
+        let can_send =
+            state.their_next_nostr_public_key.is_some() && state.our_current_nostr_key.is_some();
+        let can_receive = state.receiving_chain_key.is_some()
+            || state.their_current_nostr_public_key.is_some()
+            || state.receiving_chain_message_number > 0;
+
+        let directionality = match (can_send, can_receive) {
+            (true, true) => 3,
+            (true, false) => 2,
+            (false, true) => 1,
+            (false, false) => 0,
+        };
+
+        (
+            directionality,
+            state.receiving_chain_message_number,
+            state.sending_chain_message_number,
+            state.previous_sending_chain_message_count,
+        )
+    }
+
+    fn push_unique_session_state(
+        sessions: &mut Vec<crate::SessionState>,
+        state: crate::SessionState,
+    ) {
+        if !sessions.contains(&state) {
+            sessions.push(state);
+        }
+    }
+
+    fn merge_stored_device_record(
+        mut existing: crate::StoredDeviceRecord,
+        current: crate::StoredDeviceRecord,
+    ) -> crate::StoredDeviceRecord {
+        let mut inactive_sessions = Vec::new();
+
+        for state in existing.inactive_sessions.drain(..) {
+            Self::push_unique_session_state(&mut inactive_sessions, state);
+        }
+        for state in current.inactive_sessions {
+            Self::push_unique_session_state(&mut inactive_sessions, state);
+        }
+
+        let active_session = match (existing.active_session.take(), current.active_session) {
+            (Some(existing_state), Some(current_state)) => {
+                if Self::session_state_priority(&existing_state)
+                    > Self::session_state_priority(&current_state)
+                {
+                    Self::push_unique_session_state(&mut inactive_sessions, current_state);
+                    Some(existing_state)
+                } else {
+                    Self::push_unique_session_state(&mut inactive_sessions, existing_state);
+                    Some(current_state)
+                }
+            }
+            (Some(existing_state), None) => Some(existing_state),
+            (None, Some(current_state)) => Some(current_state),
+            (None, None) => None,
+        };
+
+        if let Some(active) = active_session.as_ref() {
+            inactive_sessions.retain(|state| state != active);
+        }
+        const MAX_INACTIVE: usize = 10;
+        inactive_sessions.truncate(MAX_INACTIVE);
+
+        crate::StoredDeviceRecord {
+            device_id: current.device_id,
+            active_session,
+            inactive_sessions,
+            created_at: match (existing.created_at, current.created_at) {
+                (0, created_at) => created_at,
+                (created_at, 0) => created_at,
+                (existing_created, current_created) => existing_created.min(current_created),
+            },
+            is_stale: current.is_stale,
+            stale_timestamp: current.stale_timestamp.or(existing.stale_timestamp),
+            last_activity: current.last_activity.max(existing.last_activity),
+        }
+    }
+
+    fn merge_stored_user_record(
+        mut existing: crate::StoredUserRecord,
+        current: crate::StoredUserRecord,
+    ) -> crate::StoredUserRecord {
+        let mut existing_devices: HashMap<String, crate::StoredDeviceRecord> = existing
+            .devices
+            .drain(..)
+            .map(|device| (device.device_id.clone(), device))
+            .collect();
+
+        let mut devices = Vec::new();
+        for current_device in current.devices {
+            let device =
+                if let Some(existing_device) = existing_devices.remove(&current_device.device_id) {
+                    Self::merge_stored_device_record(existing_device, current_device)
+                } else {
+                    current_device
+                };
+            devices.push(device);
+        }
+        devices.extend(existing_devices.into_values());
+        devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+
+        let mut known_device_identities = current.known_device_identities;
+        for identity in existing.known_device_identities {
+            if !known_device_identities.contains(&identity) {
+                known_device_identities.push(identity);
+            }
+        }
+
+        crate::StoredUserRecord {
+            user_id: current.user_id,
+            devices,
+            known_device_identities,
+        }
+    }
+
     fn store_user_record(&self, pubkey: &PublicKey) -> Result<()> {
         let stored = self.with_user_records({
             let pubkey = *pubkey;
@@ -2764,6 +2909,15 @@ impl SessionManager {
         });
         if let Some(stored) = stored {
             let key = self.user_record_key(pubkey);
+            let stored = match self.storage.get(&key)? {
+                Some(existing_json) => {
+                    match serde_json::from_str::<crate::StoredUserRecord>(&existing_json) {
+                        Ok(existing) => Self::merge_stored_user_record(existing, stored),
+                        Err(_) => stored,
+                    }
+                }
+                None => stored,
+            };
             let json = serde_json::to_string(&stored)?;
             self.storage.put(&key, json)?;
         }
@@ -3173,6 +3327,93 @@ mod tests {
     }
 
     #[test]
+    fn merge_stored_user_record_keeps_more_advanced_existing_session() {
+        let mut stale_state = test_session_state();
+        stale_state.sending_chain_message_number = 3;
+
+        let mut advanced_state = stale_state.clone();
+        advanced_state.sending_chain_message_number = 4;
+
+        let device2_state = test_session_state();
+        let device3_state = test_session_state();
+
+        let existing = crate::StoredUserRecord {
+            user_id: "peer".to_string(),
+            devices: vec![
+                crate::StoredDeviceRecord {
+                    device_id: "device-1".to_string(),
+                    active_session: Some(advanced_state),
+                    inactive_sessions: Vec::new(),
+                    created_at: 1,
+                    is_stale: false,
+                    stale_timestamp: None,
+                    last_activity: Some(10),
+                },
+                crate::StoredDeviceRecord {
+                    device_id: "device-3".to_string(),
+                    active_session: Some(device3_state),
+                    inactive_sessions: Vec::new(),
+                    created_at: 3,
+                    is_stale: false,
+                    stale_timestamp: None,
+                    last_activity: Some(12),
+                },
+            ],
+            known_device_identities: vec!["device-1".to_string(), "device-3".to_string()],
+        };
+
+        let current = crate::StoredUserRecord {
+            user_id: "peer".to_string(),
+            devices: vec![
+                crate::StoredDeviceRecord {
+                    device_id: "device-1".to_string(),
+                    active_session: Some(stale_state),
+                    inactive_sessions: Vec::new(),
+                    created_at: 1,
+                    is_stale: false,
+                    stale_timestamp: None,
+                    last_activity: Some(9),
+                },
+                crate::StoredDeviceRecord {
+                    device_id: "device-2".to_string(),
+                    active_session: Some(device2_state),
+                    inactive_sessions: Vec::new(),
+                    created_at: 2,
+                    is_stale: false,
+                    stale_timestamp: None,
+                    last_activity: Some(11),
+                },
+            ],
+            known_device_identities: vec!["device-1".to_string(), "device-2".to_string()],
+        };
+
+        let merged = SessionManager::merge_stored_user_record(existing, current);
+        let device1 = merged
+            .devices
+            .iter()
+            .find(|device| device.device_id == "device-1")
+            .expect("device-1 should be preserved");
+        assert_eq!(
+            device1
+                .active_session
+                .as_ref()
+                .map(|state| state.sending_chain_message_number),
+            Some(4)
+        );
+        assert!(merged
+            .devices
+            .iter()
+            .any(|device| device.device_id == "device-2"));
+        assert!(merged
+            .devices
+            .iter()
+            .any(|device| device.device_id == "device-3"));
+        assert!(merged
+            .known_device_identities
+            .contains(&"device-3".to_string()));
+    }
+
+    #[test]
     fn test_session_manager_new() {
         let keys = Keys::generate();
         let pubkey = keys.public_key();
@@ -3384,7 +3625,6 @@ mod tests {
         assert_eq!(subscribe_count, 2);
 
         let (active_count, inactive_count) = manager.with_user_records({
-            let peer = peer;
             move |records| {
                 let device_record = records
                     .get(&peer)
@@ -3398,6 +3638,55 @@ mod tests {
         });
         assert_eq!(active_count, 1);
         assert_eq!(inactive_count, 0);
+    }
+
+    #[test]
+    fn imported_device_session_is_authorized_for_owner_fanout() {
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let linked_device = Keys::generate().public_key();
+        let linked_device_id = linked_device.to_hex();
+        let primary_device_id = owner.to_hex();
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let manager = SessionManager::new(
+            owner,
+            owner_keys.secret_key().to_secret_bytes(),
+            primary_device_id,
+            owner,
+            tx,
+            None,
+            None,
+        );
+
+        manager
+            .import_session_state(owner, Some(linked_device_id.clone()), test_session_state())
+            .unwrap();
+
+        let known_identities = manager.with_user_records({
+            move |records| {
+                records
+                    .get(&owner)
+                    .map(|record| record.known_device_identities.clone())
+                    .unwrap_or_default()
+            }
+        });
+        assert!(known_identities.contains(&linked_device_id));
+        assert_eq!(manager.resolve_to_owner(&linked_device), owner);
+
+        let event =
+            nostr::EventBuilder::new(nostr::Kind::TextNote, "linked-device fanout").build(owner);
+        let published_ids = manager.send_event(owner, event).unwrap();
+        assert_eq!(published_ids.len(), 1);
+
+        let events = drain_events(&rx);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SessionManagerEvent::PublishSigned(signed)
+                    if signed.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+            )
+        }));
     }
 
     #[test]

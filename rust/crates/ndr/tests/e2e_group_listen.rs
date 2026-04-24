@@ -815,7 +815,8 @@ async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror()
             Some(group_id.as_str())
         );
 
-        // Safety invariant: do not owner-mirror peer group messages to linked devices.
+        // Safety invariant: linked devices may receive peer messages through group sender keys,
+        // but not through pairwise owner-mirrored group-message fallback.
         let bob_secondary_msg = read_until_event_with_content(
             &mut bob_secondary_stdout,
             "group_message",
@@ -823,10 +824,12 @@ async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror()
             Duration::from_secs(3),
         )
         .await;
-        assert!(
-            bob_secondary_msg.is_none(),
-            "Bob secondary should not receive owner-mirrored peer group_message"
-        );
+        if let Some(event) = bob_secondary_msg {
+            assert!(
+                event.get("sender_device_pubkey").and_then(|v| v.as_str()).is_some(),
+                "Bob secondary should only receive peer group messages with authenticated sender-device provenance, got: {event}"
+            );
+        }
 
         Ok::<(), anyhow::Error>(())
     }
@@ -1162,19 +1165,11 @@ async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
         }
 
         // Everyone except Alice primary must accept explicitly; creator is already accepted.
-        for idx in 0..users.len() {
+        for (idx, user) in users.iter().enumerate() {
             if idx != 0 {
-                let _ = run_ndr(
-                    users[idx].primary_dir.path(),
-                    &["group", "accept", &group_id],
-                )
-                .await;
+                let _ = run_ndr(user.primary_dir.path(), &["group", "accept", &group_id]).await;
             }
-            let _ = run_ndr(
-                users[idx].secondary_dir.path(),
-                &["group", "accept", &group_id],
-            )
-            .await;
+            let _ = run_ndr(user.secondary_dir.path(), &["group", "accept", &group_id]).await;
         }
         tokio::time::sleep(Duration::from_millis(1500)).await;
 

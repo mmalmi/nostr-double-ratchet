@@ -61,7 +61,10 @@ async fn resolve_or_join_chat(
     }
 }
 
-fn build_runtime(config: &Config, storage: &Storage) -> Result<(NdrRuntime, nostr::Keys, String)> {
+pub(super) fn build_runtime(
+    config: &Config,
+    storage: &Storage,
+) -> Result<(NdrRuntime, nostr::Keys, String)> {
     let our_private_key = config.private_key_bytes()?;
     let our_pubkey_hex = config.public_key()?;
     let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
@@ -86,53 +89,7 @@ fn build_runtime(config: &Config, storage: &Storage) -> Result<(NdrRuntime, nost
     Ok((runtime, signing_keys, owner_pubkey_hex))
 }
 
-fn import_chats_into_session_manager(
-    storage: &Storage,
-    manager: &SessionManager,
-    my_owner_pubkey_hex: &str,
-) -> Result<()> {
-    let known: std::collections::HashMap<(String, String), String> = manager
-        .export_active_sessions()
-        .into_iter()
-        .filter_map(|(owner, device_id, state)| {
-            serde_json::to_string(&state)
-                .ok()
-                .map(|json| ((owner.to_hex(), device_id), json))
-        })
-        .collect();
-
-    for chat in storage.list_chats()? {
-        if chat.their_pubkey == my_owner_pubkey_hex {
-            continue;
-        }
-
-        let owner_pubkey = match nostr::PublicKey::from_hex(&chat.their_pubkey) {
-            Ok(pk) => pk,
-            Err(_) => continue,
-        };
-        manager.setup_user(owner_pubkey);
-
-        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
-        if known
-            .get(&(owner_pubkey.to_hex(), device_id.clone()))
-            .is_some_and(|known_state| known_state == &chat.session_state)
-        {
-            continue;
-        }
-
-        let state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(state) => state,
-                Err(_) => continue,
-            };
-
-        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
-    }
-
-    Ok(())
-}
-
-fn sync_chats_from_session_manager(
+pub(super) fn sync_chats_from_session_manager(
     storage: &Storage,
     manager: &SessionManager,
     my_owner_pubkey_hex: &str,
@@ -466,7 +423,6 @@ pub(super) async fn send_message_impl(
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
     let manager = runtime.session_manager();
-    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
     prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
@@ -530,7 +486,6 @@ pub async fn react(
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
     let manager = runtime.session_manager();
-    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
     prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
@@ -616,7 +571,6 @@ pub async fn receipt(
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
     let manager = runtime.session_manager();
-    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
     let message_ids_vec = message_ids.iter().map(|s| (*s).to_string()).collect();
 
     let client = connect_client(config).await?;
@@ -659,7 +613,6 @@ pub async fn typing(
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
     let manager = runtime.session_manager();
-    import_chats_into_session_manager(storage, manager, &owner_pubkey_hex)?;
 
     let client = connect_client(config).await?;
     prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;

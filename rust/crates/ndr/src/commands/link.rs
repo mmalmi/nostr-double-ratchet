@@ -52,6 +52,33 @@ fn build_device_invite(device_pubkey_hex: &str) -> Result<nostr_double_ratchet::
     .map_err(Into::into)
 }
 
+fn persist_link_session(
+    config: &Config,
+    storage: &Storage,
+    owner_pubkey: nostr::PublicKey,
+    linked_device_pubkey: nostr::PublicKey,
+    state: nostr_double_ratchet::SessionState,
+) -> Result<()> {
+    let session_manager_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> =
+        std::sync::Arc::new(nostr_double_ratchet::FileStorageAdapter::new(
+            storage.data_dir().join("session_manager"),
+        )?);
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let our_pubkey_hex = config.public_key()?;
+    let manager = nostr_double_ratchet::SessionManager::new(
+        nostr::PublicKey::from_hex(&our_pubkey_hex)?,
+        config.private_key_bytes()?,
+        our_pubkey_hex,
+        owner_pubkey,
+        tx,
+        Some(session_manager_store),
+        None,
+    );
+    manager.init()?;
+    manager.import_session_state(owner_pubkey, Some(linked_device_pubkey.to_hex()), state)?;
+    Ok(())
+}
+
 fn ensure_device_invite(
     config: &Config,
     storage: &Storage,
@@ -198,8 +225,15 @@ pub async fn accept(url: &str, config: &Config, storage: &Storage, output: &Outp
     let owner_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&owner_pubkey_hex)?;
     let owner_private_key = config.private_key_bytes()?;
 
-    let (_session, response_event) =
+    let (session, response_event) =
         invite.accept_with_owner(owner_pubkey, owner_private_key, None, Some(owner_pubkey))?;
+    persist_link_session(
+        &config,
+        storage,
+        owner_pubkey,
+        invite.inviter,
+        session.state.clone(),
+    )?;
 
     // Publish to relays if configured
     let relays = config.resolved_relays();

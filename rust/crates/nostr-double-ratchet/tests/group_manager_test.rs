@@ -84,10 +84,14 @@ fn create_group_fans_out_metadata_by_default_and_returns_group_data() {
         ]
     );
     assert!(result.fanout.enabled);
-    assert_eq!(result.fanout.attempted, 2);
+    assert_eq!(result.fanout.attempted, 3);
     assert_eq!(
         result.fanout.succeeded,
-        vec![bob_owner.to_hex(), carol_owner.to_hex()]
+        vec![
+            alice_owner.to_hex(),
+            bob_owner.to_hex(),
+            carol_owner.to_hex()
+        ]
     );
     assert_eq!(result.fanout.failed, Vec::<String>::new());
 
@@ -118,11 +122,13 @@ fn create_group_fans_out_metadata_by_default_and_returns_group_data() {
     );
     assert_eq!(parsed.admins, vec![alice_owner.to_hex()]);
 
-    assert_eq!(sent.len(), 2);
-    assert_eq!(sent[0].0, bob_owner);
-    assert_eq!(sent[1].0, carol_owner);
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[0].0, alice_owner);
+    assert_eq!(sent[1].0, bob_owner);
+    assert_eq!(sent[2].0, carol_owner);
     assert_eq!(sent[0].1.kind, Kind::Custom(GROUP_METADATA_KIND as u16));
     assert_eq!(sent[1].1.kind, Kind::Custom(GROUP_METADATA_KIND as u16));
+    assert_eq!(sent[2].1.kind, Kind::Custom(GROUP_METADATA_KIND as u16));
 }
 
 #[test]
@@ -225,10 +231,14 @@ fn fan_out_group_metadata_redacts_secret_for_removed_member() {
         .unwrap();
 
     assert_eq!(result.group, updated_group);
-    assert_eq!(result.fanout.attempted, 2);
+    assert_eq!(result.fanout.attempted, 3);
     assert_eq!(
         result.fanout.succeeded,
-        vec![bob_owner.to_hex(), removed_member_hex.clone()]
+        vec![
+            alice_owner.to_hex(),
+            bob_owner.to_hex(),
+            removed_member_hex.clone()
+        ]
     );
     assert_eq!(result.fanout.failed, Vec::<String>::new());
 
@@ -245,13 +255,16 @@ fn fan_out_group_metadata_redacts_secret_for_removed_member() {
     .unwrap();
     assert_eq!(redacted_metadata.secret, None);
 
-    assert_eq!(sent.len(), 2);
-    assert_eq!(sent[0].0, bob_owner);
-    assert_eq!(sent[1].0, carol_owner);
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[0].0, alice_owner);
+    assert_eq!(sent[1].0, bob_owner);
+    assert_eq!(sent[2].0, carol_owner);
 
-    let bob_metadata = parse_group_metadata(&sent[0].1.content).unwrap();
+    let alice_metadata = parse_group_metadata(&sent[0].1.content).unwrap();
+    assert_eq!(alice_metadata.secret, updated_group.secret);
+    let bob_metadata = parse_group_metadata(&sent[1].1.content).unwrap();
     assert_eq!(bob_metadata.secret, updated_group.secret);
-    let carol_metadata = parse_group_metadata(&sent[1].1.content).unwrap();
+    let carol_metadata = parse_group_metadata(&sent[2].1.content).unwrap();
     assert_eq!(carol_metadata.secret, None);
 }
 

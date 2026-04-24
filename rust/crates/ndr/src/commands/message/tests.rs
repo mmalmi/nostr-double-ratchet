@@ -71,6 +71,36 @@ fn init_test_env() {
     });
 }
 
+fn persist_session_manager_session(
+    config: &Config,
+    storage: &Storage,
+    owner_pubkey: nostr::PublicKey,
+    device_id: Option<String>,
+    state: nostr_double_ratchet::SessionState,
+) {
+    let session_manager_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> =
+        std::sync::Arc::new(
+            nostr_double_ratchet::FileStorageAdapter::new(
+                storage.data_dir().join("session_manager"),
+            )
+            .unwrap(),
+        );
+    let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
+    let manager = nostr_double_ratchet::SessionManager::new(
+        nostr::PublicKey::from_hex(config.public_key().unwrap()).unwrap(),
+        config.private_key_bytes().unwrap(),
+        config.public_key().unwrap(),
+        nostr::PublicKey::from_hex(config.owner_public_key_hex().unwrap()).unwrap(),
+        sm_tx,
+        Some(session_manager_store),
+        None,
+    );
+    manager.init().unwrap();
+    manager
+        .import_session_state(owner_pubkey, device_id, state)
+        .unwrap();
+}
+
 fn setup() -> (TempDir, Config, Storage, String) {
     init_test_env();
     let temp = TempDir::new().unwrap();
@@ -86,11 +116,12 @@ fn setup() -> (TempDir, Config, Storage, String) {
     let session_state = serde_json::to_string(&session.state).unwrap();
 
     // Create a test chat with valid session
-    let their_pubkey = nostr::Keys::generate().public_key().to_hex();
+    let their_pubkey = nostr::Keys::generate().public_key();
+    let their_pubkey_hex = their_pubkey.to_hex();
     storage
         .save_chat(&StoredChat {
             id: "test-chat".to_string(),
-            their_pubkey,
+            their_pubkey: their_pubkey_hex,
             device_id: None,
             created_at: 1234567890,
             last_message_at: None,
@@ -98,6 +129,7 @@ fn setup() -> (TempDir, Config, Storage, String) {
             message_ttl_seconds: None,
         })
         .unwrap();
+    persist_session_manager_session(&config, &storage, their_pubkey, None, session.state.clone());
 
     (temp, config, storage, session_state)
 }
@@ -698,7 +730,13 @@ async fn test_receive_typing_does_not_save_message() {
     let storage = Storage::open(temp.path()).unwrap();
     let output = Output::new(true);
 
-    let (_alice_keys, bob_keys, mut bob_session, alice_session) = create_test_session_pair();
+    let (alice_keys, bob_keys, mut bob_session, alice_session) = create_test_session_pair();
+
+    let mut config = Config::load(temp.path()).unwrap();
+    config
+        .set_private_key(&alice_keys.secret_key().to_secret_hex())
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
 
     let chat_id = "peer-chat".to_string();
     let session_state = serde_json::to_string(&alice_session.state).unwrap();
@@ -713,9 +751,16 @@ async fn test_receive_typing_does_not_save_message() {
             message_ttl_seconds: None,
         })
         .unwrap();
+    persist_session_manager_session(
+        &config,
+        &storage,
+        bob_keys.public_key(),
+        None,
+        alice_session.state.clone(),
+    );
 
     let typing_event = bob_session.send_typing().unwrap();
-    super::receive::receive(&typing_event.as_json(), &storage, &output)
+    super::receive::receive(&typing_event.as_json(), &config, &storage, &output)
         .await
         .unwrap();
 

@@ -493,15 +493,11 @@ impl GroupManager {
         exclude_secret_for: Option<&str>,
         send_pairwise: &mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
     ) -> GroupMetadataFanoutResult {
-        let our_owner_hex = pubkey_to_hex(&self.our_owner_pubkey);
         let mut delivered = HashSet::new();
         let mut succeeded = Vec::new();
         let mut failed = Vec::new();
 
         for member_owner_hex in &group.members {
-            if member_owner_hex == &our_owner_hex {
-                continue;
-            }
             if !delivered.insert(member_owner_hex.clone()) {
                 continue;
             }
@@ -521,9 +517,7 @@ impl GroupManager {
         }
 
         if let Some(excluded_member_hex) = exclude_secret_for {
-            if excluded_member_hex != our_owner_hex
-                && delivered.insert(excluded_member_hex.to_string())
-            {
+            if delivered.insert(excluded_member_hex.to_string()) {
                 match (
                     parse_pubkey_hex(excluded_member_hex),
                     redacted_metadata_rumor,

@@ -72,52 +72,6 @@ fn build_session_manager(
     ))
 }
 
-fn import_chats_into_session_manager(
-    storage: &Storage,
-    manager: &SessionManager,
-    my_owner_pubkey_hex: &str,
-) -> Result<()> {
-    let known: std::collections::HashMap<(String, String), String> = manager
-        .export_active_sessions()
-        .into_iter()
-        .filter_map(|(owner, device_id, state)| {
-            serde_json::to_string(&state)
-                .ok()
-                .map(|json| ((owner.to_hex(), device_id), json))
-        })
-        .collect();
-
-    for chat in storage.list_chats()? {
-        if chat.their_pubkey == my_owner_pubkey_hex {
-            continue;
-        }
-
-        let owner_pubkey = match nostr::PublicKey::from_hex(&chat.their_pubkey) {
-            Ok(pk) => pk,
-            Err(_) => continue,
-        };
-        manager.setup_user(owner_pubkey);
-
-        let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
-        if known
-            .get(&(owner_pubkey.to_hex(), device_id.clone()))
-            .is_some_and(|known_state| known_state == &chat.session_state)
-        {
-            continue;
-        }
-
-        let state: nostr_double_ratchet::SessionState =
-            match serde_json::from_str(&chat.session_state) {
-                Ok(state) => state,
-                Err(_) => continue,
-            };
-
-        manager.import_session_state(owner_pubkey, Some(device_id), state)?;
-    }
-
-    Ok(())
-}
-
 fn sync_chats_from_session_manager(
     storage: &Storage,
     manager: &SessionManager,
@@ -505,7 +459,7 @@ fn refresh_runtime_state_from_storage(
     storage: &Storage,
     owner_pubkey_hex: &str,
 ) -> Result<()> {
-    import_chats_into_session_manager(storage, session_manager, owner_pubkey_hex)?;
+    session_manager.reload_from_storage()?;
     sync_chats_from_session_manager(storage, session_manager, owner_pubkey_hex)?;
     sync_runtime_groups(runtime, storage)?;
     Ok(())
@@ -698,8 +652,10 @@ async fn apply_session_group_decrypts(
                     "group_id": gid,
                     "message_id": msg_id,
                     "sender_pubkey": from_pubkey_hex,
+                    "sender_device_pubkey": sender_device_pubkey.as_ref().map(|pk| pk.to_hex()),
                     "content": content,
                     "timestamp": timestamp,
+                    "transport": "session",
                 }),
             );
             handled_any = true;
@@ -843,14 +799,13 @@ async fn backfill_recent_group_sender_events(
 
     for event in events {
         let event_id = event.id.to_hex();
-        if seen_event_ids.contains(&event_id) {
-            continue;
-        }
-        seen_event_ids.insert(event_id.clone());
-        seen_event_ids_order.push_back(event_id);
-        if seen_event_ids_order.len() > MAX_SEEN_EVENT_IDS {
-            if let Some(old) = seen_event_ids_order.pop_front() {
-                seen_event_ids.remove(&old);
+        if !seen_event_ids.contains(&event_id) {
+            seen_event_ids.insert(event_id.clone());
+            seen_event_ids_order.push_back(event_id);
+            if seen_event_ids_order.len() > MAX_SEEN_EVENT_IDS {
+                if let Some(old) = seen_event_ids_order.pop_front() {
+                    seen_event_ids.remove(&old);
+                }
             }
         }
 
@@ -1175,7 +1130,7 @@ pub(super) fn apply_session_manager_one_to_one_decrypted(
     };
 
     if extract_group_id_tag(&decrypted_event).is_some() {
-        // Group-routed events continue through legacy handling below.
+        // Group-routed events are handled by the group-specific path.
         return Ok(false);
     }
 
@@ -1829,7 +1784,6 @@ pub async fn listen(
             should_refresh = true;
         }
         if should_refresh || last_refresh.elapsed() >= Duration::from_millis(100) {
-            import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
             sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
             if connected {
                 if last_peer_app_keys_refresh.elapsed()
@@ -2028,6 +1982,27 @@ pub async fn listen(
             let event_kind = event.kind.as_u16() as u32;
             let mut used_group_routed_fallback = false;
 
+            if event_kind == MESSAGE_EVENT_KIND && current_event_group_routed {
+                if apply_session_group_decrypts(
+                    &session_group_decrypts,
+                    None,
+                    &runtime,
+                    &client,
+                    &relays,
+                    &config,
+                    storage,
+                    output,
+                    &mut subscribed_group_sender_pubkeys,
+                    &mut seen_event_ids,
+                    &mut seen_event_ids_order,
+                )
+                .await?
+                {
+                    sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
+                }
+                continue;
+            }
+
             // Handle invite responses
             if event_kind == INVITE_RESPONSE_KIND {
                 for stored_invite in storage.list_invites()? {
@@ -2077,6 +2052,16 @@ pub async fn listen(
 
                             if invite.purpose.as_deref() == Some("link") {
                                 let owner_pubkey_hex = their_pubkey.to_hex();
+                                let peer_device_id = response
+                                    .device_id
+                                    .clone()
+                                    .or_else(|| Some(response.invitee_identity.to_hex()));
+                                session_manager.import_session_state(
+                                    their_pubkey,
+                                    peer_device_id,
+                                    response.session.state.clone(),
+                                )?;
+                                session_manager.setup_user(their_pubkey);
 
                                 config.set_linked_owner(&owner_pubkey_hex)?;
                                 storage.delete_invite(&stored_invite.id)?;
@@ -3039,8 +3024,6 @@ pub async fn listen(
 
             if used_group_routed_fallback {
                 sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-            } else if current_event_group_routed {
-                import_chats_into_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
             }
         }
     }
