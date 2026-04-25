@@ -14,6 +14,10 @@ name = "ndr_ffi"
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]
+
+[features]
+bindgen-cli = ["uniffi/cargo-metadata", "uniffi/cli"]
 
 [dependencies]
 nostr-double-ratchet.workspace = true
@@ -22,10 +26,8 @@ serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 thiserror.workspace = true
-uniffi = { version = "0.28", features = ["cli"] }
+uniffi = { version = "0.28", default-features = false }
 crossbeam-channel.workspace = true
-tokio.workspace = true
-nostr35 = { package = "nostr", version = "0.35", default-features = false, features = ["std", "nip44"] }
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }

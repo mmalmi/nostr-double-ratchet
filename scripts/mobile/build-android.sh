@@ -58,7 +58,7 @@ cargo ndk \
     -t x86_64 \
     -t x86 \
     -o "$OUTPUT_DIR" \
-    build -p ndr-ffi $CARGO_FLAGS
+    build -p ndr-ffi --lib $CARGO_FLAGS
 
 # Generate Kotlin bindings
 echo ""
@@ -79,13 +79,13 @@ if [[ ! -f "$LIB_FOR_BINDGEN" ]]; then
     done
 fi
 
-cargo run -p ndr-ffi --features uniffi/cli -- \
+cargo run -p ndr-ffi --features bindgen-cli --bin uniffi-bindgen -- \
     generate --library "$LIB_FOR_BINDGEN" \
     --language kotlin \
     --out-dir "$BINDINGS_DIR" 2>/dev/null || {
     echo "    Note: Binding generation requires the library to be built first."
     echo "    You can generate bindings manually with:"
-    echo "    cargo run -p ndr-ffi --features uniffi/cli -- generate --library <lib.so> --language kotlin --out-dir <dir>"
+    echo "    cargo run -p ndr-ffi --features bindgen-cli --bin uniffi-bindgen -- generate --library <lib.so> --language kotlin --out-dir <dir>"
 }
 
 echo ""

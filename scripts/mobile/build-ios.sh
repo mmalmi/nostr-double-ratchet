@@ -52,7 +52,7 @@ mkdir -p "$OUTPUT_DIR"
 for TARGET in "${IOS_TARGETS[@]}"; do
     echo ""
     echo "==> Building for $TARGET"
-    cargo build -p ndr-ffi --target "$TARGET" $CARGO_FLAGS
+    cargo build -p ndr-ffi --lib --target "$TARGET" $CARGO_FLAGS
 done
 
 echo ""
@@ -95,11 +95,11 @@ HEADERS_DIR="$OUTPUT_DIR/headers"
 mkdir -p "$BINDINGS_DIR" "$HEADERS_DIR"
 
 # Build the library for the host to run uniffi-bindgen
-cargo build -p ndr-ffi
+cargo build -p ndr-ffi --lib
 
 # Generate bindings using uniffi-bindgen-library-mode if available
 # Otherwise use the built binary
-if cargo run -p ndr-ffi --features uniffi/cli -- \
+if cargo run -p ndr-ffi --features bindgen-cli --bin uniffi-bindgen -- \
     generate --library "$RUST_ROOT/target/debug/libndr_ffi.dylib" \
     --language swift \
     --out-dir "$BINDINGS_DIR" 2>/dev/null; then
