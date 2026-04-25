@@ -88,6 +88,33 @@ cargo run -p ndr-ffi --features bindgen-cli --bin uniffi-bindgen -- \
     echo "    cargo run -p ndr-ffi --features bindgen-cli --bin uniffi-bindgen -- generate --library <lib.so> --language kotlin --out-dir <dir>"
 }
 
+if [[ "$BUILD_TYPE" == "release" ]]; then
+    STRIP_BIN="${LLVM_STRIP:-}"
+    if [[ -z "$STRIP_BIN" ]]; then
+        NDK_ROOT="${ANDROID_NDK_HOME:-${NDK_HOME:-}}"
+        if [[ -n "$NDK_ROOT" ]]; then
+            STRIP_BIN="$(find "$NDK_ROOT/toolchains/llvm/prebuilt" -path "*/bin/llvm-strip" -print -quit 2>/dev/null || true)"
+        fi
+    fi
+    if [[ -z "$STRIP_BIN" ]]; then
+        STRIP_BIN="$(command -v llvm-strip || true)"
+    fi
+
+    if [[ -n "$STRIP_BIN" ]]; then
+        echo ""
+        echo "==> Stripping release native libraries"
+        echo "    Strip tool: $STRIP_BIN"
+        for ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+            LIB="$OUTPUT_DIR/$ABI/libndr_ffi.so"
+            if [[ -f "$LIB" ]]; then
+                "$STRIP_BIN" --strip-unneeded "$LIB"
+            fi
+        done
+    else
+        echo "Warning: llvm-strip not found; release libraries keep non-runtime symbol tables."
+    fi
+fi
+
 echo ""
 echo "==> Android build complete!"
 echo "    JNI libs: $OUTPUT_DIR"
