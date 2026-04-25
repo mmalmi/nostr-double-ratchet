@@ -143,6 +143,11 @@ if [[ ${#XCODE_ARGS[@]} -gt 0 ]]; then
     xcodebuild -create-xcframework \
         "${XCODE_ARGS[@]}" \
         -output "$XCFRAMEWORK_PATH"
+
+    echo "    Stripping debug info from static libraries..."
+    for lib in "$XCFRAMEWORK_PATH"/*/libndr_ffi*.a; do
+        [[ -f "$lib" ]] && xcrun strip -S "$lib"
+    done
     
     echo "    XCFramework created: $XCFRAMEWORK_PATH"
 else
