@@ -1296,6 +1296,9 @@ async fn flush_session_manager_events(
             SessionManagerEvent::PublishSigned(signed) => {
                 send_event_or_ignore(client, signed).await?;
             }
+            SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => {
+                send_event_or_ignore(client, event).await?;
+            }
             SessionManagerEvent::Subscribe { filter_json, .. } => {
                 if !subscribed_manager_filters.insert(filter_json.clone()) {
                     continue;

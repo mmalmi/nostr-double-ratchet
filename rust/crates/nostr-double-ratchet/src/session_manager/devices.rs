@@ -343,7 +343,12 @@ impl SessionManager {
 
                 let mut pending = Vec::new();
                 for entry in entries {
-                    let maybe_event_id = entry.event.id.as_ref().map(|id| id.to_string());
+                    let maybe_event_id = entry
+                        .event
+                        .id
+                        .as_ref()
+                        .map(|id| id.to_string())
+                        .or_else(|| entry.id.split('/').next().map(str::to_string));
                     if let Some(signed_event) =
                         SessionManager::send_event_with_best_session(device_record, entry.event)
                     {
@@ -355,7 +360,11 @@ impl SessionManager {
         });
 
         for (entry_id, maybe_event_id, signed_event) in pending_publishes {
-            if self.pubsub.publish_signed(signed_event).is_ok() {
+            if self
+                .pubsub
+                .publish_signed_for_inner_event(signed_event, maybe_event_id.clone())
+                .is_ok()
+            {
                 sent.push((entry_id, maybe_event_id));
             }
         }

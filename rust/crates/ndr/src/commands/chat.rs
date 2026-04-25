@@ -295,6 +295,7 @@ pub async fn ttl(
         let signed = match ev {
             SessionManagerEvent::Publish(unsigned) => unsigned.sign_with_keys(&signing_keys)?,
             SessionManagerEvent::PublishSigned(signed) => signed,
+            SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => event,
             SessionManagerEvent::Subscribe { .. }
             | SessionManagerEvent::Unsubscribe(_)
             | SessionManagerEvent::ReceivedEvent(_)

@@ -1257,6 +1257,18 @@ impl SessionManagerHandle {
                     content: None,
                     event_id: None,
                 },
+                SessionManagerEvent::PublishSignedForInnerEvent {
+                    event,
+                    inner_event_id,
+                } => PubSubEvent {
+                    kind: "publish_signed".to_string(),
+                    subid: None,
+                    filter_json: None,
+                    event_json: Some(serde_json::to_string(&event)?),
+                    sender_pubkey_hex: None,
+                    content: None,
+                    event_id: inner_event_id,
+                },
                 SessionManagerEvent::Subscribe { subid, filter_json } => PubSubEvent {
                     kind: "subscribe".to_string(),
                     subid: Some(subid),

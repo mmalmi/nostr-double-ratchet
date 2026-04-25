@@ -25,7 +25,11 @@ impl SessionManager {
                     .process_invite_response(&event, state.our_identity_key)
                 {
                     Ok(Some(response)) => {
+                        let claimed_owner = response
+                            .owner_public_key
+                            .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
                         if !self.install_invite_response_session(event.id.to_string(), response) {
+                            self.setup_user(claimed_owner);
                             self.queue_pending_invite_response(event.clone());
                         }
                     }

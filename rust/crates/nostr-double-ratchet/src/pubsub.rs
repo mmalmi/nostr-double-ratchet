@@ -11,6 +11,13 @@ use crate::{Error, Result, SessionManagerEvent};
 pub trait NostrPubSub: Send + Sync {
     fn publish(&self, event: nostr::UnsignedEvent) -> Result<()>;
     fn publish_signed(&self, event: nostr::Event) -> Result<()>;
+    fn publish_signed_for_inner_event(
+        &self,
+        event: nostr::Event,
+        _inner_event_id: Option<String>,
+    ) -> Result<()> {
+        self.publish_signed(event)
+    }
     fn subscribe(&self, subid: String, filter_json: String) -> Result<()>;
     fn unsubscribe(&self, subid: String) -> Result<()>;
     fn decrypted_message(
@@ -32,6 +39,18 @@ impl NostrPubSub for crossbeam_channel::Sender<SessionManagerEvent> {
     fn publish_signed(&self, event: nostr::Event) -> Result<()> {
         self.send(SessionManagerEvent::PublishSigned(event))
             .map_err(|_| Error::Storage("Failed to send publish".to_string()))
+    }
+
+    fn publish_signed_for_inner_event(
+        &self,
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+    ) -> Result<()> {
+        self.send(SessionManagerEvent::PublishSignedForInnerEvent {
+            event,
+            inner_event_id,
+        })
+        .map_err(|_| Error::Storage("Failed to send publish".to_string()))
     }
 
     fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
@@ -89,6 +108,15 @@ impl NostrPubSub for ChannelPubSub {
 
     fn publish_signed(&self, event: nostr::Event) -> Result<()> {
         self.tx.publish_signed(event)
+    }
+
+    fn publish_signed_for_inner_event(
+        &self,
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+    ) -> Result<()> {
+        self.tx
+            .publish_signed_for_inner_event(event, inner_event_id)
     }
 
     fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
@@ -150,6 +178,15 @@ impl NostrPubSub for DedupingPubSub {
 
     fn publish_signed(&self, event: nostr::Event) -> Result<()> {
         self.inner.publish_signed(event)
+    }
+
+    fn publish_signed_for_inner_event(
+        &self,
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+    ) -> Result<()> {
+        self.inner
+            .publish_signed_for_inner_event(event, inner_event_id)
     }
 
     fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
@@ -372,6 +409,10 @@ pub mod test_utils {
                 crate::session_manager::SessionManagerEvent::PublishSigned(signed) => {
                     SessionEvent::PublishSigned(signed)
                 }
+                crate::session_manager::SessionManagerEvent::PublishSignedForInnerEvent {
+                    event,
+                    ..
+                } => SessionEvent::PublishSigned(event),
                 crate::session_manager::SessionManagerEvent::Subscribe { subid, filter_json } => {
                     SessionEvent::Subscribe { subid, filter_json }
                 }

@@ -114,6 +114,12 @@ async fn flush_session_manager_events(
                 }
                 send_event_or_ignore(client, signed).await?;
             }
+            SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => {
+                if event.kind.as_u16() == INVITE_RESPONSE_KIND as u16 && invite_response.is_none() {
+                    invite_response = Some(event.clone());
+                }
+                send_event_or_ignore(client, event).await?;
+            }
             SessionManagerEvent::Subscribe { .. }
             | SessionManagerEvent::Unsubscribe(_)
             | SessionManagerEvent::ReceivedEvent(_)

@@ -69,9 +69,14 @@ fn recv_signed_event(rx: &Receiver<SessionManagerEvent>) -> nostr::Event {
         if start.elapsed() > EVENT_TIMEOUT {
             panic!("Timed out waiting for PublishSigned event");
         }
-        if let Ok(SessionManagerEvent::PublishSigned(signed)) = rx.recv_timeout(EVENT_POLL_INTERVAL)
-        {
-            return signed;
+        if let Ok(event) = rx.recv_timeout(EVENT_POLL_INTERVAL) {
+            match event {
+                SessionManagerEvent::PublishSigned(signed)
+                | SessionManagerEvent::PublishSignedForInnerEvent { event: signed, .. } => {
+                    return signed;
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -82,10 +87,15 @@ fn recv_signed_event_of_kind(rx: &Receiver<SessionManagerEvent>, kind: u32) -> n
         if start.elapsed() > EVENT_TIMEOUT {
             panic!("Timed out waiting for PublishSigned event of kind {kind}");
         }
-        if let Ok(SessionManagerEvent::PublishSigned(signed)) = rx.recv_timeout(EVENT_POLL_INTERVAL)
-        {
-            if signed.kind.as_u16() == kind as u16 {
-                return signed;
+        if let Ok(event) = rx.recv_timeout(EVENT_POLL_INTERVAL) {
+            match event {
+                SessionManagerEvent::PublishSigned(signed)
+                | SessionManagerEvent::PublishSignedForInnerEvent { event: signed, .. } => {
+                    if signed.kind.as_u16() == kind as u16 {
+                        return signed;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -96,13 +106,18 @@ fn recv_message_events(rx: &Receiver<SessionManagerEvent>, expected: usize) -> V
     let mut events = Vec::new();
 
     while start.elapsed() <= EVENT_TIMEOUT {
-        if let Ok(SessionManagerEvent::PublishSigned(signed)) = rx.recv_timeout(EVENT_POLL_INTERVAL)
-        {
-            if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
-                events.push(signed);
-                if events.len() >= expected {
-                    return events;
+        if let Ok(event) = rx.recv_timeout(EVENT_POLL_INTERVAL) {
+            match event {
+                SessionManagerEvent::PublishSigned(signed)
+                | SessionManagerEvent::PublishSignedForInnerEvent { event: signed, .. } => {
+                    if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
+                        events.push(signed);
+                        if events.len() >= expected {
+                            return events;
+                        }
+                    }
                 }
+                _ => {}
             }
         }
     }
@@ -140,8 +155,12 @@ fn recv_invite_response_and_message_event(
     let mut message = None;
 
     while start.elapsed() <= EVENT_TIMEOUT {
-        if let Ok(SessionManagerEvent::PublishSigned(signed)) = rx.recv_timeout(EVENT_POLL_INTERVAL)
-        {
+        if let Ok(event) = rx.recv_timeout(EVENT_POLL_INTERVAL) {
+            let signed = match event {
+                SessionManagerEvent::PublishSigned(signed)
+                | SessionManagerEvent::PublishSignedForInnerEvent { event: signed, .. } => signed,
+                _ => continue,
+            };
             if signed.kind.as_u16() == nostr_double_ratchet::INVITE_RESPONSE_KIND as u16 {
                 response = Some(signed);
             } else if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
@@ -244,8 +263,12 @@ fn test_accept_invite_routes_session_under_verified_claimed_owner() -> Result<()
     let mut saw_response = false;
     let start = std::time::Instant::now();
     while start.elapsed() < EVENT_TIMEOUT {
-        if let Ok(SessionManagerEvent::PublishSigned(signed)) = rx.recv_timeout(EVENT_POLL_INTERVAL)
-        {
+        if let Ok(event) = rx.recv_timeout(EVENT_POLL_INTERVAL) {
+            let signed = match event {
+                SessionManagerEvent::PublishSigned(signed)
+                | SessionManagerEvent::PublishSignedForInnerEvent { event: signed, .. } => signed,
+                _ => continue,
+            };
             if signed.kind.as_u16() == nostr_double_ratchet::INVITE_RESPONSE_KIND as u16 {
                 saw_response = true;
                 break;

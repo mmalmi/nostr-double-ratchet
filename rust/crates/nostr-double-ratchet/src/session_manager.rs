@@ -18,6 +18,10 @@ pub enum SessionManagerEvent {
     Unsubscribe(String),
     Publish(UnsignedEvent),
     PublishSigned(nostr::Event), // For events pre-signed with ephemeral keys (kind 1059, 1060)
+    PublishSignedForInnerEvent {
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+    },
     ReceivedEvent(nostr::Event),
     DecryptedMessage {
         sender: PublicKey,

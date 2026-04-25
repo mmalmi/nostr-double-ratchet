@@ -76,6 +76,27 @@ fn drain_events(rx: &crossbeam_channel::Receiver<SessionManagerEvent>) -> Vec<Se
     out
 }
 
+fn is_message_publish(event: &SessionManagerEvent) -> bool {
+    matches!(
+        event,
+        SessionManagerEvent::PublishSigned(signed)
+            | SessionManagerEvent::PublishSignedForInnerEvent {
+                event: signed,
+                ..
+            } if signed.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
+    )
+}
+
+fn queued_publish_inner_event_id(event: &SessionManagerEvent) -> Option<&str> {
+    match event {
+        SessionManagerEvent::PublishSignedForInnerEvent {
+            event,
+            inner_event_id,
+        } if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16 => inner_event_id.as_deref(),
+        _ => None,
+    }
+}
+
 fn sign_app_keys_event_with_created_at(
     app_keys: &AppKeys,
     owner_pubkey: PublicKey,
@@ -884,14 +905,10 @@ fn queued_message_survives_restart_and_flushes_after_session_creation() {
 
     let events = drain_events(&rx2);
     assert!(
-        events.iter().any(|ev| {
-            matches!(
-                ev,
-                SessionManagerEvent::PublishSigned(event)
-                    if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-            )
-        }),
-        "expected queued message to be published after session creation"
+        events
+            .iter()
+            .any(|ev| queued_publish_inner_event_id(ev) == Some(inner_id.as_str())),
+        "expected queued message publish to preserve original inner event id"
     );
 
     let remaining_keys = storage.list("v1/message-queue/").unwrap();
@@ -983,14 +1000,10 @@ fn queued_message_for_known_appkeys_device_flushes_without_new_appkeys_event() {
 
     let events = drain_events(&rx);
     assert!(
-        events.iter().any(|ev| {
-            matches!(
-                ev,
-                SessionManagerEvent::PublishSigned(event)
-                    if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-            )
-        }),
-        "expected queued message to flush immediately after session creation"
+        events
+            .iter()
+            .any(|ev| queued_publish_inner_event_id(ev) == Some(inner_id.as_str())),
+        "expected queued message publish to preserve original inner event id"
     );
 
     let remaining_keys = storage.list("v1/message-queue/").unwrap();
@@ -999,6 +1012,98 @@ fn queued_message_for_known_appkeys_device_flushes_without_new_appkeys_event() {
             .iter()
             .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
         "expected recipient queue entry removal after successful publish"
+    );
+}
+
+#[test]
+fn pending_invite_response_subscribes_to_claimed_owner_appkeys() {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let alice_device_id = alice_pubkey.to_hex();
+
+    let bob_owner_keys = Keys::generate();
+    let bob_owner = bob_owner_keys.public_key();
+    let bob_device_keys = Keys::generate();
+    let bob_device = bob_device_keys.public_key();
+    let bob_device_id = bob_device.to_hex();
+
+    let mut invite = Invite::create_new(alice_pubkey, Some(alice_device_id.clone()), None).unwrap();
+    invite.owner_public_key = Some(alice_pubkey);
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_device_id,
+        alice_pubkey,
+        tx,
+        Some(Arc::new(InMemoryStorage::new())),
+        Some(invite.clone()),
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    let (_, response_event) = invite
+        .accept_with_owner(
+            bob_device,
+            bob_device_keys.secret_key().to_secret_bytes(),
+            Some(bob_device_id.clone()),
+            Some(bob_owner),
+        )
+        .unwrap();
+
+    manager.process_received_event(response_event);
+    let events = drain_events(&rx);
+    assert!(
+        events.iter().any(|event| {
+            let SessionManagerEvent::Subscribe { filter_json, .. } = event else {
+                return false;
+            };
+            let Ok(filter) = serde_json::from_str::<serde_json::Value>(filter_json) else {
+                return false;
+            };
+            let has_app_keys_kind = filter
+                .get("kinds")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|kinds| {
+                    kinds
+                        .iter()
+                        .any(|kind| kind.as_u64() == Some(crate::APP_KEYS_EVENT_KIND as u64))
+                });
+            let has_owner_author = filter
+                .get("authors")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|authors| {
+                    authors
+                        .iter()
+                        .any(|author| author.as_str() == Some(bob_owner.to_hex().as_str()))
+                });
+            has_app_keys_kind && has_owner_author
+        }),
+        "expected pending invite response to subscribe to claimed owner AppKeys"
+    );
+
+    assert!(
+        manager
+            .pending_invite_response_owner_pubkeys()
+            .contains(&bob_owner),
+        "expected invite response to stay pending until owner AppKeys prove device membership"
+    );
+
+    let mut app_keys = AppKeys::new(vec![]);
+    app_keys.add_device(DeviceEntry::new(bob_device, 1));
+    let app_keys_event = app_keys
+        .get_event(bob_owner)
+        .sign_with_keys(&bob_owner_keys)
+        .unwrap();
+    manager.process_received_event(app_keys_event);
+
+    assert!(
+        manager
+            .export_active_session_state(bob_owner)
+            .unwrap()
+            .is_some(),
+        "expected pending invite response to install after claimed owner AppKeys arrive"
     );
 }
 
@@ -1291,13 +1396,7 @@ fn discovery_entry_retained_when_discovery_expansion_partially_fails() {
 
     let events = drain_events(&rx);
     assert!(
-        events.iter().any(|ev| {
-            matches!(
-                ev,
-                SessionManagerEvent::PublishSigned(event)
-                    if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-            )
-        }),
+        events.iter().any(is_message_publish),
         "expected queued message to publish after retry and session creation"
     );
 }
@@ -1389,13 +1488,7 @@ fn appkeys_replacement_cleans_revoked_device_queue_entries() {
     manager.process_received_event(invite_event);
     let events = drain_events(&rx);
     assert!(
-        events.iter().any(|ev| {
-            matches!(
-                ev,
-                SessionManagerEvent::PublishSigned(event)
-                    if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-            )
-        }),
+        events.iter().any(is_message_publish),
         "expected queued message to publish for still-authorized device"
     );
 }
@@ -1690,13 +1783,7 @@ fn transient_expansion_failure_then_revocation_keeps_only_authorized_retry_path(
     manager.process_received_event(invite_event);
     let events = drain_events(&rx);
     assert!(
-        events.iter().any(|ev| {
-            matches!(
-                ev,
-                SessionManagerEvent::PublishSigned(event)
-                    if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-            )
-        }),
+        events.iter().any(is_message_publish),
         "authorized device should receive queued message after retry path"
     );
 }

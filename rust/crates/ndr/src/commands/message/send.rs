@@ -184,6 +184,7 @@ async fn flush_session_manager_message_events(
                 .sign_with_keys(signing_keys)
                 .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?,
             SessionManagerEvent::PublishSigned(signed) => signed,
+            SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => event,
             SessionManagerEvent::Subscribe { .. }
             | SessionManagerEvent::Unsubscribe(_)
             | SessionManagerEvent::ReceivedEvent(_)

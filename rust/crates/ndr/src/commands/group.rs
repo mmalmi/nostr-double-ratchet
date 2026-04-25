@@ -203,6 +203,7 @@ async fn publish_pending_session_manager_events(
                 .sign_with_keys(&signing_keys)
                 .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?,
             Ok(SessionManagerEvent::PublishSigned(signed)) => signed,
+            Ok(SessionManagerEvent::PublishSignedForInnerEvent { event, .. }) => event,
             Ok(_) => continue,
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         };
@@ -220,6 +221,7 @@ fn drain_session_manager_message_events(rx: &Receiver<SessionManagerEvent>) -> V
     loop {
         match rx.try_recv() {
             Ok(SessionManagerEvent::PublishSigned(event))
+            | Ok(SessionManagerEvent::PublishSignedForInnerEvent { event, .. })
                 if event.kind.as_u16() == nostr_double_ratchet::MESSAGE_EVENT_KIND as u16 =>
             {
                 message_events.push(event);
