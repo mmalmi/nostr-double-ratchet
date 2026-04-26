@@ -6,6 +6,10 @@
 
 End-to-end encrypted messaging primitives for Nostr, implemented in TypeScript and Rust.
 
+Reference integrations:
+[`iris-client`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-client),
+[`iris-chat`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat),
+[`iris-chat-flutter`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-flutter).
 Used by [chat.iris.to](https://chat.iris.to) and by CLI tooling in this repo.
 
 ## Install `ndr` CLI (latest release)
@@ -61,19 +65,6 @@ multi-device routing, device authorization, or session persistence yourself.
 
 Use plain `Session` when you want the smallest possible surface for 1:1 messaging and you do not
 need owner/device fanout, AppKeys-driven authorization, or runtime-managed group transport.
-
-## Reference Integrations
-
-- Web ([`iris-client`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-client),
-  [`iris-chat`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat)):
-  one long-lived `NdrRuntime`; app-owned `nostrSubscribe` / `nostrFetch` / `nostrPublish` plus
-  persistent storage; `initForOwner(ownerPubkey)`; register the current device when owner-key
-  logins should fan out; attach `onSessionEvent(...)` / `onGroupEvent(...)`.
-- Native / FFI
-  ([`iris-chat-flutter`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-flutter)):
-  app-owned `SessionManager` loop; `init()`; drain emitted pubsub events; publish/subscribe in the
-  host app; feed relay events back through `process_received_event(...)`; own relay
-  bootstrap/backfill around `setup_user(...)`.
 
 ## Security Guarantees And Properties
 
