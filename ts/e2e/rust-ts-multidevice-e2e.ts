@@ -164,7 +164,7 @@ async function main() {
   log(`E2E_DEVICE2_INVITE_PUBLISHED:${device2InviteEvent.id}`);
 
   const invite = Invite.fromUrl(INVITE_URL);
-  const accepted = await invite.accept(subscribe, ownerPubkey, ownerSk);
+  const accepted = await invite.accept(ownerPubkey, ownerSk);
   ownerSession = accepted.session;
   ownerSession.onEvent(onOwnerEvent);
   log("E2E_OWNER_SESSION_CREATED");
@@ -182,7 +182,7 @@ async function main() {
 
     if (ownerSession) {
       try {
-        (ownerSession as any).handleNostrEvent(event);
+        ownerSession.receiveEvent(event);
       } catch {
         // Ignore unrelated events.
       }
@@ -190,7 +190,7 @@ async function main() {
 
     if (device2Session) {
       try {
-        (device2Session as any).handleNostrEvent(event);
+        device2Session.receiveEvent(event);
       } catch {
         // Ignore unrelated events.
       }

@@ -207,7 +207,7 @@ async function main() {
       log(`E2E_DR_EVENT:${event.id.slice(0, 8)}`);
       if (session) {
         try {
-          (session as any).handleNostrEvent(event);
+          session.receiveEvent(event);
         } catch (e) {
           // May not be for us
         }

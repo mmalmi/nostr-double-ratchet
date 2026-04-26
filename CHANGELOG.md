@@ -2,6 +2,9 @@
 
 ## 0.0.100 - 2026-04-26
 
+- Align the Rust workspace/crate versions with the TypeScript package release.
+- Update TypeScript e2e harnesses to use the current `receiveEvent(...)` and
+  `Invite.accept(...)` APIs.
 - Mirror the runtime-owned direct-message subscription architecture in the TypeScript package.
 - Add fed-event `Session.receiveEvent(...)` and `SessionManager.processReceivedEvent(...)` paths for external relay dispatch.
 - Have `NdrRuntime` subscribe to current direct-message authors and resubscribe when ratchet/session state changes.

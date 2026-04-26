@@ -115,7 +115,6 @@ async function main() {
 
   // Accept the invite - this creates a session and a response event
   const { session, event: responseEvent } = await invite.accept(
-    subscribe,
     bobPubkey,
     bobSecretKey
   );
@@ -149,7 +148,7 @@ async function main() {
     (event: any) => {
       log(`E2E_DR_EVENT:${event.id.slice(0, 8)}`);
       try {
-        (session as any).handleNostrEvent(event);
+        session.receiveEvent(event);
       } catch (e) {
         // May not be for us
       }

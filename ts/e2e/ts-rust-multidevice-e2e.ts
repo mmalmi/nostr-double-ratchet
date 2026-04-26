@@ -200,14 +200,14 @@ async function main() {
   relay.subscribe({ kinds: [1060] }, (event: any) => {
     if (session1) {
       try {
-        (session1 as any).handleNostrEvent(event);
+        session1.receiveEvent(event);
       } catch {
         // ignore unrelated events
       }
     }
     if (session2) {
       try {
-        (session2 as any).handleNostrEvent(event);
+        session2.receiveEvent(event);
       } catch {
         // ignore unrelated events
       }
@@ -241,4 +241,3 @@ main().catch((e) => {
   log(`E2E_ERROR:${e?.message || e}`);
   process.exit(1);
 });
-

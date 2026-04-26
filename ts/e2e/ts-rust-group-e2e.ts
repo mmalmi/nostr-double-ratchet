@@ -301,7 +301,7 @@ async function main() {
         // Fallback path for relays/test harnesses where author-filtered subscriptions are unreliable.
         if (dmSession) {
           try {
-            dmSession.handleNostrEvent(event);
+            dmSession.receiveEvent(event);
           } catch {
             // ignore non-session or duplicate events
           }

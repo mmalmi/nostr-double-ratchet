@@ -127,7 +127,7 @@ async function main() {
   relay.subscribe({ kinds: [1060] }, (event: any) => {
     if (session) {
       try {
-        (session as any).handleNostrEvent(event);
+        session.receiveEvent(event);
       } catch (e) {}
     }
   });
