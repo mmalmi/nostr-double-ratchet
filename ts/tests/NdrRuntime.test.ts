@@ -178,6 +178,58 @@ describe("NdrRuntime", () => {
     expect(restartedRuntime.getState().hasLocalAppKeys).toBe(true)
   })
 
+  it("routes direct messages through runtime-owned subscriptions", async () => {
+    const relay = new MockRelay()
+
+    const aliceOwnerPrivateKey = generateSecretKey()
+    const aliceOwnerPubkey = getPublicKey(aliceOwnerPrivateKey)
+    const aliceRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: aliceOwnerPrivateKey,
+    })
+    await aliceRuntime.initForOwner(aliceOwnerPubkey)
+    await aliceRuntime.registerCurrentDevice({ ownerPubkey: aliceOwnerPubkey })
+    await aliceRuntime.republishInvite()
+
+    const bobOwnerPrivateKey = generateSecretKey()
+    const bobOwnerPubkey = getPublicKey(bobOwnerPrivateKey)
+    const bobRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: bobOwnerPrivateKey,
+    })
+    await bobRuntime.initForOwner(bobOwnerPubkey)
+    await bobRuntime.registerCurrentDevice({ ownerPubkey: bobOwnerPubkey })
+    await bobRuntime.republishInvite()
+
+    const bobReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("bob did not receive alice message")), 5_000)
+      const unsubscribe = bobRuntime.onSessionEvent((event) => {
+        if (event.content !== "hello via runtime") return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await aliceRuntime.sendMessage(bobOwnerPubkey, "hello via runtime")
+    await bobReceived
+
+    expect(bobRuntime.getDirectMessageSubscriptionAuthors().length).toBeGreaterThan(0)
+
+    const aliceReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("alice did not receive bob reply")), 5_000)
+      const unsubscribe = aliceRuntime.onSessionEvent((event) => {
+        if (event.content !== "reply via runtime") return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await bobRuntime.sendMessage(aliceOwnerPubkey, "reply via runtime")
+    await aliceReceived
+  })
+
   it("owns group transport alongside sessions on the high-level runtime path", async () => {
     const relay = new MockRelay()
 

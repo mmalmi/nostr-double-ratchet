@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.100 - 2026-04-26
+
+- Mirror the runtime-owned direct-message subscription architecture in the TypeScript package.
+- Add fed-event `Session.receiveEvent(...)` and `SessionManager.processReceivedEvent(...)` paths for external relay dispatch.
+- Have `NdrRuntime` subscribe to current direct-message authors and resubscribe when ratchet/session state changes.
+- Add TypeScript runtime coverage for direct messages delivered through `NdrRuntime`.
+
 ## 0.0.99 - 2026-04-26
 
 - Move direct-message subscription ownership from `Session`/`SessionManager` into `NdrRuntime`.

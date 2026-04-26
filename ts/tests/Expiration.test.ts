@@ -19,10 +19,7 @@ describe("Expiration / Disappearing Messages", () => {
     const aliceSecretKey = generateSecretKey()
     const bobSecretKey = generateSecretKey()
 
-    const dummySubscribe = () => () => {}
-
     const alice = Session.init(
-      dummySubscribe,
       getPublicKey(bobSecretKey),
       aliceSecretKey,
       true,

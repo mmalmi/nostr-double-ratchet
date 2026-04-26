@@ -27,6 +27,7 @@ import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
 import {
   type ChatSettingsPayloadV1,
   type ExpirationOptions,
+  MESSAGE_EVENT_KIND,
   type NostrFetch,
   type NostrPublish,
   type NostrSubscribe,
@@ -34,6 +35,7 @@ import {
   type Rumor,
   type Unsubscribe,
 } from "./types";
+import type { VerifiedEvent } from "nostr-tools";
 import {
   SessionGroupRuntime,
   type RuntimeGroupEvent,
@@ -141,6 +143,9 @@ export class NdrRuntime {
 
   private appKeysSubscriptionCleanup: Unsubscribe | null = null;
   private appKeysSubscriptionOwnerPubkey: string | null = null;
+  private directMessageSubscriptionCleanup: Unsubscribe | null = null;
+  private directMessageSubscriptionAuthors: string[] = [];
+  private messagePushAuthorCleanup: Unsubscribe | null = null;
 
   private readonly stateListeners = new Set<(state: NdrRuntimeState) => void>();
   private readonly sessionEventCallbacks = new Set<OnEventCallback>();
@@ -241,6 +246,18 @@ export class NdrRuntime {
 
   getGroupManager(): GroupManager | null {
     return this.groupController.getManager();
+  }
+
+  getDirectMessageSubscriptionAuthors(): string[] {
+    return [...this.directMessageSubscriptionAuthors];
+  }
+
+  processReceivedEvent(event: VerifiedEvent): boolean {
+    const handled = this.sessionManager?.processReceivedEvent(event) ?? false;
+    if (handled) {
+      this.syncDirectMessageSubscription();
+    }
+    return handled;
   }
 
   async initManagers(): Promise<void> {
@@ -346,15 +363,22 @@ export class NdrRuntime {
       this.attachSessionEventCallbacks(manager);
       await manager.init();
       this.sessionManager = manager;
+      this.messagePushAuthorCleanup?.();
+      this.messagePushAuthorCleanup = manager.onMessagePushAuthorsChanged(() => {
+        this.syncDirectMessageSubscription();
+      });
       this.syncState({
         ownerPubkey,
         sessionManagerReady: true,
       });
       this.groupController.setSessionManager(manager);
+      this.syncDirectMessageSubscription();
       return manager;
     })()
       .catch((error) => {
         this.clearAttachedSessionEventCallbacks();
+        this.messagePushAuthorCleanup?.();
+        this.messagePushAuthorCleanup = null;
         this.groupController.setSessionManager(null);
         throw error;
       })
@@ -377,7 +401,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    await manager.setupUser(userPubkey);
+    try {
+      await manager.setupUser(userPubkey);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async sendEvent(
@@ -388,7 +416,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    return manager.sendEvent(recipientPubkey, event);
+    try {
+      return await manager.sendEvent(recipientPubkey, event);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async sendMessage(
@@ -400,7 +432,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    return manager.sendMessage(recipientPubkey, content, options);
+    try {
+      return await manager.sendMessage(recipientPubkey, content, options);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async sendChatSettings(
@@ -411,7 +447,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    return manager.sendChatSettings(recipientPubkey, messageTtlSeconds);
+    try {
+      return await manager.sendChatSettings(recipientPubkey, messageTtlSeconds);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async setChatSettingsForPeer(
@@ -422,7 +462,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    return manager.setChatSettingsForPeer(peerPubkey, messageTtlSeconds);
+    try {
+      return await manager.setChatSettingsForPeer(peerPubkey, messageTtlSeconds);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async sendReceipt(
@@ -434,7 +478,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    return manager.sendReceipt(recipientPubkey, receiptType, messageIds);
+    try {
+      return await manager.sendReceipt(recipientPubkey, receiptType, messageIds);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async sendTyping(
@@ -444,7 +492,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    return manager.sendTyping(recipientPubkey);
+    try {
+      return await manager.sendTyping(recipientPubkey);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async setDefaultExpiration(
@@ -483,7 +535,11 @@ export class NdrRuntime {
     const manager = await this.waitForSessionManager(
       this.resolveActiveOwnerPubkey(ownerPubkey),
     );
-    await manager.deleteChat(userPubkey);
+    try {
+      await manager.deleteChat(userPubkey);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async resolveBaseAppKeys(
@@ -565,6 +621,39 @@ export class NdrRuntime {
     this.syncState({
       appKeysSubscriptionActive: false,
     });
+  }
+
+  private syncDirectMessageSubscription(): void {
+    const nextAuthors = [
+      ...new Set(this.sessionManager?.getAllMessagePushAuthorPubkeys() ?? []),
+    ].sort();
+
+    if (
+      nextAuthors.length === this.directMessageSubscriptionAuthors.length &&
+      nextAuthors.every(
+        (author, index) => author === this.directMessageSubscriptionAuthors[index],
+      )
+    ) {
+      return;
+    }
+
+    this.directMessageSubscriptionCleanup?.();
+    this.directMessageSubscriptionCleanup = null;
+    this.directMessageSubscriptionAuthors = nextAuthors;
+
+    if (nextAuthors.length === 0) {
+      return;
+    }
+
+    this.directMessageSubscriptionCleanup = this.nostrSubscribe(
+      {
+        kinds: [MESSAGE_EVENT_KIND],
+        authors: nextAuthors,
+      },
+      (event) => {
+        this.processReceivedEvent(event);
+      },
+    );
   }
 
   async refreshOwnAppKeysFromRelay(
@@ -792,7 +881,11 @@ export class NdrRuntime {
       invite.ownerPubkey ||
       invite.inviter;
     const manager = await this.waitForSessionManager(ownerPubkey);
-    return manager.acceptInvite(invite, options);
+    try {
+      return await manager.acceptInvite(invite, options);
+    } finally {
+      this.syncDirectMessageSubscription();
+    }
   }
 
   async acceptLinkInvite(
@@ -842,6 +935,11 @@ export class NdrRuntime {
 
   close(): void {
     this.stopAppKeysSubscription();
+    this.messagePushAuthorCleanup?.();
+    this.messagePushAuthorCleanup = null;
+    this.directMessageSubscriptionCleanup?.();
+    this.directMessageSubscriptionCleanup = null;
+    this.directMessageSubscriptionAuthors = [];
     this.clearAttachedSessionEventCallbacks();
     this.groupController.close();
     this.appKeysManager?.close();

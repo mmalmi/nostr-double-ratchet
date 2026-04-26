@@ -60,7 +60,7 @@ function makeSession(
     skippedKeys: {},
   }
 
-  const session = new Session(() => () => {}, state)
+  const session = new Session(state)
   session.name = name
   return session
 }
@@ -166,7 +166,6 @@ describe("DeviceRecordActor", () => {
     })
 
     const { session: activeSession, event: responseEvent } = await invite.accept(
-      subscribe,
       activeSidePublicKey,
       activeSideSecretKey,
       activeSidePublicKey,
@@ -181,7 +180,6 @@ describe("DeviceRecordActor", () => {
     })
 
     const passiveSession = createSessionFromAccept({
-      nostrSubscribe: subscribe,
       theirPublicKey: decrypted.inviteeSessionPublicKey,
       ourSessionPrivateKey: invite.inviterEphemeralPrivateKey!,
       sharedSecret: invite.sharedSecret,
@@ -203,7 +201,7 @@ describe("DeviceRecordActor", () => {
     const nostr: NostrFacade = {
       subscribe,
       publish: vi.fn(async (event: UnsignedEvent | VerifiedEvent) => {
-        relay.storeAndDeliver(event as VerifiedEvent)
+        activeSession.receiveEvent(event as VerifiedEvent)
       }),
     }
 
@@ -238,7 +236,7 @@ describe("DeviceRecordActor", () => {
     const { event: bootstrapEvent } = activeSession.sendTyping({
       expiresAt: Math.floor(Date.now() / 1000),
     })
-    relay.storeAndDeliver(bootstrapEvent)
+    actor.processReceivedEvent(bootstrapEvent)
 
     await receivedQueuedMessage
 
@@ -262,7 +260,6 @@ describe("DeviceRecordActor", () => {
     })
 
     const { session: senderSession, event: responseEvent } = await invite.accept(
-      subscribe,
       senderPublicKey,
       senderSecretKey,
       senderPublicKey,
@@ -277,7 +274,6 @@ describe("DeviceRecordActor", () => {
     })
 
     const decryptingInactiveSession = createSessionFromAccept({
-      nostrSubscribe: subscribe,
       theirPublicKey: decrypted.inviteeSessionPublicKey,
       ourSessionPrivateKey: invite.inviterEphemeralPrivateKey!,
       sharedSecret: invite.sharedSecret,
@@ -328,7 +324,7 @@ describe("DeviceRecordActor", () => {
 
     const text = `inactive-session-forward-${Date.now()}`
     const { event } = senderSession.send(text)
-    relay.storeAndDeliver(event)
+    actor.processReceivedEvent(event)
 
     await waitForSpyCall(() => {
       expect(userHooks.onDeviceRumor).toHaveBeenCalledWith(
@@ -339,7 +335,7 @@ describe("DeviceRecordActor", () => {
     expect(actor.activeSession).toBe(decryptingInactiveSession)
   })
 
-  it("closes underlying session relay subscriptions when the device record is closed", async () => {
+  it("does not open relay subscriptions for installed sessions", async () => {
     const relay = new MockRelay()
     let activeSubscriptions = 0
     const subscribe: NostrSubscribe = (filter, onEvent) => {
@@ -362,7 +358,6 @@ describe("DeviceRecordActor", () => {
     })
 
     const { event: responseEvent } = await invite.accept(
-      subscribe,
       activeSidePublicKey,
       activeSideSecretKey,
       activeSidePublicKey,
@@ -377,7 +372,6 @@ describe("DeviceRecordActor", () => {
     })
 
     const passiveSession = createSessionFromAccept({
-      nostrSubscribe: subscribe,
       theirPublicKey: decrypted.inviteeSessionPublicKey,
       ourSessionPrivateKey: invite.inviterEphemeralPrivateKey!,
       sharedSecret: invite.sharedSecret,
@@ -413,7 +407,7 @@ describe("DeviceRecordActor", () => {
 
     actor.installSession(passiveSession)
 
-    expect(activeSubscriptions).toBeGreaterThan(0)
+    expect(activeSubscriptions).toBe(0)
 
     actor.close()
 

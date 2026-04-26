@@ -4,7 +4,6 @@ import {
   SessionState,
   Header,
   Unsubscribe,
-  NostrSubscribe,
   EventCallback,
   MESSAGE_EVENT_KIND,
   Rumor,
@@ -28,21 +27,17 @@ const DUMMY_PUBKEY = '0000000000000000000000000000000000000000000000000000000000
  * https://signal.org/docs/specifications/doubleratchet/
  */
 export class Session {
-  private skippedSubscription?: Unsubscribe;
-  private nostrUnsubscribe?: Unsubscribe;
-  private nostrNextUnsubscribe?: Unsubscribe;
   private internalSubscriptions = new Map<number, EventCallback>();
   private currentInternalSubscriptionId = 0;
   public name: string;
 
   // 1. CHANNEL PUBLIC INTERFACE
-  constructor(private nostrSubscribe: NostrSubscribe, public state: SessionState) {
+  constructor(public state: SessionState) {
     this.name = Math.random().toString(36).substring(2, 6);
   }
 
   /**
    * Initializes a new secure communication session
-   * @param nostrSubscribe Function to subscribe to Nostr events. Make sure it deduplicates events (doesn't return the same event twice), otherwise you'll see decryption errors!
    * @param theirEphemeralNostrPublicKey The ephemeral public key of the other party for the initial handshake
    * @param ourEphemeralNostrPrivateKey Our ephemeral private key for the initial handshake
    * @param isInitiator Whether we are initiating the conversation (true) or responding (false)
@@ -51,7 +46,6 @@ export class Session {
    * @returns A new Session instance
    */
   static init(
-    nostrSubscribe: NostrSubscribe,
     theirEphemeralNostrPublicKey: string,
     ourEphemeralNostrPrivateKey: Uint8Array,
     isInitiator: boolean,
@@ -98,7 +92,7 @@ export class Session {
       skippedKeys: {},
     };
 
-    const session = new Session(nostrSubscribe, state);
+    const session = new Session(state);
     if (name) session.name = name;
     return session;
   }
@@ -230,24 +224,20 @@ export class Session {
   }
 
   /**
-   * Subscribes to incoming messages on this session
+   * Subscribe to rumors decrypted by receiveEvent().
    * @param callback Function to be called when a message is received
    * @returns Unsubscribe function to stop receiving messages
    */
   onEvent(callback: EventCallback): Unsubscribe {
     const id = this.currentInternalSubscriptionId++
     this.internalSubscriptions.set(id, callback)
-    this.subscribeToNostrEvents()
     return () => this.internalSubscriptions.delete(id)
   }
 
   /**
-   * Stop listening to incoming messages
+   * Stop local receiveEvent() callbacks.
    */
   close() {
-    this.nostrUnsubscribe?.();
-    this.nostrNextUnsubscribe?.();
-    this.skippedSubscription?.();
     this.internalSubscriptions.clear();
   }
 
@@ -388,16 +378,14 @@ export class Session {
   }
 
 
-  private handleNostrEvent(e: { tags: string[][]; pubkey: string; content: string }) {
+  receiveEvent(e: VerifiedEvent): Rumor | undefined {
     const snapshot = deepCopyState(this.state);
-    let pendingSwitch = false;
 
     try {
       const [header, shouldRatchet, isSkipped] = this.decryptHeader(e);
       if (!isSkipped && this.state.theirNextNostrPublicKey !== header.nextPublicKey) {
         this.state.theirCurrentNostrPublicKey = this.state.theirNextNostrPublicKey;
         this.state.theirNextNostrPublicKey = header.nextPublicKey;
-        pendingSwitch = true;
       }
 
       if (!isSkipped) {
@@ -421,53 +409,22 @@ export class Session {
       // The `id` field is derived; don't trust the sender-provided value.
       innerEvent.id = getEventHash(innerEvent);
 
-      if (pendingSwitch) {
-        this.nostrUnsubscribe?.();
-        this.nostrUnsubscribe = this.nostrNextUnsubscribe;
-        this.nostrNextUnsubscribe = this.nostrSubscribe(
-          { authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND] },
-          (ev) => this.handleNostrEvent(ev)
-        );
-      }
-
-      this.internalSubscriptions.forEach(callback => callback(innerEvent, e as VerifiedEvent));
+      this.internalSubscriptions.forEach(callback => callback(innerEvent, e));
+      return innerEvent
     } catch (error) {
       this.state = snapshot;
       if (error instanceof Error) {
         if (error.message.includes("Failed to decrypt header")) {
-          return;
+          return undefined;
         }
 
         if (error.message === "invalid MAC") {
           // Duplicate or stale ciphertexts can hit decrypt() again after a state restore.
           // nip44 throws "invalid MAC" in that case, but the message has already been handled.
-          return;
+          return undefined;
         }
       }
       throw error;
-    }
-  }
-
-  private subscribeToNostrEvents() {
-    if (this.nostrNextUnsubscribe) return;
-    this.nostrNextUnsubscribe = this.nostrSubscribe(
-      {authors: [this.state.theirNextNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
-      (e) => this.handleNostrEvent(e)
-    );
-
-    if (this.state.theirCurrentNostrPublicKey) {
-      this.nostrUnsubscribe = this.nostrSubscribe(
-        {authors: [this.state.theirCurrentNostrPublicKey], kinds: [MESSAGE_EVENT_KIND]},
-        (e) => this.handleNostrEvent(e)
-      );
-    }
-
-    const skippedAuthors = Object.keys(this.state.skippedKeys);
-    if (skippedAuthors.length) {
-      this.skippedSubscription = this.nostrSubscribe(
-        {authors: skippedAuthors, kinds: [MESSAGE_EVENT_KIND]},
-        (e) => this.handleNostrEvent(e)
-      );
     }
   }
 }

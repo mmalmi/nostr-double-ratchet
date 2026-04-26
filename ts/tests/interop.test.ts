@@ -17,9 +17,6 @@ const ALICE_EPHEMERAL_SK = hexToBytes("11111111111111111111111111111111111111111
 const BOB_EPHEMERAL_SK = hexToBytes("2222222222222222222222222222222222222222222222222222222222222222");
 const SHARED_SECRET = hexToBytes("3333333333333333333333333333333333333333333333333333333333333333");
 
-// Mock nostr subscribe - we don't need actual subscriptions for vector generation
-const mockSubscribe = () => () => {};
-
 interface TestVector {
   description: string;
   alice_ephemeral_sk: string;
@@ -56,7 +53,6 @@ describe("Interop Test Vector Generation", () => {
 
     // Alice is initiator
     const alice = Session.init(
-      mockSubscribe,
       bobEphemeralPk,
       ALICE_EPHEMERAL_SK,
       true,
@@ -66,7 +62,6 @@ describe("Interop Test Vector Generation", () => {
 
     // Bob is responder
     const bob = Session.init(
-      mockSubscribe,
       aliceEphemeralPk,
       BOB_EPHEMERAL_SK,
       false,
@@ -93,7 +88,7 @@ describe("Interop Test Vector Generation", () => {
     });
 
     // Bob receives and decrypts (to advance his ratchet state)
-    (bob as any).handleNostrEvent(msg1.event);
+    bob.receiveEvent(msg1.event);
 
     // Message 2: Bob -> Alice
     const msg2 = bob.send("Hello back from TypeScript Bob!");
@@ -112,7 +107,7 @@ describe("Interop Test Vector Generation", () => {
     });
 
     // Alice receives
-    (alice as any).handleNostrEvent(msg2.event);
+    alice.receiveEvent(msg2.event);
 
     // Message 3: Alice -> Bob (after ratchet)
     const msg3 = alice.send("Second message from Alice");
@@ -166,7 +161,6 @@ describe("Interop Test Vector Generation", () => {
 
     // Fresh sessions for direct message exchange (not using pre-generated vectors)
     const alice = Session.init(
-      mockSubscribe,
       bobEphemeralPk,
       ALICE_EPHEMERAL_SK,
       true,
@@ -175,7 +169,6 @@ describe("Interop Test Vector Generation", () => {
     );
 
     const bob = Session.init(
-      mockSubscribe,
       aliceEphemeralPk,
       BOB_EPHEMERAL_SK,
       false,
@@ -192,7 +185,7 @@ describe("Interop Test Vector Generation", () => {
 
     // Alice sends first message directly (not from vectors)
     const aliceMsg = alice.send("Hello from Alice!");
-    (bob as any).handleNostrEvent(aliceMsg.event);
+    bob.receiveEvent(aliceMsg.event);
     expect(receivedMessages).toContain("Hello from Alice!");
 
     // Now Bob can send a reply
@@ -203,7 +196,7 @@ describe("Interop Test Vector Generation", () => {
       receivedMessages.push(event.content);
     });
 
-    (alice as any).handleNostrEvent(bobMsg.event);
+    alice.receiveEvent(bobMsg.event);
     expect(receivedMessages).toContain("Reply from Bob");
   });
 });
@@ -225,7 +218,6 @@ describe("Rust-generated vectors", () => {
 
     // Create Bob session to receive Alice's messages
     const bob = Session.init(
-      mockSubscribe,
       vectors.alice_ephemeral_pk,
       bobEphemeralSk,
       false,
@@ -241,7 +233,7 @@ describe("Rust-generated vectors", () => {
     // Process Alice's message from Rust
     const aliceMsg = vectors.messages.find(m => m.sender === "alice");
     if (aliceMsg) {
-      (bob as any).handleNostrEvent(aliceMsg.encrypted_event);
+      bob.receiveEvent(aliceMsg.encrypted_event as any);
       expect(receivedMessages).toContain(aliceMsg.plaintext);
       console.log("Successfully decrypted Rust-generated message:", aliceMsg.plaintext);
     }

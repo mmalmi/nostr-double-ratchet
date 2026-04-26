@@ -1,5 +1,7 @@
 import { Invite } from "../Invite"
 import { Session } from "../Session"
+import type { VerifiedEvent } from "nostr-tools"
+import type { Rumor } from "../types"
 import type {
   DeviceRecord as DeviceRecordShape,
   DeviceRecordDeps,
@@ -17,7 +19,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
 
   private ensurePromise?: Promise<void>
   private inviteSubscription?: Unsubscribe
-  private sessionSubscriptions: Map<string, { session: Session; unsubscribe: Unsubscribe }> = new Map()
   private inviteAcceptancePromise?: Promise<Session>
   private inviteBackfillPromise?: Promise<void>
   private hasAttemptedInviteBackfill = false
@@ -65,11 +66,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
   }
 
   private detachSession(session: Session): void {
-    const existing = this.sessionSubscriptions.get(session.name)
-    if (existing?.session === session) {
-      existing.unsubscribe()
-      this.sessionSubscriptions.delete(session.name)
-    }
     session.close()
   }
 
@@ -90,12 +86,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
       this.detachSession(staleSession)
     }
 
-    const existingSubscription = this.sessionSubscriptions.get(session.name)
-    if (existingSubscription && existingSubscription.session !== session) {
-      existingSubscription.unsubscribe()
-      existingSubscription.session.close()
-      this.sessionSubscriptions.delete(session.name)
-    }
   }
 
   hasEstablishedActiveSession(): boolean {
@@ -233,7 +223,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
       const encryptor = identityKey instanceof Uint8Array ? identityKey : identityKey.encrypt
 
       const { session, event } = await invite.accept(
-        this.deps.nostr.subscribe,
         this.deps.ourDeviceId,
         encryptor,
         this.deps.ourOwnerPubkey
@@ -262,6 +251,108 @@ export class DeviceRecordActor implements DeviceRecordShape {
     }
   }
 
+  private promoteToActive(
+    nextSession: Session,
+    options: { force?: boolean; preferActive?: boolean } = {},
+  ): void {
+    const { force = false, preferActive = false } = options
+    const current = this.activeSession
+    if (current === nextSession || current?.name === nextSession.name) {
+      this.activeSession = nextSession
+      this.inactiveSessions = this.inactiveSessions.filter(
+        (s) => s !== nextSession && s.name !== nextSession.name
+      )
+      return
+    }
+
+    this.inactiveSessions = this.inactiveSessions.filter(
+      (s) => s !== nextSession && s.name !== nextSession.name
+    )
+
+    if (force) {
+      if (current) {
+        this.inactiveSessions.unshift(current)
+      }
+      this.activeSession = nextSession
+      this.trimInactiveSessions()
+      return
+    }
+
+    const shouldReplaceUnestablishedActive =
+      preferActive &&
+      current &&
+      !this.hasEstablishedActiveSession()
+
+    if (shouldReplaceUnestablishedActive) {
+      this.inactiveSessions.unshift(current)
+      this.activeSession = nextSession
+    } else if (
+      current &&
+      DeviceRecordActor.sessionPriority(current) >=
+        DeviceRecordActor.sessionPriority(nextSession)
+    ) {
+      this.inactiveSessions.unshift(nextSession)
+      this.activeSession = current
+    } else {
+      if (current) {
+        this.inactiveSessions.unshift(current)
+      }
+      this.activeSession = nextSession
+    }
+    this.trimInactiveSessions()
+  }
+
+  private handleSessionRumor(session: Session, event: Rumor): boolean {
+    const owner = this.deps.ownerPubkey
+    const isKnownInstalledSession =
+      this.activeSession?.name === session.name ||
+      this.inactiveSessions.some((s) => s === session || s.name === session.name)
+    const isAuthorizedDevice =
+      owner === this.deviceId ||
+      this.deps.user.isDeviceAuthorized(this.deviceId) ||
+      isKnownInstalledSession
+    if (!isAuthorizedDevice) {
+      return false
+    }
+
+    // A session that successfully decrypts a rumor is the live session, even if
+    // AppKeys propagation or previous priority ordering has not caught up yet.
+    this.promoteToActive(session, { force: true })
+    this.deps.user.onDeviceRumor(this.deviceId, event)
+    this.state = "session-ready"
+    this.flushMessageQueue().catch(() => {})
+    this.deps.user.onDeviceDirty()
+    return true
+  }
+
+  processReceivedEvent(event: VerifiedEvent): boolean {
+    const sessions: Session[] = []
+    if (this.activeSession) {
+      sessions.push(this.activeSession)
+    }
+    sessions.push(...this.inactiveSessions)
+
+    const seenSessionNames = new Set<string>()
+    for (const session of sessions) {
+      if (seenSessionNames.has(session.name)) {
+        continue
+      }
+      seenSessionNames.add(session.name)
+
+      let rumor: Rumor | undefined
+      try {
+        rumor = session.receiveEvent(event)
+      } catch {
+        continue
+      }
+      if (rumor && this.handleSessionRumor(session, rumor)) {
+        return true
+      }
+    }
+
+    return false
+  }
+
   installSession(
     session: Session,
     inactive = false,
@@ -269,57 +360,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
   ): void {
     const { persist = true, preferActive = false } = options
     this.pruneDuplicateSessions(session)
-
-    const promoteToActive = (
-      nextSession: Session,
-      promotionOptions: { force?: boolean } = {}
-    ) => {
-      const { force = false } = promotionOptions
-      const current = this.activeSession
-      if (current === nextSession || current?.name === nextSession.name) {
-        this.activeSession = nextSession
-        this.inactiveSessions = this.inactiveSessions.filter(
-          (s) => s !== nextSession && s.name !== nextSession.name
-        )
-        return
-      }
-
-      this.inactiveSessions = this.inactiveSessions.filter(
-        (s) => s !== nextSession && s.name !== nextSession.name
-      )
-
-      if (force) {
-        if (current) {
-          this.inactiveSessions.unshift(current)
-        }
-        this.activeSession = nextSession
-        this.trimInactiveSessions()
-        return
-      }
-
-      const shouldReplaceUnestablishedActive =
-        preferActive &&
-        current &&
-        !this.hasEstablishedActiveSession()
-
-      if (shouldReplaceUnestablishedActive) {
-        this.inactiveSessions.unshift(current)
-        this.activeSession = nextSession
-      } else if (
-        current &&
-        DeviceRecordActor.sessionPriority(current) >=
-          DeviceRecordActor.sessionPriority(nextSession)
-      ) {
-        this.inactiveSessions.unshift(nextSession)
-        this.activeSession = current
-      } else {
-        if (current) {
-          this.inactiveSessions.unshift(current)
-        }
-        this.activeSession = nextSession
-      }
-      this.trimInactiveSessions()
-    }
 
     if (inactive) {
       const exists = this.inactiveSessions.some(
@@ -330,32 +370,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
         this.trimInactiveSessions()
       }
     } else {
-      promoteToActive(session)
-    }
-
-    if (!this.sessionSubscriptions.has(session.name)) {
-      const unsub = session.onEvent((event) => {
-        const owner = this.deps.ownerPubkey
-        const isKnownInstalledSession =
-          this.activeSession?.name === session.name ||
-          this.inactiveSessions.some((s) => s === session || s.name === session.name)
-        const isAuthorizedDevice =
-          owner === this.deviceId ||
-          this.deps.user.isDeviceAuthorized(this.deviceId) ||
-          isKnownInstalledSession
-        if (!isAuthorizedDevice) {
-          return
-        }
-
-        // A session that successfully decrypts a rumor is the live session, even if
-        // AppKeys propagation or previous priority ordering has not caught up yet.
-        promoteToActive(session, { force: true })
-        this.deps.user.onDeviceRumor(this.deviceId, event)
-        this.state = "session-ready"
-        this.flushMessageQueue().catch(() => {})
-        this.deps.user.onDeviceDirty()
-      })
-      this.sessionSubscriptions.set(session.name, { session, unsubscribe: unsub })
+      this.promoteToActive(session, { preferActive })
     }
 
     if (this.activeSession) {
@@ -428,13 +443,8 @@ export class DeviceRecordActor implements DeviceRecordShape {
     for (const session of this.inactiveSessions) {
       sessions.add(session)
     }
-    for (const binding of this.sessionSubscriptions.values()) {
-      sessions.add(binding.session)
-    }
     for (const session of sessions) {
       this.detachSession(session)
     }
-
-    this.sessionSubscriptions.clear()
   }
 }

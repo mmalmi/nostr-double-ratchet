@@ -11,6 +11,7 @@ import {
   ReceiptType,
   ExpirationOptions,
   ChatSettingsPayloadV1,
+  MESSAGE_EVENT_KIND,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { MessageQueue } from "./MessageQueue"
@@ -95,6 +96,20 @@ export class SessionManager {
     )
   }
 
+  private static sessionMessageAuthorPubkeys(session: Session): string[] {
+    const authors = new Set<string>()
+    if (session.state.theirCurrentNostrPublicKey) {
+      authors.add(session.state.theirCurrentNostrPublicKey)
+    }
+    if (session.state.theirNextNostrPublicKey) {
+      authors.add(session.state.theirNextNostrPublicKey)
+    }
+    for (const author of Object.keys(session.state.skippedKeys || {})) {
+      authors.add(author)
+    }
+    return [...authors].sort()
+  }
+
   // Versioning
   private readonly storageVersion = "1"
   private readonly versionPrefix: string
@@ -138,6 +153,7 @@ export class SessionManager {
 
   // Callbacks
   private internalSubscriptions: Set<OnEventCallback> = new Set()
+  private messagePushAuthorCallbacks: Set<() => void> = new Set()
 
   // Initialization flag
   private initialized: boolean = false
@@ -425,6 +441,7 @@ export class SessionManager {
           },
           persistUserRecord: (ownerPubkey) => {
             this.storeUserRecord(ownerPubkey).catch(() => {})
+            this.notifyMessagePushAuthorsChanged()
           },
         },
         nostr: this.nostrFacade,
@@ -583,7 +600,6 @@ export class SessionManager {
     const deviceRecord = this.upsertDeviceRecord(userRecord, response.deviceId)
 
     const session = createSessionFromAccept({
-      nostrSubscribe: this.nostrSubscribe,
       theirPublicKey: response.inviteeSessionPublicKey,
       ourSessionPrivateKey: response.ephemeralPrivateKey,
       sharedSecret: response.sharedSecret,
@@ -665,6 +681,20 @@ export class SessionManager {
     }
   }
 
+  onMessagePushAuthorsChanged(callback: () => void): Unsubscribe {
+    this.messagePushAuthorCallbacks.add(callback)
+    callback()
+    return () => {
+      this.messagePushAuthorCallbacks.delete(callback)
+    }
+  }
+
+  private notifyMessagePushAuthorsChanged(): void {
+    for (const callback of this.messagePushAuthorCallbacks) {
+      callback()
+    }
+  }
+
   /**
    * Enable/disable automatically adopting incoming `chat-settings` events (kind 10448).
    * When enabled, receiving a valid settings payload updates per-peer expiration defaults.
@@ -679,6 +709,58 @@ export class SessionManager {
 
   getUserRecords(): Map<string, UserRecord> {
     return this.userRecords as unknown as Map<string, UserRecord>
+  }
+
+  getMessagePushAuthorPubkeys(peerPubkey: string): string[] {
+    const ownerPubkey = this.resolveToOwner(peerPubkey)
+    const userRecord = this.userRecords.get(ownerPubkey)
+    return this.collectMessagePushAuthorPubkeys(userRecord)
+  }
+
+  getAllMessagePushAuthorPubkeys(): string[] {
+    const authors = new Set<string>()
+    for (const userRecord of this.userRecords.values()) {
+      for (const author of this.collectMessagePushAuthorPubkeys(userRecord)) {
+        authors.add(author)
+      }
+    }
+    return [...authors].sort()
+  }
+
+  processReceivedEvent(event: VerifiedEvent): boolean {
+    if (event.kind !== MESSAGE_EVENT_KIND) {
+      return false
+    }
+
+    for (const userRecord of this.userRecords.values()) {
+      for (const device of userRecord.devices.values()) {
+        if (device.processReceivedEvent(event)) {
+          return true
+        }
+      }
+    }
+
+    return false
+  }
+
+  private collectMessagePushAuthorPubkeys(userRecord?: UserRecordActor): string[] {
+    if (!userRecord) {
+      return []
+    }
+
+    const authors = new Set<string>()
+    for (const device of userRecord.devices.values()) {
+      const sessions = [
+        ...(device.activeSession ? [device.activeSession] : []),
+        ...device.inactiveSessions,
+      ]
+      for (const session of sessions) {
+        for (const author of SessionManager.sessionMessageAuthorPubkeys(session)) {
+          authors.add(author)
+        }
+      }
+    }
+    return [...authors].sort()
   }
 
   /**
@@ -961,7 +1043,6 @@ export class SessionManager {
         ? this.ownerPublicKey
         : await this.resolveInviteeOwnerClaim(ownerPublicKey)
     const { session, event } = await invite.accept(
-      this.nostrSubscribe,
       this.ourPublicKey,
       encryptor,
       inviteeOwnerClaim
@@ -1360,7 +1441,7 @@ export class SessionManager {
         userRecord.devices.clear()
 
         const deserializeSession = (entry: StoredSessionEntry): Session => {
-          const session = new Session(this.nostrSubscribe, deserializeSessionState(entry.state))
+          const session = new Session(deserializeSessionState(entry.state))
           session.name = entry.name
           this.processedInviteResponses.add(entry.name)
           return session

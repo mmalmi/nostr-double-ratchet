@@ -1,15 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Invite } from '../src/Invite'
-import { finalizeEvent, generateSecretKey, getPublicKey, matchFilter } from 'nostr-tools'
+import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools'
 import { INVITE_EVENT_KIND, INVITE_RESPONSE_KIND } from '../src/types'
 import { Session } from '../src/Session'
-import { createEventStream } from '../src/utils'
 import { serializeSessionState, deserializeSessionState } from '../src/utils'
 import { MockRelay } from './helpers/mockRelay'
 
 describe('Invite', () => {
-  const dummySubscribe = vi.fn()
-
   it('should create a new invite link', () => {
     const alicePrivateKey = generateSecretKey()
     const alicePublicKey = getPublicKey(alicePrivateKey)
@@ -40,7 +37,7 @@ describe('Invite', () => {
     const bobPublicKey = getPublicKey(bobSecretKey)
     const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { session, event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     expect(session).toBeDefined()
     expect(event).toBeDefined()
@@ -57,7 +54,7 @@ describe('Invite', () => {
     const bobPublicKey = getPublicKey(bobSecretKey)
     const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -90,57 +87,35 @@ describe('Invite', () => {
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
 
-    const messageQueue: any[] = []
-    const createSubscribe = (name: string) => (filter: any, onEvent: (event: any) => void) => {
-      const checkQueue = () => {
-        const index = messageQueue.findIndex(event => matchFilter(filter, event))
-        if (index !== -1) {
-          onEvent(messageQueue.splice(index, 1)[0])
-        }
-        setTimeout(checkQueue, 100)
-      }
-      checkQueue()
-      return () => {}
-    }
-
     let aliceSession: Session | undefined
 
-    const onSession = (session: Session) => {
-      aliceSession = session
-    }
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
+    const { session: bobSession, event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     invite.listen(
       alicePrivateKey,
-      createSubscribe('Alice'),
-      onSession
+      (_filter: any, callback: (event: any) => void) => {
+        callback(event)
+        return () => {}
+      },
+      (session: Session) => {
+        aliceSession = session
+      }
     )
 
-    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
-    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey, bobOwnerPublicKey)
-    messageQueue.push(event)
-
-    // Wait for Alice's session to be created
     await new Promise(resolve => setTimeout(resolve, 100))
 
     expect(aliceSession).toBeDefined()
 
-    const aliceMessages = createEventStream(aliceSession!)
-    const bobMessages = createEventStream(bobSession)
-
-    const sendAndExpect = async (sender: Session, receiver: AsyncIterableIterator<any>, message: string) => {
-      messageQueue.push(sender.send(message).event)
-      const receivedMessage = await receiver.next()
-      expect(receivedMessage.value?.content).toBe(message)
+    const sendAndExpect = (sender: Session, receiver: Session, message: string) => {
+      const receivedMessage = receiver.receiveEvent(sender.send(message).event)
+      expect(receivedMessage?.content).toBe(message)
     }
 
-    // Test conversation
-    await sendAndExpect(bobSession, aliceMessages, 'Hello Alice!')
-    await sendAndExpect(aliceSession!, bobMessages, 'Hi Bob!')
-    await sendAndExpect(bobSession, aliceMessages, 'How are you?')
-    await sendAndExpect(aliceSession!, bobMessages, "I'm doing great, thanks!")
-
-    // No remaining messages
-    expect(messageQueue.length).toBe(0)
+    sendAndExpect(bobSession, aliceSession!, 'Hello Alice!')
+    sendAndExpect(aliceSession!, bobSession, 'Hi Bob!')
+    sendAndExpect(bobSession, aliceSession!, 'How are you?')
+    sendAndExpect(aliceSession!, bobSession, "I'm doing great, thanks!")
   })
 
   it('should require device ID for getEvent', () => {
@@ -240,61 +215,36 @@ describe('Invite', () => {
     const bobSecretKey = generateSecretKey()
     const bobPublicKey = getPublicKey(bobSecretKey)
 
-    const messageQueue: any[] = []
-    const createSubscribe = (name: string) => (filter: any, onEvent: (event: any) => void) => {
-      const checkQueue = () => {
-        const index = messageQueue.findIndex(event => matchFilter(filter, event))
-        if (index !== -1) {
-          onEvent(messageQueue.splice(index, 1)[0])
-        }
-        setTimeout(checkQueue, 100)
-      }
-      checkQueue()
-      return () => {}
-    }
-
     let aliceSession: Session | undefined
 
-    const onSession = (session: Session) => {
-      aliceSession = session
-    }
+    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
+    const { session: bobSession, event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     invite.listen(
       alicePrivateKey,
-      createSubscribe('Alice'),
-      onSession
+      (_filter: any, callback: (event: any) => void) => {
+        callback(event)
+        return () => {}
+      },
+      (session: Session) => {
+        aliceSession = session
+      }
     )
 
-    const bobOwnerPublicKey = getPublicKey(generateSecretKey())
-    const { session: bobSession, event } = await invite.accept(createSubscribe('Bob'), bobPublicKey, bobSecretKey, bobOwnerPublicKey)
-    messageQueue.push(event)
-
-    // Wait for Alice's session to be created
     await new Promise(resolve => setTimeout(resolve, 100))
 
     expect(aliceSession).toBeDefined()
 
-    let aliceMessages = createEventStream(aliceSession!)
-    const _bobMessages = createEventStream(bobSession)
-
-    // Bob sends first message
-    messageQueue.push(bobSession.send('Hello Alice!').event)
-    const firstMessage = await aliceMessages.next()
-    expect(firstMessage.value?.content).toBe('Hello Alice!')
+    const firstMessage = aliceSession!.receiveEvent(bobSession.send('Hello Alice!').event)
+    expect(firstMessage?.content).toBe('Hello Alice!')
 
     // Alice closes her session and reinitializes with serialized state
     const serializedAliceState = serializeSessionState(aliceSession!.state)
     aliceSession!.close()
-    aliceSession = new Session(createSubscribe('Alice'), deserializeSessionState(serializedAliceState))
-    aliceMessages = createEventStream(aliceSession)
+    aliceSession = new Session(deserializeSessionState(serializedAliceState))
 
-    // Bob sends second message
-    messageQueue.push(bobSession.send('Can you still hear me?').event)
-    const secondMessage = await aliceMessages.next()
-    expect(secondMessage.value?.content).toBe('Can you still hear me?')
-
-    // No remaining messages
-    expect(messageQueue.length).toBe(0)
+    const secondMessage = aliceSession.receiveEvent(bobSession.send('Can you still hear me?').event)
+    expect(secondMessage?.content).toBe('Can you still hear me?')
   })
 
   it('should accept invite with ownerPublicKey parameter', async () => {
@@ -305,7 +255,7 @@ describe('Invite', () => {
     const bobPublicKey = getPublicKey(bobSecretKey)
     const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { session, event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { session, event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     expect(session).toBeDefined()
     expect(event).toBeDefined()
@@ -322,7 +272,7 @@ describe('Invite', () => {
     const bobPublicKey = getPublicKey(bobSecretKey)
     const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -355,7 +305,7 @@ describe('Invite', () => {
     const bobPublicKey = getPublicKey(bobSecretKey)
     const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -385,7 +335,7 @@ describe('Invite', () => {
     const bobPublicKey = getPublicKey(bobSecretKey)
     const bobOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { event } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -421,8 +371,8 @@ describe('Invite', () => {
     const charliePublicKey = getPublicKey(charlieSecretKey)
     const charlieOwnerPublicKey = getPublicKey(generateSecretKey())
 
-    const { event: bobEvent } = await invite.accept(dummySubscribe, bobPublicKey, bobSecretKey, bobOwnerPublicKey)
-    const { event: charlieEvent } = await invite.accept(dummySubscribe, charliePublicKey, charlieSecretKey, charlieOwnerPublicKey)
+    const { event: bobEvent } = await invite.accept(bobPublicKey, bobSecretKey, bobOwnerPublicKey)
+    const { event: charlieEvent } = await invite.accept(charliePublicKey, charlieSecretKey, charlieOwnerPublicKey)
 
     const onSession = vi.fn()
 
@@ -571,29 +521,26 @@ describe('Invite', () => {
       const bobPrivateKey = generateSecretKey()
       const bobPublicKey = getPublicKey(bobPrivateKey)
 
-      const messageQueue: any[] = []
-      const createSubscribe = () => (filter: any, onEvent: (event: any) => void) => {
-        const checkQueue = () => {
-          const index = messageQueue.findIndex(event => matchFilter(filter, event))
-          if (index !== -1) {
-            onEvent(messageQueue.splice(index, 1)[0])
-          }
-          setTimeout(checkQueue, 100)
-        }
-        checkQueue()
-        return () => {}
-      }
-
       const invite = Invite.createNew(alicePublicKey, 'Serialized Test')
       const inviteUrl = invite.getUrl()
 
       const bobInvite = Invite.fromUrl(inviteUrl)
 
       let aliceSession: Session | undefined
+
+      const bobOwnerPublicKey = getPublicKey(generateSecretKey())
+      const { session: bobSession, event: acceptanceEvent } = await bobInvite.accept(bobPublicKey,
+        bobPrivateKey,
+        bobOwnerPublicKey
+      )
+
       const aliceSessionPromise = new Promise<Session>((resolve) => {
         invite.listen(
           alicePrivateKey,
-          createSubscribe(),
+          (_filter: any, callback: (event: any) => void) => {
+            callback(acceptanceEvent)
+            return () => {}
+          },
           (session: Session) => {
             aliceSession = session
             resolve(session)
@@ -601,33 +548,16 @@ describe('Invite', () => {
         )
       })
 
-      const bobOwnerPublicKey = getPublicKey(generateSecretKey())
-      const { session: bobSession, event: acceptanceEvent } = await bobInvite.accept(
-        createSubscribe(),
-        bobPublicKey,
-        bobPrivateKey,
-        bobOwnerPublicKey
-      )
-
-      messageQueue.push(acceptanceEvent)
-
       await aliceSessionPromise
       expect(aliceSession).toBeDefined()
 
-      const aliceMessages = createEventStream(aliceSession!)
-      const bobMessages = createEventStream(bobSession)
-
-      // Bob sends first message
       const bobMessage1 = bobSession.send('Hello Alice from Bob!')
-      messageQueue.push(bobMessage1.event)
-      const aliceReceived1 = await aliceMessages.next()
-      expect(aliceReceived1.value?.content).toBe('Hello Alice from Bob!')
+      const aliceReceived1 = aliceSession!.receiveEvent(bobMessage1.event)
+      expect(aliceReceived1?.content).toBe('Hello Alice from Bob!')
 
-      // Alice sends reply
       const aliceMessage1 = aliceSession!.send('Hi Bob from Alice!')
-      messageQueue.push(aliceMessage1.event)
-      const bobReceived1 = await bobMessages.next()
-      expect(bobReceived1.value?.content).toBe('Hi Bob from Alice!')
+      const bobReceived1 = bobSession.receiveEvent(aliceMessage1.event)
+      expect(bobReceived1?.content).toBe('Hi Bob from Alice!')
     })
   })
 })

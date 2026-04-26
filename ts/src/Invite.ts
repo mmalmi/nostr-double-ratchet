@@ -367,7 +367,6 @@ export class Invite {
     /**
      * Called by the invitee. Accepts the invite and creates a new session with the inviter.
      *
-     * @param nostrSubscribe - A function to subscribe to Nostr events
      * @param inviteePublicKey - The invitee's identity public key (also serves as device ID)
      * @param encryptor - The invitee's secret key or a signing/encrypt function
      * @param ownerPublicKey - The invitee's owner/Nostr identity public key (optional for single-device users)
@@ -382,7 +381,6 @@ export class Invite {
      * so the inviter can create the session on their side.
      */
     async accept(
-        nostrSubscribe: NostrSubscribe,
         inviteePublicKey: string,
         encryptor: Uint8Array | EncryptFunction,
         ownerPublicKey?: string,
@@ -391,7 +389,6 @@ export class Invite {
         const inviterPublicKey = this.inviter || this.inviterEphemeralPublicKey;
 
         const session = createSessionFromAccept({
-            nostrSubscribe,
             theirPublicKey: this.inviterEphemeralPublicKey,
             ourSessionPrivateKey: inviteeSessionKeypair.privateKey,
             sharedSecret: this.sharedSecret,
@@ -455,7 +452,6 @@ export class Invite {
                 this.usedBy.push(decrypted.inviteeIdentity);
 
                 const session = createSessionFromAccept({
-                    nostrSubscribe,
                     theirPublicKey: decrypted.inviteeSessionPublicKey,
                     ourSessionPrivateKey: this.inviterEphemeralPrivateKey!,
                     sharedSecret: this.sharedSecret,

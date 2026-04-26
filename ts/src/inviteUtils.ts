@@ -2,7 +2,7 @@ import { generateSecretKey, getPublicKey, nip44 } from 'nostr-tools'
 import { getConversationKey } from 'nostr-tools/nip44'
 import { hexToBytes, bytesToHex } from '@noble/hashes/utils'
 import { Session } from './Session'
-import { NostrSubscribe, INVITE_RESPONSE_KIND, EncryptFunction, DecryptFunction, KeyPair } from './types'
+import { INVITE_RESPONSE_KIND, EncryptFunction, DecryptFunction, KeyPair } from './types'
 
 /**
  * Device payload for QR code / text code sharing.
@@ -239,8 +239,6 @@ export async function decryptInviteResponse(params: DecryptInviteResponseParams)
 }
 
 export interface CreateSessionFromAcceptParams {
-  /** Nostr subscription function */
-  nostrSubscribe: NostrSubscribe
   /** The other party's public key */
   theirPublicKey: string
   /** Our session private key */
@@ -258,7 +256,6 @@ export interface CreateSessionFromAcceptParams {
  */
 export function createSessionFromAccept(params: CreateSessionFromAcceptParams): Session {
   const {
-    nostrSubscribe,
     theirPublicKey,
     ourSessionPrivateKey,
     sharedSecret,
@@ -267,5 +264,5 @@ export function createSessionFromAccept(params: CreateSessionFromAcceptParams): 
   } = params
 
   const sharedSecretBytes = hexToBytes(sharedSecret)
-  return Session.init(nostrSubscribe, theirPublicKey, ourSessionPrivateKey, isSender, sharedSecretBytes, name)
+  return Session.init(theirPublicKey, ourSessionPrivateKey, isSender, sharedSecretBytes, name)
 }
