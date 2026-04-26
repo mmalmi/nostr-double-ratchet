@@ -7,14 +7,21 @@ use nostr::{Event, PublicKey, UnsignedEvent};
 use crate::{
     group::GroupData, AcceptInviteResult, AppKeys, GroupDecryptedEvent, GroupManager,
     GroupManagerOptions, GroupOuterSubscriptionPlan, InMemoryStorage, Invite, Result, SendOptions,
-    SessionManager, SessionManagerEvent, StorageAdapter,
+    SessionManager, SessionManagerEvent, StorageAdapter, MESSAGE_EVENT_KIND,
 };
+
+#[derive(Debug, Clone)]
+struct DirectMessageSubscription {
+    subid: String,
+    authors: Vec<PublicKey>,
+}
 
 pub struct NdrRuntime {
     session_manager: SessionManager,
     group_manager: Mutex<GroupManager>,
     event_rx: Mutex<Receiver<SessionManagerEvent>>,
     event_tx: Sender<SessionManagerEvent>,
+    direct_message_subscription: Mutex<Option<DirectMessageSubscription>>,
 }
 
 impl NdrRuntime {
@@ -49,17 +56,19 @@ impl NdrRuntime {
             group_manager: Mutex::new(group_manager),
             event_rx: Mutex::new(event_rx),
             event_tx,
+            direct_message_subscription: Mutex::new(None),
         }
     }
 
     pub fn init(&self) -> Result<()> {
-        self.session_manager.init()
+        self.session_manager.init()?;
+        self.sync_direct_message_subscriptions()
     }
 
     pub fn setup_user(&self, user_pubkey: PublicKey) -> Result<()> {
         self.session_manager.init()?;
         self.session_manager.setup_user(user_pubkey);
-        Ok(())
+        self.sync_direct_message_subscriptions()
     }
 
     pub fn accept_invite(
@@ -68,8 +77,11 @@ impl NdrRuntime {
         owner_pubkey_hint: Option<PublicKey>,
     ) -> Result<AcceptInviteResult> {
         self.session_manager.init()?;
-        self.session_manager
-            .accept_invite(invite, owner_pubkey_hint)
+        let result = self
+            .session_manager
+            .accept_invite(invite, owner_pubkey_hint)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(result)
     }
 
     pub fn send_text(
@@ -78,7 +90,9 @@ impl NdrRuntime {
         text: String,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        self.session_manager.send_text(recipient, text, options)
+        let ids = self.session_manager.send_text(recipient, text, options)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(ids)
     }
 
     pub fn send_text_with_inner_id(
@@ -87,8 +101,11 @@ impl NdrRuntime {
         text: String,
         options: Option<SendOptions>,
     ) -> Result<(String, Vec<String>)> {
-        self.session_manager
-            .send_text_with_inner_id(recipient, text, options)
+        let result = self
+            .session_manager
+            .send_text_with_inner_id(recipient, text, options)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(result)
     }
 
     pub fn send_event(
@@ -96,7 +113,9 @@ impl NdrRuntime {
         recipient: PublicKey,
         event: nostr::UnsignedEvent,
     ) -> Result<Vec<String>> {
-        self.session_manager.send_event(recipient, event)
+        let ids = self.session_manager.send_event(recipient, event)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(ids)
     }
 
     pub fn send_reaction(
@@ -106,8 +125,11 @@ impl NdrRuntime {
         emoji: String,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        self.session_manager
-            .send_reaction(recipient, message_id, emoji, options)
+        let ids = self
+            .session_manager
+            .send_reaction(recipient, message_id, emoji, options)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(ids)
     }
 
     pub fn send_receipt(
@@ -117,8 +139,11 @@ impl NdrRuntime {
         message_ids: Vec<String>,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        self.session_manager
-            .send_receipt(recipient, receipt_type, message_ids, options)
+        let ids =
+            self.session_manager
+                .send_receipt(recipient, receipt_type, message_ids, options)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(ids)
     }
 
     pub fn send_typing(
@@ -126,7 +151,9 @@ impl NdrRuntime {
         recipient: PublicKey,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        self.session_manager.send_typing(recipient, options)
+        let ids = self.session_manager.send_typing(recipient, options)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(ids)
     }
 
     pub fn send_chat_settings(
@@ -134,8 +161,11 @@ impl NdrRuntime {
         recipient: PublicKey,
         ttl_seconds: u64,
     ) -> Result<Vec<String>> {
-        self.session_manager
-            .send_chat_settings(recipient, ttl_seconds)
+        let ids = self
+            .session_manager
+            .send_chat_settings(recipient, ttl_seconds)?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(ids)
     }
 
     pub fn import_session_state(
@@ -145,7 +175,8 @@ impl NdrRuntime {
         state: crate::SessionState,
     ) -> Result<()> {
         self.session_manager
-            .import_session_state(peer_pubkey, device_id, state)
+            .import_session_state(peer_pubkey, device_id, state)?;
+        self.sync_direct_message_subscriptions()
     }
 
     pub fn export_active_sessions(&self) -> Vec<(PublicKey, String, crate::SessionState)> {
@@ -159,7 +190,48 @@ impl NdrRuntime {
         created_at: u64,
     ) {
         self.session_manager
-            .ingest_app_keys_snapshot(owner_pubkey, app_keys, created_at)
+            .ingest_app_keys_snapshot(owner_pubkey, app_keys, created_at);
+        let _ = self.sync_direct_message_subscriptions();
+    }
+
+    pub fn process_received_event(&self, event: Event) {
+        self.session_manager.process_received_event(event);
+        let _ = self.sync_direct_message_subscriptions();
+    }
+
+    pub fn sync_direct_message_subscriptions(&self) -> Result<()> {
+        let authors = self.session_manager.get_all_message_push_author_pubkeys();
+        let mut current = self.direct_message_subscription.lock().unwrap();
+        if current
+            .as_ref()
+            .is_some_and(|subscription| subscription.authors == authors)
+        {
+            return Ok(());
+        }
+
+        if let Some(subscription) = current.take() {
+            let _ = self
+                .event_tx
+                .send(SessionManagerEvent::Unsubscribe(subscription.subid));
+        }
+
+        if authors.is_empty() {
+            return Ok(());
+        }
+
+        let filter = crate::pubsub::build_filter()
+            .kinds(vec![MESSAGE_EVENT_KIND as u64])
+            .authors(authors.clone())
+            .build();
+        let filter_json = serde_json::to_string(&filter)?;
+        let subid = format!("ndr-runtime-messages-{}", uuid::Uuid::new_v4());
+        let _ = self.event_tx.send(SessionManagerEvent::Subscribe {
+            subid: subid.clone(),
+            filter_json,
+        });
+        *current = Some(DirectMessageSubscription { subid, authors });
+
+        Ok(())
     }
 
     pub fn pending_invite_response_owner_pubkeys(&self) -> Vec<PublicKey> {
@@ -253,8 +325,29 @@ mod tests {
     use nostr::Keys;
 
     use crate::group::create_group_data;
+    use crate::{SerializableKeyPair, SessionManagerEvent, SessionState, MESSAGE_EVENT_KIND};
 
     use super::NdrRuntime;
+
+    fn session_state_tracking(current: nostr::PublicKey, next: nostr::PublicKey) -> SessionState {
+        let our_next = Keys::generate();
+        SessionState {
+            root_key: [1; 32],
+            their_current_nostr_public_key: Some(current),
+            their_next_nostr_public_key: Some(next),
+            our_current_nostr_key: None,
+            our_next_nostr_key: SerializableKeyPair {
+                public_key: our_next.public_key(),
+                private_key: our_next.secret_key().to_secret_bytes(),
+            },
+            receiving_chain_key: None,
+            sending_chain_key: None,
+            sending_chain_message_number: 0,
+            receiving_chain_message_number: 0,
+            previous_sending_chain_message_count: 0,
+            skipped_keys: Default::default(),
+        }
+    }
 
     #[test]
     fn runtime_init_queues_initial_publish_events() {
@@ -288,6 +381,66 @@ mod tests {
 
         runtime.init().unwrap();
         runtime.setup_user(bob.public_key()).unwrap();
+    }
+
+    #[test]
+    fn runtime_owns_direct_message_subscription_lifecycle() {
+        let alice = Keys::generate();
+        let peer = Keys::generate().public_key();
+        let peer_device = Keys::generate().public_key();
+        let current_sender = Keys::generate().public_key();
+        let next_sender = Keys::generate().public_key();
+        let runtime = NdrRuntime::new(
+            alice.public_key(),
+            alice.secret_key().secret_bytes(),
+            alice.public_key().to_hex(),
+            alice.public_key(),
+            None,
+            None,
+        );
+
+        runtime
+            .import_session_state(
+                peer,
+                Some(peer_device.to_hex()),
+                session_state_tracking(current_sender, next_sender),
+            )
+            .unwrap();
+
+        let events = runtime.drain_events();
+        let (subid, filter_json) = events
+            .iter()
+            .find_map(|event| match event {
+                SessionManagerEvent::Subscribe { subid, filter_json }
+                    if subid.starts_with("ndr-runtime-messages-") =>
+                {
+                    Some((subid.clone(), filter_json.clone()))
+                }
+                _ => None,
+            })
+            .expect("runtime should subscribe for session message authors");
+        let filter = serde_json::from_str::<serde_json::Value>(&filter_json).unwrap();
+        assert_eq!(
+            filter.get("kinds").and_then(serde_json::Value::as_array),
+            Some(&vec![serde_json::json!(MESSAGE_EVENT_KIND)])
+        );
+        let authors = filter
+            .get("authors")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(authors.contains(&current_sender.to_hex().as_str()));
+        assert!(authors.contains(&next_sender.to_hex().as_str()));
+
+        runtime.session_manager().delete_chat(peer).unwrap();
+        runtime.sync_direct_message_subscriptions().unwrap();
+
+        let events = runtime.drain_events();
+        assert!(events.iter().any(|event| {
+            matches!(event, SessionManagerEvent::Unsubscribe(unsubid) if unsubid == &subid)
+        }));
     }
 
     #[test]

@@ -53,3 +53,38 @@ pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};
 pub use types::*;
 pub use user_record::{DeviceRecord, StoredDeviceRecord, StoredUserRecord, UserRecord};
+
+#[cfg(test)]
+mod architecture_tests {
+    #[test]
+    fn session_core_does_not_manage_pubsub_or_subscriptions() {
+        let source = include_str!("session.rs");
+        for banned in [
+            "NostrPubSub",
+            "SessionManagerEvent",
+            "crossbeam_channel",
+            "subscribe_to_messages",
+            "update_subscriptions",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "Session should stay pure ratchet state; found `{banned}`"
+            );
+        }
+    }
+
+    #[test]
+    fn session_manager_does_not_own_direct_message_subscriptions() {
+        let source = include_str!("session_manager.rs");
+        for banned in [
+            "sync_session_message_subscription",
+            "session_message_subscription",
+            "session-manager-messages-",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "SessionManager should expose direct-message authors, not own subscriptions; found `{banned}`"
+            );
+        }
+    }
+}

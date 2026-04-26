@@ -114,9 +114,7 @@ impl SessionManager {
             .device_id
             .unwrap_or_else(|| hex::encode(response.invitee_identity.to_bytes()));
 
-        let mut session = response.session;
-        session.set_pubsub(self.pubsub.clone());
-        let _ = session.subscribe_to_messages();
+        let session = response.session;
 
         self.with_user_records({
             let device_id = device_id.clone();

@@ -220,23 +220,8 @@ impl SessionManager {
             }
         }
 
-        // Sessions manage their own kind 1060 subscriptions
         let active_device_ids = self.with_user_records({
-            let pubsub = self.pubsub.clone();
             move |records| {
-                for user_record in records.values_mut() {
-                    for device_record in user_record.device_records.values_mut() {
-                        if let Some(ref mut session) = device_record.active_session {
-                            session.set_pubsub(pubsub.clone());
-                            let _ = session.subscribe_to_messages();
-                        }
-                        for session in &mut device_record.inactive_sessions {
-                            session.set_pubsub(pubsub.clone());
-                            let _ = session.subscribe_to_messages();
-                        }
-                    }
-                }
-
                 records
                     .values()
                     .flat_map(|user_record| {
@@ -568,6 +553,10 @@ impl SessionManager {
         pubkeys
     }
 
+    pub fn get_all_message_push_author_pubkeys(&self) -> Vec<PublicKey> {
+        self.with_user_records(|records| Self::message_push_author_pubkeys_for_records(records))
+    }
+
     pub fn get_message_push_session_states(
         &self,
         peer_owner_pubkey: PublicKey,
@@ -603,9 +592,7 @@ impl SessionManager {
         let device_identity = device_id
             .as_deref()
             .and_then(|id| crate::utils::pubkey_from_hex(id).ok());
-        let mut session = crate::Session::new(state, "imported".to_string());
-        session.set_pubsub(self.pubsub.clone());
-        let _ = session.subscribe_to_messages();
+        let session = crate::Session::new(state, "imported".to_string());
 
         self.with_user_records(move |records| {
             let user_record = records

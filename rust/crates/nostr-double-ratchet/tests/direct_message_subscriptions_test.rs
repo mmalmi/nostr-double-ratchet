@@ -12,7 +12,7 @@ fn tracker_returns_only_new_direct_message_authors() {
     let mut tracker = DirectMessageSubscriptionTracker::new();
 
     let added = tracker.register_subscription(
-        "session-next-1",
+        "ndr-runtime-messages-1",
         format!(
             r#"{{"kinds":[1060],"authors":["{}","{}"]}}"#,
             alice.to_hex().to_uppercase(),
@@ -25,13 +25,13 @@ fn tracker_returns_only_new_direct_message_authors() {
     assert_eq!(tracker.tracked_authors(), expected_authors);
 
     let duplicate = tracker.register_subscription(
-        "session-current-1",
+        "ndr-runtime-messages-2",
         format!(r#"{{"kinds":[1060],"authors":["{}"]}}"#, bob.to_hex()),
     );
     assert!(duplicate.is_empty());
     assert_eq!(tracker.tracked_authors(), expected_authors);
 
-    tracker.unregister_subscription("session-next-1");
+    tracker.unregister_subscription("ndr-runtime-messages-1");
     assert_eq!(tracker.tracked_authors(), vec![bob]);
 }
 
@@ -41,13 +41,13 @@ fn tracker_can_apply_session_manager_events() {
     let mut tracker = DirectMessageSubscriptionTracker::new();
 
     let added = tracker.apply_session_event(&SessionManagerEvent::Subscribe {
-        subid: "session-next-1".to_string(),
+        subid: "ndr-runtime-messages-1".to_string(),
         filter_json: format!(r#"{{"kinds":[1060],"authors":["{}"]}}"#, alice.to_hex()),
     });
     assert_eq!(added, vec![alice]);
 
     let removed = tracker.apply_session_event(&SessionManagerEvent::Unsubscribe(
-        "session-next-1".to_string(),
+        "ndr-runtime-messages-1".to_string(),
     ));
     assert!(removed.is_empty());
     assert!(tracker.tracked_authors().is_empty());
@@ -62,12 +62,18 @@ fn helper_ignores_non_session_or_invalid_filters() {
     .is_empty());
 
     assert!(direct_message_subscription_authors(
-        "session-next-1",
+        "ndr-runtime-messages-1",
         r#"{"kinds":[1],"authors":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
     )
     .is_empty());
 
-    assert!(direct_message_subscription_authors("session-next-1", "not json").is_empty());
+    assert!(direct_message_subscription_authors(
+        "session-next-1",
+        r#"{"kinds":[1060],"authors":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
+    )
+    .is_empty());
+
+    assert!(direct_message_subscription_authors("ndr-runtime-messages-1", "not json").is_empty());
 }
 
 #[test]

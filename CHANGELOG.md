@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.99 - 2026-04-26
+
+- Move direct-message subscription ownership from `Session`/`SessionManager` into `NdrRuntime`.
+- Keep `Session` focused on ratchet state and encryption/decryption; callers now feed received events through runtime/manager APIs.
+- Speed up `ndr listen` startup by removing the redundant filesystem watcher path and flushing runtime subscriptions immediately.
+- Fix shared-channel group invite acceptance so accepted sessions are imported into `SessionManager` before follow-up messages.
+- Tighten group-listener e2e coverage so a single group send must reach every other participant.
+
 ## 0.0.98 - 2026-04-26
 
 - Preserve original inner rumor IDs when queued session-manager publishes flush later.

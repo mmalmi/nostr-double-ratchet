@@ -404,7 +404,7 @@ fn send_uses_send_capable_inactive_session_when_active_session_cannot_send() {
 }
 
 #[test]
-fn init_compacts_duplicate_stored_sessions_and_only_subscribes_once_per_filter() {
+fn init_compacts_duplicate_stored_sessions_and_exposes_unique_message_authors() {
     let our_keys = Keys::generate();
     let peer = Keys::generate().public_key();
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
@@ -431,7 +431,7 @@ fn init_compacts_duplicate_stored_sessions_and_only_subscribes_once_per_filter()
         )
         .unwrap();
 
-    let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx, _rx) = crossbeam_channel::unbounded();
     let manager = SessionManager::new(
         our_keys.public_key(),
         our_keys.secret_key().to_secret_bytes(),
@@ -444,13 +444,7 @@ fn init_compacts_duplicate_stored_sessions_and_only_subscribes_once_per_filter()
 
     manager.init().unwrap();
 
-    let subscribe_count = drain_events(&rx)
-        .into_iter()
-        .filter(|event| {
-            matches!(event, SessionManagerEvent::Subscribe { subid, .. } if subid.starts_with("session-"))
-        })
-        .count();
-    assert_eq!(subscribe_count, 2);
+    assert_eq!(manager.get_all_message_push_author_pubkeys().len(), 2);
 
     let (active_count, inactive_count) = manager.with_user_records({
         move |records| {
@@ -466,6 +460,49 @@ fn init_compacts_duplicate_stored_sessions_and_only_subscribes_once_per_filter()
     });
     assert_eq!(active_count, 1);
     assert_eq!(inactive_count, 0);
+}
+
+#[test]
+fn session_manager_exposes_message_authors_without_emitting_subscriptions() {
+    let our_keys = Keys::generate();
+    let peer = Keys::generate().public_key();
+    let peer_device = Keys::generate().public_key();
+    let state = test_session_state();
+    let expected_authors = SessionManager::session_state_tracked_sender_pubkeys(&state);
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        our_keys.public_key(),
+        our_keys.secret_key().to_secret_bytes(),
+        our_keys.public_key().to_hex(),
+        our_keys.public_key(),
+        tx,
+        None,
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    manager
+        .import_session_state(peer, Some(peer_device.to_hex()), state)
+        .unwrap();
+
+    assert_eq!(
+        manager.get_all_message_push_author_pubkeys(),
+        expected_authors
+    );
+    let events = drain_events(&rx);
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, SessionManagerEvent::Subscribe { .. })));
+
+    manager.delete_chat(peer).unwrap();
+
+    assert!(manager.get_all_message_push_author_pubkeys().is_empty());
+    let events = drain_events(&rx);
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, SessionManagerEvent::Unsubscribe(_))));
 }
 
 #[test]

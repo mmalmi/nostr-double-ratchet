@@ -54,8 +54,9 @@ fi
 # Tier 1: Library (no internal dependencies)
 publish_crate "nostr-double-ratchet"
 
-# Tier 2: CLI (depends on library)
+# Tier 2: crates that depend on the library
 publish_crate "ndr"
+publish_crate "ndr-ffi"
 
 echo ""
 echo "=========================================="

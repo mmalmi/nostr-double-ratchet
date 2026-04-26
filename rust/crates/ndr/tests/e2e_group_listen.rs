@@ -1582,11 +1582,11 @@ async fn test_group_chat_six_participants_everyone_receives() {
             let sender = &participants[sender_idx];
             let msg = format!("group-msg-{}", sender.name);
 
+            let _ = run_ndr(sender.dir.path(), &["group", "send", &group_id, &msg]).await;
             for (recipient_idx, listener) in listeners.iter_mut().enumerate() {
                 if recipient_idx == sender_idx {
                     continue;
                 }
-                let _ = run_ndr(sender.dir.path(), &["group", "send", &group_id, &msg]).await;
                 let event = read_until_event_with_content(
                     &mut listener.stdout,
                     "group_message",

@@ -5,8 +5,7 @@ use nostr::{Filter, PublicKey};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-const DIRECT_MESSAGE_SESSION_SUBSCRIPTION_PREFIXES: [&str; 2] =
-    ["session-current-", "session-next-"];
+const DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX: &str = "ndr-runtime-messages-";
 
 #[derive(Debug, Default, Clone)]
 pub struct DirectMessageSubscriptionTracker {
@@ -120,11 +119,7 @@ pub fn direct_message_subscription_authors(
     filter_json: impl AsRef<str>,
 ) -> Vec<PublicKey> {
     let subid = subid.as_ref().trim();
-    if subid.is_empty()
-        || !DIRECT_MESSAGE_SESSION_SUBSCRIPTION_PREFIXES
-            .iter()
-            .any(|prefix| subid.starts_with(prefix))
-    {
+    if subid.is_empty() || !subid.starts_with(DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX) {
         return Vec::new();
     }
 

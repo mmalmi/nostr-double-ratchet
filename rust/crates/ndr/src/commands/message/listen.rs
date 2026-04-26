@@ -157,19 +157,6 @@ fn collect_chat_pubkeys_with_session_manager(
     session_manager: &SessionManager,
     chat_id: Option<&str>,
 ) -> Result<Vec<nostr::PublicKey>> {
-    let chats = if let Some(id) = chat_id {
-        vec![storage
-            .get_chat(id)?
-            .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?]
-    } else {
-        storage.list_chats()?
-    };
-
-    let mut owners = std::collections::HashSet::new();
-    for chat in &chats {
-        owners.insert(chat.their_pubkey.clone());
-    }
-
     let mut seen = std::collections::HashSet::new();
     let mut pubkeys = Vec::new();
     for pubkey in collect_chat_pubkeys(storage, chat_id)? {
@@ -178,21 +165,9 @@ fn collect_chat_pubkeys_with_session_manager(
         }
     }
 
-    for (owner, _device_id, state) in session_manager.export_active_sessions() {
-        if !owners.contains(&owner.to_hex()) {
-            continue;
-        }
-
-        for pubkey in [
-            state.their_current_nostr_public_key,
-            state.their_next_nostr_public_key,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if seen.insert(pubkey.to_hex()) {
-                pubkeys.push(pubkey);
-            }
+    for pubkey in session_manager.get_all_message_push_author_pubkeys() {
+        if seen.insert(pubkey.to_hex()) {
+            pubkeys.push(pubkey);
         }
     }
 
@@ -201,7 +176,7 @@ fn collect_chat_pubkeys_with_session_manager(
 
 async fn refresh_peer_app_keys_snapshots(
     storage: &Storage,
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     relays: &[String],
     my_owner_pubkey_hex: &str,
@@ -245,11 +220,7 @@ async fn refresh_peer_app_keys_snapshots(
                 .map(|device| device.identity_pubkey)
                 .filter(|device_pubkey| *device_pubkey != owner_pubkey)
                 .collect();
-            session_manager.ingest_app_keys_snapshot(
-                owner_pubkey,
-                snapshot.app_keys,
-                snapshot.created_at,
-            );
+            runtime.ingest_app_keys_snapshot(owner_pubkey, snapshot.app_keys, snapshot.created_at);
 
             if sibling_devices.is_empty() {
                 continue;
@@ -280,7 +251,7 @@ async fn refresh_peer_app_keys_snapshots(
                         && parts.get(1).map(|value| value.as_str()) == Some(expected_d.as_str())
                 });
                 if matches_device_invite {
-                    session_manager.process_received_event(event);
+                    runtime.process_received_event(event);
                 }
             }
         }
@@ -290,12 +261,13 @@ async fn refresh_peer_app_keys_snapshots(
 }
 
 async fn refresh_pending_invite_response_app_keys(
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     relays: &[String],
 ) -> Result<()> {
     const APP_KEYS_POLL_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+    let session_manager = runtime.session_manager();
     for owner_pubkey in session_manager.pending_invite_response_owner_pubkeys() {
         if let Some(snapshot) = fetch_latest_app_keys_snapshot_with_timeout(
             client,
@@ -305,11 +277,7 @@ async fn refresh_pending_invite_response_app_keys(
         )
         .await?
         {
-            session_manager.ingest_app_keys_snapshot(
-                owner_pubkey,
-                snapshot.app_keys,
-                snapshot.created_at,
-            );
+            runtime.ingest_app_keys_snapshot(owner_pubkey, snapshot.app_keys, snapshot.created_at);
         }
     }
 
@@ -946,9 +914,7 @@ async fn process_session_manager_event(
 ) -> Result<SessionManagerProcessingResult> {
     let current_event_id = event.id.to_hex();
     let current_timestamp = event.created_at.as_u64();
-    let session_manager = runtime.session_manager();
-
-    session_manager.process_received_event(event.clone());
+    runtime.process_received_event(event.clone());
     let decrypted_events =
         flush_session_manager_events(runtime, client, config, subscribed_manager_filters).await?;
     let session_group_decrypts: Vec<SessionGroupDecrypt> = decrypted_events
@@ -1283,6 +1249,8 @@ async fn flush_session_manager_events(
 ) -> Result<Vec<SessionManagerDecrypted>> {
     let mut decrypted = Vec::new();
 
+    runtime.sync_direct_message_subscriptions()?;
+
     for event in runtime.drain_events() {
         match event {
             SessionManagerEvent::Publish(unsigned) => {
@@ -1345,7 +1313,6 @@ pub async fn listen(
         MESSAGE_EVENT_KIND, SHARED_CHANNEL_KIND,
     };
     use nostr_sdk::{Client, Filter, RelayPoolNotification};
-    use notify::{Event as NotifyEvent, EventKind, RecursiveMode, Watcher};
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -1572,38 +1539,7 @@ pub async fn listen(
     // backfilled events that relays may send immediately upon subscription.
     let mut notifications = client.notifications();
 
-    // Set up filesystem watcher for invites and chats directories
-    let (fs_tx, fs_rx) = mpsc::channel();
-    let mut _watcher =
-        notify::recommended_watcher(move |res: Result<NotifyEvent, notify::Error>| {
-            if let Ok(event) = res {
-                if matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                ) {
-                    let _ = fs_tx.send(());
-                }
-            }
-        })?;
-
-    // Watch storage directories
-    let invites_dir = storage.data_dir().join("invites");
-    let chats_dir = storage.data_dir().join("chats");
-    let groups_dir = storage.data_dir().join("groups");
-    let group_senders_dir = storage.data_dir().join("group_senders");
-    if invites_dir.exists() {
-        _watcher.watch(&invites_dir, RecursiveMode::NonRecursive)?;
-    }
-    if chats_dir.exists() {
-        _watcher.watch(&chats_dir, RecursiveMode::NonRecursive)?;
-    }
-    if groups_dir.exists() {
-        _watcher.watch(&groups_dir, RecursiveMode::NonRecursive)?;
-    }
-    if group_senders_dir.exists() {
-        // `group_senders/<group_id>/<identity>.json`
-        _watcher.watch(&group_senders_dir, RecursiveMode::Recursive)?;
-    }
+    let (_fs_tx, fs_rx) = mpsc::channel::<()>();
 
     // Subscribe only if we have filters
     let mut has_subscription = !filters.is_empty();
@@ -1623,39 +1559,11 @@ pub async fn listen(
             &mut seen_event_ids_order,
         )
         .await?;
-        refresh_peer_app_keys_snapshots(
-            storage,
-            &session_manager,
-            &client,
-            &relays,
-            &owner_pubkey_hex,
-            chat_id_owned.as_deref(),
-        )
-        .await?;
-        refresh_pending_invite_response_app_keys(&session_manager, &client, &relays).await?;
-        last_peer_app_keys_refresh = Instant::now();
         let _ = flush_session_manager_events(
             &runtime,
             &client,
             &config,
             &mut subscribed_manager_filters,
-        )
-        .await?;
-        sync_chats_from_session_manager(storage, &session_manager, &owner_pubkey_hex)?;
-        retry_pending_session_manager_message_events(
-            &mut pending_session_manager_message_events,
-            &mut pending_session_manager_message_event_order,
-            &session_manager,
-            &runtime,
-            &client,
-            &config,
-            storage,
-            output,
-            &mut subscribed_group_sender_pubkeys,
-            &mut subscribed_manager_filters,
-            &owner_pubkey_hex,
-            &mut seen_event_ids,
-            &mut seen_event_ids_order,
         )
         .await?;
         backfill_recent_pairwise_session_messages(
@@ -1725,14 +1633,14 @@ pub async fn listen(
             .await?;
             refresh_peer_app_keys_snapshots(
                 storage,
-                &session_manager,
+                &runtime,
                 &client,
                 &relays,
                 &owner_pubkey_hex,
                 chat_id_owned.as_deref(),
             )
             .await?;
-            refresh_pending_invite_response_app_keys(&session_manager, &client, &relays).await?;
+            refresh_pending_invite_response_app_keys(&runtime, &client, &relays).await?;
             last_peer_app_keys_refresh = Instant::now();
             let _ = flush_session_manager_events(
                 &runtime,
@@ -1794,15 +1702,14 @@ pub async fn listen(
                 {
                     refresh_peer_app_keys_snapshots(
                         storage,
-                        &session_manager,
+                        &runtime,
                         &client,
                         &relays,
                         &owner_pubkey_hex,
                         chat_id_owned.as_deref(),
                     )
                     .await?;
-                    refresh_pending_invite_response_app_keys(&session_manager, &client, &relays)
-                        .await?;
+                    refresh_pending_invite_response_app_keys(&runtime, &client, &relays).await?;
                     last_peer_app_keys_refresh = Instant::now();
                 }
                 let _ = flush_session_manager_events(
@@ -1932,8 +1839,7 @@ pub async fn listen(
             )
             .await?;
             if event.kind.as_u16() as u32 == INVITE_RESPONSE_KIND {
-                refresh_pending_invite_response_app_keys(&session_manager, &client, &relays)
-                    .await?;
+                refresh_pending_invite_response_app_keys(&runtime, &client, &relays).await?;
                 let _ = flush_session_manager_events(
                     &runtime,
                     &client,
@@ -2059,12 +1965,19 @@ pub async fn listen(
                                     .device_id
                                     .clone()
                                     .or_else(|| Some(response.invitee_identity.to_hex()));
-                                session_manager.import_session_state(
+                                runtime.import_session_state(
                                     their_pubkey,
                                     peer_device_id,
                                     response.session.state.clone(),
                                 )?;
-                                session_manager.setup_user(their_pubkey);
+                                runtime.setup_user(their_pubkey)?;
+                                let _ = flush_session_manager_events(
+                                    &runtime,
+                                    &client,
+                                    &config,
+                                    &mut subscribed_manager_filters,
+                                )
+                                .await?;
 
                                 config.set_linked_owner(&owner_pubkey_hex)?;
                                 storage.delete_invite(&stored_invite.id)?;
@@ -2085,7 +1998,7 @@ pub async fn listen(
                                     fetch_latest_app_keys_snapshot(&client, &relays, their_pubkey)
                                         .await?
                                 {
-                                    session_manager.ingest_app_keys_snapshot(
+                                    runtime.ingest_app_keys_snapshot(
                                         their_pubkey,
                                         snapshot.app_keys,
                                         snapshot.created_at,
@@ -2153,12 +2066,12 @@ pub async fn listen(
                                 storage.save_chat(&new_chat)?;
                                 new_chat
                             };
-                            session_manager.import_session_state(
+                            runtime.import_session_state(
                                 their_pubkey,
                                 chat.device_id.clone(),
                                 import_state,
                             )?;
-                            session_manager.setup_user(their_pubkey);
+                            runtime.setup_user(their_pubkey)?;
                             let _ = flush_session_manager_events(
                                 &runtime,
                                 &client,
@@ -2436,6 +2349,20 @@ pub async fn listen(
                             // Best-effort; group functionality still works if this fails.
                             let _ = client.send_event(typing_event).await;
                         }
+
+                        runtime.import_session_state(
+                            signer_owner_pubkey,
+                            Some(invite.inviter.to_hex()),
+                            accept_session.state.clone(),
+                        )?;
+                        runtime.setup_user(signer_owner_pubkey)?;
+                        let _ = flush_session_manager_events(
+                            &runtime,
+                            &client,
+                            &config,
+                            &mut subscribed_manager_filters,
+                        )
+                        .await?;
 
                         // Update subscription for new chat's keys.
                         let new_pubkeys = collect_chat_pubkeys_with_session_manager(

@@ -33,7 +33,7 @@ pub async fn receive(
 
     let (runtime, _signing_keys, owner_pubkey_hex) = super::send::build_runtime(config, storage)?;
     let manager = runtime.session_manager();
-    manager.process_received_event(event);
+    runtime.process_received_event(event);
 
     for manager_event in runtime.drain_events() {
         let SessionManagerEvent::DecryptedMessage {

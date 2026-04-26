@@ -201,6 +201,23 @@ impl SessionManager {
         snapshots
     }
 
+    fn message_push_author_pubkeys_for_records(
+        records: &HashMap<PublicKey, UserRecord>,
+    ) -> Vec<PublicKey> {
+        let mut authors = HashSet::new();
+        for user_record in records.values() {
+            for snapshot in Self::message_push_session_snapshots(user_record) {
+                for author in snapshot.tracked_sender_pubkeys {
+                    authors.insert(author);
+                }
+            }
+        }
+
+        let mut authors: Vec<PublicKey> = authors.into_iter().collect();
+        authors.sort_by_key(|pubkey| pubkey.to_hex());
+        authors
+    }
+
     fn stored_user_record_json(user_record: &UserRecord) -> Result<String> {
         Ok(serde_json::to_string(&user_record.to_stored())?)
     }

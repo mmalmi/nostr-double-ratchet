@@ -266,20 +266,17 @@ impl SessionManager {
                 };
 
                 if let Some(state) = device.active_session {
-                    let mut session =
-                        crate::Session::new(state, format!("session-{}", device.device_id));
-                    session.set_pubsub(self.pubsub.clone());
-                    let _ = session.subscribe_to_messages();
-                    device_record.active_session = Some(session);
+                    device_record.active_session = Some(crate::Session::new(
+                        state,
+                        format!("session-{}", device.device_id),
+                    ));
                 }
 
                 for state in device.inactive_sessions {
-                    let mut session = crate::Session::new(
+                    let session = crate::Session::new(
                         state,
                         format!("session-{}-inactive", device.device_id),
                     );
-                    session.set_pubsub(self.pubsub.clone());
-                    let _ = session.subscribe_to_messages();
                     device_record.inactive_sessions.push(session);
                 }
 

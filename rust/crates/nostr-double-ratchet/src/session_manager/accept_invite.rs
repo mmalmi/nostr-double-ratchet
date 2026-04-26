@@ -223,9 +223,6 @@ impl SessionManager {
             let invite_bootstrap_events =
                 SessionManager::sign_bootstrap_schedule(&mut session, &invite_bootstrap_messages);
 
-            session.set_pubsub(self.pubsub.clone());
-            let _ = session.subscribe_to_messages();
-
             self.with_user_records({
                 let device_id = device_id.clone();
                 move |records| {
