@@ -22,6 +22,9 @@ practice.
   replicated invite/control state convergence.
 - [`group_sender_keys`](./group_sender_keys):
   sender-key distribution and recovery for groups.
+- [`direct_message_subscriptions`](./direct_message_subscriptions):
+  runtime-owned direct-message subscription synchronization from `SessionManager` message-push
+  author state.
 
 ## Main Lessons So Far
 
@@ -37,6 +40,9 @@ practice.
   `locally published` versus `relay-visible`. Silent or lagging relays are worth testing end to
   end, while TLA+ should focus on whether enough relay-visible state exists for other participants
   to verify an authorization change.
+- Direct-message subscriptions are runtime/consumer state. `SessionManager` should expose the
+  author pubkeys that can carry ratchet messages, and the runtime must sync its relay subscription
+  whenever that author set changes. Otherwise valid ratchet state can still miss inbound messages.
 
 ## Running Models
 
