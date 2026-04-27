@@ -1,10 +1,5 @@
 # Changelog
 
-## 0.0.103 - 2026-04-27
-
-- Copy one-to-one inner recipient `p` tags onto encrypted outer kind 1060 events so push servers can route first messages before recipient clients refresh author subscriptions.
-- Add Rust and TypeScript regression coverage that recipient-tagged encrypted events still decrypt normally.
-
 ## 0.0.102 - 2026-04-27
 
 - Pin the Rust crates to `nostr` 0.44.2 and `nostr-sdk` 0.44.1.

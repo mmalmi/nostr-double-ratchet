@@ -70,20 +70,6 @@ describe("Session", () => {
     expect(event.sig).toHaveLength(128)
   })
 
-  it("copies inner recipient p tags to the encrypted outer message", () => {
-    const { alice, bob, bobSecretKey } = createPair()
-    const recipient = getPublicKey(bobSecretKey)
-    const { event } = alice.sendEvent({
-      content: "push route me",
-      kind: CHAT_MESSAGE_KIND,
-      tags: [["p", recipient]],
-    })
-
-    expect(event.kind).toBe(MESSAGE_EVENT_KIND)
-    expect(event.tags).toContainEqual(["p", recipient])
-    expect(deliver(bob, event).content).toBe("push route me")
-  })
-
   it("decrypts fed events and updates ratchet keys", async () => {
     const { alice, bob } = createPair()
     const initialReceivingChainKey = bob.state.receivingChainKey
