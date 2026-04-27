@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.104 - 2026-04-28
+
+- Publish a clean release after yanking/deprecating 0.0.103.
+- Keep encrypted kind 1060 wrappers free of outer recipient routing tags.
+
 ## 0.0.102 - 2026-04-27
 
 - Pin the Rust crates to `nostr` 0.44.2 and `nostr-sdk` 0.44.1.
