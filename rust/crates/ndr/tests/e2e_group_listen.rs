@@ -18,18 +18,15 @@ struct Listener {
 }
 
 static NDR_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
-static E2E_TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+static E2E_TEST_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+const MAX_CONCURRENT_E2E_TESTS: usize = 3;
 
-fn e2e_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    match E2E_TEST_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-    {
-        Ok(guard) => guard,
-        // Keep running remaining tests even if a previous test panicked while
-        // holding the lock.
-        Err(poisoned) => poisoned.into_inner(),
-    }
+async fn e2e_test_permit() -> tokio::sync::SemaphorePermit<'static> {
+    E2E_TEST_SEMAPHORE
+        .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_E2E_TESTS))
+        .acquire()
+        .await
+        .expect("e2e semaphore should stay open")
 }
 
 fn workspace_root() -> PathBuf {
@@ -498,7 +495,7 @@ async fn stop_child(mut child: Child) {
 
 #[tokio::test]
 async fn test_listen_group_metadata_and_message() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -632,7 +629,7 @@ async fn test_listen_group_metadata_and_message() {
 
 #[tokio::test]
 async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -856,7 +853,7 @@ async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror()
 
 #[tokio::test]
 async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1251,7 +1248,7 @@ async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
 
 #[tokio::test]
 async fn test_group_sender_key_rotation() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1424,7 +1421,7 @@ async fn test_group_sender_key_rotation() {
 
 #[tokio::test]
 async fn test_group_chat_six_participants_everyone_receives() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1624,7 +1621,7 @@ async fn test_group_chat_six_participants_everyone_receives() {
 
 #[tokio::test]
 async fn test_listen_group_add_member_and_fanout() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1907,7 +1904,7 @@ async fn test_listen_group_add_member_and_fanout() {
 
 #[tokio::test]
 async fn test_group_chat_two_strangers_can_exchange_messages() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -2284,7 +2281,7 @@ async fn test_group_chat_two_strangers_can_exchange_messages() {
 
 #[tokio::test]
 async fn test_listen_group_remove_member() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -2563,7 +2560,7 @@ async fn test_listen_group_remove_member() {
 
 #[tokio::test]
 async fn test_group_accept_shared_channel_invite_opens_session() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -2753,7 +2750,7 @@ async fn test_group_accept_shared_channel_invite_opens_session() {
 
 #[tokio::test]
 async fn test_group_accept_shared_channel_rejects_unsigned_and_impersonated_invites() {
-    let _guard = e2e_test_lock();
+    let _guard = e2e_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);

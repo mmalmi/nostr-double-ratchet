@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.102 - 2026-04-27
+
+- Pin the Rust crates to `nostr` 0.44.2 and `nostr-sdk` 0.44.1.
+- Speed up `e2e_group_listen` by bounding concurrent real relay/listener scenarios instead of blocking Tokio worker threads with a synchronous global test lock.
+
 ## 0.0.101 - 2026-04-27
 
 - Update the Rust crates to `nostr` 0.44 and `nostr-sdk` 0.44.
