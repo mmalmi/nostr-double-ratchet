@@ -375,15 +375,22 @@ fn send_uses_send_capable_inactive_session_when_active_session_cannot_send() {
     assert_eq!(published_ids.len(), 1);
 
     let events = drain_events(&rx);
+    let published = events.iter().find_map(|ev| match ev {
+        SessionManagerEvent::PublishSigned(event)
+            if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16 =>
+        {
+            Some(event)
+        }
+        _ => None,
+    });
+    let published = published.expect("expected send to publish using promoted inactive session");
     assert!(
-        events.iter().any(|ev| {
-            matches!(
-                ev,
-                SessionManagerEvent::PublishSigned(event)
-                    if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-            )
+        published.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(|value| value.as_str()) == Some("p")
+                && values.get(1).map(|value| value.as_str()) == Some(bob_pubkey.to_hex().as_str())
         }),
-        "expected send to publish using promoted inactive session"
+        "outer message event should expose the recipient owner for push routing"
     );
 
     let (active_can_send, inactive_len) = manager.with_user_records(move |records| {

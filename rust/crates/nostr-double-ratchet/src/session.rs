@@ -229,8 +229,14 @@ impl Session {
             Version::V2,
         )?;
 
-        let tags = vec![Tag::parse(&["header".to_string(), encrypted_header])
+        let mut tags = vec![Tag::parse(&["header".to_string(), encrypted_header])
             .map_err(|e| Error::InvalidEvent(e.to_string()))?];
+        for recipient in rumor_recipient_pubkeys(&event) {
+            tags.push(
+                Tag::parse(&["p".to_string(), recipient.to_hex()])
+                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
+            );
+        }
 
         let author_pubkey = our_current.public_key;
 
@@ -500,6 +506,26 @@ impl Session {
     }
 
     pub fn close(&self) {}
+}
+
+fn rumor_recipient_pubkeys(event: &UnsignedEvent) -> Vec<PublicKey> {
+    let mut recipients = Vec::new();
+    for tag in event.tags.iter() {
+        let values = tag.as_slice();
+        if values.first().map(|value| value.as_str()) != Some("p") {
+            continue;
+        }
+        let Some(pubkey_hex) = values.get(1) else {
+            continue;
+        };
+        let Ok(pubkey) = pubkey_from_hex(pubkey_hex) else {
+            continue;
+        };
+        if !recipients.contains(&pubkey) {
+            recipients.push(pubkey);
+        }
+    }
+    recipients
 }
 
 fn normalize_inner_rumor_id(plaintext: &str) -> String {

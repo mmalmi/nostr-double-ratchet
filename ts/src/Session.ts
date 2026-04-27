@@ -213,10 +213,20 @@ export class Session {
     const sharedSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, this.state.theirNextNostrPublicKey);
     const encryptedHeader = nip44.encrypt(JSON.stringify(header), sharedSecret);
     
+    const recipientTags = rumor.tags!
+      .filter((tag) => tag[0] === "p" && typeof tag[1] === "string" && tag[1].length === 64)
+      .map((tag) => ["p", tag[1]])
+    const outerTags = [["header", encryptedHeader]]
+    for (const tag of recipientTags) {
+      if (!outerTags.some((existing) => existing[0] === "p" && existing[1] === tag[1])) {
+        outerTags.push(tag)
+      }
+    }
+
     const nostrEvent = finalizeEvent({
       content: encryptedData,
       kind: MESSAGE_EVENT_KIND,
-      tags: [["header", encryptedHeader]],
+      tags: outerTags,
       created_at: Math.floor(now / 1000)
     }, this.state.ourCurrentNostrKey.privateKey);
 
