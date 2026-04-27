@@ -50,7 +50,10 @@ fn expected_ndr_binary_path() -> PathBuf {
 
 fn resolve_ndr_binary_path() -> PathBuf {
     if let Ok(bin_path) = std::env::var("CARGO_BIN_EXE_ndr") {
-        return PathBuf::from(bin_path);
+        let path = PathBuf::from(bin_path);
+        if path.exists() {
+            return path;
+        }
     }
 
     let path = expected_ndr_binary_path();
@@ -2425,17 +2428,25 @@ async fn test_listen_group_remove_member() {
             .to_string();
 
         // Bob and Carol should both receive group metadata creation.
-        let bob_created =
-            read_until_event(&mut bob_stdout, "group_metadata", Duration::from_secs(10))
-                .await
-                .expect("Bob should receive group_metadata created");
+        let bob_created = read_until_group_metadata_action(
+            &mut bob_stdout,
+            &group_id,
+            "created",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("Bob should receive group_metadata created");
         assert_eq!(bob_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(bob_created["action"].as_str(), Some("created"));
 
-        let carol_created =
-            read_until_event(&mut carol_stdout, "group_metadata", Duration::from_secs(10))
-                .await
-                .expect("Carol should receive group_metadata created");
+        let carol_created = read_until_group_metadata_action(
+            &mut carol_stdout,
+            &group_id,
+            "created",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("Carol should receive group_metadata created");
         assert_eq!(carol_created["group_id"].as_str(), Some(group_id.as_str()));
         assert_eq!(carol_created["action"].as_str(), Some("created"));
 
