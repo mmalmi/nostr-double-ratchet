@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.101 - 2026-04-27
+
+- Update the Rust crates to `nostr` 0.44 and `nostr-sdk` 0.44.
+- Adapt CLI relay fetch, subscribe, and publish paths to the current single-filter and borrowed-event APIs.
+- Preserve shared-channel self `p` tags under the newer Nostr event builder behavior.
+- Refresh Rust, FFI, CLI, and interop tests for the new SDK APIs.
+
 ## 0.0.100 - 2026-04-26
 
 - Align the Rust workspace/crate versions with the TypeScript package release.

@@ -320,7 +320,7 @@ async fn backfill_recent_pairwise_session_messages(
         .since(nostr::Timestamp::from(now.saturating_sub(3600)));
     let mut events =
         fetch_events_best_effort(client, relays, filter, std::time::Duration::from_secs(3)).await?;
-    events.sort_by_key(|event| (event.created_at.as_u64(), event.id.to_hex()));
+    events.sort_by_key(|event| (event.created_at.as_secs(), event.id.to_hex()));
 
     let mut handled_any = false;
     for event in events {
@@ -763,7 +763,7 @@ async fn backfill_recent_group_sender_events(
         fetch_events_best_effort(client, relays, filter, std::time::Duration::from_secs(3)).await?;
     // Preserve relay order for same-second events. Sender-key messages are sequential, and
     // tie-breaking by event id can reorder a warmup/distribution follow-up pair.
-    events.sort_by_key(|event| event.created_at.as_u64());
+    events.sort_by_key(|event| event.created_at.as_secs());
 
     for event in events {
         let event_id = event.id.to_hex();
@@ -913,7 +913,7 @@ async fn process_session_manager_event(
     subscribed_manager_filters: &mut std::collections::HashSet<String>,
 ) -> Result<SessionManagerProcessingResult> {
     let current_event_id = event.id.to_hex();
-    let current_timestamp = event.created_at.as_u64();
+    let current_timestamp = event.created_at.as_secs();
     runtime.process_received_event(event.clone());
     let decrypted_events =
         flush_session_manager_events(runtime, client, config, subscribed_manager_filters).await?;
@@ -2347,7 +2347,7 @@ pub async fn listen(
                             storage.save_chat(&chat)?;
 
                             // Best-effort; group functionality still works if this fails.
-                            let _ = client.send_event(typing_event).await;
+                            let _ = client.send_event(&typing_event).await;
                         }
 
                         runtime.import_session_state(
@@ -2425,7 +2425,7 @@ pub async fn listen(
                                 .unwrap_or(&decrypted_event_json)
                                 .to_string();
 
-                            let timestamp = event.created_at.as_u64();
+                            let timestamp = event.created_at.as_secs();
 
                             // Check for group routing tag ["l", group_id]
                             let group_id = decrypted_event["tags"].as_array().and_then(|tags| {
@@ -2654,7 +2654,7 @@ pub async fn listen(
                                                             .unwrap_or(&plaintext_json)
                                                             .to_string();
 
-                                                        let timestamp = env.created_at.as_u64();
+                                                        let timestamp = env.created_at.as_secs();
                                                         let now_seconds =
                                                             std::time::SystemTime::now()
                                                                 .duration_since(

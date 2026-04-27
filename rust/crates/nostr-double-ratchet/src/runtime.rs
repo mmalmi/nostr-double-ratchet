@@ -253,9 +253,7 @@ impl NdrRuntime {
             .map(|last| last.elapsed());
         if let Some(elapsed) = elapsed_since_last_change {
             if elapsed < DM_SUBSCRIPTION_THROTTLE {
-                self.schedule_direct_message_subscription_flush(
-                    DM_SUBSCRIPTION_THROTTLE - elapsed,
-                );
+                self.schedule_direct_message_subscription_flush(DM_SUBSCRIPTION_THROTTLE - elapsed);
                 return Ok(());
             }
         }

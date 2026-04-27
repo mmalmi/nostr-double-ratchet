@@ -162,7 +162,7 @@ impl AppKeys {
         }
 
         let conversation_key =
-            nip44::v2::ConversationKey::derive(owner_keys.secret_key(), &owner_keys.public_key());
+            nip44::v2::ConversationKey::derive(owner_keys.secret_key(), &owner_keys.public_key())?;
         let payload = EncryptedAppKeysContent {
             payload_type: "app-keys-labels".to_string(),
             v: 1,
@@ -180,7 +180,8 @@ impl AppKeys {
         };
 
         let payload_json = serde_json::to_string(&payload)?;
-        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, &payload_json)?;
+        let encrypted_bytes =
+            nip44::v2::encrypt_to_bytes(&conversation_key, payload_json.as_bytes())?;
         let content = base64::engine::general_purpose::STANDARD.encode(&encrypted_bytes);
 
         Ok(self.build_unsigned_event(owner_keys.public_key(), content))
@@ -215,7 +216,7 @@ impl AppKeys {
             let created_at_str = vals[2].clone();
             let created_at = created_at_str
                 .parse::<u64>()
-                .unwrap_or_else(|_| event.created_at.as_u64());
+                .unwrap_or_else(|_| event.created_at.as_secs());
 
             let pk = crate::utils::pubkey_from_hex(&pk_hex)?;
             devices.push(DeviceEntry::new(pk, created_at));
@@ -355,7 +356,7 @@ impl AppKeys {
         }
 
         let conversation_key =
-            nip44::v2::ConversationKey::derive(owner_keys.secret_key(), &owner_keys.public_key());
+            nip44::v2::ConversationKey::derive(owner_keys.secret_key(), &owner_keys.public_key())?;
         let ciphertext_bytes = base64::engine::general_purpose::STANDARD
             .decode(event.content.as_bytes())
             .map_err(|e| Error::Decryption(format!("Base64 decode error: {}", e)))?;

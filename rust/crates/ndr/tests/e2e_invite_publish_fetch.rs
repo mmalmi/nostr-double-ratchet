@@ -70,7 +70,7 @@ async fn test_publish_fetch_and_message_both_ways() {
         .limit(10);
 
     let events = bob_client
-        .fetch_events(vec![filter], Some(Duration::from_secs(5)))
+        .fetch_events(filter, Duration::from_secs(5))
         .await
         .expect("Failed to fetch events");
 
@@ -103,7 +103,7 @@ async fn test_publish_fetch_and_message_both_ways() {
 
     // Publish response to relay
     bob_client
-        .send_event(response_event.clone())
+        .send_event(&response_event)
         .await
         .expect("Failed to publish response");
     sleep(Duration::from_millis(300)).await;

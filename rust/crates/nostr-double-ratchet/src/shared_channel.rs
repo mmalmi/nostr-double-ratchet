@@ -21,7 +21,7 @@ impl SharedChannel {
         let public_key = keys.public_key();
 
         // Self-encryption: derive conversation key from secret_key + own public_key
-        let conversation_key = nip44::v2::ConversationKey::derive(keys.secret_key(), &public_key);
+        let conversation_key = nip44::v2::ConversationKey::derive(keys.secret_key(), &public_key)?;
 
         Ok(Self {
             public_key,
@@ -32,14 +32,17 @@ impl SharedChannel {
 
     /// Encrypt a rumor JSON string and return a signed kind 4 outer event.
     pub fn create_event(&self, rumor_json: &str) -> Result<nostr::Event> {
-        let encrypted = nip44::v2::encrypt_to_bytes(&self.conversation_key, rumor_json)?;
+        let encrypted = nip44::v2::encrypt_to_bytes(&self.conversation_key, rumor_json.as_bytes())?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&encrypted);
 
         let secret_key = nostr::SecretKey::from_slice(&self.secret_key)?;
         let keys = Keys::new(secret_key);
+        let public_key_tag = Tag::parse(["p".to_string(), keys.public_key().to_hex()])
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
 
         let unsigned = EventBuilder::new(nostr::Kind::Custom(SHARED_CHANNEL_KIND as u16), &encoded)
-            .tag(Tag::public_key(keys.public_key()))
+            .tag(public_key_tag)
+            .allow_self_tagging()
             .build(keys.public_key());
 
         let event = unsigned

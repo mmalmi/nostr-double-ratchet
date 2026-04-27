@@ -953,7 +953,7 @@ impl GroupChannel {
             sender_device_pubkey,
             sender_owner_pubkey,
             outer_event_id: outer.id.to_string(),
-            outer_created_at: outer.created_at.as_u64(),
+            outer_created_at: outer.created_at.as_secs(),
             key_id: parsed.key_id,
             message_number: parsed.message_number,
             inner,

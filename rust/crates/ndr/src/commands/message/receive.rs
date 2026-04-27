@@ -29,7 +29,7 @@ pub async fn receive(
     let event: nostr::Event = nostr::JsonUtil::from_json(event_json)
         .map_err(|e| anyhow::anyhow!("Invalid event JSON: {}", e))?;
     let current_event_id = event.id.to_hex();
-    let current_timestamp = event.created_at.as_u64();
+    let current_timestamp = event.created_at.as_secs();
 
     let (runtime, _signing_keys, owner_pubkey_hex) = super::send::build_runtime(config, storage)?;
     let manager = runtime.session_manager();

@@ -469,7 +469,7 @@ async fn publish_shared_channel_inner(relay_url: &str, secret: [u8; 32], inner_j
     let client = nostr_sdk::Client::default();
     client.add_relay(relay_url).await.expect("add relay");
     client.connect().await;
-    let _ = client.send_event(event).await;
+    let _ = client.send_event(&event).await;
 }
 
 async fn stop_child(mut child: Child) {

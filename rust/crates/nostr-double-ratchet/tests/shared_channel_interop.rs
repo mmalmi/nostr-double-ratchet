@@ -114,7 +114,7 @@ fn test_generate_rust_shared_channel_vectors() {
         encrypted_event: Some(serde_json::json!({
             "id": event.id.to_hex(),
             "pubkey": event.pubkey.to_hex(),
-            "created_at": event.created_at.as_u64(),
+            "created_at": event.created_at.as_secs(),
             "kind": event.kind.as_u16(),
             "tags": event.tags.iter().map(|t| t.as_slice().iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>()).collect::<Vec<_>>(),
             "content": event.content,

@@ -166,7 +166,7 @@ pub async fn create(
                 }
                 client.connect().await;
 
-                match client.send_event(event).await {
+                match client.send_event(&event).await {
                     Ok(_) => device_invite_published = true,
                     Err(err) => {
                         device_invite_publish_error = Some(err.to_string());
@@ -306,9 +306,7 @@ async fn fetch_latest_app_keys(
         .author(owner_pubkey)
         .limit(20);
 
-    let events = client
-        .fetch_events(vec![filter], Some(Duration::from_secs(3)))
-        .await?;
+    let events = client.fetch_events(filter, Duration::from_secs(3)).await?;
 
     Ok(
         nostr_double_ratchet::select_latest_app_keys_from_events(events.iter())

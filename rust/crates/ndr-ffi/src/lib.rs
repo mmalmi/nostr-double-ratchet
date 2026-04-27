@@ -289,12 +289,12 @@ pub fn resolve_latest_app_keys_devices(
                 Some(&current.app_keys),
                 current.created_at,
                 &app_keys,
-                event.created_at.as_u64(),
+                event.created_at.as_secs(),
             ),
             None => nostr_double_ratchet::AppKeysSnapshot {
                 decision: nostr_double_ratchet::AppKeysSnapshotDecision::Advanced,
                 app_keys,
-                created_at: event.created_at.as_u64(),
+                created_at: event.created_at.as_secs(),
             },
         });
     }

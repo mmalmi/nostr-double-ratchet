@@ -4,7 +4,7 @@ impl SessionManager {
     pub fn process_received_event(&self, event: nostr::Event) {
         if is_app_keys_event(&event) {
             if let Ok(app_keys) = AppKeys::from_event(&event) {
-                self.handle_app_keys_event(event.pubkey, app_keys, event.created_at.as_u64());
+                self.handle_app_keys_event(event.pubkey, app_keys, event.created_at.as_secs());
             }
             return;
         }

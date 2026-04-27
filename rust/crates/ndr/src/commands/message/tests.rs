@@ -87,10 +87,10 @@ fn persist_session_manager_session(
         );
     let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
     let manager = nostr_double_ratchet::SessionManager::new(
-        nostr::PublicKey::from_hex(config.public_key().unwrap()).unwrap(),
+        nostr::PublicKey::from_hex(&config.public_key().unwrap()).unwrap(),
         config.private_key_bytes().unwrap(),
         config.public_key().unwrap(),
-        nostr::PublicKey::from_hex(config.owner_public_key_hex().unwrap()).unwrap(),
+        nostr::PublicKey::from_hex(&config.owner_public_key_hex().unwrap()).unwrap(),
         sm_tx,
         Some(session_manager_store),
         None,

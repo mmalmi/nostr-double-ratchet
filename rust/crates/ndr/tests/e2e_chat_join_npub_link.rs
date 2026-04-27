@@ -55,7 +55,7 @@ async fn test_chat_join_accepts_npub_link_and_creates_chat_without_storing_a_mes
     let client = nostr_sdk::Client::default();
     client.add_relay(&relay_url).await.unwrap();
     client.connect().await;
-    client.send_event(public_event).await.unwrap();
+    client.send_event(&public_event).await.unwrap();
 
     sleep(Duration::from_millis(200)).await;
 

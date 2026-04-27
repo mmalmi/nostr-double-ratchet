@@ -50,8 +50,8 @@ fn craft_outer_from_plaintext(session: &mut Session, plaintext: &str, now_s: u64
     session.state.sending_chain_message_number += 1;
 
     let conversation_key = nip44::v2::ConversationKey::new(message_key);
-    let encrypted_bytes =
-        nip44::v2::encrypt_to_bytes(&conversation_key, plaintext).expect("encrypt_to_bytes failed");
+    let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext.as_bytes())
+        .expect("encrypt_to_bytes failed");
     let encrypted_data = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
 
     let our_current = session

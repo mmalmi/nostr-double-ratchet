@@ -192,7 +192,7 @@ pub(crate) async fn backfill_recent_invite_responses(
         INVITE_RESPONSE_FETCH_TIMEOUT,
     )
     .await?;
-    invite_responses.sort_by_key(|event| (event.created_at.as_u64(), event.id.to_hex()));
+    invite_responses.sort_by_key(|event| (event.created_at.as_secs(), event.id.to_hex()));
 
     for event in invite_responses {
         session_manager.process_received_event(event);

@@ -64,8 +64,8 @@ async fn test_send_prefers_public_invite() {
     let client = nostr_sdk::Client::default();
     client.add_relay(&relay_url).await.unwrap();
     client.connect().await;
-    client.send_event(other_event).await.unwrap();
-    client.send_event(public_event).await.unwrap();
+    client.send_event(&other_event).await.unwrap();
+    client.send_event(&public_event).await.unwrap();
 
     sleep(Duration::from_millis(200)).await;
 

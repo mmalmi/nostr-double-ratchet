@@ -4,8 +4,8 @@ use crate::{
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
-use nostr::types::filter::{Alphabet, SingleLetterTag};
 use nostr::PublicKey;
+use nostr::{Alphabet, SingleLetterTag};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 
 #[derive(Clone)]
@@ -231,7 +231,7 @@ impl Invite {
             device_id,
             max_uses: None,
             used_by: Vec::new(),
-            created_at: event.created_at.as_u64(),
+            created_at: event.created_at.as_secs(),
             purpose: None,
             owner_public_key: None,
         })
@@ -286,7 +286,8 @@ impl Invite {
             nip44::encrypt(&invitee_sk, &self.inviter, payload.to_string(), Version::V2)?;
 
         let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
-        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, &dh_encrypted)?;
+        let encrypted_bytes =
+            nip44::v2::encrypt_to_bytes(&conversation_key, dh_encrypted.as_bytes())?;
         let inner_encrypted = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
 
         let inner_event = serde_json::json!({
@@ -445,7 +446,7 @@ impl Invite {
             .authors(vec![user_pubkey])
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::L),
-                ["double-ratchet/invites"],
+                "double-ratchet/invites",
             );
 
         let filter_json = serde_json::to_string(&filter)?;

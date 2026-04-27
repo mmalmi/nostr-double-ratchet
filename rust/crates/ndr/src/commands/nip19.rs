@@ -48,7 +48,7 @@ pub(super) fn parse_pubkey(input: &str) -> Option<PublicKey> {
     use nostr::nips::nip19::{FromBech32, Nip19};
 
     let candidate = extract_nip19_candidate(input)?;
-    match Nip19::from_bech32(candidate).ok()? {
+    match Nip19::from_bech32(&candidate).ok()? {
         Nip19::Pubkey(pk) => Some(pk),
         Nip19::Profile(profile) => Some(profile.public_key),
         _ => None,

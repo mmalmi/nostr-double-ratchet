@@ -21,7 +21,7 @@ async fn send_event_once(client: &Client, event: nostr::Event) -> Result<()> {
     if relays.is_empty() {
         match tokio::time::timeout(
             std::time::Duration::from_secs(SEND_EVENT_TIMEOUT_SECS),
-            client.send_event(event.clone()),
+            client.send_event(&event),
         )
         .await
         {
@@ -40,7 +40,7 @@ async fn send_event_once(client: &Client, event: nostr::Event) -> Result<()> {
     for relay in relay_urls {
         match tokio::time::timeout(
             std::time::Duration::from_secs(SEND_EVENT_TIMEOUT_SECS),
-            client.send_event_to([relay.as_str()], event.clone()),
+            client.send_event_to([relay.as_str()], &event),
         )
         .await
         {
@@ -153,7 +153,9 @@ pub(crate) async fn subscribe_filters_best_effort(
     filters: Vec<Filter>,
 ) -> Result<()> {
     if relays.is_empty() {
-        client.subscribe(filters, None).await?;
+        for filter in filters {
+            client.subscribe(filter, None).await?;
+        }
         return Ok(());
     }
 
@@ -163,7 +165,7 @@ pub(crate) async fn subscribe_filters_best_effort(
     for relay in relays {
         match tokio::time::timeout(
             std::time::Duration::from_secs(SUBSCRIBE_TIMEOUT_SECS),
-            client.subscribe_to([relay.as_str()], filters.clone(), None),
+            subscribe_filters_to_relay(client, relay, filters.clone()),
         )
         .await
         {
@@ -190,6 +192,17 @@ pub(crate) async fn subscribe_filters_best_effort(
     }
 }
 
+async fn subscribe_filters_to_relay(
+    client: &Client,
+    relay: &str,
+    filters: Vec<Filter>,
+) -> Result<()> {
+    for filter in filters {
+        client.subscribe_to([relay], filter, None).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn fetch_events_best_effort(
     client: &Client,
     relays: &[String],
@@ -197,7 +210,7 @@ pub(crate) async fn fetch_events_best_effort(
     timeout: std::time::Duration,
 ) -> Result<Vec<nostr::Event>> {
     if relays.is_empty() {
-        let events = client.fetch_events(vec![filter], Some(timeout)).await?;
+        let events = client.fetch_events(filter, timeout).await?;
         return Ok(events.iter().cloned().collect());
     }
 
@@ -209,7 +222,7 @@ pub(crate) async fn fetch_events_best_effort(
     for relay in relays {
         match tokio::time::timeout(
             timeout + std::time::Duration::from_millis(250),
-            client.fetch_events_from([relay.as_str()], vec![filter.clone()], Some(timeout)),
+            client.fetch_events_from([relay.as_str()], filter.clone(), timeout),
         )
         .await
         {

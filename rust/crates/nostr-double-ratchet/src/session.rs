@@ -42,7 +42,7 @@ impl Session {
             let conversation_key = nip44::v2::ConversationKey::derive(
                 our_next_keys.secret_key(),
                 &their_ephemeral_nostr_public_key,
-            );
+            )?;
             let kdf_outputs = kdf(&shared_secret, conversation_key.as_bytes(), 2);
             root_key = kdf_outputs[0];
             sending_chain_key = Some(kdf_outputs[1]);
@@ -267,7 +267,7 @@ impl Session {
         self.state.sending_chain_message_number += 1;
 
         let conversation_key = nip44::v2::ConversationKey::new(message_key);
-        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext)?;
+        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext.as_bytes())?;
         let ciphertext = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
         Ok((header, ciphertext))
     }
@@ -316,7 +316,7 @@ impl Session {
             .their_next_nostr_public_key
             .ok_or(Error::SessionNotReady)?;
 
-        let conversation_key1 = nip44::v2::ConversationKey::derive(&our_next_sk, &their_next_pk);
+        let conversation_key1 = nip44::v2::ConversationKey::derive(&our_next_sk, &their_next_pk)?;
         let kdf_outputs = kdf(&self.state.root_key, conversation_key1.as_bytes(), 2);
 
         self.state.receiving_chain_key = Some(kdf_outputs[1]);
@@ -331,7 +331,7 @@ impl Session {
         };
 
         let our_next_sk2 = nostr::SecretKey::from_slice(&our_next_private_key)?;
-        let conversation_key2 = nip44::v2::ConversationKey::derive(&our_next_sk2, &their_next_pk);
+        let conversation_key2 = nip44::v2::ConversationKey::derive(&our_next_sk2, &their_next_pk)?;
         let kdf_outputs2 = kdf(&kdf_outputs[0], conversation_key2.as_bytes(), 2);
 
         self.state.root_key = kdf_outputs2[0];

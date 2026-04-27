@@ -194,9 +194,7 @@ pub(super) async fn join_via_public_invite(
         .author(target_pubkey)
         .limit(20);
 
-    let events = client
-        .fetch_events(vec![filter], Some(Duration::from_secs(10)))
-        .await?;
+    let events = client.fetch_events(filter, Duration::from_secs(10)).await?;
 
     let has_tag = |event: &nostr::Event, name: &str, value: &str| {
         event.tags.iter().any(|t| {

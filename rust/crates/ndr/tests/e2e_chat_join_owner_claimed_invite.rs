@@ -68,7 +68,7 @@ async fn test_chat_join_private_invite_routes_chat_to_verified_owner_pubkey() {
     let client = nostr_sdk::Client::default();
     client.add_relay(&relay_url).await.unwrap();
     client.connect().await;
-    client.send_event(app_keys_event).await.unwrap();
+    client.send_event(&app_keys_event).await.unwrap();
     sleep(Duration::from_millis(200)).await;
 
     let mut invite = Invite::create_new(

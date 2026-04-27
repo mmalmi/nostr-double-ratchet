@@ -94,7 +94,7 @@ impl SenderKeyState {
         self.iteration = self.iteration.saturating_add(1);
 
         let conversation_key = nip44::v2::ConversationKey::new(message_key);
-        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext)?;
+        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext.as_bytes())?;
         Ok((message_number, encrypted_bytes))
     }
 

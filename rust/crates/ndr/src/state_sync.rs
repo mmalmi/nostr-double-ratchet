@@ -52,7 +52,7 @@ pub fn extract_control_stamp_from_unsigned(event: &UnsignedEvent) -> Option<Cont
     let mut event = event.clone();
     event.ensure_id();
     let event_id = event.id?.to_hex();
-    let ms = parse_ms_tag(&event.tags).unwrap_or_else(|| event.created_at.as_u64() * 1000);
+    let ms = parse_ms_tag(&event.tags).unwrap_or_else(|| event.created_at.as_secs() * 1000);
     Some(ControlStamp { ms, event_id })
 }
 
