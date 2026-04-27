@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use nostr::{Event, PublicKey, UnsignedEvent};
@@ -16,12 +18,24 @@ struct DirectMessageSubscription {
     authors: Vec<PublicKey>,
 }
 
+const DM_SUBSCRIPTION_THROTTLE: Duration = Duration::from_millis(1500);
+
+/// Shared between `NdrRuntime` and the trailing-flush worker thread. Holding
+/// the throttle state, current sub, session pubkey query helper, and outbound
+/// event channel here lets the timer thread re-run the sync without needing
+/// to hold a reference to the full runtime.
+struct DirectMessageSubscriptionShared {
+    current: Mutex<Option<DirectMessageSubscription>>,
+    last_change: Mutex<Option<Instant>>,
+    flush_pending: AtomicBool,
+}
+
 pub struct NdrRuntime {
-    session_manager: SessionManager,
+    session_manager: Arc<SessionManager>,
     group_manager: Mutex<GroupManager>,
     event_rx: Mutex<Receiver<SessionManagerEvent>>,
     event_tx: Sender<SessionManagerEvent>,
-    direct_message_subscription: Mutex<Option<DirectMessageSubscription>>,
+    direct_message_subscription: Arc<DirectMessageSubscriptionShared>,
 }
 
 impl NdrRuntime {
@@ -52,11 +66,15 @@ impl NdrRuntime {
         });
 
         Self {
-            session_manager,
+            session_manager: Arc::new(session_manager),
             group_manager: Mutex::new(group_manager),
             event_rx: Mutex::new(event_rx),
             event_tx,
-            direct_message_subscription: Mutex::new(None),
+            direct_message_subscription: Arc::new(DirectMessageSubscriptionShared {
+                current: Mutex::new(None),
+                last_change: Mutex::new(None),
+                flush_pending: AtomicBool::new(false),
+            }),
         }
     }
 
@@ -200,11 +218,58 @@ impl NdrRuntime {
     }
 
     pub fn sync_direct_message_subscriptions(&self) -> Result<()> {
-        let authors = self.session_manager.get_all_message_push_author_pubkeys();
-        let mut current = self.direct_message_subscription.lock().unwrap();
+        // The relay REQ for direct messages is filtered by author pubkeys.
+        // The double-ratchet rotates `their_current_nostr_public_key` /
+        // `their_next_nostr_public_key` on every step, so this set churns
+        // continuously while a chat is active. Each REQ rebuild makes every
+        // relay replay all matching historical events, which slams the event
+        // pipeline and the UI with redundant work.
+        //
+        // Two-stage filter:
+        //   1. Identical author set → no-op.
+        //   2. Otherwise honour a 1.5 s trailing throttle: bursts of ratchet
+        //      steps collapse into one relay REQ. If the window has not
+        //      elapsed we spawn a one-shot worker that fires the latest
+        //      sync at the boundary, even if no further runtime call comes
+        //      along to drive it.
+        let next_authors = self.session_manager.get_all_message_push_author_pubkeys();
+
+        let unchanged = self
+            .direct_message_subscription
+            .current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|subscription| subscription.authors == next_authors);
+        if unchanged {
+            return Ok(());
+        }
+
+        let elapsed_since_last_change = self
+            .direct_message_subscription
+            .last_change
+            .lock()
+            .unwrap()
+            .map(|last| last.elapsed());
+        if let Some(elapsed) = elapsed_since_last_change {
+            if elapsed < DM_SUBSCRIPTION_THROTTLE {
+                self.schedule_direct_message_subscription_flush(
+                    DM_SUBSCRIPTION_THROTTLE - elapsed,
+                );
+                return Ok(());
+            }
+        }
+
+        self.apply_direct_message_subscription(next_authors)
+    }
+
+    fn apply_direct_message_subscription(&self, next_authors: Vec<PublicKey>) -> Result<()> {
+        let mut current = self.direct_message_subscription.current.lock().unwrap();
+        let mut last_change = self.direct_message_subscription.last_change.lock().unwrap();
+
         if current
             .as_ref()
-            .is_some_and(|subscription| subscription.authors == authors)
+            .is_some_and(|subscription| subscription.authors == next_authors)
         {
             return Ok(());
         }
@@ -215,13 +280,14 @@ impl NdrRuntime {
                 .send(SessionManagerEvent::Unsubscribe(subscription.subid));
         }
 
-        if authors.is_empty() {
+        if next_authors.is_empty() {
+            *last_change = Some(Instant::now());
             return Ok(());
         }
 
         let filter = crate::pubsub::build_filter()
             .kinds(vec![MESSAGE_EVENT_KIND as u64])
-            .authors(authors.clone())
+            .authors(next_authors.clone())
             .build();
         let filter_json = serde_json::to_string(&filter)?;
         let subid = format!("ndr-runtime-messages-{}", uuid::Uuid::new_v4());
@@ -229,11 +295,87 @@ impl NdrRuntime {
             subid: subid.clone(),
             filter_json,
         });
-        *current = Some(DirectMessageSubscription { subid, authors });
+        *current = Some(DirectMessageSubscription {
+            subid,
+            authors: next_authors,
+        });
+        *last_change = Some(Instant::now());
 
         Ok(())
     }
 
+    fn schedule_direct_message_subscription_flush(&self, delay: Duration) {
+        // One-shot trailing flush. `flush_pending` deduplicates so a burst of
+        // throttled calls only spawns a single worker thread.
+        if self
+            .direct_message_subscription
+            .flush_pending
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+
+        let shared_weak = Arc::downgrade(&self.direct_message_subscription);
+        let session_manager = Arc::clone(&self.session_manager);
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let Some(shared) = shared_weak.upgrade() else {
+                return;
+            };
+            shared.flush_pending.store(false, Ordering::Release);
+            DirectMessageSubscriptionShared::flush_now(&shared, &session_manager, &event_tx);
+        });
+    }
+}
+
+impl DirectMessageSubscriptionShared {
+    fn flush_now(
+        shared: &Arc<Self>,
+        session_manager: &SessionManager,
+        event_tx: &Sender<SessionManagerEvent>,
+    ) {
+        let next_authors = session_manager.get_all_message_push_author_pubkeys();
+
+        let mut current = shared.current.lock().unwrap();
+        if current
+            .as_ref()
+            .is_some_and(|subscription| subscription.authors == next_authors)
+        {
+            return;
+        }
+        let mut last_change = shared.last_change.lock().unwrap();
+
+        if let Some(subscription) = current.take() {
+            let _ = event_tx.send(SessionManagerEvent::Unsubscribe(subscription.subid));
+        }
+
+        if next_authors.is_empty() {
+            *last_change = Some(Instant::now());
+            return;
+        }
+
+        let filter = crate::pubsub::build_filter()
+            .kinds(vec![MESSAGE_EVENT_KIND as u64])
+            .authors(next_authors.clone())
+            .build();
+        let Ok(filter_json) = serde_json::to_string(&filter) else {
+            return;
+        };
+        let subid = format!("ndr-runtime-messages-{}", uuid::Uuid::new_v4());
+        let _ = event_tx.send(SessionManagerEvent::Subscribe {
+            subid: subid.clone(),
+            filter_json,
+        });
+        *current = Some(DirectMessageSubscription {
+            subid,
+            authors: next_authors,
+        });
+        *last_change = Some(Instant::now());
+    }
+}
+
+impl NdrRuntime {
     pub fn pending_invite_response_owner_pubkeys(&self) -> Vec<PublicKey> {
         self.session_manager.pending_invite_response_owner_pubkeys()
     }
@@ -436,7 +578,10 @@ mod tests {
 
         runtime.session_manager().delete_chat(peer).unwrap();
         runtime.sync_direct_message_subscriptions().unwrap();
-
+        // The first sync set `last_change`, so the immediate follow-up call
+        // is throttled and schedules a trailing-flush worker. Wait long
+        // enough for that worker to fire the unsub.
+        std::thread::sleep(std::time::Duration::from_millis(1700));
         let events = runtime.drain_events();
         assert!(events.iter().any(|event| {
             matches!(event, SessionManagerEvent::Unsubscribe(unsubid) if unsubid == &subid)

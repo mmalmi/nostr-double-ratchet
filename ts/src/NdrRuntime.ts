@@ -145,6 +145,9 @@ export class NdrRuntime {
   private appKeysSubscriptionOwnerPubkey: string | null = null;
   private directMessageSubscriptionCleanup: Unsubscribe | null = null;
   private directMessageSubscriptionAuthors: string[] = [];
+  private directMessageSubscriptionLastChangeMs = 0;
+  private directMessageSubscriptionThrottleTimer: ReturnType<typeof setTimeout> | null =
+    null;
   private messagePushAuthorCleanup: Unsubscribe | null = null;
 
   private readonly stateListeners = new Set<(state: NdrRuntimeState) => void>();
@@ -624,6 +627,21 @@ export class NdrRuntime {
   }
 
   private syncDirectMessageSubscription(): void {
+    // The relay REQ for direct messages is filtered by author pubkeys, but
+    // the double-ratchet rotates `theirCurrentNostrPublicKey` /
+    // `theirNextNostrPublicKey` every step. Without throttling, every
+    // received message recomputes a new author set and forces every relay
+    // to replay all matching historical events — measured at 5–10 s of
+    // sub churn during an active chat.
+    //
+    //   1. Identical author set → no-op.
+    //   2. Otherwise honour a 1.5 s throttle: bursts of ratchet steps
+    //      collapse into one relay REQ. If the throttle window has not
+    //      elapsed we schedule a single trailing flush so the new authors
+    //      still get subscribed once the window expires, even if no other
+    //      runtime activity comes along to call us again.
+    const THROTTLE_MS = 1500;
+
     const nextAuthors = [
       ...new Set(this.sessionManager?.getAllMessagePushAuthorPubkeys() ?? []),
     ].sort();
@@ -637,9 +655,27 @@ export class NdrRuntime {
       return;
     }
 
+    const now = Date.now();
+    const elapsed = now - this.directMessageSubscriptionLastChangeMs;
+    if (elapsed < THROTTLE_MS) {
+      if (this.directMessageSubscriptionThrottleTimer === null) {
+        this.directMessageSubscriptionThrottleTimer = setTimeout(() => {
+          this.directMessageSubscriptionThrottleTimer = null;
+          this.syncDirectMessageSubscription();
+        }, THROTTLE_MS - elapsed);
+      }
+      return;
+    }
+
+    if (this.directMessageSubscriptionThrottleTimer !== null) {
+      clearTimeout(this.directMessageSubscriptionThrottleTimer);
+      this.directMessageSubscriptionThrottleTimer = null;
+    }
+
     this.directMessageSubscriptionCleanup?.();
     this.directMessageSubscriptionCleanup = null;
     this.directMessageSubscriptionAuthors = nextAuthors;
+    this.directMessageSubscriptionLastChangeMs = now;
 
     if (nextAuthors.length === 0) {
       return;
@@ -940,6 +976,11 @@ export class NdrRuntime {
     this.directMessageSubscriptionCleanup?.();
     this.directMessageSubscriptionCleanup = null;
     this.directMessageSubscriptionAuthors = [];
+    this.directMessageSubscriptionLastChangeMs = 0;
+    if (this.directMessageSubscriptionThrottleTimer !== null) {
+      clearTimeout(this.directMessageSubscriptionThrottleTimer);
+      this.directMessageSubscriptionThrottleTimer = null;
+    }
     this.clearAttachedSessionEventCallbacks();
     this.groupController.close();
     this.appKeysManager?.close();
