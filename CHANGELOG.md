@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.116 - 2026-04-28
+
+- Feed AppKeys events observed by `NdrRuntime` into the session core as well as runtime device state, keeping owner-device session discovery aligned with runtime AppKeys subscriptions.
+- Feed locally published AppKeys registrations/revocations back into the session core before updating runtime state, reducing same-owner multi-device fanout races.
+
 ## 0.0.115 - 2026-04-28
 
 - Preserve freshly accepted own-device sessions across delayed AppKeys snapshots that do not yet list the linked device, preventing duplicate linked-device ratchets.

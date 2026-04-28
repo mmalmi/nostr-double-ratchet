@@ -221,6 +221,51 @@ describe("NdrRuntime", () => {
     expect(runtime.getState().lastAppKeysCreatedAt).toBe(200)
   })
 
+  it("feeds runtime AppKeys subscription events into the session core", async () => {
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+    const appKeysCallbacks: Array<(event: VerifiedEvent) => void> = []
+    const feedEvent = vi.fn(() => true)
+    const runtime = new NdrRuntime({
+      nostrSubscribe: (_filter, onEvent) => {
+        appKeysCallbacks.push(onEvent)
+        return () => {}
+      },
+      nostrPublish: async (event) => event as VerifiedEvent,
+    })
+    ;(runtime as unknown as {
+      sessionManager: {
+        feedEvent: (event: VerifiedEvent) => boolean
+        getAllMessagePushAuthorPubkeys: () => string[]
+        drainEvents: () => []
+        hasPendingEvents: () => boolean
+      }
+    }).sessionManager = {
+      feedEvent,
+      getAllMessagePushAuthorPubkeys: () => [],
+      drainEvents: () => [],
+      hasPendingEvents: () => false,
+    }
+
+    runtime.startAppKeysSubscription(ownerPubkey)
+    const event = finalizeEvent(
+      {
+        ...new AppKeys([{ identityPubkey: "device-a", createdAt: 100 }]).getEvent(),
+        pubkey: ownerPubkey,
+        created_at: 200,
+      },
+      ownerPrivateKey,
+    ) as VerifiedEvent
+
+    appKeysCallbacks[0]!(event)
+    await tick()
+
+    expect(runtime.getState().registeredDevices).toEqual([
+      { identityPubkey: "device-a", createdAt: 100 },
+    ])
+    expect(feedEvent).toHaveBeenCalledWith(event)
+  })
+
   it("preserves relay AppKeys timestamps when refreshing from relay", async () => {
     const relay = new MockRelay()
     const ownerPrivateKey = generateSecretKey()

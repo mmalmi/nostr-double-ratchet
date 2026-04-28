@@ -266,12 +266,7 @@ export class NdrRuntime {
   }
 
   processReceivedEvent(event: VerifiedEvent): boolean {
-    const handled = this.sessionManager?.feedEvent(event) ?? false;
-    if (handled) {
-      void this.flushSessionManagerEvents();
-      this.syncDirectMessageSubscription();
-    }
-    return handled;
+    return this.feedSessionManagerEvent(event);
   }
 
   async initManagers(): Promise<void> {
@@ -628,6 +623,7 @@ export class NdrRuntime {
         try {
           const incomingAppKeys = AppKeys.fromEvent(event);
           await this.applyIncomingAppKeys(incomingAppKeys, event.created_at);
+          this.feedSessionManagerEvent(event);
         } catch {
           // Ignore invalid AppKeys events.
         }
@@ -815,6 +811,7 @@ export class NdrRuntime {
       });
     const publishedEvent = await this.publishAppKeys(prepared.appKeys);
     await this.appKeysManager?.setAppKeys(prepared.appKeys);
+    this.feedSessionManagerEvent(publishedEvent);
     this.syncState({
       registeredDevices: prepared.devices,
       hasLocalAppKeys: prepared.devices.length > 0,
@@ -848,6 +845,7 @@ export class NdrRuntime {
     await this.initAppKeysManager();
     const publishedEvent = await this.publishAppKeys(prepared.appKeys);
     await this.appKeysManager?.setAppKeys(prepared.appKeys);
+    this.feedSessionManagerEvent(publishedEvent);
     this.syncState({
       registeredDevices: prepared.devices,
       hasLocalAppKeys: prepared.devices.length > 0,
@@ -1109,13 +1107,18 @@ export class NdrRuntime {
 
     this.sessionManagerEmittedSubscriptions.get(event.subid)?.();
     const cleanup = this.nostrSubscribe(event.filter, (received) => {
-      const handled = this.sessionManager?.feedEvent(received) ?? false;
-      if (handled) {
-        void this.flushSessionManagerEvents();
-        this.syncDirectMessageSubscription();
-      }
+      this.feedSessionManagerEvent(received);
     });
     this.sessionManagerEmittedSubscriptions.set(event.subid, cleanup);
+  }
+
+  private feedSessionManagerEvent(event: VerifiedEvent): boolean {
+    const handled = this.sessionManager?.feedEvent(event) ?? false;
+    if (handled) {
+      void this.flushSessionManagerEvents();
+      this.syncDirectMessageSubscription();
+    }
+    return handled;
   }
 
   private clearSessionManagerEvents(): void {
