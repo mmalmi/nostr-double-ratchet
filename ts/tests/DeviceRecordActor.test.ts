@@ -330,6 +330,7 @@ describe("DeviceRecordActor", () => {
       expect(userHooks.onDeviceRumor).toHaveBeenCalledWith(
         devicePublicKey,
         expect.objectContaining({ content: text }),
+        expect.objectContaining({ id: event.id }),
       )
     })
     expect(actor.activeSession).toBe(decryptingInactiveSession)

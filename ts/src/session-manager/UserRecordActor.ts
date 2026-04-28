@@ -1,6 +1,7 @@
 import { AppKeys, buildAppKeysFilter } from "../AppKeys"
 import { applyAppKeysSnapshot } from "../multiDevice"
 import type { Rumor } from "../types"
+import type { VerifiedEvent } from "nostr-tools"
 import { DeviceRecordActor } from "./DeviceRecordActor"
 import type {
   Unsubscribe,
@@ -215,8 +216,12 @@ export class UserRecordActor implements UserRecordShape {
     return this.appKeys.getAllDevices().some((d) => d.identityPubkey === deviceId)
   }
 
-  onDeviceRumor(deviceId: string, rumor: Rumor): void {
-    this.deps.manager.handleDeviceRumor(this.publicKey, deviceId, rumor)
+  onDeviceRumor(
+    deviceId: string,
+    rumor: Rumor,
+    outerEvent?: VerifiedEvent,
+  ): void {
+    this.deps.manager.handleDeviceRumor(this.publicKey, deviceId, rumor, outerEvent)
   }
 
   onDeviceDirty(): void {

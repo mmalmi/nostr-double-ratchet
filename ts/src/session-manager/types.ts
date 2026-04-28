@@ -1,4 +1,5 @@
 import type { AppKeys } from "../AppKeys"
+import type { VerifiedEvent } from "nostr-tools"
 import type { MessageQueue } from "../MessageQueue"
 import type { Session } from "../Session"
 import type {
@@ -12,6 +13,7 @@ import type { MessageOrigin } from "../MessageOrigin"
 
 export type OnEventMeta = {
   fromDeviceId?: string
+  outerEventId?: string
   senderOwnerPubkey?: string
   senderDevicePubkey?: string
   origin?: MessageOrigin
@@ -89,7 +91,7 @@ export interface NostrFacade {
 
 export interface DeviceRecordUserHooks {
   isDeviceAuthorized(deviceId: string): boolean
-  onDeviceRumor(deviceId: string, rumor: Rumor): void
+  onDeviceRumor(deviceId: string, rumor: Rumor, outerEvent?: VerifiedEvent): void
   onDeviceDirty(): void
 }
 
@@ -107,7 +109,12 @@ export interface DeviceRecordDeps {
 export interface UserRecordManagerHooks {
   updateDelegateMapping(ownerPubkey: string, appKeys: AppKeys): void
   removeDelegateMapping(deviceId: string): void
-  handleDeviceRumor(ownerPubkey: string, deviceId: string, rumor: Rumor): void
+  handleDeviceRumor(
+    ownerPubkey: string,
+    deviceId: string,
+    rumor: Rumor,
+    outerEvent?: VerifiedEvent,
+  ): void
   persistUserRecord(ownerPubkey: string): void
 }
 

@@ -302,7 +302,11 @@ export class DeviceRecordActor implements DeviceRecordShape {
     this.trimInactiveSessions()
   }
 
-  private handleSessionRumor(session: Session, event: Rumor): boolean {
+  private handleSessionRumor(
+    session: Session,
+    event: Rumor,
+    outerEvent?: VerifiedEvent,
+  ): boolean {
     const owner = this.deps.ownerPubkey
     const isKnownInstalledSession =
       this.activeSession?.name === session.name ||
@@ -318,7 +322,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
     // A session that successfully decrypts a rumor is the live session, even if
     // AppKeys propagation or previous priority ordering has not caught up yet.
     this.promoteToActive(session, { force: true })
-    this.deps.user.onDeviceRumor(this.deviceId, event)
+    this.deps.user.onDeviceRumor(this.deviceId, event, outerEvent)
     this.state = "session-ready"
     this.flushMessageQueue().catch(() => {})
     this.deps.user.onDeviceDirty()
@@ -345,7 +349,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
       } catch {
         continue
       }
-      if (rumor && this.handleSessionRumor(session, rumor)) {
+      if (rumor && this.handleSessionRumor(session, rumor, event)) {
         return true
       }
     }

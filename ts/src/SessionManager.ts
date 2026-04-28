@@ -456,7 +456,12 @@ export class SessionManager {
     return rec
   }
 
-  private handleDeviceRumor(ownerPubkey: string, deviceId: string, event: Rumor): void {
+  private handleDeviceRumor(
+    ownerPubkey: string,
+    deviceId: string,
+    event: Rumor,
+    outerEvent?: VerifiedEvent,
+  ): void {
     const userRecord = this.userRecords.get(ownerPubkey)
     const knownDevice =
       ownerPubkey === deviceId ||
@@ -487,6 +492,7 @@ export class SessionManager {
 
     const meta: OnEventMeta = {
       fromDeviceId: deviceId,
+      outerEventId: outerEvent?.id,
       senderOwnerPubkey: ownerPubkey,
       senderDevicePubkey: deviceId,
       origin,
