@@ -404,6 +404,36 @@ export class DelegateManager {
     )
   }
 
+  createRuntimeSessionManager(sessionStorage?: StorageAdapter): SessionManager {
+    if (!this.initialized) {
+      throw new Error("DelegateManager must be initialized before creating SessionManager")
+    }
+
+    const ownerPublicKey = this.getOwnerPublicKey()
+    if (!ownerPublicKey) {
+      throw new Error("Owner public key required for SessionManager - device must be activated first")
+    }
+
+    if (!this.invite || !this.invite.inviterEphemeralPrivateKey) {
+      throw new Error("Invite with ephemeral keys required for SessionManager")
+    }
+
+    const ephemeralKeypair = {
+      publicKey: this.invite.inviterEphemeralPublicKey,
+      privateKey: this.invite.inviterEphemeralPrivateKey,
+    }
+    const sharedSecret = this.invite.sharedSecret
+
+    return SessionManager.createForRuntime(
+      this.devicePublicKey,
+      this.devicePrivateKey,
+      this.devicePublicKey,
+      ownerPublicKey,
+      { ephemeralKeypair, sharedSecret },
+      sessionStorage || this.storage,
+    )
+  }
+
   private ownerPubkeyKey(): string {
     return `${this.versionPrefix}/device-manager/owner-pubkey`
   }

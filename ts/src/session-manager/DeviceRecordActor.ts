@@ -1,7 +1,7 @@
 import { Invite } from "../Invite"
 import { Session } from "../Session"
 import type { VerifiedEvent } from "nostr-tools"
-import type { Rumor } from "../types"
+import { INVITE_EVENT_KIND, type Rumor } from "../types"
 import type {
   DeviceRecord as DeviceRecordShape,
   DeviceRecordDeps,
@@ -20,8 +20,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
   private ensurePromise?: Promise<void>
   private inviteSubscription?: Unsubscribe
   private inviteAcceptancePromise?: Promise<Session>
-  private inviteBackfillPromise?: Promise<void>
-  private hasAttemptedInviteBackfill = false
 
   constructor(
     public readonly deviceId: string,
@@ -139,12 +137,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
     }
 
     this.ensureInviteSubscription()
-    await this.ensureInviteBackfill()
-    if (this.activeSession) {
-      this.state = "session-ready"
-      await this.flushMessageQueue()
-      return
-    }
     this.state = "waiting-for-invite"
   }
 
@@ -153,37 +145,22 @@ export class DeviceRecordActor implements DeviceRecordShape {
       return
     }
 
-    this.inviteSubscription = Invite.fromUser(
-      this.deviceId,
-      this.deps.nostr.subscribe,
-      (invite) => {
-        this.acceptInvite(invite).catch(() => {})
+    this.inviteSubscription = this.deps.nostr.subscribe(
+      `device-invite-${this.deviceId}`,
+      {
+        kinds: [INVITE_EVENT_KIND],
+        authors: [this.deviceId],
+        "#l": ["double-ratchet/invites"],
+      },
+      (event) => {
+        try {
+          const invite = Invite.fromEvent(event)
+          this.acceptInvite(invite).catch(() => {})
+        } catch {
+          // Ignore invalid invite events.
+        }
       }
     )
-  }
-
-  private ensureInviteBackfill(): Promise<void> {
-    if (this.state === "revoked" || this.hasAttemptedInviteBackfill) {
-      return Promise.resolve()
-    }
-    if (this.inviteBackfillPromise) {
-      return this.inviteBackfillPromise
-    }
-
-    this.hasAttemptedInviteBackfill = true
-    this.inviteBackfillPromise = this.doInviteBackfill().finally(() => {
-      this.inviteBackfillPromise = undefined
-    })
-    return this.inviteBackfillPromise
-  }
-
-  private async doInviteBackfill(): Promise<void> {
-    const invite = await Invite.waitFor(this.deviceId, this.deps.nostr.subscribe, 1000).catch(() => null)
-    if (!invite) {
-      return
-    }
-
-    await this.acceptInvite(invite).catch(() => {})
   }
 
   acceptInvite(invite: Invite): Promise<Session> {

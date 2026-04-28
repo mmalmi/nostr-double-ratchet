@@ -148,26 +148,33 @@ export class UserRecordActor implements UserRecordShape {
     }
 
     this.appKeysSubscription = this.deps.nostr.subscribe(
+      `app-keys-${this.publicKey}`,
       buildAppKeysFilter(this.publicKey),
       (event) => {
-        try {
-          const appKeys = AppKeys.fromEvent(event)
-          const next = applyAppKeysSnapshot({
-            currentAppKeys: this.appKeys,
-            currentCreatedAt: this.latestAppKeysCreatedAt,
-            incomingAppKeys: appKeys,
-            incomingCreatedAt: event.created_at,
-          })
-          if (next.decision === "stale") {
-            return
-          }
-          this.latestAppKeysCreatedAt = next.createdAt
-          this.onAppKeys(next.appKeys).catch(() => {})
-        } catch {
-          // Ignore invalid AppKeys events.
-        }
+        this.processAppKeysEvent(event).catch(() => {})
       }
     )
+  }
+
+  async processAppKeysEvent(event: VerifiedEvent): Promise<boolean> {
+    if (event.pubkey !== this.publicKey) return false
+    try {
+      const appKeys = AppKeys.fromEvent(event)
+      const next = applyAppKeysSnapshot({
+        currentAppKeys: this.appKeys,
+        currentCreatedAt: this.latestAppKeysCreatedAt,
+        incomingAppKeys: appKeys,
+        incomingCreatedAt: event.created_at,
+      })
+      if (next.decision === "stale") {
+        return false
+      }
+      this.latestAppKeysCreatedAt = next.createdAt
+      await this.onAppKeys(next.appKeys)
+      return true
+    } catch {
+      return false
+    }
   }
 
   private async expandDiscoveryQueue(): Promise<void> {

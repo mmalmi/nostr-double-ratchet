@@ -23,6 +23,7 @@ import {
   type AcceptInviteResult,
   type OnEventCallback,
   type SendMessageOptions,
+  type SessionManagerEvent,
 } from "./SessionManager";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
 import {
@@ -150,6 +151,12 @@ export class NdrRuntime {
   private directMessageSubscriptionThrottleTimer: ReturnType<typeof setTimeout> | null =
     null;
   private messagePushAuthorCleanup: Unsubscribe | null = null;
+  private sessionManagerEventsAvailableCleanup: Unsubscribe | null = null;
+  private sessionManagerEventFlushPromise: Promise<void> | null = null;
+  private readonly sessionManagerEmittedSubscriptions = new Map<
+    string,
+    Unsubscribe
+  >();
 
   private readonly stateListeners = new Set<(state: NdrRuntimeState) => void>();
   private readonly sessionEventCallbacks = new Set<OnEventCallback>();
@@ -267,9 +274,14 @@ export class NdrRuntime {
     return this.sessionManager?.getMessagePushAuthorPubkeys(peerPubkey) ?? [];
   }
 
+  feedEvent(event: VerifiedEvent): boolean {
+    return this.processReceivedEvent(event);
+  }
+
   processReceivedEvent(event: VerifiedEvent): boolean {
-    const handled = this.sessionManager?.processReceivedEvent(event) ?? false;
+    const handled = this.sessionManager?.feedEvent(event) ?? false;
     if (handled) {
+      void this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
     return handled;
@@ -372,12 +384,14 @@ export class NdrRuntime {
       }
 
       await this.delegateManager.activate(ownerPubkey);
-      const manager = this.delegateManager.createSessionManager(
+      const manager = this.delegateManager.createRuntimeSessionManager(
         this.sessionStorage,
       );
-      this.attachSessionEventCallbacks(manager);
-      await manager.init();
       this.sessionManager = manager;
+      this.attachSessionEventCallbacks(manager);
+      this.attachSessionManagerEvents(manager);
+      await manager.init();
+      await this.flushSessionManagerEvents();
       this.messagePushAuthorCleanup?.();
       this.messagePushAuthorCleanup = manager.onMessagePushAuthorsChanged(() => {
         this.syncDirectMessageSubscription();
@@ -392,8 +406,10 @@ export class NdrRuntime {
     })()
       .catch((error) => {
         this.clearAttachedSessionEventCallbacks();
+        this.clearSessionManagerEvents();
         this.messagePushAuthorCleanup?.();
         this.messagePushAuthorCleanup = null;
+        this.sessionManager = null;
         this.groupController.setSessionManager(null);
         throw error;
       })
@@ -419,6 +435,7 @@ export class NdrRuntime {
     try {
       await manager.setupUser(userPubkey);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -434,6 +451,7 @@ export class NdrRuntime {
     try {
       return await manager.sendEvent(recipientPubkey, event);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -450,6 +468,7 @@ export class NdrRuntime {
     try {
       return await manager.sendMessage(recipientPubkey, content, options);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -465,6 +484,7 @@ export class NdrRuntime {
     try {
       return await manager.sendChatSettings(recipientPubkey, messageTtlSeconds);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -480,6 +500,7 @@ export class NdrRuntime {
     try {
       return await manager.setChatSettingsForPeer(peerPubkey, messageTtlSeconds);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -496,6 +517,7 @@ export class NdrRuntime {
     try {
       return await manager.sendReceipt(recipientPubkey, receiptType, messageIds);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -510,6 +532,7 @@ export class NdrRuntime {
     try {
       return await manager.sendTyping(recipientPubkey);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -553,6 +576,7 @@ export class NdrRuntime {
     try {
       await manager.deleteChat(userPubkey);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -935,6 +959,7 @@ export class NdrRuntime {
     try {
       return await manager.acceptInvite(invite, options);
     } finally {
+      await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
   }
@@ -997,6 +1022,7 @@ export class NdrRuntime {
       this.directMessageSubscriptionThrottleTimer = null;
     }
     this.clearAttachedSessionEventCallbacks();
+    this.clearSessionManagerEvents();
     this.groupController.close();
     this.appKeysManager?.close();
     this.delegateManager?.close();
@@ -1028,11 +1054,79 @@ export class NdrRuntime {
     }
   }
 
+  private attachSessionManagerEvents(manager: SessionManager): void {
+    this.clearSessionManagerEvents();
+    this.sessionManagerEventsAvailableCleanup = manager.onEventsAvailable(() => {
+      void this.flushSessionManagerEvents();
+    });
+    void this.flushSessionManagerEvents();
+  }
+
+  private async flushSessionManagerEvents(): Promise<void> {
+    if (this.sessionManagerEventFlushPromise) {
+      return this.sessionManagerEventFlushPromise;
+    }
+
+    this.sessionManagerEventFlushPromise = (async () => {
+      while (true) {
+        const events = this.sessionManager?.drainEvents() ?? [];
+        if (events.length === 0) {
+          return;
+        }
+
+        for (const event of events) {
+          await this.handleSessionManagerEvent(event);
+        }
+      }
+    })().finally(() => {
+      this.sessionManagerEventFlushPromise = null;
+      if (this.sessionManager?.hasPendingEvents()) {
+        void this.flushSessionManagerEvents();
+      }
+    });
+
+    return this.sessionManagerEventFlushPromise;
+  }
+
+  private async handleSessionManagerEvent(
+    event: SessionManagerEvent,
+  ): Promise<void> {
+    if (event.type === "publish") {
+      await this.nostrPublish(event.event);
+      return;
+    }
+
+    if (event.type === "unsubscribe") {
+      this.sessionManagerEmittedSubscriptions.get(event.subid)?.();
+      this.sessionManagerEmittedSubscriptions.delete(event.subid);
+      return;
+    }
+
+    this.sessionManagerEmittedSubscriptions.get(event.subid)?.();
+    const cleanup = this.nostrSubscribe(event.filter, (received) => {
+      const handled = this.sessionManager?.feedEvent(received) ?? false;
+      if (handled) {
+        void this.flushSessionManagerEvents();
+        this.syncDirectMessageSubscription();
+      }
+    });
+    this.sessionManagerEmittedSubscriptions.set(event.subid, cleanup);
+  }
+
   private clearAttachedSessionEventCallbacks(): void {
     for (const cleanup of this.sessionEventCleanup.values()) {
       cleanup();
     }
     this.sessionEventCleanup.clear();
+  }
+
+  private clearSessionManagerEvents(): void {
+    this.sessionManagerEventsAvailableCleanup?.();
+    this.sessionManagerEventsAvailableCleanup = null;
+    for (const cleanup of this.sessionManagerEmittedSubscriptions.values()) {
+      cleanup();
+    }
+    this.sessionManagerEmittedSubscriptions.clear();
   }
 
   private resolveActiveOwnerPubkey(ownerPubkey?: string): string {

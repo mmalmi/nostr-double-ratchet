@@ -12,10 +12,12 @@ import {
   ExpirationOptions,
   ChatSettingsPayloadV1,
   MESSAGE_EVENT_KIND,
+  INVITE_EVENT_KIND,
+  INVITE_RESPONSE_KIND,
 } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
 import { MessageQueue } from "./MessageQueue"
-import { AppKeys, buildAppKeysFilter } from "./AppKeys"
+import { AppKeys, isAppKeysEvent } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
 import { GROUP_METADATA_KIND } from "./GroupMeta"
@@ -43,6 +45,8 @@ import type {
   NostrFacade,
   OnEventCallback,
   OnEventMeta,
+  SessionManagerEvent,
+  SessionManagerEventsAvailableCallback,
   StoredSessionEntry,
   StoredUserRecord,
   UserRecord,
@@ -55,6 +59,8 @@ export type {
   InviteCredentials,
   OnEventCallback,
   OnEventMeta,
+  SessionManagerEvent,
+  SessionManagerEventsAvailableCallback,
   UserRecord,
 } from "./session-manager/types"
 
@@ -117,8 +123,8 @@ export class SessionManager {
   // Params
   private deviceId: string
   private storage: StorageAdapter
-  private nostrSubscribe: NostrSubscribe
-  private nostrPublish: NostrPublish
+  private legacyNostrSubscribe?: NostrSubscribe
+  private legacyNostrPublish?: NostrPublish
   private identityKey: IdentityKey
   private ourPublicKey: string
   // Owner's public key - used for grouping devices together (all devices are delegates)
@@ -150,10 +156,15 @@ export class SessionManager {
 
   // Subscriptions
   private ourInviteResponseSubscription: Unsubscribe | null = null
+  private legacyRuntimeSubscriptions: Map<string, Unsubscribe> = new Map()
+  private legacyDirectMessageSubscription: Unsubscribe | null = null
+  private legacyDirectMessageAuthors: string[] = []
 
   // Callbacks
   private internalSubscriptions: Set<OnEventCallback> = new Set()
   private messagePushAuthorCallbacks: Set<() => void> = new Set()
+  private eventsAvailableCallbacks: Set<SessionManagerEventsAvailableCallback> = new Set()
+  private emittedEvents: SessionManagerEvent[] = []
 
   // Initialization flag
   private initialized: boolean = false
@@ -252,8 +263,8 @@ export class SessionManager {
     storage?: StorageAdapter,
   ) {
     this.userRecords = new Map()
-    this.nostrSubscribe = nostrSubscribe
-    this.nostrPublish = nostrPublish
+    this.legacyNostrSubscribe = nostrSubscribe
+    this.legacyNostrPublish = nostrPublish
     this.ourPublicKey = ourPublicKey
     this.identityKey = identityKey
     this.deviceId = deviceId
@@ -264,11 +275,115 @@ export class SessionManager {
     this.messageQueue = new MessageQueue(this.storage, "v1/message-queue/")
     this.discoveryQueue = new MessageQueue(this.storage, "v1/discovery-queue/")
     this.nostrFacade = {
-      subscribe: this.nostrSubscribe,
-      publish: async (event) => {
-        await this.nostrPublish(event)
-      },
+      subscribe: (subid, filter, onEvent) => this.emitSubscribe(subid, filter, onEvent),
+      publish: (event, innerEventId) => this.emitPublish(event, innerEventId),
     }
+  }
+
+  static createForRuntime(
+    ourPublicKey: string,
+    identityKey: IdentityKey,
+    deviceId: string,
+    ownerPublicKey: string,
+    inviteKeys: InviteCredentials,
+    storage?: StorageAdapter,
+  ): SessionManager {
+    const noopSubscribe: NostrSubscribe = () => () => {}
+    const noopPublish: NostrPublish = async (event) => event as VerifiedEvent
+    const manager = new SessionManager(
+      ourPublicKey,
+      identityKey,
+      deviceId,
+      noopSubscribe,
+      noopPublish,
+      ownerPublicKey,
+      inviteKeys,
+      storage,
+    )
+    manager.legacyNostrSubscribe = undefined
+    manager.legacyNostrPublish = undefined
+    return manager
+  }
+
+  onEventsAvailable(callback: SessionManagerEventsAvailableCallback): Unsubscribe {
+    this.eventsAvailableCallbacks.add(callback)
+    return () => {
+      this.eventsAvailableCallbacks.delete(callback)
+    }
+  }
+
+  drainEvents(): SessionManagerEvent[] {
+    const events = this.emittedEvents
+    this.emittedEvents = []
+    return events
+  }
+
+  hasPendingEvents(): boolean {
+    return this.emittedEvents.length > 0
+  }
+
+  private async emitEvent(event: SessionManagerEvent): Promise<void> {
+    this.emittedEvents.push(event)
+    const legacy = this.handleLegacyEmittedEvent(event)
+    for (const callback of this.eventsAvailableCallbacks) {
+      try {
+        void callback()
+      } catch {
+        // Event-availability observers should not break core state changes.
+      }
+    }
+    if (legacy) await legacy
+  }
+
+  private handleLegacyEmittedEvent(event: SessionManagerEvent): Promise<void> | void {
+    if (event.type === "subscribe") {
+      if (!this.legacyNostrSubscribe) return
+      this.legacyRuntimeSubscriptions.get(event.subid)?.()
+      const unsubscribe = this.legacyNostrSubscribe(event.filter, (received) => {
+        this.processReceivedEvent(received)
+      })
+      this.legacyRuntimeSubscriptions.set(event.subid, unsubscribe)
+      return
+    }
+
+    if (event.type === "unsubscribe") {
+      this.legacyRuntimeSubscriptions.get(event.subid)?.()
+      this.legacyRuntimeSubscriptions.delete(event.subid)
+      return
+    }
+
+    if (!this.legacyNostrPublish) return
+    return this.legacyNostrPublish(event.event).then(() => {})
+  }
+
+  private emitSubscribe(
+    subid: string,
+    filter: Parameters<NostrFacade["subscribe"]>[1],
+    onEvent?: Parameters<NostrFacade["subscribe"]>[2],
+  ): Unsubscribe {
+    if (this.legacyNostrSubscribe && onEvent) {
+      this.emittedEvents.push({ type: "subscribe", subid, filter })
+      this.legacyRuntimeSubscriptions.get(subid)?.()
+      const cleanup = this.legacyNostrSubscribe(filter, onEvent)
+      this.legacyRuntimeSubscriptions.set(subid, cleanup)
+      return () => {
+        this.emittedEvents.push({ type: "unsubscribe", subid })
+        this.legacyRuntimeSubscriptions.get(subid)?.()
+        this.legacyRuntimeSubscriptions.delete(subid)
+      }
+    }
+
+    void this.emitEvent({ type: "subscribe", subid, filter })
+    return () => {
+      void this.emitEvent({ type: "unsubscribe", subid })
+    }
+  }
+
+  private emitPublish(
+    event: Parameters<NostrFacade["publish"]>[0],
+    innerEventId?: string,
+  ): Promise<void> {
+    return this.emitEvent({ type: "publish", event, innerEventId })
   }
 
   async init() {
@@ -305,121 +420,22 @@ export class SessionManager {
    * This is used by devices to receive session establishment responses.
    */
   private startInviteResponseListener(): void {
-    const { publicKey: ephemeralPubkey, privateKey: ephemeralPrivkey } = this.inviteKeys.ephemeralKeypair
-    const sharedSecret = this.inviteKeys.sharedSecret
+    const { publicKey: ephemeralPubkey } = this.inviteKeys.ephemeralKeypair
 
-    // Subscribe to invite responses tagged to our ephemeral key
-    this.ourInviteResponseSubscription = this.nostrSubscribe(
+    this.ourInviteResponseSubscription = this.emitSubscribe(
+      `invite-responses-${ephemeralPubkey}`,
       {
-        kinds: [1059], // INVITE_RESPONSE_KIND
+        kinds: [INVITE_RESPONSE_KIND],
         "#p": [ephemeralPubkey],
-      },
-      async (event) => {
-        // Skip already processed InviteResponses (prevents replay issues on restart)
-        if (
-          this.processedInviteResponses.has(event.id) ||
-          this.pendingInviteResponses.has(event.id)
-        ) {
-          return
-        }
-
-        try {
-          const decrypted = await decryptInviteResponse({
-            envelopeContent: event.content,
-            envelopeSenderPubkey: event.pubkey,
-            inviterEphemeralPrivateKey: ephemeralPrivkey,
-            inviterPrivateKey: this.identityKey instanceof Uint8Array ? this.identityKey : undefined,
-            sharedSecret,
-            decrypt: this.identityKey instanceof Uint8Array ? undefined : this.identityKey.decrypt,
-          })
-
-          // Skip our own responses - this happens when we publish an invite response
-          // and our own listener receives it back from relays
-          // inviteeIdentity serves as the device ID
-          if (decrypted.inviteeIdentity === this.deviceId) {
-            return
-          }
-
-          // Get owner pubkey from response (required for proper chat routing)
-          // If not present (old client), fall back to resolveToOwner
-          const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
-          const pendingResponse: PendingInviteResponse = {
-            eventId: event.id,
-            ownerPublicKey: claimedOwner,
-            deviceId: decrypted.inviteeIdentity,
-            inviteeSessionPublicKey: decrypted.inviteeSessionPublicKey,
-            ephemeralPrivateKey: ephemeralPrivkey,
-            sharedSecret,
-          }
-
-          // Verify the device is authorized by fetching owner's AppKeys
-          const appKeys = await this.fetchAppKeys(claimedOwner)
-
-          if (appKeys) {
-            this.updateDelegateMapping(claimedOwner, appKeys)
-            if (this.installInviteResponseSession(pendingResponse, appKeys)) {
-              return
-            }
-          }
-
-          // No AppKeys from relay or an older snapshot may arrive before the fresh one.
-          // Keep the decrypted response pending and retry it when AppKeys are updated later.
-          const persistedAppKeys = this.userRecords.get(claimedOwner)?.appKeys
-          if (this.installInviteResponseSession(pendingResponse, persistedAppKeys)) {
-            return
-          }
-
-          this.queuePendingInviteResponse(pendingResponse)
-          this.setupUser(claimedOwner).catch(() => {})
-        } catch {
-        }
       }
     )
   }
 
-  /**
-   * Fetch a user's AppKeys from relays.
-   * Returns null if not found within timeout.
-   */
   private fetchAppKeys(pubkey: string, timeoutMs = 2000): Promise<AppKeys | null> {
-    return new Promise((resolve) => {
-      let latestEvent: { created_at: number; appKeys: AppKeys } | null = null
-      let resolved = false
-
-      // Use a short initial delay before resolving to allow event delivery
-      const resolveResult = () => {
-        if (resolved) return
-        resolved = true
-        unsubscribe()
-        resolve(latestEvent?.appKeys ?? null)
-      }
-
-      // Start timeout
-      const timeout = setTimeout(resolveResult, timeoutMs)
-
-      const unsubscribe = this.nostrSubscribe(
-        buildAppKeysFilter(pubkey),
-        (event) => {
-          if (resolved) return
-          try {
-            const appKeys = AppKeys.fromEvent(event)
-            if (!latestEvent || event.created_at > latestEvent.created_at) {
-              latestEvent = { created_at: event.created_at, appKeys }
-            } else if (event.created_at === latestEvent.created_at) {
-              latestEvent = {
-                created_at: event.created_at,
-                appKeys: latestEvent.appKeys.merge(appKeys),
-              }
-            }
-            // Resolve quickly after receiving an event (allow for more events to arrive)
-            clearTimeout(timeout)
-            setTimeout(resolveResult, 100) // Short delay to collect any late events
-          } catch {
-            // Invalid event, ignore
-          }
-        }
-      )
-    })
+    if (!this.legacyNostrSubscribe) {
+      return Promise.resolve(null)
+    }
+    return AppKeys.waitFor(pubkey, this.legacyNostrSubscribe, timeoutMs)
   }
 
   // -------------------
@@ -472,13 +488,7 @@ export class SessionManager {
       ownerPubkey !== this.ownerPublicKey &&
       (!userRecord?.appKeys || !knownDevice)
     ) {
-      this.fetchAppKeys(ownerPubkey)
-        .then((appKeys) => {
-          if (appKeys) {
-            userRecord?.onAppKeys(appKeys).catch(() => {})
-          }
-        })
-        .catch(() => {})
+      this.setupUser(ownerPubkey).catch(() => {})
     }
 
     this.maybeAutoAdoptChatSettings(event, ownerPubkey)
@@ -659,7 +669,7 @@ export class SessionManager {
     const userRecord = this.getOrCreateUserRecord(userPubkey)
     await userRecord.ensureSetup().catch(() => {})
 
-    const latestAppKeys = await this.fetchAppKeys(userPubkey).catch(() => null)
+    const latestAppKeys = await this.fetchAppKeys(userPubkey, 50).catch(() => null)
     if (latestAppKeys) {
       await userRecord.onAppKeys(latestAppKeys).catch(() => {})
       return
@@ -699,6 +709,35 @@ export class SessionManager {
     for (const callback of this.messagePushAuthorCallbacks) {
       callback()
     }
+    this.syncLegacyDirectMessageSubscription()
+  }
+
+  private syncLegacyDirectMessageSubscription(): void {
+    if (!this.legacyNostrSubscribe) return
+    const nextAuthors = this.getAllMessagePushAuthorPubkeys()
+    if (
+      nextAuthors.length === this.legacyDirectMessageAuthors.length &&
+      nextAuthors.every((author, index) => author === this.legacyDirectMessageAuthors[index])
+    ) {
+      return
+    }
+
+    this.legacyDirectMessageSubscription?.()
+    this.legacyDirectMessageSubscription = null
+    this.legacyDirectMessageAuthors = nextAuthors
+    if (nextAuthors.length === 0) {
+      return
+    }
+
+    this.legacyDirectMessageSubscription = this.legacyNostrSubscribe(
+      {
+        kinds: [MESSAGE_EVENT_KIND],
+        authors: nextAuthors,
+      },
+      (event) => {
+        this.processReceivedEvent(event)
+      }
+    )
   }
 
   /**
@@ -733,7 +772,26 @@ export class SessionManager {
     return [...authors].sort()
   }
 
+  feedEvent(event: VerifiedEvent): boolean {
+    return this.processReceivedEvent(event)
+  }
+
   processReceivedEvent(event: VerifiedEvent): boolean {
+    if (isAppKeysEvent(event)) {
+      void this.processAppKeysEvent(event)
+      return true
+    }
+
+    if (event.kind === INVITE_RESPONSE_KIND) {
+      void this.processInviteResponseEvent(event)
+      return true
+    }
+
+    if (event.kind === INVITE_EVENT_KIND) {
+      void this.processInviteEvent(event)
+      return true
+    }
+
     if (event.kind !== MESSAGE_EVENT_KIND) {
       return false
     }
@@ -741,12 +799,90 @@ export class SessionManager {
     for (const userRecord of this.userRecords.values()) {
       for (const device of userRecord.devices.values()) {
         if (device.processReceivedEvent(event)) {
+          this.syncLegacyDirectMessageSubscription()
           return true
         }
       }
     }
 
     return false
+  }
+
+  private async processAppKeysEvent(event: VerifiedEvent): Promise<boolean> {
+    const userRecord = this.getOrCreateUserRecord(event.pubkey)
+    return userRecord.processAppKeysEvent(event)
+  }
+
+  private async processInviteResponseEvent(event: VerifiedEvent): Promise<boolean> {
+    if (
+      this.processedInviteResponses.has(event.id) ||
+      this.pendingInviteResponses.has(event.id)
+    ) {
+      return false
+    }
+
+    try {
+      const { privateKey: ephemeralPrivkey } = this.inviteKeys.ephemeralKeypair
+      const decrypted = await decryptInviteResponse({
+        envelopeContent: event.content,
+        envelopeSenderPubkey: event.pubkey,
+        inviterEphemeralPrivateKey: ephemeralPrivkey,
+        inviterPrivateKey: this.identityKey instanceof Uint8Array ? this.identityKey : undefined,
+        sharedSecret: this.inviteKeys.sharedSecret,
+        decrypt: this.identityKey instanceof Uint8Array ? undefined : this.identityKey.decrypt,
+      })
+
+      if (decrypted.inviteeIdentity === this.deviceId) {
+        return false
+      }
+
+      const claimedOwner = decrypted.ownerPublicKey || this.resolveToOwner(decrypted.inviteeIdentity)
+      const pendingResponse: PendingInviteResponse = {
+        eventId: event.id,
+        ownerPublicKey: claimedOwner,
+        deviceId: decrypted.inviteeIdentity,
+        inviteeSessionPublicKey: decrypted.inviteeSessionPublicKey,
+        ephemeralPrivateKey: ephemeralPrivkey,
+        sharedSecret: this.inviteKeys.sharedSecret,
+      }
+
+      const persistedAppKeys = this.userRecords.get(claimedOwner)?.appKeys
+      if (this.installInviteResponseSession(pendingResponse, persistedAppKeys)) {
+        return true
+      }
+
+      this.queuePendingInviteResponse(pendingResponse)
+      await this.setupUser(claimedOwner).catch(() => {})
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async processInviteEvent(event: VerifiedEvent): Promise<boolean> {
+    let invite: Invite
+    try {
+      invite = Invite.fromEvent(event)
+    } catch {
+      return false
+    }
+
+    const deviceId = invite.deviceId || invite.inviter
+    if (!deviceId) {
+      return false
+    }
+    if (deviceId === this.deviceId) {
+      return false
+    }
+
+    let handled = false
+    for (const userRecord of this.userRecords.values()) {
+      const device = userRecord.devices.get(deviceId)
+      if (!device) continue
+      handled = true
+      await device.acceptInvite(invite).catch(() => {})
+    }
+    return handled
   }
 
   private collectMessagePushAuthorPubkeys(userRecord?: UserRecordActor): string[] {
@@ -830,6 +966,14 @@ export class SessionManager {
     }
 
     this.ourInviteResponseSubscription?.()
+    this.ourInviteResponseSubscription = null
+    this.legacyDirectMessageSubscription?.()
+    this.legacyDirectMessageSubscription = null
+    this.legacyDirectMessageAuthors = []
+    for (const unsubscribe of this.legacyRuntimeSubscriptions.values()) {
+      unsubscribe()
+    }
+    this.legacyRuntimeSubscriptions.clear()
   }
 
   deactivateCurrentSessions(publicKey: string) {
@@ -906,7 +1050,7 @@ export class SessionManager {
     events.slice(1).forEach((event, index) => {
       const timeout = setTimeout(() => {
         this.bootstrapRetryTimeouts.delete(timeout)
-        void this.nostrPublish(event).catch(() => {
+        void this.emitPublish(event).catch(() => {
           // Best-effort retry publish. A later inbound event can still recover the session.
         })
       }, SessionManager.INVITE_BOOTSTRAP_RETRY_DELAYS_MS[index + 1])
@@ -931,7 +1075,7 @@ export class SessionManager {
       if (!initialBootstrap) {
         return
       }
-      await this.nostrPublish(initialBootstrap)
+      await this.emitPublish(initialBootstrap)
       this.scheduleBootstrapRetryEvents(bootstrapEvents)
       await this.storeUserRecord(ownerPublicKey).catch(() => {})
     } catch {
@@ -946,7 +1090,7 @@ export class SessionManager {
       if (!initialBootstrap) {
         return
       }
-      await this.nostrPublish(initialBootstrap)
+      await this.emitPublish(initialBootstrap)
       this.scheduleBootstrapRetryEvents(bootstrapEvents)
     } catch {
       // The session is still established even if the bootstrap publish fails.
@@ -982,29 +1126,28 @@ export class SessionManager {
     // If claim verification fails for chat invites, fall back to device-identity routing.
     // For owner-side link flow, allow pre-registration acceptance and register via AppKeys afterward.
     if (claimedOwnerPublicKey !== deviceId) {
-      const appKeys = await this.fetchAppKeys(claimedOwnerPublicKey).catch(() => null)
-      if (appKeys) {
+      const persistedAppKeys =
+        this.userRecords.get(claimedOwnerPublicKey)?.appKeys ||
+        (await this.fetchAppKeys(claimedOwnerPublicKey, 50).catch(() => null)) ||
+        undefined
+      if (options.ownerPublicKey && !persistedAppKeys) {
+        ownerPublicKey = claimedOwnerPublicKey
+      } else {
         const routing = resolveInviteOwnerRouting({
           devicePubkey: deviceId,
           claimedOwnerPublicKey,
           invitePurpose: invite.purpose,
           currentOwnerPublicKey: this.ownerPublicKey,
-          appKeys,
+          appKeys: persistedAppKeys,
         })
-        if (!routing.fellBackToDeviceIdentity) {
-          preloadedAppKeys = appKeys
-          this.updateDelegateMapping(claimedOwnerPublicKey, appKeys)
+        if (!routing.fellBackToDeviceIdentity && persistedAppKeys) {
+          preloadedAppKeys = persistedAppKeys
+          this.updateDelegateMapping(claimedOwnerPublicKey, persistedAppKeys)
         }
         ownerPublicKey = routing.ownerPublicKey
-      } else {
-        const persistedAppKeys = this.userRecords.get(claimedOwnerPublicKey)?.appKeys
-        ownerPublicKey = resolveInviteOwnerRouting({
-          devicePubkey: deviceId,
-          claimedOwnerPublicKey,
-          invitePurpose: invite.purpose,
-          currentOwnerPublicKey: this.ownerPublicKey,
-          appKeys: persistedAppKeys,
-        }).ownerPublicKey
+      }
+      if (!persistedAppKeys) {
+        await this.setupUser(claimedOwnerPublicKey).catch(() => {})
       }
     }
 
@@ -1053,7 +1196,7 @@ export class SessionManager {
       encryptor,
       inviteeOwnerClaim
     )
-    await this.nostrPublish(event)
+    await this.emitPublish(event)
 
     const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
     this.delegateToOwner.set(deviceId, ownerPublicKey)
@@ -1180,7 +1323,7 @@ export class SessionManager {
 
     await Promise.allSettled(
       toPublish.map((evt, i) =>
-        this.nostrPublish(evt).then(() => {
+        this.emitPublish(evt, (event as Rumor).id).then(() => {
           const deviceId = sentDeviceIds[i]
           this.messageQueue.removeByTargetAndEventId(deviceId, (event as Rumor).id).catch(() => {})
           this.flushMessageQueue(deviceId).catch(() => {})

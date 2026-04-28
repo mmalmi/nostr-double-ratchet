@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.108 - 2026-04-28
+
+- Move TypeScript `NdrRuntime` to the Rust-style feed/emit split for session-manager relay work.
+- Add runtime construction for `SessionManager` so AppKeys, invite, invite-response, and publish events are emitted by the session core and executed by `NdrRuntime`.
+
 ## 0.0.107 - 2026-04-28
 
 - Expose session user records and message push author lookup through `NdrRuntime` so apps can treat the runtime as the production boundary.

@@ -1,11 +1,9 @@
 import type { AppKeys } from "../AppKeys"
-import type { VerifiedEvent } from "nostr-tools"
+import type { Filter, UnsignedEvent, VerifiedEvent } from "nostr-tools"
 import type { MessageQueue } from "../MessageQueue"
 import type { Session } from "../Session"
 import type {
   IdentityKey,
-  NostrPublish,
-  NostrSubscribe,
   Rumor,
   Unsubscribe,
 } from "../types"
@@ -84,9 +82,31 @@ export type DeviceSetupState =
   | "stale"
   | "revoked"
 
+export type SessionManagerEvent =
+  | {
+      type: "subscribe"
+      subid: string
+      filter: Filter
+    }
+  | {
+      type: "unsubscribe"
+      subid: string
+    }
+  | {
+      type: "publish"
+      event: UnsignedEvent | VerifiedEvent
+      innerEventId?: string
+    }
+
+export type SessionManagerEventsAvailableCallback = () => void | Promise<void>
+
 export interface NostrFacade {
-  subscribe: NostrSubscribe
-  publish: (event: Parameters<NostrPublish>[0]) => Promise<void>
+  subscribe(
+    subid: string,
+    filter: Filter,
+    onEvent?: (event: VerifiedEvent) => void,
+  ): Unsubscribe
+  publish(event: UnsignedEvent | VerifiedEvent, innerEventId?: string): Promise<void>
 }
 
 export interface DeviceRecordUserHooks {
