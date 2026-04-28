@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.105 - 2026-04-28
+
+- Add a notification-preview helper for decrypting candidate session events without mutating durable ratchet state.
+- Include the outer wrapper event id in session event metadata so apps can cache notification previews by outer event id.
+
 ## 0.0.104 - 2026-04-28
 
 - Publish a clean release after yanking/deprecating 0.0.103.
