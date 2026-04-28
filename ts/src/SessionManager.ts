@@ -436,8 +436,8 @@ export class SessionManager {
           removeDelegateMapping: (deviceId) => {
             this.delegateToOwner.delete(deviceId)
           },
-          handleDeviceRumor: (ownerPubkey, deviceId, rumor) => {
-            this.handleDeviceRumor(ownerPubkey, deviceId, rumor)
+          handleDeviceRumor: (ownerPubkey, deviceId, rumor, outerEvent) => {
+            this.handleDeviceRumor(ownerPubkey, deviceId, rumor, outerEvent)
           },
           persistUserRecord: (ownerPubkey) => {
             this.storeUserRecord(ownerPubkey).catch(() => {})

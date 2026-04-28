@@ -149,6 +149,46 @@ describe("NdrRuntime", () => {
     expect(runtime.getState().lastAppKeysCreatedAt).toBe(200)
   })
 
+  it("preserves relay AppKeys timestamps when refreshing from relay", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+    const runtime = createRuntime({ relay, ownerPrivateKey })
+
+    await runtime.initAppKeysManager()
+
+    const oldAppKeys = new AppKeys([
+      { identityPubkey: "device-a", createdAt: 100 },
+    ])
+    const oldEvent = oldAppKeys.getEvent()
+    oldEvent.created_at = 100
+    relay.storeAndDeliver(finalizeEvent(oldEvent, ownerPrivateKey) as VerifiedEvent)
+
+    await runtime.refreshOwnAppKeysFromRelay(ownerPubkey, 10)
+
+    expect(runtime.getState().registeredDevices).toEqual([
+      { identityPubkey: "device-a", createdAt: 100 },
+    ])
+    expect(runtime.getState().lastAppKeysCreatedAt).toBe(100)
+
+    runtime.startAppKeysSubscription(ownerPubkey)
+
+    const newAppKeys = new AppKeys([
+      { identityPubkey: "device-a", createdAt: 100 },
+      { identityPubkey: "device-b", createdAt: 101 },
+    ])
+    const newEvent = newAppKeys.getEvent()
+    newEvent.created_at = 101
+    relay.storeAndDeliver(finalizeEvent(newEvent, ownerPrivateKey) as VerifiedEvent)
+    await tick()
+
+    expect(runtime.getState().registeredDevices).toEqual([
+      { identityPubkey: "device-a", createdAt: 100 },
+      { identityPubkey: "device-b", createdAt: 101 },
+    ])
+    expect(runtime.getState().lastAppKeysCreatedAt).toBe(101)
+  })
+
   it("restores the same delegate identity and local AppKeys state after restart", async () => {
     const relay = new MockRelay()
     const ownerPrivateKey = generateSecretKey()

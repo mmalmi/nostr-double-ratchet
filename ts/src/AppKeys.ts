@@ -380,12 +380,22 @@ export class AppKeys {
     subscribe: NostrSubscribe,
     timeoutMs = 500
   ): Promise<AppKeys | null> {
+    return AppKeys.waitForSnapshot(user, subscribe, timeoutMs).then(
+      (snapshot) => snapshot?.appKeys ?? null
+    )
+  }
+
+  static waitForSnapshot(
+    user: string,
+    subscribe: NostrSubscribe,
+    timeoutMs = 500
+  ): Promise<{ appKeys: AppKeys; createdAt: number } | null> {
     return new Promise((resolve) => {
       let latest: { list: AppKeys; createdAt: number } | null = null
 
       setTimeout(() => {
         unsubscribe()
-        resolve(latest?.list ?? null)
+        resolve(latest ? { appKeys: latest.list, createdAt: latest.createdAt } : null)
       }, timeoutMs)
 
       const unsubscribe = subscribe(

@@ -696,7 +696,7 @@ export class NdrRuntime {
     ownerPubkey: string,
     timeoutMs: number = this.appKeysFastTimeoutMs,
   ): Promise<boolean> {
-    const nextSnapshot = await AppKeys.waitFor(
+    const nextSnapshot = await AppKeys.waitForSnapshot(
       ownerPubkey,
       this.nostrSubscribe,
       timeoutMs,
@@ -705,7 +705,10 @@ export class NdrRuntime {
       return false;
     }
 
-    const update = await this.applyIncomingAppKeys(nextSnapshot, now());
+    const update = await this.applyIncomingAppKeys(
+      nextSnapshot.appKeys,
+      nextSnapshot.createdAt,
+    );
     return update !== "stale";
   }
 

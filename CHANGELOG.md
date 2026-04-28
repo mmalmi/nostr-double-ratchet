@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.106 - 2026-04-28
+
+- Preserve relay AppKeys event timestamps when refreshing runtime device state, preventing linked devices from treating fresh registrations as stale.
+- Forward the outer wrapper event through the SessionManager user-record bridge so `outerEventId` metadata is populated.
+
 ## 0.0.105 - 2026-04-28
 
 - Add a notification-preview helper for decrypting candidate session events without mutating durable ratchet state.
