@@ -1254,6 +1254,7 @@ export class SessionManager {
     // Queue event for devices that don't have sessions yet
     const completeEvent = event as Rumor
     const targets = new Set([recipientIdentityKey, this.ownerPublicKey])
+    const queuedDeviceIds = new Set<string>()
     for (const target of targets) {
       const userRecord = this.userRecords.get(target)
       const knownDeviceIds = new Set<string>()
@@ -1275,6 +1276,7 @@ export class SessionManager {
         // flush as soon as any invite/session bootstrap completes.
         for (const deviceId of knownDeviceIds) {
           await this.messageQueue.add(deviceId, completeEvent)
+          queuedDeviceIds.add(deviceId)
         }
       } else {
         await this.discoveryQueue.add(target, completeEvent)
@@ -1340,6 +1342,10 @@ export class SessionManager {
           this.flushMessageQueue(deviceId).catch(() => {})
         })
       )
+    )
+
+    await Promise.allSettled(
+      Array.from(queuedDeviceIds).map((deviceId) => this.flushMessageQueue(deviceId))
     )
 
     // Return the event with computed ID (same as library would compute)

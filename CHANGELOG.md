@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.111 - 2026-04-28
+
+- Flush queued device targets after `SessionManager.sendEvent(...)` so messages queued during session setup are delivered as soon as the just-created session becomes usable.
+
 ## 0.0.110 - 2026-04-28
 
 - Wait for relay-visible AppKeys when registering a linked device identity, matching current-device registration behavior and avoiding sends before linked-device fanout is established.
