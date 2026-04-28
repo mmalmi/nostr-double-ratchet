@@ -409,6 +409,32 @@ describe("NdrRuntime", () => {
       relay.getAllEvents().filter((event) => event.kind === INVITE_RESPONSE_KIND),
     ).toHaveLength(1)
 
+    const ownerDevicePubkey = ownerRuntime.getState().currentDevicePubkey
+    if (!ownerDevicePubkey) {
+      throw new Error("owner device pubkey missing")
+    }
+    const staleAppKeys = new AppKeys([
+      {
+        identityPubkey: ownerDevicePubkey,
+        createdAt: Math.floor(Date.now() / 1000),
+      },
+    ])
+    ownerRuntime.feedEvent(
+      finalizeEvent(
+        {
+          ...staleAppKeys.getEvent(ownerPrivateKey),
+          created_at: Math.floor(Date.now() / 1000) + 10,
+        },
+        ownerPrivateKey,
+      ) as VerifiedEvent,
+    )
+    await tick()
+
+    const ownerRecord = ownerRuntime
+      .getSessionUserRecords()
+      .get(ownerPubkey) as any
+    expect(ownerRecord?.devices.get(linkInvite.inviter)?.activeSession).toBeTruthy()
+
     await ownerRuntime.registerDeviceIdentity({
       ownerPubkey,
       identityPubkey: linkInvite.inviter,

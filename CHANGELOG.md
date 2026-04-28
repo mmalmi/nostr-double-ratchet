@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.115 - 2026-04-28
+
+- Preserve freshly accepted own-device sessions across delayed AppKeys snapshots that do not yet list the linked device, preventing duplicate linked-device ratchets.
+- Extend linked-device fanout coverage for stale AppKeys arriving between link acceptance and device registration.
+
 ## 0.0.114 - 2026-04-28
 
 - Deduplicate concurrent link-invite accepts so the TypeScript runtime cannot create parallel ratchet sessions for the same linked device.

@@ -11,6 +11,8 @@ import type {
 } from "./types"
 
 export class UserRecordActor implements UserRecordShape {
+  private static readonly RECENT_OWN_DEVICE_SESSION_GRACE_MS = 5 * 60 * 1000
+
   public appKeys?: AppKeys
   public state: UserSetupState = "new"
   public devices: Map<string, DeviceRecordActor> = new Map()
@@ -127,7 +129,12 @@ export class UserRecordActor implements UserRecordShape {
           this.publicKey === this.deps.ourOwnerPubkey &&
           Boolean(device.activeSession) &&
           Math.floor(device.createdAt / 1000) >= createdAt
-        if (isNewerOwnDeviceSession) {
+        const isRecentOwnDeviceSession =
+          this.publicKey === this.deps.ourOwnerPubkey &&
+          Boolean(device.activeSession) &&
+          Date.now() - device.createdAt <=
+            UserRecordActor.RECENT_OWN_DEVICE_SESSION_GRACE_MS
+        if (isNewerOwnDeviceSession || isRecentOwnDeviceSession) {
           continue
         }
         await this.migrateQueuedMessagesFromDevice(deviceId, activeTargetIds)
