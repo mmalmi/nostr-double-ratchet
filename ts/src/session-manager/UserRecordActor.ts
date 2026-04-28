@@ -117,9 +117,13 @@ export class UserRecordActor implements UserRecordShape {
         .map((d) => d.identityPubkey)
         .filter(Boolean) as string[]
     )
+    const activeTargetIds = [...activeIds].filter(
+      (deviceId) => deviceId !== this.deps.ourDeviceId
+    )
 
     for (const [deviceId, device] of this.devices) {
       if (!activeIds.has(deviceId)) {
+        await this.migrateQueuedMessagesFromDevice(deviceId, activeTargetIds)
         await device.revoke()
         this.devices.delete(deviceId)
         this.deps.manager.removeDelegateMapping(deviceId)
@@ -140,6 +144,29 @@ export class UserRecordActor implements UserRecordShape {
 
     this.setState("ready")
     this.onDeviceDirty()
+  }
+
+  private async migrateQueuedMessagesFromDevice(
+    staleDeviceId: string,
+    targetDeviceIds: string[],
+  ): Promise<void> {
+    const entries = await this.deps.messageQueue.getForTarget(staleDeviceId)
+    if (entries.length === 0) {
+      return
+    }
+
+    if (targetDeviceIds.length === 0) {
+      for (const entry of entries) {
+        await this.deps.discoveryQueue.add(this.publicKey, entry.event)
+      }
+      return
+    }
+
+    for (const entry of entries) {
+      for (const targetDeviceId of targetDeviceIds) {
+        await this.deps.messageQueue.add(targetDeviceId, entry.event)
+      }
+    }
   }
 
   private ensureAppKeysSubscription(): void {

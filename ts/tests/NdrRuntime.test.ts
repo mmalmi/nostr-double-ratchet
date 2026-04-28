@@ -26,11 +26,27 @@ const createRuntime = (options: {
   ownerPrivateKey?: Uint8Array
   storage?: StorageAdapter
   appKeysDelayMs?: number
+  publishDelayMs?: number
 }) => {
-  const { relay, ownerPrivateKey, storage, appKeysDelayMs = 0 } = options
+  const {
+    relay,
+    ownerPrivateKey,
+    storage,
+    appKeysDelayMs = 0,
+    publishDelayMs = 0,
+  } = options
+  const deliver = (event: VerifiedEvent, delayMs: number) => {
+    if (delayMs > 0) {
+      setTimeout(() => {
+        relay.storeAndDeliver(event)
+      }, delayMs)
+      return
+    }
+    relay.storeAndDeliver(event)
+  }
   const publish = (async (event: UnsignedEvent | VerifiedEvent) => {
     if ("sig" in event && event.sig) {
-      relay.storeAndDeliver(event as VerifiedEvent)
+      deliver(event as VerifiedEvent, publishDelayMs)
       return event as VerifiedEvent
     }
 
@@ -39,13 +55,7 @@ const createRuntime = (options: {
     }
 
     const signedEvent = finalizeEvent(event, ownerPrivateKey) as VerifiedEvent
-    if (appKeysDelayMs > 0) {
-      setTimeout(() => {
-        relay.storeAndDeliver(signedEvent)
-      }, appKeysDelayMs)
-    } else {
-      relay.storeAndDeliver(signedEvent)
-    }
+    deliver(signedEvent, Math.max(appKeysDelayMs, publishDelayMs))
     return signedEvent
   }) as NostrPublish
 
@@ -364,6 +374,85 @@ describe("NdrRuntime", () => {
 
     await ownerRuntime.sendMessage(ownerPubkey, "hello linked runtime")
     await linkedReceived
+  })
+
+  it("flushes queued runtime sends after async peer discovery and linked-device fanout", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+
+    const ownerRuntime = createRuntime({
+      relay,
+      ownerPrivateKey,
+      publishDelayMs: 10,
+    })
+    await ownerRuntime.initForOwner(ownerPubkey)
+    await ownerRuntime.registerCurrentDevice({ ownerPubkey })
+    await ownerRuntime.republishInvite()
+
+    const linkedRuntime = createRuntime({ relay, publishDelayMs: 10 })
+    await linkedRuntime.initDelegateManager()
+    const linkInvite = await linkedRuntime.createLinkInvite(ownerPubkey)
+    await linkedRuntime.republishInvite()
+
+    await ownerRuntime.acceptLinkInvite(linkInvite, ownerPubkey)
+    await ownerRuntime.registerDeviceIdentity({
+      ownerPubkey,
+      identityPubkey: linkInvite.inviter,
+      timeoutMs: 500,
+    })
+    await linkedRuntime.initForOwner(ownerPubkey)
+
+    const peerPrivateKey = generateSecretKey()
+    const peerPubkey = getPublicKey(peerPrivateKey)
+    const peerRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: peerPrivateKey,
+      publishDelayMs: 10,
+    })
+    await peerRuntime.initForOwner(peerPubkey)
+
+    const message = "queued async runtime hello"
+    const ownerDevicePubkey = ownerRuntime.getState().currentDevicePubkey
+    const linkedReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("linked runtime did not receive queued owner send")),
+        5_000,
+      )
+      const unsubscribe = linkedRuntime.onSessionEvent((event, from) => {
+        if (event.content !== message) return
+        expect([ownerPubkey, peerPubkey]).toContain(from)
+        expect(event.pubkey).toBe(ownerDevicePubkey)
+        expect(
+          event.tags.some((tag) => tag[0] === "p" && tag[1] === peerPubkey),
+        ).toBe(true)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    const peerReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("peer runtime did not receive queued owner send")),
+        5_000,
+      )
+      const unsubscribe = peerRuntime.onSessionEvent((event, from) => {
+        if (event.content !== message) return
+        expect(from).toBe(ownerPubkey)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    const sendPromise = ownerRuntime.sendMessage(peerPubkey, message)
+    await tick(25)
+    await peerRuntime.registerCurrentDevice({ ownerPubkey: peerPubkey })
+    await peerRuntime.republishInvite()
+    await sendPromise
+
+    await Promise.all([linkedReceived, peerReceived])
   })
 
   it("exposes session user records through the runtime boundary", async () => {

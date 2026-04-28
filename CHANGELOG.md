@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.112 - 2026-04-28
+
+- Preserve queued runtime sends when provisional single-device setup is replaced by real AppKeys, so messages sent before peer discovery completes flush to the newly authorized devices.
+- Add runtime coverage for async peer discovery plus linked-device fanout.
+
 ## 0.0.111 - 2026-04-28
 
 - Flush queued device targets after `SessionManager.sendEvent(...)` so messages queued during session setup are delivered as soon as the just-created session becomes usable.
