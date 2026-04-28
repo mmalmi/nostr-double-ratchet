@@ -270,6 +270,18 @@ describe("NdrRuntime", () => {
     await aliceReceived
   })
 
+  it("exposes session user records through the runtime boundary", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+    const runtime = createRuntime({ relay, ownerPrivateKey })
+
+    await runtime.initForOwner(ownerPubkey)
+    await runtime.setupUser(ownerPubkey)
+
+    expect(runtime.getSessionUserRecords().has(ownerPubkey)).toBe(true)
+  })
+
   it("owns group transport alongside sessions on the high-level runtime path", async () => {
     const relay = new MockRelay()
 

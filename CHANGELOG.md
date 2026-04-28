@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.107 - 2026-04-28
+
+- Expose session user records and message push author lookup through `NdrRuntime` so apps can treat the runtime as the production boundary.
+
 ## 0.0.106 - 2026-04-28
 
 - Preserve relay AppKeys event timestamps when refreshing runtime device state, preventing linked devices from treating fresh registrations as stale.

@@ -15,6 +15,7 @@ import {
   evaluateDeviceRegistrationState,
   shouldRequireRelayRegistrationConfirmation,
   type DeviceRegistrationState,
+  type SessionUserRecordsLike,
 } from "./multiDevice";
 import {
   SessionManager,
@@ -253,6 +254,17 @@ export class NdrRuntime {
 
   getDirectMessageSubscriptionAuthors(): string[] {
     return [...this.directMessageSubscriptionAuthors];
+  }
+
+  getSessionUserRecords(): SessionUserRecordsLike {
+    return (
+      (this.sessionManager?.getUserRecords() as unknown as SessionUserRecordsLike | undefined) ??
+      new Map()
+    );
+  }
+
+  getSessionMessagePushAuthorPubkeys(peerPubkey: string): string[] {
+    return this.sessionManager?.getMessagePushAuthorPubkeys(peerPubkey) ?? [];
   }
 
   processReceivedEvent(event: VerifiedEvent): boolean {
