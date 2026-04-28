@@ -35,6 +35,10 @@ const createRuntime = (options: {
   storage?: StorageAdapter
   appKeysDelayMs?: number
   publishDelayMs?: number
+  onPublish?: (
+    event: UnsignedEvent | VerifiedEvent,
+    innerEventId?: string,
+  ) => void
 }) => {
   const {
     relay,
@@ -42,6 +46,7 @@ const createRuntime = (options: {
     storage,
     appKeysDelayMs = 0,
     publishDelayMs = 0,
+    onPublish,
   } = options
   const deliver = (event: VerifiedEvent, delayMs: number) => {
     if (delayMs > 0) {
@@ -52,7 +57,11 @@ const createRuntime = (options: {
     }
     relay.storeAndDeliver(event)
   }
-  const publish = (async (event: UnsignedEvent | VerifiedEvent) => {
+  const publish = (async (
+    event: UnsignedEvent | VerifiedEvent,
+    innerEventId?: string,
+  ) => {
+    onPublish?.(event, innerEventId)
     if ("sig" in event && event.sig) {
       deliver(event as VerifiedEvent, publishDelayMs)
       return event as VerifiedEvent
@@ -877,12 +886,16 @@ describe("NdrRuntime", () => {
 
   it("owns group transport alongside sessions on the high-level runtime path", async () => {
     const relay = new MockRelay()
+    const publishedInnerEventIds: Array<string | undefined> = []
 
     const aliceOwnerPrivateKey = generateSecretKey()
     const aliceOwnerPubkey = getPublicKey(aliceOwnerPrivateKey)
     const aliceRuntime = createRuntime({
       relay,
       ownerPrivateKey: aliceOwnerPrivateKey,
+      onPublish: (_event, innerEventId) => {
+        publishedInnerEventIds.push(innerEventId)
+      },
     })
     await aliceRuntime.initForOwner(aliceOwnerPubkey)
     await aliceRuntime.registerCurrentDevice({ ownerPubkey: aliceOwnerPubkey })
@@ -917,6 +930,7 @@ describe("NdrRuntime", () => {
     expect(sent.inner.content).toBe("hello group")
     expect(sent.inner.kind).toBe(14)
     expect(sent.inner.tags).toContainEqual(["l", created.group.id])
+    expect(publishedInnerEventIds).toContain(sent.inner.id)
     expect(aliceRuntime.getGroupManager()?.knownSenderEventPubkeys().length).toBeGreaterThan(0)
 
     await bobRuntime.syncGroups([], bobOwnerPubkey)

@@ -244,8 +244,8 @@ export class SessionGroupRuntime {
         const manager = await this.waitForSessionManagerFn();
         await manager.sendEvent(recipientOwnerPubkey, rumor);
       },
-      publishOuter: async (outer) => {
-        await this.nostrPublish(outer);
+      publishOuter: async (outer, innerEventId) => {
+        await this.nostrPublish(outer, innerEventId);
       },
     });
   }

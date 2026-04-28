@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.120 - 2026-04-28
+
+- Pass group inner event ids through `NdrRuntime` publish callbacks so apps can correlate one-to-many group publishes with local group message records.
+
 ## 0.0.119 - 2026-04-28
 
 - Pass the inner rumor event id through `NdrRuntime` publish callbacks so apps can correlate encrypted outer publishes with local message records.

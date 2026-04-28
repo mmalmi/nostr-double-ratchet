@@ -24,7 +24,10 @@ import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
 import { CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND, type Rumor } from "./types";
 
 export type PairwiseSend = (recipientOwnerPubkey: string, rumor: Rumor) => Promise<void>;
-export type PublishOuter = (outer: VerifiedEvent) => Promise<unknown>;
+export type PublishOuter = (
+  outer: VerifiedEvent,
+  innerEventId?: string
+) => Promise<unknown>;
 
 export interface GroupOptions {
   data: GroupData;
@@ -511,7 +514,7 @@ export class Group {
     const outer = this.oneToMany.encryptToOuterEvent(senderEventSecretKey, senderKey, innerJson, nowSeconds);
 
     await this.saveSenderKeyState(this.ourDevicePubkey, senderKey);
-    await opts.publishOuter(outer);
+    await opts.publishOuter(outer, inner.id);
 
     return { outer, inner };
   }
