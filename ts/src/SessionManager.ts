@@ -1172,6 +1172,9 @@ export class SessionManager {
       ...(existingRecord?.activeSession ? [existingRecord.activeSession] : []),
       ...(existingRecord?.inactiveSessions ?? []),
     ]
+    if (invite.purpose === "link" && existingSessions.length > 0) {
+      return { ownerPublicKey, deviceId, session: existingSessions[0] }
+    }
     const reusableEstablishedSession = existingSessions.find(
       (session) =>
         SessionManager.sessionCanSend(session) &&
@@ -1207,11 +1210,11 @@ export class SessionManager {
       encryptor,
       inviteeOwnerClaim
     )
-    await this.emitPublish(event)
 
     const deviceRecord = this.upsertDeviceRecord(userRecord, deviceId)
     this.delegateToOwner.set(deviceId, ownerPublicKey)
     deviceRecord.installSession(session, false, { preferActive: true })
+    await this.emitPublish(event)
     await this.sendInviteBootstrap(session)
     if (invite.purpose === "link" && ownerPublicKey === this.ownerPublicKey) {
       await this.sendLinkBootstrap(ownerPublicKey, deviceId)

@@ -173,6 +173,11 @@ export class DeviceRecordActor implements DeviceRecordShape {
       return Promise.reject(new Error("Invite does not target this device"))
     }
 
+    const existingSession = this.activeSession || this.inactiveSessions[0]
+    if (existingSession) {
+      return Promise.resolve(existingSession)
+    }
+
     if (this.hasEstablishedActiveSession()) {
       return Promise.resolve(this.activeSession!)
     }
@@ -204,8 +209,8 @@ export class DeviceRecordActor implements DeviceRecordShape {
         encryptor,
         this.deps.ourOwnerPubkey
       )
-      await this.deps.nostr.publish(event)
       this.installSession(session, false, { preferActive: true })
+      await this.deps.nostr.publish(event)
       await this.publishInviteBootstrap(session)
       this.state = "session-ready"
       await this.flushMessageQueue()

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.113 - 2026-04-28
+
+- Subscribe newly added runtime direct-message authors immediately while keeping stale-author removal throttled, reducing missed live delivery during rapid ratchet author changes.
+- Install accepted invite sessions before emitting the invite response publish, preventing duplicate invite acceptance from racing the local session state and diverging linked-device ratchets.
+- Reuse existing device-invite sessions when replayed device invite events arrive after a session has already been accepted.
+- Preserve newly accepted own-device sessions when an older AppKeys event lacking that device arrives before the confirming multi-device AppKeys event.
+- Add runtime coverage for immediate author additions during the direct-message subscription throttle window.
+
 ## 0.0.112 - 2026-04-28
 
 - Preserve queued runtime sends when provisional single-device setup is replaced by real AppKeys, so messages sent before peer discovery completes flush to the newly authorized devices.

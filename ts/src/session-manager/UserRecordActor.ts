@@ -107,7 +107,7 @@ export class UserRecordActor implements UserRecordShape {
     this.setState("ready")
   }
 
-  async onAppKeys(appKeys: AppKeys): Promise<void> {
+  async onAppKeys(appKeys: AppKeys, createdAt = 0): Promise<void> {
     this.appKeys = appKeys
     this.setState("appkeys-known")
     this.deps.manager.updateDelegateMapping(this.publicKey, appKeys)
@@ -123,6 +123,13 @@ export class UserRecordActor implements UserRecordShape {
 
     for (const [deviceId, device] of this.devices) {
       if (!activeIds.has(deviceId)) {
+        const isNewerOwnDeviceSession =
+          this.publicKey === this.deps.ourOwnerPubkey &&
+          Boolean(device.activeSession) &&
+          Math.floor(device.createdAt / 1000) >= createdAt
+        if (isNewerOwnDeviceSession) {
+          continue
+        }
         await this.migrateQueuedMessagesFromDevice(deviceId, activeTargetIds)
         await device.revoke()
         this.devices.delete(deviceId)
@@ -197,7 +204,7 @@ export class UserRecordActor implements UserRecordShape {
         return false
       }
       this.latestAppKeysCreatedAt = next.createdAt
-      await this.onAppKeys(next.appKeys)
+      await this.onAppKeys(next.appKeys, next.createdAt)
       return true
     } catch {
       return false

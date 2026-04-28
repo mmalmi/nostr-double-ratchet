@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   finalizeEvent,
+  type Filter,
   generateSecretKey,
+  getEventHash,
   getPublicKey,
   type UnsignedEvent,
   type VerifiedEvent,
@@ -9,7 +11,7 @@ import {
 import { AppKeys } from "../src/AppKeys"
 import { NdrRuntime } from "../src/NdrRuntime"
 import { InMemoryStorageAdapter, type StorageAdapter } from "../src/StorageAdapter"
-import type { NostrPublish, NostrSubscribe } from "../src/types"
+import { CHAT_MESSAGE_KIND, type NostrPublish, type NostrSubscribe, type Rumor } from "../src/types"
 import { MockRelay } from "./helpers/mockRelay"
 
 const tick = async (ms = 0) =>
@@ -453,6 +455,154 @@ describe("NdrRuntime", () => {
     await sendPromise
 
     await Promise.all([linkedReceived, peerReceived])
+  })
+
+  it("fans out prebuilt runtime sendEvent rumors to linked devices", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+
+    const ownerRuntime = createRuntime({ relay, ownerPrivateKey })
+    await ownerRuntime.initForOwner(ownerPubkey)
+    await ownerRuntime.registerCurrentDevice({ ownerPubkey })
+    await ownerRuntime.republishInvite()
+
+    const linkedRuntime = createRuntime({ relay })
+    await linkedRuntime.initDelegateManager()
+    const linkInvite = await linkedRuntime.createLinkInvite(ownerPubkey)
+    await linkedRuntime.republishInvite()
+
+    await ownerRuntime.acceptLinkInvite(linkInvite, ownerPubkey)
+    await ownerRuntime.registerDeviceIdentity({
+      ownerPubkey,
+      identityPubkey: linkInvite.inviter,
+      timeoutMs: 500,
+    })
+    await linkedRuntime.initForOwner(ownerPubkey)
+
+    const peerPrivateKey = generateSecretKey()
+    const peerPubkey = getPublicKey(peerPrivateKey)
+    const peerRuntime = createRuntime({ relay, ownerPrivateKey: peerPrivateKey })
+    await peerRuntime.initForOwner(peerPubkey)
+    await peerRuntime.registerCurrentDevice({ ownerPubkey: peerPubkey })
+    await peerRuntime.republishInvite()
+
+    const message = "prebuilt runtime hello"
+    const ownerDevicePubkey = ownerRuntime.getState().currentDevicePubkey
+    if (!ownerDevicePubkey) {
+      throw new Error("owner device pubkey missing")
+    }
+    const now = Date.now()
+    const rumor: Rumor = {
+      content: message,
+      kind: CHAT_MESSAGE_KIND,
+      created_at: Math.floor(now / 1000),
+      tags: [["p", peerPubkey], ["ms", String(now)]],
+      pubkey: ownerDevicePubkey,
+      id: "",
+    }
+    rumor.id = getEventHash(rumor)
+
+    const linkedReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("linked runtime did not receive prebuilt sendEvent")),
+        5_000,
+      )
+      const unsubscribe = linkedRuntime.onSessionEvent((event) => {
+        if (event.content !== message) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    const peerReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("peer runtime did not receive prebuilt sendEvent")),
+        5_000,
+      )
+      const unsubscribe = peerRuntime.onSessionEvent((event) => {
+        if (event.content !== message) return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await ownerRuntime.sendEvent(peerPubkey, rumor)
+
+    await Promise.all([linkedReceived, peerReceived])
+  })
+
+  it("subscribes newly added direct-message authors without waiting for the throttle", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(10_000)
+
+    try {
+      const firstAuthor = "a".repeat(64)
+      const secondAuthor = "b".repeat(64)
+      let authors = [firstAuthor]
+      const filters: Filter[] = []
+      const unsubscribed: Filter[] = []
+      const runtime = new NdrRuntime({
+        nostrSubscribe: (filter) => {
+          filters.push(filter)
+          return () => {
+            unsubscribed.push(filter)
+          }
+        },
+        nostrPublish: async (event) => event as VerifiedEvent,
+      })
+      ;(runtime as unknown as {
+        sessionManager: {
+          getAllMessagePushAuthorPubkeys: () => string[]
+          feedEvent: () => boolean
+          drainEvents: () => []
+          hasPendingEvents: () => boolean
+        }
+      }).sessionManager = {
+        getAllMessagePushAuthorPubkeys: () => authors,
+        feedEvent: () => true,
+        drainEvents: () => [],
+        hasPendingEvents: () => false,
+      }
+      const event = {
+        id: "event",
+        pubkey: firstAuthor,
+        created_at: 1,
+        kind: 1060,
+        tags: [],
+        content: "",
+        sig: "sig",
+      } as VerifiedEvent
+
+      runtime.processReceivedEvent(event)
+      expect(runtime.getDirectMessageSubscriptionAuthors()).toEqual([firstAuthor])
+      expect(filters.at(-1)?.authors).toEqual([firstAuthor])
+
+      authors = [firstAuthor, secondAuthor]
+      runtime.processReceivedEvent(event)
+      expect(runtime.getDirectMessageSubscriptionAuthors()).toEqual([
+        firstAuthor,
+        secondAuthor,
+      ])
+      expect(filters.at(-1)?.authors).toEqual([firstAuthor, secondAuthor])
+      expect(unsubscribed).toHaveLength(1)
+
+      authors = [secondAuthor]
+      runtime.processReceivedEvent(event)
+      expect(runtime.getDirectMessageSubscriptionAuthors()).toEqual([
+        firstAuthor,
+        secondAuthor,
+      ])
+
+      vi.advanceTimersByTime(1500)
+
+      expect(runtime.getDirectMessageSubscriptionAuthors()).toEqual([secondAuthor])
+      expect(filters.at(-1)?.authors).toEqual([secondAuthor])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("exposes session user records through the runtime boundary", async () => {

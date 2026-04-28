@@ -658,11 +658,13 @@ export class NdrRuntime {
     // sub churn during an active chat.
     //
     //   1. Identical author set → no-op.
-    //   2. Otherwise honour a 1.5 s throttle: bursts of ratchet steps
-    //      collapse into one relay REQ. If the throttle window has not
-    //      elapsed we schedule a single trailing flush so the new authors
-    //      still get subscribed once the window expires, even if no other
-    //      runtime activity comes along to call us again.
+    //   2. Newly added authors are subscribed immediately. They may already
+    //      have relay events waiting, and delaying them can miss live delivery.
+    //   3. Pure removals honour a 1.5 s trailing throttle so bursts of
+    //      ratchet steps collapse into one relay REQ. If the throttle window
+    //      has not elapsed we schedule a single trailing flush so stale
+    //      authors are eventually dropped even if no other runtime activity
+    //      comes along to call us again.
     const THROTTLE_MS = 1500;
 
     const nextAuthors = [
@@ -678,9 +680,13 @@ export class NdrRuntime {
       return;
     }
 
+    const currentAuthors = this.directMessageSubscriptionAuthors;
+    const addedAuthors = nextAuthors.filter(
+      (author) => !currentAuthors.includes(author),
+    );
     const now = Date.now();
     const elapsed = now - this.directMessageSubscriptionLastChangeMs;
-    if (elapsed < THROTTLE_MS) {
+    if (elapsed < THROTTLE_MS && addedAuthors.length === 0) {
       if (this.directMessageSubscriptionThrottleTimer === null) {
         this.directMessageSubscriptionThrottleTimer = setTimeout(() => {
           this.directMessageSubscriptionThrottleTimer = null;
