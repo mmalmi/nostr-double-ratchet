@@ -23,7 +23,7 @@ const createSubscribe = (relay: MockRelay): NostrSubscribe => {
 
 const createRuntime = (options: {
   relay: MockRelay
-  ownerPrivateKey: Uint8Array
+  ownerPrivateKey?: Uint8Array
   storage?: StorageAdapter
   appKeysDelayMs?: number
 }) => {
@@ -32,6 +32,10 @@ const createRuntime = (options: {
     if ("sig" in event && event.sig) {
       relay.storeAndDeliver(event as VerifiedEvent)
       return event as VerifiedEvent
+    }
+
+    if (!ownerPrivateKey) {
+      throw new Error("Cannot sign unsigned event without owner private key")
     }
 
     const signedEvent = finalizeEvent(event, ownerPrivateKey) as VerifiedEvent
@@ -268,6 +272,48 @@ describe("NdrRuntime", () => {
 
     await bobRuntime.sendMessage(aliceOwnerPubkey, "reply via runtime")
     await aliceReceived
+  })
+
+  it("delivers owner messages to a linked runtime after link invite registration", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+
+    const ownerRuntime = createRuntime({ relay, ownerPrivateKey })
+    await ownerRuntime.initForOwner(ownerPubkey)
+    await ownerRuntime.registerCurrentDevice({ ownerPubkey })
+    await ownerRuntime.republishInvite()
+
+    const linkedRuntime = createRuntime({ relay })
+    await linkedRuntime.initDelegateManager()
+    const linkInvite = await linkedRuntime.createLinkInvite(ownerPubkey)
+    await linkedRuntime.republishInvite()
+
+    await ownerRuntime.acceptLinkInvite(linkInvite, ownerPubkey)
+    await ownerRuntime.registerDeviceIdentity({
+      ownerPubkey,
+      identityPubkey: linkInvite.inviter,
+    })
+
+    await linkedRuntime.initForOwner(ownerPubkey)
+
+    const linkedReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("linked runtime did not receive owner message")),
+        5_000,
+      )
+      const unsubscribe = linkedRuntime.onSessionEvent((event, from, meta) => {
+        if (event.content !== "hello linked runtime") return
+        expect(from).toBe(ownerPubkey)
+        expect(meta?.isCrossDeviceSelf).toBe(true)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await ownerRuntime.sendMessage(ownerPubkey, "hello linked runtime")
+    await linkedReceived
   })
 
   it("exposes session user records through the runtime boundary", async () => {

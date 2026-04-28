@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.109 - 2026-04-28
+
+- Emit decrypted TypeScript session messages through the same runtime event queue as publish/subscribe work, matching the Rust feed/drain model more closely.
+- Keep `NdrRuntime.onSessionEvent` as the app-facing callback while routing it from drained runtime events instead of attaching directly to `SessionManager`.
+- Add linked-device runtime coverage for owner messages delivered to a linked runtime after link invite registration.
+
 ## 0.0.108 - 2026-04-28
 
 - Move TypeScript `NdrRuntime` to the Rust-style feed/emit split for session-manager relay work.

@@ -97,6 +97,13 @@ export type SessionManagerEvent =
       event: UnsignedEvent | VerifiedEvent
       innerEventId?: string
     }
+  | {
+      type: "decryptedMessage"
+      event: Rumor
+      sender: string
+      senderDevice?: string
+      meta: OnEventMeta
+    }
 
 export type SessionManagerEventsAvailableCallback = () => void | Promise<void>
 

@@ -336,6 +336,13 @@ export class SessionManager {
   }
 
   private handleLegacyEmittedEvent(event: SessionManagerEvent): Promise<void> | void {
+    if (event.type === "decryptedMessage") {
+      for (const cb of this.internalSubscriptions) {
+        cb(event.event, event.sender, event.meta)
+      }
+      return
+    }
+
     if (event.type === "subscribe") {
       if (!this.legacyNostrSubscribe) return
       this.legacyRuntimeSubscriptions.get(event.subid)?.()
@@ -510,9 +517,13 @@ export class SessionManager {
       isCrossDeviceSelf: isCrossDeviceSelfOrigin(origin),
     }
 
-    for (const cb of this.internalSubscriptions) {
-      cb(event, ownerPubkey, meta)
-    }
+    void this.emitEvent({
+      type: "decryptedMessage",
+      event,
+      sender: ownerPubkey,
+      senderDevice: deviceId,
+      meta,
+    })
   }
 
   private upsertDeviceRecord(userRecord: UserRecordActor, deviceId: string): DeviceRecordActor {

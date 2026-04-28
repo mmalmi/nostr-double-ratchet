@@ -21,6 +21,7 @@ import {
   type Rumor,
   type Unsubscribe,
 } from "./types";
+import type { OnEventMeta } from "./session-manager/types";
 import type { VerifiedEvent } from "nostr-tools";
 
 export interface SendGroupEventOptions {
@@ -153,7 +154,11 @@ export class SessionGroupRuntime {
     };
   }
 
-  setSessionManager(manager: SessionManager | null): void {
+  setSessionManager(
+    manager: SessionManager | null,
+    options: { bridgeSessionEvents?: boolean } = {},
+  ): void {
+    const bridgeSessionEvents = options.bridgeSessionEvents ?? true;
     if (this.sessionManager === manager && this.sessionBridgeCleanup) {
       return;
     }
@@ -161,28 +166,32 @@ export class SessionGroupRuntime {
     this.clearSessionBridge();
     this.sessionManager = manager;
 
-    if (!manager || !this.groupManager) {
+    if (!manager || !this.groupManager || !bridgeSessionEvents) {
       return;
     }
 
     this.sessionBridgeCleanup = manager.onEvent((event, from, meta) => {
-      const senderOwnerPubkey = meta?.senderOwnerPubkey || from;
-      const senderDevicePubkey = meta?.senderDevicePubkey || event.pubkey;
-      if (this.shouldEmitPairwiseGroupEvent(event, senderDevicePubkey)) {
-        this.emitGroupEvent(
-          this.buildPairwiseGroupEvent(
-            event,
-            senderOwnerPubkey,
-            senderDevicePubkey,
-          ),
-        );
-      }
-      void this.groupManager?.handleIncomingSessionEvent(
-        event,
-        senderOwnerPubkey,
-        senderDevicePubkey,
-      );
+      this.processSessionEvent(event, from, meta);
     });
+  }
+
+  processSessionEvent(event: Rumor, from: string, meta?: OnEventMeta): void {
+    const senderOwnerPubkey = meta?.senderOwnerPubkey || from;
+    const senderDevicePubkey = meta?.senderDevicePubkey || event.pubkey;
+    if (this.shouldEmitPairwiseGroupEvent(event, senderDevicePubkey)) {
+      this.emitGroupEvent(
+        this.buildPairwiseGroupEvent(
+          event,
+          senderOwnerPubkey,
+          senderDevicePubkey,
+        ),
+      );
+    }
+    void this.groupManager?.handleIncomingSessionEvent(
+      event,
+      senderOwnerPubkey,
+      senderDevicePubkey,
+    );
   }
 
   async upsertGroup(group: GroupData, ownerPubkey?: string): Promise<void> {

@@ -37,7 +37,7 @@ For Windows/manual install options, see [Releases](https://github.com/mmalmi/nos
 | Mode | Use it when | What it owns |
 | --- | --- | --- |
 | `NdrRuntime` | You want the default production path with one app-facing surface for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager` in TypeScript. |
-| `SessionManager` | You want multi-device routing and storage, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and subscription intent. |
+| `SessionManager` | You want multi-device routing and storage, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and emitted pubsub/decrypted-message events. |
 | `Session` | You want the simplest 1:1 primitive and you already own invite/bootstrap, persistence, and transport. Good for negotiated 1:1 channels or other app-specific direct links. | Only the ratchet session state itself. |
 
 Add-ons around those layers:
@@ -141,9 +141,9 @@ re-implementing policy ad hoc.
   `DirectMessageSubscriptionTracker`, `build_direct_message_backfill_filter`,
   `resolve_rumor_peer_pubkey`
 
-`NdrRuntime` and `SessionManager` own session state and subscription intent, but they do not own
-relay history fetch. Consumers should treat new direct-message subscription authors as a transport
-catch-up signal and run a short replay/backfill with the shared helpers above.
+`NdrRuntime` and `SessionManager` own session state and emit pubsub/decrypted-message events, but
+they do not own relay history fetch. Consumers should treat new direct-message subscription authors
+as a transport catch-up signal and run a short replay/backfill with the shared helpers above.
 
 ## Group Messaging Model
 

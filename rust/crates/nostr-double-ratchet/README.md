@@ -97,8 +97,8 @@ assert!(plaintext.is_some());
 
 ## Minimal Runtime Loop
 
-For app integration, `SessionManager` / `NdrRuntime` emit pubsub intent and the host app executes
-it.
+For app integration, `SessionManager` / `NdrRuntime` emit pubsub events and the host app executes
+them.
 
 ```rust
 use nostr::{Event, Keys};
@@ -159,9 +159,9 @@ Use NIP-40-style `["expiration", "<unix seconds>"]` tags in inner rumors.
 
 ## Direct Message Catch-Up
 
-`SessionManager` owns session routing and emits subscription intent, but the caller still owns
-relay history fetch. When a new `session-current-*` or `session-next-*` author appears, run a
-short replay/backfill immediately with `DirectMessageSubscriptionTracker` and
+`SessionManager` owns session routing and emits subscription events, but the caller still owns relay
+history fetch. When a new `session-current-*` or `session-next-*` author appears, run a short
+replay/backfill immediately with `DirectMessageSubscriptionTracker` and
 `build_direct_message_backfill_filter(...)` instead of waiting for a periodic sweep.
 
 ## 1:1 Chat Settings Signaling

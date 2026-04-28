@@ -160,10 +160,6 @@ export class NdrRuntime {
 
   private readonly stateListeners = new Set<(state: NdrRuntimeState) => void>();
   private readonly sessionEventCallbacks = new Set<OnEventCallback>();
-  private readonly sessionEventCleanup = new Map<
-    OnEventCallback,
-    Unsubscribe
-  >();
 
   private state: NdrRuntimeState = {
     ownerPubkey: null,
@@ -229,17 +225,8 @@ export class NdrRuntime {
 
   onSessionEvent(callback: OnEventCallback): Unsubscribe {
     this.sessionEventCallbacks.add(callback);
-    if (this.sessionManager && !this.sessionEventCleanup.has(callback)) {
-      this.sessionEventCleanup.set(
-        callback,
-        this.sessionManager.onEvent(callback),
-      );
-    }
     return () => {
       this.sessionEventCallbacks.delete(callback);
-      const cleanup = this.sessionEventCleanup.get(callback);
-      cleanup?.();
-      this.sessionEventCleanup.delete(callback);
     };
   }
 
@@ -388,7 +375,6 @@ export class NdrRuntime {
         this.sessionStorage,
       );
       this.sessionManager = manager;
-      this.attachSessionEventCallbacks(manager);
       this.attachSessionManagerEvents(manager);
       await manager.init();
       await this.flushSessionManagerEvents();
@@ -400,12 +386,13 @@ export class NdrRuntime {
         ownerPubkey,
         sessionManagerReady: true,
       });
-      this.groupController.setSessionManager(manager);
+      this.groupController.setSessionManager(manager, {
+        bridgeSessionEvents: false,
+      });
       this.syncDirectMessageSubscription();
       return manager;
     })()
       .catch((error) => {
-        this.clearAttachedSessionEventCallbacks();
         this.clearSessionManagerEvents();
         this.messagePushAuthorCleanup?.();
         this.messagePushAuthorCleanup = null;
@@ -1021,7 +1008,6 @@ export class NdrRuntime {
       clearTimeout(this.directMessageSubscriptionThrottleTimer);
       this.directMessageSubscriptionThrottleTimer = null;
     }
-    this.clearAttachedSessionEventCallbacks();
     this.clearSessionManagerEvents();
     this.groupController.close();
     this.appKeysManager?.close();
@@ -1045,13 +1031,6 @@ export class NdrRuntime {
       groupManagerReady: false,
       appKeysSubscriptionActive: false,
     });
-  }
-
-  private attachSessionEventCallbacks(manager: SessionManager): void {
-    this.clearAttachedSessionEventCallbacks();
-    for (const callback of this.sessionEventCallbacks) {
-      this.sessionEventCleanup.set(callback, manager.onEvent(callback));
-    }
   }
 
   private attachSessionManagerEvents(manager: SessionManager): void {
@@ -1091,6 +1070,14 @@ export class NdrRuntime {
   private async handleSessionManagerEvent(
     event: SessionManagerEvent,
   ): Promise<void> {
+    if (event.type === "decryptedMessage") {
+      this.groupController.processSessionEvent(event.event, event.sender, event.meta);
+      for (const callback of this.sessionEventCallbacks) {
+        callback(event.event, event.sender, event.meta);
+      }
+      return;
+    }
+
     if (event.type === "publish") {
       await this.nostrPublish(event.event);
       return;
@@ -1111,13 +1098,6 @@ export class NdrRuntime {
       }
     });
     this.sessionManagerEmittedSubscriptions.set(event.subid, cleanup);
-  }
-
-  private clearAttachedSessionEventCallbacks(): void {
-    for (const cleanup of this.sessionEventCleanup.values()) {
-      cleanup();
-    }
-    this.sessionEventCleanup.clear();
   }
 
   private clearSessionManagerEvents(): void {

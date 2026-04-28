@@ -24,7 +24,7 @@ pnpm add nostr-double-ratchet
 | Mode | Use it when | What it owns |
 | --- | --- | --- |
 | `NdrRuntime` | You want the default production path for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`. |
-| `SessionManager` | You want multi-device routing, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and subscription intent. |
+| `SessionManager` | You want multi-device routing, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and emitted pubsub/decrypted-message events. |
 | `Session` | You want the smallest 1:1 primitive and already own invite/bootstrap, persistence, and relay transport. Good for negotiated 1:1 channels or app-specific direct links. | Only the ratchet session state itself. |
 
 Supporting pieces around those modes:
