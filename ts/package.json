@@ -1,6 +1,6 @@
 {
   "name": "nostr-double-ratchet",
-  "version": "0.0.117",
+  "version": "0.0.118",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "description": "Nostr double ratchet library",
@@ -21,7 +21,10 @@
     "build": "vite build && tsc",
     "lint": "eslint src --ext .ts --fix"
   },
-  "repository": "https://files.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-double-ratchet",
+  "repository": {
+    "type": "git",
+    "url": "https://files.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-double-ratchet"
+  },
   "author": "Martti Malmi",
   "license": "MIT",
   "homepage": "https://files.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-double-ratchet",

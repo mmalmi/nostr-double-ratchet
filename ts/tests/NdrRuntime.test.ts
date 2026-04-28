@@ -488,6 +488,64 @@ describe("NdrRuntime", () => {
     await linkedReceived
   })
 
+  it("fans out same-owner messages across three registered runtimes", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+
+    const firstRuntime = createRuntime({ relay, ownerPrivateKey })
+    const secondRuntime = createRuntime({ relay, ownerPrivateKey })
+    const thirdRuntime = createRuntime({ relay, ownerPrivateKey })
+
+    await firstRuntime.initForOwner(ownerPubkey)
+    await firstRuntime.republishInvite()
+    await firstRuntime.registerCurrentDevice({ ownerPubkey })
+    await secondRuntime.initForOwner(ownerPubkey)
+    await secondRuntime.republishInvite()
+    await secondRuntime.registerCurrentDevice({ ownerPubkey, timeoutMs: 500 })
+    await thirdRuntime.initForOwner(ownerPubkey)
+    await thirdRuntime.republishInvite()
+    await thirdRuntime.registerCurrentDevice({ ownerPubkey, timeoutMs: 500 })
+
+    await Promise.all([
+      firstRuntime.refreshOwnAppKeysFromRelay(ownerPubkey, 50),
+      secondRuntime.refreshOwnAppKeysFromRelay(ownerPubkey, 50),
+      thirdRuntime.refreshOwnAppKeysFromRelay(ownerPubkey, 50),
+    ])
+    await Promise.all([
+      firstRuntime.setupUser(ownerPubkey),
+      secondRuntime.setupUser(ownerPubkey),
+      thirdRuntime.setupUser(ownerPubkey),
+    ])
+    const receivedBySecond = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("second runtime did not receive owner message")),
+        1000,
+      )
+      const unsubscribe = secondRuntime.onSessionEvent((event) => {
+        if (event.content !== "hello three owner runtimes") return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+    const receivedByThird = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("third runtime did not receive owner message")),
+        1000,
+      )
+      const unsubscribe = thirdRuntime.onSessionEvent((event) => {
+        if (event.content !== "hello three owner runtimes") return
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await firstRuntime.sendMessage(ownerPubkey, "hello three owner runtimes")
+    await Promise.all([receivedBySecond, receivedByThird])
+  })
+
   it("deduplicates concurrent link invite accepts before linked-device fanout", async () => {
     const relay = new MockRelay()
     const ownerPrivateKey = generateSecretKey()

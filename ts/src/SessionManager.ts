@@ -1469,9 +1469,8 @@ export class SessionManager {
 
     rumor.id = getEventHash(rumor)
 
-    // Use sendEvent for actual sending (includes queueing)
-    // Note: sendEvent is not awaited to maintain backward compatibility
-    // The message is queued and will be sent when sessions are established
+    // Use sendEvent for actual sending (includes queueing).
+    // Note: sendEvent is not awaited to maintain backward compatibility.
     this.sendEvent(recipientPublicKey, rumor).catch(() => {})
 
     return rumor

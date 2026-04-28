@@ -344,7 +344,11 @@ export class Session {
   // 4. NOSTR EVENT HANDLING
   private decryptHeader(event: { tags: string[][]; pubkey: string }): [Header, boolean, boolean] {
     const encryptedHeader = event.tags[0][1];
-    if (this.state.ourCurrentNostrKey) {
+    if (
+      this.state.ourCurrentNostrKey &&
+      (!this.state.theirCurrentNostrPublicKey ||
+        event.pubkey === this.state.theirCurrentNostrPublicKey)
+    ) {
       const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, event.pubkey);
       try {
         const header = JSON.parse(nip44.decrypt(encryptedHeader, currentSecret)) as Header;
@@ -354,12 +358,17 @@ export class Session {
       }
     }
 
-    const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, event.pubkey);
-    try {
-      const header = JSON.parse(nip44.decrypt(encryptedHeader, nextSecret)) as Header;
-      return [header, true, false];
-    } catch {
-      // Decryption with nextSecret also failed
+    if (
+      !this.state.theirNextNostrPublicKey ||
+      event.pubkey === this.state.theirNextNostrPublicKey
+    ) {
+      const nextSecret = nip44.getConversationKey(this.state.ourNextNostrKey.privateKey, event.pubkey);
+      try {
+        const header = JSON.parse(nip44.decrypt(encryptedHeader, nextSecret)) as Header;
+        return [header, true, false];
+      } catch {
+        // Decryption with nextSecret also failed
+      }
     }
 
     const skippedKeys = this.state.skippedKeys[event.pubkey];

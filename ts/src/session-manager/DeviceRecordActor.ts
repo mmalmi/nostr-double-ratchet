@@ -173,16 +173,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
       return Promise.reject(new Error("Invite does not target this device"))
     }
 
-    const existingSession = this.activeSession || this.inactiveSessions[0]
-    if (existingSession) {
-      return Promise.resolve(existingSession)
-    }
-
     if (this.hasEstablishedActiveSession()) {
-      return Promise.resolve(this.activeSession!)
-    }
-
-    if (this.activeSession && DeviceRecordActor.sessionCanSend(this.activeSession)) {
       return Promise.resolve(this.activeSession!)
     }
 
