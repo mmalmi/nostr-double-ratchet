@@ -733,6 +733,16 @@ describe("NdrRuntime", () => {
     await peerRuntime.initForOwner(peerPubkey)
     await peerRuntime.registerCurrentDevice({ ownerPubkey: peerPubkey })
     await peerRuntime.republishInvite()
+    const publishedInnerEventIds: Array<string | undefined> = []
+    const originalPublish = (ownerRuntime as unknown as {
+      nostrPublish: NostrPublish
+    }).nostrPublish
+    ;(ownerRuntime as unknown as {
+      nostrPublish: NostrPublish
+    }).nostrPublish = async (event, innerEventId) => {
+      publishedInnerEventIds.push(innerEventId)
+      return originalPublish(event, innerEventId)
+    }
 
     const message = "prebuilt runtime hello"
     const ownerDevicePubkey = ownerRuntime.getState().currentDevicePubkey
@@ -779,6 +789,7 @@ describe("NdrRuntime", () => {
     await ownerRuntime.sendEvent(peerPubkey, rumor)
 
     await Promise.all([linkedReceived, peerReceived])
+    expect(publishedInnerEventIds).toContain(rumor.id)
   })
 
   it("subscribes newly added direct-message authors without waiting for the throttle", () => {

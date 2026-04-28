@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.119 - 2026-04-28
+
+- Pass the inner rumor event id through `NdrRuntime` publish callbacks so apps can correlate encrypted outer publishes with local message records.
+
 ## 0.0.118 - 2026-04-28
 
 - Reject direct-message wrapper events whose outer author is not the expected ratchet author for the session, preventing same-invite linked-device bootstraps from corrupting sibling sessions.

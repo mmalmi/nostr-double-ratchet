@@ -1097,7 +1097,7 @@ export class NdrRuntime {
     }
 
     if (event.type === "publish") {
-      await this.nostrPublish(event.event);
+      await this.nostrPublish(event.event, event.innerEventId);
       return;
     }
 
