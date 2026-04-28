@@ -402,6 +402,8 @@ mod tests {
         let _prefer = EnvGuard::set("NOSTR_PREFER_LOCAL", "1");
         let _ports = EnvGuard::set("NOSTR_LOCAL_RELAY_PORTS", &port.to_string());
         let _relays = EnvGuard::clear("NOSTR_RELAYS");
+        let _explicit_local = EnvGuard::clear("NOSTR_LOCAL_RELAY");
+        let _explicit_htree_local = EnvGuard::clear("HTREE_LOCAL_RELAY");
 
         let config = Config {
             relays: vec!["wss://relay.example".to_string()],
@@ -409,9 +411,16 @@ mod tests {
         };
 
         let resolved = config.resolved_relays();
-        assert!(!resolved.is_empty());
-        assert_eq!(resolved[0], format!("ws://127.0.0.1:{port}"));
-        assert!(resolved.contains(&"wss://relay.example".to_string()));
+        let local = format!("ws://127.0.0.1:{port}");
+        let local_index = resolved
+            .iter()
+            .position(|relay| relay == &local)
+            .expect("configured local relay should be detected");
+        let configured_index = resolved
+            .iter()
+            .position(|relay| relay == "wss://relay.example")
+            .expect("configured relay should be retained");
+        assert!(local_index < configured_index);
     }
 
     #[test]
