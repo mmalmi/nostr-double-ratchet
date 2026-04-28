@@ -143,6 +143,7 @@ export class SessionManager {
   // Track processed InviteResponse event IDs to prevent replay
   private processedInviteResponses: Set<string> = new Set()
   private pendingInviteResponses: Map<string, PendingInviteResponse> = new Map()
+  private inviteAcceptPromises: Map<string, Promise<AcceptInviteResult>> = new Map()
   // Expiration defaults (persisted)
   private defaultExpiration: ExpirationOptions | undefined
   private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
@@ -1129,6 +1130,48 @@ export class SessionManager {
       invite.ownerPubkey ||
       this.resolveToOwner(deviceId) ||
       deviceId
+
+    const acceptKey = [
+      invite.purpose || "chat",
+      claimedOwnerPublicKey,
+      deviceId,
+      invite.inviterEphemeralPublicKey,
+      invite.sharedSecret,
+    ].join(":")
+    const existingAccept = this.inviteAcceptPromises.get(acceptKey)
+    if (existingAccept) {
+      return existingAccept
+    }
+
+    const acceptPromise = this.doAcceptInvite(invite, options, {
+      deviceId,
+      explicitSameDeviceOwnerHint,
+      claimedOwnerPublicKey,
+    })
+    this.inviteAcceptPromises.set(acceptKey, acceptPromise)
+    try {
+      return await acceptPromise
+    } finally {
+      if (this.inviteAcceptPromises.get(acceptKey) === acceptPromise) {
+        this.inviteAcceptPromises.delete(acceptKey)
+      }
+    }
+  }
+
+  private async doAcceptInvite(
+    invite: Invite,
+    options: AcceptInviteOptions,
+    resolved: {
+      deviceId: string
+      explicitSameDeviceOwnerHint: boolean
+      claimedOwnerPublicKey: string
+    }
+  ): Promise<AcceptInviteResult> {
+    const {
+      deviceId,
+      explicitSameDeviceOwnerHint,
+      claimedOwnerPublicKey,
+    } = resolved
 
     let ownerPublicKey = claimedOwnerPublicKey
     let preloadedAppKeys: AppKeys | null = null

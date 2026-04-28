@@ -11,7 +11,13 @@ import {
 import { AppKeys } from "../src/AppKeys"
 import { NdrRuntime } from "../src/NdrRuntime"
 import { InMemoryStorageAdapter, type StorageAdapter } from "../src/StorageAdapter"
-import { CHAT_MESSAGE_KIND, type NostrPublish, type NostrSubscribe, type Rumor } from "../src/types"
+import {
+  CHAT_MESSAGE_KIND,
+  INVITE_RESPONSE_KIND,
+  type NostrPublish,
+  type NostrSubscribe,
+  type Rumor,
+} from "../src/types"
 import { MockRelay } from "./helpers/mockRelay"
 
 const tick = async (ms = 0) =>
@@ -375,6 +381,59 @@ describe("NdrRuntime", () => {
     })
 
     await ownerRuntime.sendMessage(ownerPubkey, "hello linked runtime")
+    await linkedReceived
+  })
+
+  it("deduplicates concurrent link invite accepts before linked-device fanout", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+
+    const ownerRuntime = createRuntime({ relay, ownerPrivateKey })
+    await ownerRuntime.initForOwner(ownerPubkey)
+    await ownerRuntime.registerCurrentDevice({ ownerPubkey })
+    await ownerRuntime.republishInvite()
+
+    const linkedRuntime = createRuntime({ relay })
+    await linkedRuntime.initDelegateManager()
+    const linkInvite = await linkedRuntime.createLinkInvite(ownerPubkey)
+    await linkedRuntime.republishInvite()
+
+    const [firstAccept, secondAccept] = await Promise.all([
+      ownerRuntime.acceptLinkInvite(linkInvite, ownerPubkey),
+      ownerRuntime.acceptLinkInvite(linkInvite, ownerPubkey),
+    ])
+
+    expect(secondAccept.session).toBe(firstAccept.session)
+    expect(
+      relay.getAllEvents().filter((event) => event.kind === INVITE_RESPONSE_KIND),
+    ).toHaveLength(1)
+
+    await ownerRuntime.registerDeviceIdentity({
+      ownerPubkey,
+      identityPubkey: linkInvite.inviter,
+      timeoutMs: 500,
+    })
+
+    await linkedRuntime.initForOwner(ownerPubkey)
+
+    const message = "hello after deduped link"
+    const linkedReceived = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("linked runtime did not receive deduped-link message")),
+        5_000,
+      )
+      const unsubscribe = linkedRuntime.onSessionEvent((event, from, meta) => {
+        if (event.content !== message) return
+        expect(from).toBe(ownerPubkey)
+        expect(meta?.isCrossDeviceSelf).toBe(true)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await ownerRuntime.sendMessage(ownerPubkey, message)
     await linkedReceived
   })
 

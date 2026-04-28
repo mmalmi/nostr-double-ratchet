@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.114 - 2026-04-28
+
+- Deduplicate concurrent link-invite accepts so the TypeScript runtime cannot create parallel ratchet sessions for the same linked device.
+- Add linked-device fanout coverage for duplicate link-accept races.
+
 ## 0.0.113 - 2026-04-28
 
 - Subscribe newly added runtime direct-message authors immediately while keeping stale-author removal throttled, reducing missed live delivery during rapid ratchet author changes.
