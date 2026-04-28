@@ -856,7 +856,7 @@ export class NdrRuntime {
     const prepared = await this.prepareRegistration(options);
     const result = await this.publishPreparedRegistration(prepared);
     if (result.relayConfirmationRequired) {
-      await this.waitForCurrentDeviceRegistrationOnRelay(
+      await this.waitForDeviceRegistrationOnRelay(
         options.ownerPubkey,
         prepared.newDeviceIdentity,
         options.timeoutMs || this.appKeysFetchTimeoutMs,
@@ -876,7 +876,19 @@ export class NdrRuntime {
     options: RegisterDeviceIdentityOptions,
   ): Promise<PublishPreparedRegistrationResult> {
     const prepared = await this.prepareRegistrationForIdentity(options);
-    return this.publishPreparedRegistration(prepared);
+    const result = await this.publishPreparedRegistration(prepared);
+    if (result.relayConfirmationRequired) {
+      await this.waitForDeviceRegistrationOnRelay(
+        options.ownerPubkey,
+        prepared.newDeviceIdentity,
+        options.timeoutMs || this.appKeysFetchTimeoutMs,
+      );
+      await this.refreshOwnAppKeysFromRelay(
+        options.ownerPubkey,
+        options.timeoutMs || this.appKeysFastTimeoutMs,
+      ).catch(() => {});
+    }
+    return result;
   }
 
   async revokeDevice(options: RevokeDeviceOptions): Promise<number> {
@@ -1161,7 +1173,7 @@ export class NdrRuntime {
     return this.nostrPublish(appKeys.getEvent(this.ownerIdentityKey));
   }
 
-  private async waitForCurrentDeviceRegistrationOnRelay(
+  private async waitForDeviceRegistrationOnRelay(
     ownerPubkey: string,
     devicePubkey: string,
     timeoutMs: number,

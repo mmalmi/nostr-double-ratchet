@@ -119,6 +119,56 @@ describe("NdrRuntime", () => {
     expect(relaySnapshot?.getAllDevices()).toHaveLength(2)
   })
 
+  it("waits for relay-visible AppKeys when registering a linked device identity", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+    const linkedPrivateKey = generateSecretKey()
+    const linkedPubkey = getPublicKey(linkedPrivateKey)
+
+    const primaryRuntime = createRuntime({ relay, ownerPrivateKey })
+    await primaryRuntime.initForOwner(ownerPubkey)
+    await primaryRuntime.registerCurrentDevice({ ownerPubkey })
+
+    const ownerRuntime = createRuntime({
+      relay,
+      ownerPrivateKey,
+      appKeysDelayMs: 50,
+    })
+    await ownerRuntime.initForOwner(ownerPubkey)
+
+    let resolved = false
+    const registrationPromise = ownerRuntime
+      .registerDeviceIdentity({
+        ownerPubkey,
+        identityPubkey: linkedPubkey,
+        timeoutMs: 500,
+      })
+      .then((result) => {
+        resolved = true
+        return result
+      })
+
+    await tick(20)
+    expect(resolved).toBe(false)
+
+    const result = await registrationPromise
+
+    expect(result.relayConfirmationRequired).toBe(true)
+    expect(ownerRuntime.getState().registeredDevices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ identityPubkey: linkedPubkey }),
+      ]),
+    )
+
+    const relaySnapshot = await AppKeys.waitFor(ownerPubkey, createSubscribe(relay), 25)
+    expect(
+      relaySnapshot
+        ?.getAllDevices()
+        .some((device) => device.identityPubkey === linkedPubkey),
+    ).toBe(true)
+  })
+
   it("ignores stale AppKeys snapshots on the runtime subscription", async () => {
     const relay = new MockRelay()
     const ownerPrivateKey = generateSecretKey()

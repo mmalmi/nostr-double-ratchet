@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.110 - 2026-04-28
+
+- Wait for relay-visible AppKeys when registering a linked device identity, matching current-device registration behavior and avoiding sends before linked-device fanout is established.
+
 ## 0.0.109 - 2026-04-28
 
 - Emit decrypted TypeScript session messages through the same runtime event queue as publish/subscribe work, matching the Rust feed/drain model more closely.
