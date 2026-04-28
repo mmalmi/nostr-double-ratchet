@@ -275,6 +275,39 @@ describe("NdrRuntime", () => {
     expect(feedEvent).toHaveBeenCalledWith(event)
   })
 
+  it("decrypts encrypted AppKeys labels from owner-key runtime subscriptions", async () => {
+    const relay = new MockRelay()
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+    const device = { identityPubkey: getPublicKey(generateSecretKey()), createdAt: 100 }
+    const runtime = new NdrRuntime({
+      nostrSubscribe: createSubscribe(relay),
+      nostrPublish: async (event) => event as VerifiedEvent,
+      ownerIdentityKey: ownerPrivateKey,
+    })
+
+    await runtime.initAppKeysManager()
+    runtime.startAppKeysSubscription(ownerPubkey)
+
+    const appKeys = new AppKeys([device])
+    appKeys.setDeviceLabels(device.identityPubkey, {
+      deviceLabel: "Sirius MacBook",
+      clientLabel: "NDR Desktop",
+    })
+    const event = appKeys.getEvent(ownerPrivateKey)
+    event.created_at = 200
+    relay.storeAndDeliver(finalizeEvent(event, ownerPrivateKey) as VerifiedEvent)
+    await tick()
+
+    expect(
+      runtime.getAppKeysManager()?.getDeviceLabels(device.identityPubkey)
+    ).toEqual({
+      deviceLabel: "Sirius MacBook",
+      clientLabel: "NDR Desktop",
+      updatedAt: expect.any(Number),
+    })
+  })
+
   it("feeds local owner AppKeys into the session core before owner setup", async () => {
     const ownerPrivateKey = generateSecretKey()
     const ownerPubkey = getPublicKey(ownerPrivateKey)

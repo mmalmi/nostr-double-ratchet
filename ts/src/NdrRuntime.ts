@@ -575,6 +575,7 @@ export class NdrRuntime {
         ownerPubkey,
         this.nostrSubscribe,
         initialTimeoutMs,
+        this.ownerIdentityKey,
       );
       if (existingKeys) {
         return existingKeys;
@@ -595,6 +596,7 @@ export class NdrRuntime {
           ownerPubkey,
           this.nostrSubscribe,
           remaining,
+          this.ownerIdentityKey,
         );
         if (existingKeys) {
           return existingKeys;
@@ -623,7 +625,7 @@ export class NdrRuntime {
       async (event) => {
         if (event.pubkey !== ownerPubkey) return;
         try {
-          const incomingAppKeys = AppKeys.fromEvent(event);
+          const incomingAppKeys = AppKeys.fromEvent(event, this.ownerIdentityKey);
           await this.applyIncomingAppKeys(incomingAppKeys, event.created_at);
           this.feedSessionManagerEvent(event);
         } catch {
@@ -727,6 +729,7 @@ export class NdrRuntime {
       ownerPubkey,
       this.nostrSubscribe,
       timeoutMs,
+      this.ownerIdentityKey,
     );
     if (!nextSnapshot) {
       return false;
@@ -1214,6 +1217,7 @@ export class NdrRuntime {
       ownerPubkey,
       this.nostrSubscribe,
       timeoutMs,
+      this.ownerIdentityKey,
     );
     const isAuthorized =
       appKeys

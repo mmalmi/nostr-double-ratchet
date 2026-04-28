@@ -353,14 +353,15 @@ export class AppKeys {
   static fromUser(
     user: string,
     subscribe: NostrSubscribe,
-    onAppKeysList: (appKeys: AppKeys) => void
+    onAppKeysList: (appKeys: AppKeys) => void,
+    ownerPrivateKey?: Uint8Array
   ): Unsubscribe {
     return subscribe(
       buildAppKeysFilter(user),
       (event) => {
         if (event.pubkey !== user) return
         try {
-          const appKeys = AppKeys.fromEvent(event)
+          const appKeys = AppKeys.fromEvent(event, ownerPrivateKey)
           onAppKeysList(appKeys)
         } catch {
           // Invalid event
@@ -378,9 +379,10 @@ export class AppKeys {
   static waitFor(
     user: string,
     subscribe: NostrSubscribe,
-    timeoutMs = 500
+    timeoutMs = 500,
+    ownerPrivateKey?: Uint8Array
   ): Promise<AppKeys | null> {
-    return AppKeys.waitForSnapshot(user, subscribe, timeoutMs).then(
+    return AppKeys.waitForSnapshot(user, subscribe, timeoutMs, ownerPrivateKey).then(
       (snapshot) => snapshot?.appKeys ?? null
     )
   }
@@ -388,7 +390,8 @@ export class AppKeys {
   static waitForSnapshot(
     user: string,
     subscribe: NostrSubscribe,
-    timeoutMs = 500
+    timeoutMs = 500,
+    ownerPrivateKey?: Uint8Array
   ): Promise<{ appKeys: AppKeys; createdAt: number } | null> {
     return new Promise((resolve) => {
       let latest: { list: AppKeys; createdAt: number } | null = null
@@ -403,7 +406,7 @@ export class AppKeys {
         (event) => {
           if (event.pubkey !== user) return
           try {
-            const list = AppKeys.fromEvent(event)
+            const list = AppKeys.fromEvent(event, ownerPrivateKey)
             const next = applyAppKeysSnapshot({
               currentAppKeys: latest?.list,
               currentCreatedAt: latest?.createdAt,

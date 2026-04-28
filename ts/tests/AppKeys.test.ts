@@ -424,6 +424,38 @@ describe('AppKeys', () => {
       expect(result?.getAllDevices()).toEqual([device])
     })
 
+    it('decrypts encrypted device labels while waiting when the owner key is supplied', async () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const device = createTestDevice()
+      const list = new AppKeys([device])
+      list.setDeviceLabels(device.identityPubkey, {
+        deviceLabel: 'Sirius MacBook',
+        clientLabel: 'NDR Desktop',
+      })
+      const event = finalizeEvent(list.getEvent(ownerPrivateKey), ownerPrivateKey)
+
+      const nostrSubscribe: NostrSubscribe = (_filter, onEvent) => {
+        setTimeout(() => onEvent(event), 0)
+        return () => {}
+      }
+
+      const withoutKey = await AppKeys.waitFor(ownerPublicKey, nostrSubscribe, 20)
+      expect(withoutKey?.getDeviceLabels(device.identityPubkey)).toBeUndefined()
+
+      const withKey = await AppKeys.waitFor(
+        ownerPublicKey,
+        nostrSubscribe,
+        20,
+        ownerPrivateKey
+      )
+      expect(withKey?.getDeviceLabels(device.identityPubkey)).toEqual({
+        deviceLabel: 'Sirius MacBook',
+        clientLabel: 'NDR Desktop',
+        updatedAt: expect.any(Number),
+      })
+    })
+
     it('preserves the larger same-second AppKeys snapshot when events arrive out of order', async () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)

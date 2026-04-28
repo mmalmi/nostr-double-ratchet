@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.121 - 2026-04-28
+
+- Decrypt encrypted AppKeys device labels when owner-key runtimes backfill or subscribe to their own AppKeys events, preserving human device labels after relay refreshes.
+
 ## 0.0.120 - 2026-04-28
 
 - Pass group inner event ids through `NdrRuntime` publish callbacks so apps can correlate one-to-many group publishes with local group message records.
