@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.117 - 2026-04-28
+
+- Feed the runtime's current local owner AppKeys snapshot into the session core before owner setup, so same-owner multi-device sends can fan out to newly registered sibling devices even if the session AppKeys subscription missed an update.
+
 ## 0.0.116 - 2026-04-28
 
 - Feed AppKeys events observed by `NdrRuntime` into the session core as well as runtime device state, keeping owner-device session discovery aligned with runtime AppKeys subscriptions.

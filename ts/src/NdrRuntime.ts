@@ -37,7 +37,7 @@ import {
   type Rumor,
   type Unsubscribe,
 } from "./types";
-import type { VerifiedEvent } from "nostr-tools";
+import { finalizeEvent, type VerifiedEvent } from "nostr-tools";
 import {
   SessionGroupRuntime,
   type RuntimeGroupEvent,
@@ -411,9 +411,11 @@ export class NdrRuntime {
   }
 
   async setupUser(userPubkey: string, ownerPubkey?: string): Promise<void> {
-    const manager = await this.waitForSessionManager(
-      this.resolveActiveOwnerPubkey(ownerPubkey),
-    );
+    const activeOwnerPubkey = this.resolveActiveOwnerPubkey(ownerPubkey);
+    const manager = await this.waitForSessionManager(activeOwnerPubkey);
+    if (userPubkey === activeOwnerPubkey) {
+      this.feedLocalAppKeysSnapshotToSessionManager(activeOwnerPubkey);
+    }
     try {
       await manager.setupUser(userPubkey);
     } finally {
@@ -1119,6 +1121,27 @@ export class NdrRuntime {
       this.syncDirectMessageSubscription();
     }
     return handled;
+  }
+
+  private feedLocalAppKeysSnapshotToSessionManager(ownerPubkey: string): boolean {
+    if (!this.ownerIdentityKey) {
+      return false;
+    }
+
+    const appKeys = this.appKeysManager?.getAppKeys();
+    if (!appKeys || appKeys.getAllDevices().length === 0) {
+      return false;
+    }
+
+    const signedEvent = finalizeEvent(
+      appKeys.getEvent(this.ownerIdentityKey),
+      this.ownerIdentityKey,
+    ) as VerifiedEvent;
+    if (signedEvent.pubkey !== ownerPubkey) {
+      return false;
+    }
+
+    return this.feedSessionManagerEvent(signedEvent);
   }
 
   private clearSessionManagerEvents(): void {

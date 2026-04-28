@@ -266,6 +266,65 @@ describe("NdrRuntime", () => {
     expect(feedEvent).toHaveBeenCalledWith(event)
   })
 
+  it("feeds local owner AppKeys into the session core before owner setup", async () => {
+    const ownerPrivateKey = generateSecretKey()
+    const ownerPubkey = getPublicKey(ownerPrivateKey)
+    const feedEvent = vi.fn(() => true)
+    const setupUser = vi.fn().mockResolvedValue(undefined)
+    const runtime = new NdrRuntime({
+      nostrSubscribe: () => () => {},
+      nostrPublish: async (event) => event as VerifiedEvent,
+      ownerIdentityKey: ownerPrivateKey,
+    })
+    await runtime.initAppKeysManager()
+    await runtime.initDelegateManager()
+    ;(runtime as unknown as {
+      state: { ownerPubkey: string }
+      sessionManager: {
+        feedEvent: (event: VerifiedEvent) => boolean
+        setupUser: (pubkey: string) => Promise<void>
+        getAllMessagePushAuthorPubkeys: () => string[]
+        drainEvents: () => []
+        hasPendingEvents: () => boolean
+      }
+    }).state.ownerPubkey = ownerPubkey
+    ;(runtime as unknown as {
+      sessionManager: {
+        feedEvent: (event: VerifiedEvent) => boolean
+        setupUser: (pubkey: string) => Promise<void>
+        getAllMessagePushAuthorPubkeys: () => string[]
+        drainEvents: () => []
+        hasPendingEvents: () => boolean
+      }
+    }).sessionManager = {
+      feedEvent,
+      setupUser,
+      getAllMessagePushAuthorPubkeys: () => [],
+      drainEvents: () => [],
+      hasPendingEvents: () => false,
+    }
+    await runtime.publishPreparedRegistration({
+      appKeys: new AppKeys([
+        { identityPubkey: "device-a", createdAt: 100 },
+        { identityPubkey: "device-b", createdAt: 101 },
+      ]),
+      devices: [
+        { identityPubkey: "device-a", createdAt: 100 },
+        { identityPubkey: "device-b", createdAt: 101 },
+      ],
+      baseDevices: [],
+      newDeviceIdentity: "device-b",
+    })
+    feedEvent.mockClear()
+
+    await runtime.setupUser(ownerPubkey)
+
+    expect(setupUser).toHaveBeenCalledWith(ownerPubkey)
+    const fedEvent = feedEvent.mock.calls[0]?.[0]
+    expect(fedEvent?.pubkey).toBe(ownerPubkey)
+    expect(AppKeys.fromEvent(fedEvent as VerifiedEvent).getAllDevices()).toHaveLength(2)
+  })
+
   it("preserves relay AppKeys timestamps when refreshing from relay", async () => {
     const relay = new MockRelay()
     const ownerPrivateKey = generateSecretKey()
