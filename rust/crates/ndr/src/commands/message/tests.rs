@@ -408,7 +408,7 @@ fn test_recipient_devices_missing_active_sessions_includes_owner_device_without_
     let recipient_devices = std::collections::HashSet::from([recipient_secondary]);
 
     let missing = crate::commands::session_delivery::recipient_devices_missing_active_sessions(
-        runtime.session_manager(),
+        &runtime,
         recipient_owner,
         &recipient_devices,
     );
@@ -462,7 +462,7 @@ fn test_recipient_devices_missing_active_sessions_includes_non_send_capable_sess
 
     let recipient_devices = std::collections::HashSet::new();
     let missing = crate::commands::session_delivery::recipient_devices_missing_active_sessions(
-        runtime.session_manager(),
+        &runtime,
         recipient_owner,
         &recipient_devices,
     );
@@ -1085,4 +1085,48 @@ fn test_session_manager_decrypted_sibling_copy_routes_to_peer_chat_as_outgoing()
 
     let self_messages = storage.get_messages("self-chat", 10).unwrap();
     assert!(self_messages.is_empty());
+}
+
+#[test]
+fn test_session_manager_decrypted_sibling_copy_creates_peer_chat_from_p_tag() {
+    init_test_env();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::load(temp.path()).unwrap();
+    let me = nostr::Keys::generate();
+    let my_owner_hex = me.public_key().to_hex();
+    config
+        .set_private_key(&me.secret_key().to_secret_hex())
+        .unwrap();
+    let config = Config::load(temp.path()).unwrap();
+    let output = Output::new(true);
+    let storage = Storage::open(temp.path()).unwrap();
+
+    let peer_owner = nostr::Keys::generate().public_key().to_hex();
+    let rumor = build_rumor_json(
+        &my_owner_hex,
+        14,
+        "hello from sibling device",
+        vec![vec!["p".to_string(), peer_owner.clone()]],
+    );
+
+    let handled = super::listen::apply_session_manager_one_to_one_decrypted(
+        nostr::PublicKey::from_hex(&my_owner_hex).unwrap(),
+        &rumor,
+        Some("outer-self-1"),
+        3000,
+        &config,
+        &storage,
+        &output,
+    )
+    .unwrap();
+    assert!(handled);
+
+    let chat = storage
+        .get_chat_by_pubkey(&peer_owner)
+        .unwrap()
+        .expect("peer chat should be created from p tag");
+    let peer_messages = storage.get_messages(&chat.id, 10).unwrap();
+    assert_eq!(peer_messages.len(), 1);
+    assert!(peer_messages[0].is_outgoing);
 }

@@ -1,11 +1,10 @@
 use anyhow::Result;
 use nostr_double_ratchet::{
-    FileStorageAdapter, Invite, SessionManager, SessionManagerEvent, StorageAdapter,
-    INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+    Invite, NdrRuntime, SessionManagerEvent, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
 };
-use std::sync::Arc;
 
 use crate::commands::owner_claim::fetch_latest_app_keys_snapshot;
+use crate::commands::runtime_support::build_runtime;
 use crate::commands::session_delivery::{
     is_double_ratchet_invite_event, is_double_ratchet_public_invite_event,
 };
@@ -18,56 +17,21 @@ pub(super) struct PublicInviteJoinResult {
     pub response_event: Option<nostr::Event>,
 }
 
-fn build_session_manager(
-    config: &Config,
+fn upsert_chat_from_runtime(
     storage: &Storage,
-) -> Result<(
-    SessionManager,
-    crossbeam_channel::Receiver<SessionManagerEvent>,
-    nostr::Keys,
-    String,
-)> {
-    let our_private_key = config.private_key_bytes()?;
-    let our_pubkey_hex = config.public_key()?;
-    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
-    let owner_pubkey_hex = config.owner_public_key_hex()?;
-    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
-
-    let session_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
-        storage.data_dir().join("session_manager"),
-    )?);
-
-    let (sm_tx, sm_rx) = crossbeam_channel::unbounded();
-    let manager = SessionManager::new(
-        our_pubkey,
-        our_private_key,
-        our_pubkey_hex,
-        owner_pubkey,
-        sm_tx,
-        Some(session_manager_store),
-        None,
-    );
-    manager.init()?;
-
-    let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
-    Ok((manager, sm_rx, keys, owner_pubkey_hex))
-}
-
-fn upsert_chat_from_session_manager(
-    storage: &Storage,
-    manager: &SessionManager,
+    runtime: &NdrRuntime,
     owner_pubkey: nostr::PublicKey,
     device_id: String,
 ) -> Result<StoredChat> {
     let owner_hex = owner_pubkey.to_hex();
-    let session_state = manager
+    let session_state = runtime
         .export_active_sessions()
         .into_iter()
         .find_map(|(owner, device, state)| {
             (owner == owner_pubkey && device == device_id).then_some(state)
         })
-        .or(manager.export_active_session_state(owner_pubkey)?)
-        .ok_or_else(|| anyhow::anyhow!("SessionManager did not expose active session"))?;
+        .or(runtime.export_active_session_state(owner_pubkey)?)
+        .ok_or_else(|| anyhow::anyhow!("NdrRuntime did not expose active session"))?;
     let session_state_json = serde_json::to_string(&session_state)?;
 
     if let Some(mut existing_chat) = storage.get_chat_by_pubkey(&owner_hex)? {
@@ -94,13 +58,13 @@ fn upsert_chat_from_session_manager(
 }
 
 async fn flush_session_manager_events(
-    manager_rx: &crossbeam_channel::Receiver<SessionManagerEvent>,
+    runtime: &NdrRuntime,
     signing_keys: &nostr::Keys,
     client: &nostr_sdk::Client,
 ) -> Result<Option<nostr::Event>> {
     let mut invite_response: Option<nostr::Event> = None;
 
-    while let Ok(event) = manager_rx.try_recv() {
+    for event in runtime.drain_events() {
         match event {
             SessionManagerEvent::Publish(unsigned) => {
                 let signed = unsigned.sign_with_keys(signing_keys)?;
@@ -147,8 +111,7 @@ pub(super) async fn join_via_invite(
     config: &Config,
     storage: &Storage,
 ) -> Result<PublicInviteJoinResult> {
-    let (manager, manager_rx, signing_keys, _owner_pubkey_hex) =
-        build_session_manager(config, storage)?;
+    let (runtime, signing_keys, _owner_pubkey_hex) = build_runtime(config, storage)?;
 
     let client = connect_client(config).await?;
     if let Some(claimed_owner_pubkey) = invite.owner_public_key {
@@ -160,7 +123,7 @@ pub(super) async fn join_via_invite(
             )
             .await?
             {
-                manager.ingest_app_keys_snapshot(
+                runtime.ingest_app_keys_snapshot(
                     claimed_owner_pubkey,
                     snapshot.app_keys,
                     snapshot.created_at,
@@ -169,15 +132,11 @@ pub(super) async fn join_via_invite(
         }
     }
 
-    let accepted = manager.accept_invite(&invite, invite.owner_public_key)?;
-    let response_event = flush_session_manager_events(&manager_rx, &signing_keys, &client).await?;
+    let accepted = runtime.accept_invite(&invite, invite.owner_public_key)?;
+    let response_event = flush_session_manager_events(&runtime, &signing_keys, &client).await?;
 
-    let chat = upsert_chat_from_session_manager(
-        storage,
-        &manager,
-        accepted.owner_pubkey,
-        accepted.device_id,
-    )?;
+    let chat =
+        upsert_chat_from_runtime(storage, &runtime, accepted.owner_pubkey, accepted.device_id)?;
 
     Ok(PublicInviteJoinResult {
         chat,

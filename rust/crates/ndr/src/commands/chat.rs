@@ -1,10 +1,8 @@
 use anyhow::Result;
-use nostr_double_ratchet::{
-    FileStorageAdapter, SessionManager, SessionManagerEvent, StorageAdapter,
-};
+use nostr_double_ratchet::SessionManagerEvent;
 use serde::Serialize;
-use std::sync::Arc;
 
+use crate::commands::runtime_support::{build_runtime, sync_chats_from_runtime};
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
@@ -142,10 +140,10 @@ pub async fn delete(id: &str, config: &Config, storage: &Storage, output: &Outpu
         .get_chat(id)?
         .ok_or_else(|| anyhow::anyhow!("Chat not found: {}", id))?;
 
-    // Best-effort SessionManager cleanup to remove persisted multi-device session state.
+    // Best-effort runtime cleanup to remove persisted multi-device session state.
     // Local chat file deletion below still succeeds even if this cleanup fails.
     if config.is_logged_in() {
-        let _ = delete_session_manager_chat(config, storage, &chat.their_pubkey);
+        let _ = delete_runtime_chat(config, storage, &chat.their_pubkey);
     }
 
     if storage.delete_chat(id)? {
@@ -156,34 +154,10 @@ pub async fn delete(id: &str, config: &Config, storage: &Storage, output: &Outpu
     Ok(())
 }
 
-fn delete_session_manager_chat(
-    config: &Config,
-    storage: &Storage,
-    their_pubkey_hex: &str,
-) -> Result<()> {
-    let our_private_key = config.private_key_bytes()?;
-    let our_pubkey_hex = config.public_key()?;
-    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
-    let owner_pubkey_hex = config.owner_public_key_hex()?;
-    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
+fn delete_runtime_chat(config: &Config, storage: &Storage, their_pubkey_hex: &str) -> Result<()> {
     let their_pubkey = nostr::PublicKey::from_hex(their_pubkey_hex)?;
-
-    let session_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
-        storage.data_dir().join("session_manager"),
-    )?);
-
-    let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
-    let manager = SessionManager::new(
-        our_pubkey,
-        our_private_key,
-        our_pubkey_hex,
-        owner_pubkey,
-        sm_tx,
-        Some(session_manager_store),
-        None,
-    );
-    manager.init()?;
-    manager.delete_chat(their_pubkey)?;
+    let (runtime, _signing_keys, _owner_pubkey_hex) = build_runtime(config, storage)?;
+    runtime.delete_chat(their_pubkey)?;
     Ok(())
 }
 
@@ -252,28 +226,9 @@ pub async fn ttl(
 
     let ttl_to_send = ttl_seconds.unwrap_or(0);
 
-    let our_private_key = config.private_key_bytes()?;
-    let our_pubkey_hex = config.public_key()?;
-    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
-    let owner_pubkey_hex = config.owner_public_key_hex()?;
-    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
+    let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
 
-    let session_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
-        storage.data_dir().join("session_manager"),
-    )?);
-    let (sm_tx, sm_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-    let manager = SessionManager::new(
-        our_pubkey,
-        our_private_key,
-        our_pubkey_hex,
-        owner_pubkey,
-        sm_tx,
-        Some(session_manager_store),
-        None,
-    );
-    manager.init()?;
-
-    // Import the current selected session so we can send via SessionManager.
+    // Import the current selected session so we can send via NdrRuntime.
     let device_id = chat.device_id.clone().unwrap_or_else(|| chat.id.clone());
     let state: nostr_double_ratchet::SessionState = serde_json::from_str(&chat.session_state)
         .map_err(|e| {
@@ -282,16 +237,15 @@ pub async fn ttl(
                 e
             )
         })?;
-    manager.import_session_state(recipient, Some(device_id), state)?;
+    runtime.import_session_state(recipient, Some(device_id), state)?;
 
-    let event_ids = manager.send_chat_settings(recipient, ttl_to_send)?;
+    let event_ids = runtime.send_chat_settings(recipient, ttl_to_send)?;
 
     let client = connect_client(config).await?;
-    let signing_keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
 
     // Drain and publish only message events (kind 1060), skipping any invite/device housekeeping.
     let mut published_events = Vec::new();
-    while let Ok(ev) = sm_rx.try_recv() {
+    for ev in runtime.drain_events() {
         let signed = match ev {
             SessionManagerEvent::Publish(unsigned) => unsigned.sign_with_keys(&signing_keys)?,
             SessionManagerEvent::PublishSigned(signed) => signed,
@@ -308,8 +262,8 @@ pub async fn ttl(
         published_events.push(signed);
     }
 
-    // Update the stored selected session state from SessionManager.
-    let mut sessions: Vec<(String, nostr_double_ratchet::SessionState)> = manager
+    // Update the stored selected session state from NdrRuntime.
+    let mut sessions: Vec<(String, nostr_double_ratchet::SessionState)> = runtime
         .export_active_sessions()
         .into_iter()
         .filter(|(owner, _, _)| *owner == recipient)
@@ -323,6 +277,7 @@ pub async fn ttl(
         chat.session_state = serde_json::to_string(&selected_state)?;
         storage.save_chat(&chat)?;
     }
+    sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
 
     output.success(
         "chat.ttl",

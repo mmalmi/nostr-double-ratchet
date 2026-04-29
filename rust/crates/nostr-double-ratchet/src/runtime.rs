@@ -47,7 +47,28 @@ impl NdrRuntime {
         storage: Option<Arc<dyn StorageAdapter>>,
         invite: Option<Invite>,
     ) -> Self {
-        let storage = storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
+        Self::new_with_group_storage(
+            our_public_key,
+            our_identity_key,
+            device_id,
+            owner_public_key,
+            storage.clone(),
+            storage,
+            invite,
+        )
+    }
+
+    pub fn new_with_group_storage(
+        our_public_key: PublicKey,
+        our_identity_key: [u8; 32],
+        device_id: String,
+        owner_public_key: PublicKey,
+        session_storage: Option<Arc<dyn StorageAdapter>>,
+        group_storage: Option<Arc<dyn StorageAdapter>>,
+        invite: Option<Invite>,
+    ) -> Self {
+        let session_storage = session_storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
+        let group_storage = group_storage.unwrap_or_else(|| Arc::clone(&session_storage));
         let (event_tx, event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
         let session_manager = SessionManager::new(
             our_public_key,
@@ -55,13 +76,13 @@ impl NdrRuntime {
             device_id,
             owner_public_key,
             event_tx.clone(),
-            Some(storage.clone()),
+            Some(session_storage),
             invite,
         );
         let group_manager = GroupManager::new(GroupManagerOptions {
             our_owner_pubkey: owner_public_key,
             our_device_pubkey: our_public_key,
-            storage: Some(storage),
+            storage: Some(group_storage),
             one_to_many: None,
         });
 
@@ -87,6 +108,20 @@ impl NdrRuntime {
         self.session_manager.init()?;
         self.session_manager.setup_user(user_pubkey);
         self.sync_direct_message_subscriptions()
+    }
+
+    pub fn reload_from_storage(&self) -> Result<()> {
+        self.session_manager.reload_from_storage()?;
+        self.sync_direct_message_subscriptions()
+    }
+
+    pub fn delete_chat(&self, user_pubkey: PublicKey) -> Result<()> {
+        self.session_manager.delete_chat(user_pubkey)?;
+        self.sync_direct_message_subscriptions()
+    }
+
+    pub fn cleanup_discovery_queue(&self, max_age_ms: u64) -> Result<usize> {
+        self.session_manager.cleanup_discovery_queue(max_age_ms)
     }
 
     pub fn accept_invite(
@@ -199,6 +234,23 @@ impl NdrRuntime {
 
     pub fn export_active_sessions(&self) -> Vec<(PublicKey, String, crate::SessionState)> {
         self.session_manager.export_active_sessions()
+    }
+
+    pub fn export_active_session_state(
+        &self,
+        peer_pubkey: PublicKey,
+    ) -> Result<Option<crate::SessionState>> {
+        self.session_manager
+            .export_active_session_state(peer_pubkey)
+    }
+
+    pub fn get_stored_user_record_json(&self, user_pubkey: PublicKey) -> Result<Option<String>> {
+        self.session_manager
+            .get_stored_user_record_json(user_pubkey)
+    }
+
+    pub fn get_all_message_push_author_pubkeys(&self) -> Vec<PublicKey> {
+        self.session_manager.get_all_message_push_author_pubkeys()
     }
 
     pub fn ingest_app_keys_snapshot(
@@ -376,6 +428,10 @@ impl DirectMessageSubscriptionShared {
 impl NdrRuntime {
     pub fn pending_invite_response_owner_pubkeys(&self) -> Vec<PublicKey> {
         self.session_manager.pending_invite_response_owner_pubkeys()
+    }
+
+    pub fn current_device_invite_response_pubkey(&self) -> Option<PublicKey> {
+        self.session_manager.current_device_invite_response_pubkey()
     }
 
     pub fn get_owner_pubkey(&self) -> PublicKey {

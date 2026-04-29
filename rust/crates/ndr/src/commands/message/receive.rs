@@ -5,6 +5,7 @@ use nostr_double_ratchet::{
     TYPING_KIND,
 };
 
+use crate::commands::runtime_support::{build_runtime, sync_chats_from_runtime};
 use crate::config::Config;
 use crate::output::Output;
 use crate::state_sync::{apply_chat_settings, extract_control_stamp_from_value};
@@ -31,8 +32,7 @@ pub async fn receive(
     let current_event_id = event.id.to_hex();
     let current_timestamp = event.created_at.as_secs();
 
-    let (runtime, _signing_keys, owner_pubkey_hex) = super::send::build_runtime(config, storage)?;
-    let manager = runtime.session_manager();
+    let (runtime, _signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
     runtime.process_received_event(event);
 
     for manager_event in runtime.drain_events() {
@@ -61,7 +61,7 @@ pub async fn receive(
             storage,
             output,
         )? {
-            super::send::sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
+            sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
             return Ok(());
         }
     }

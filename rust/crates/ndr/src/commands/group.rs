@@ -1,15 +1,13 @@
 use anyhow::Result;
-use crossbeam_channel::{Receiver, TryRecvError};
 use nostr::ToBech32;
 use nostr_double_ratchet::{
-    CreateGroupOptions, FanoutGroupMetadataOptions, FileStorageAdapter, GroupManager,
-    GroupManagerOptions, GroupSendEvent, SessionManager, SessionManagerEvent, StorageAdapter,
-    CHAT_MESSAGE_KIND, REACTION_KIND,
+    CreateGroupOptions, FanoutGroupMetadataOptions, FileStorageAdapter, GroupSendEvent, NdrRuntime,
+    SessionManagerEvent, StorageAdapter, CHAT_MESSAGE_KIND, REACTION_KIND,
 };
 use nostr_sdk::Client;
 use serde::Serialize;
-use std::sync::Arc;
 
+use crate::commands::runtime_support::{build_runtime, sync_chats_from_runtime};
 use crate::commands::session_delivery::{
     is_double_ratchet_invite_event,
     prepare_recipient_delivery_sessions as prepare_member_delivery_sessions,
@@ -79,19 +77,19 @@ struct GroupMessageList {
 
 struct PairwiseSessionEventQueue<'a> {
     storage: &'a Storage,
-    session_manager: &'a SessionManager,
-    session_manager_rx: &'a Receiver<SessionManagerEvent>,
+    runtime: &'a NdrRuntime,
+    my_owner_pubkey_hex: &'a str,
     queued_events: &'a mut Vec<nostr::Event>,
 }
 
-fn sync_member_chats_from_session_manager(
+fn sync_member_chats_from_runtime(
     storage: &Storage,
-    manager: &SessionManager,
+    runtime: &NdrRuntime,
     member_owner_pubkey_hex: &str,
 ) -> Result<()> {
     use std::collections::HashMap;
 
-    let sessions_by_device: HashMap<String, nostr_double_ratchet::SessionState> = manager
+    let sessions_by_device: HashMap<String, nostr_double_ratchet::SessionState> = runtime
         .export_active_sessions()
         .into_iter()
         .filter_map(|(owner_pubkey, device_id, state)| {
@@ -136,41 +134,9 @@ fn sync_member_chats_from_session_manager(
     Ok(())
 }
 
-fn build_session_manager(
-    config: &Config,
-    storage: &Storage,
-) -> Result<(SessionManager, Receiver<SessionManagerEvent>)> {
-    let our_private_key = config.private_key_bytes()?;
-    let our_pubkey_hex = config.public_key()?;
-    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
-    let owner_pubkey_hex = config.owner_public_key_hex()?;
-    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
-
-    let session_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
-        storage.data_dir().join("session_manager"),
-    )?);
-
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let manager = SessionManager::new(
-        our_pubkey,
-        our_private_key,
-        our_pubkey_hex,
-        owner_pubkey,
-        tx,
-        Some(session_manager_store),
-        None,
-    );
-    manager.init()?;
-
-    // Drop any initial SessionManager events (device invite publication, subscribe requests, etc).
-    // Group commands only care about publishing ratchet message events that they explicitly send.
-    while rx.try_recv().is_ok() {}
-    Ok((manager, rx))
-}
-
 async fn prepare_group_member_sessions(
     members: &[String],
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     client: &Client,
     config: &Config,
 ) -> Result<()> {
@@ -182,7 +148,7 @@ async fn prepare_group_member_sessions(
     recipient_pubkeys.dedup_by_key(|pubkey| pubkey.to_hex());
 
     for recipient in recipient_pubkeys {
-        prepare_member_delivery_sessions(session_manager, client, config, recipient).await?;
+        prepare_member_delivery_sessions(runtime, client, config, recipient).await?;
     }
 
     Ok(())
@@ -191,7 +157,7 @@ async fn prepare_group_member_sessions(
 async fn publish_pending_session_manager_events(
     client: &Client,
     config: &Config,
-    rx: &Receiver<SessionManagerEvent>,
+    runtime: &NdrRuntime,
 ) -> Result<bool> {
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
     const DELIVERY_RETRY_MS: u64 = 100;
@@ -200,15 +166,14 @@ async fn publish_pending_session_manager_events(
         nostr::Keys::new(nostr::SecretKey::from_slice(&config.private_key_bytes()?)?);
     let mut published_any = false;
 
-    loop {
-        let signed = match rx.try_recv() {
-            Ok(SessionManagerEvent::Publish(unsigned)) => unsigned
+    for event in runtime.drain_events() {
+        let signed = match event {
+            SessionManagerEvent::Publish(unsigned) => unsigned
                 .sign_with_keys(&signing_keys)
                 .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?,
-            Ok(SessionManagerEvent::PublishSigned(signed)) => signed,
-            Ok(SessionManagerEvent::PublishSignedForInnerEvent { event, .. }) => event,
-            Ok(_) => continue,
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            SessionManagerEvent::PublishSigned(signed) => signed,
+            SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => event,
+            _ => continue,
         };
 
         if is_double_ratchet_invite_event(&signed) {
@@ -222,19 +187,18 @@ async fn publish_pending_session_manager_events(
     Ok(published_any)
 }
 
-fn drain_session_manager_message_events(rx: &Receiver<SessionManagerEvent>) -> Vec<nostr::Event> {
+fn drain_runtime_message_events(runtime: &NdrRuntime) -> Vec<nostr::Event> {
     let mut message_events = Vec::new();
 
-    loop {
-        match rx.try_recv() {
-            Ok(SessionManagerEvent::PublishSigned(event))
-            | Ok(SessionManagerEvent::PublishSignedForInnerEvent { event, .. })
+    for event in runtime.drain_events() {
+        match event {
+            SessionManagerEvent::PublishSigned(event)
+            | SessionManagerEvent::PublishSignedForInnerEvent { event, .. }
                 if event.kind.as_u16() == nostr_double_ratchet::MESSAGE_EVENT_KIND as u16 =>
             {
                 message_events.push(event);
             }
-            Ok(_) => {}
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            _ => {}
         }
     }
 
@@ -258,17 +222,17 @@ async fn fan_out_metadata(
     }
     client.connect().await;
 
-    let mut group_manager = build_group_manager(config, storage)?;
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
-    prepare_group_member_sessions(&group.members, &session_manager, &client, config).await?;
-    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+    let (runtime, _signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    runtime.sync_groups(vec![group.clone()])?;
+    prepare_group_member_sessions(&group.members, &runtime, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &runtime).await? {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         storage,
-        session_manager: &session_manager,
-        session_manager_rx: &session_manager_rx,
+        runtime: &runtime,
+        my_owner_pubkey_hex: &owner_pubkey_hex,
         queued_events: &mut pairwise_events,
     };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
@@ -283,15 +247,17 @@ async fn fan_out_metadata(
         );
         Ok(())
     };
-    let fanout = group_manager
-        .fan_out_group_metadata(
-            group.clone(),
-            FanoutGroupMetadataOptions {
-                send_pairwise: &mut send_pairwise,
-                exclude_secret_for: excluded_member,
-                now_ms: Some(now_ms),
-            },
-        )
+    let fanout = runtime
+        .with_group_context(|_, group_manager, _| {
+            group_manager.fan_out_group_metadata(
+                group.clone(),
+                FanoutGroupMetadataOptions {
+                    send_pairwise: &mut send_pairwise,
+                    exclude_secret_for: excluded_member,
+                    now_ms: Some(now_ms),
+                },
+            )
+        })
         .map_err(|e| anyhow::anyhow!("Failed to fan out group metadata: {}", e))?;
     let stamp = extract_control_stamp_from_unsigned(&fanout.metadata_rumor)
         .ok_or_else(|| anyhow::anyhow!("group metadata rumor missing control stamp"))?;
@@ -307,21 +273,6 @@ async fn fan_out_metadata(
     .await;
 
     Ok(stamp)
-}
-
-fn build_group_manager(config: &Config, storage: &Storage) -> Result<GroupManager> {
-    let our_owner_pubkey = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
-    let our_device_pubkey = nostr::PublicKey::from_hex(&config.public_key()?)?;
-    let group_manager_store: Arc<dyn StorageAdapter> = Arc::new(FileStorageAdapter::new(
-        storage.data_dir().join("group_manager"),
-    )?);
-
-    Ok(GroupManager::new(GroupManagerOptions {
-        our_owner_pubkey,
-        our_device_pubkey,
-        storage: Some(group_manager_store),
-        one_to_many: None,
-    }))
 }
 
 fn invalidate_group_manager_sender_state(
@@ -350,15 +301,12 @@ fn queue_pairwise_session_events_for_recipient(
     let mut message_events: Vec<nostr::Event> = Vec::new();
     for attempt in 0..MAX_DELIVERY_ATTEMPTS {
         let _event_ids = queue
-            .session_manager
+            .runtime
             .send_event(recipient_owner, rumor.clone())
             .unwrap_or_default();
-        let drained = drain_session_manager_message_events(queue.session_manager_rx);
-        sync_member_chats_from_session_manager(
-            queue.storage,
-            queue.session_manager,
-            recipient_owner_hex,
-        )?;
+        let drained = drain_runtime_message_events(queue.runtime);
+        sync_member_chats_from_runtime(queue.storage, queue.runtime, recipient_owner_hex)?;
+        sync_chats_from_runtime(queue.storage, queue.runtime, queue.my_owner_pubkey_hex)?;
 
         if !drained.is_empty() {
             message_events = drained;
@@ -398,19 +346,18 @@ pub async fn create(
     }
     client.connect().await;
 
-    let mut group_manager = build_group_manager(config, storage)?;
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
+    let (runtime, _signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
     let mut delivery_members = members.to_vec();
     delivery_members.push(my_owner_pubkey.clone());
-    prepare_group_member_sessions(&delivery_members, &session_manager, &client, config).await?;
-    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+    prepare_group_member_sessions(&delivery_members, &runtime, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &runtime).await? {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         storage,
-        session_manager: &session_manager,
-        session_manager_rx: &session_manager_rx,
+        runtime: &runtime,
+        my_owner_pubkey_hex: &owner_pubkey_hex,
         queued_events: &mut pairwise_events,
     };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
@@ -426,16 +373,18 @@ pub async fn create(
         Ok(())
     };
 
-    let created = group_manager
-        .create_group(
-            name,
-            &member_refs,
-            CreateGroupOptions {
-                send_pairwise: Some(&mut send_pairwise),
-                fanout_metadata: true,
-                now_ms: Some(now_ms),
-            },
-        )
+    let created = runtime
+        .with_group_context(|_, group_manager, _| {
+            group_manager.create_group(
+                name,
+                &member_refs,
+                CreateGroupOptions {
+                    send_pairwise: Some(&mut send_pairwise),
+                    fanout_metadata: true,
+                    now_ms: Some(now_ms),
+                },
+            )
+        })
         .map_err(|e| anyhow::anyhow!("Failed to create group: {}", e))?;
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
@@ -698,21 +647,18 @@ pub async fn send_message(
     }
     client.connect().await;
 
-    let mut group_manager = build_group_manager(config, storage)?;
-    group_manager
-        .upsert_group(group.data.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
+    let (runtime, _signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    runtime.sync_groups(vec![group.data.clone()])?;
 
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
-    prepare_group_member_sessions(&group.data.members, &session_manager, &client, config).await?;
-    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+    prepare_group_member_sessions(&group.data.members, &runtime, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &runtime).await? {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         storage,
-        session_manager: &session_manager,
-        session_manager_rx: &session_manager_rx,
+        runtime: &runtime,
+        my_owner_pubkey_hex: &owner_pubkey_hex,
         queued_events: &mut pairwise_events,
     };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
@@ -733,18 +679,20 @@ pub async fn send_message(
     if let Some(reply_id) = reply_to {
         tags.push(vec!["e".to_string(), reply_id.to_string()]);
     }
-    let sent = group_manager
-        .send_event(
-            id,
-            GroupSendEvent {
-                kind: CHAT_MESSAGE_KIND,
-                content: message.to_string(),
-                tags,
-            },
-            &mut send_pairwise,
-            &mut publish_outer,
-            Some(now_ms),
-        )
+    let sent = runtime
+        .with_group_context(|_, group_manager, _| {
+            group_manager.send_event(
+                id,
+                GroupSendEvent {
+                    kind: CHAT_MESSAGE_KIND,
+                    content: message.to_string(),
+                    tags,
+                },
+                &mut send_pairwise,
+                &mut publish_outer,
+                Some(now_ms),
+            )
+        })
         .map_err(|e| anyhow::anyhow!("Failed to send group message: {}", e))?;
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
@@ -825,21 +773,18 @@ pub async fn react(
     }
     client.connect().await;
 
-    let mut group_manager = build_group_manager(config, storage)?;
-    group_manager
-        .upsert_group(group.data.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
+    let (runtime, _signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    runtime.sync_groups(vec![group.data.clone()])?;
 
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
-    prepare_group_member_sessions(&group.data.members, &session_manager, &client, config).await?;
-    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+    prepare_group_member_sessions(&group.data.members, &runtime, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &runtime).await? {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         storage,
-        session_manager: &session_manager,
-        session_manager_rx: &session_manager_rx,
+        runtime: &runtime,
+        my_owner_pubkey_hex: &owner_pubkey_hex,
         queued_events: &mut pairwise_events,
     };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
@@ -856,18 +801,20 @@ pub async fn react(
     };
     let mut publish_outer = |_outer: &nostr::Event| -> nostr_double_ratchet::Result<()> { Ok(()) };
 
-    let sent = group_manager
-        .send_event(
-            id,
-            GroupSendEvent {
-                kind: REACTION_KIND,
-                content: emoji.to_string(),
-                tags: vec![vec!["e".to_string(), message_id.to_string()]],
-            },
-            &mut send_pairwise,
-            &mut publish_outer,
-            Some(now_ms),
-        )
+    let sent = runtime
+        .with_group_context(|_, group_manager, _| {
+            group_manager.send_event(
+                id,
+                GroupSendEvent {
+                    kind: REACTION_KIND,
+                    content: emoji.to_string(),
+                    tags: vec![vec!["e".to_string(), message_id.to_string()]],
+                },
+                &mut send_pairwise,
+                &mut publish_outer,
+                Some(now_ms),
+            )
+        })
         .map_err(|e| anyhow::anyhow!("Failed to send group reaction: {}", e))?;
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;
@@ -933,21 +880,18 @@ pub async fn rotate_sender_key(
     }
     client.connect().await;
 
-    let mut group_manager = build_group_manager(config, storage)?;
-    group_manager
-        .upsert_group(group.data.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to initialize group manager: {}", e))?;
+    let (runtime, _signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
+    runtime.sync_groups(vec![group.data.clone()])?;
 
-    let (session_manager, session_manager_rx) = build_session_manager(config, storage)?;
-    prepare_group_member_sessions(&group.data.members, &session_manager, &client, config).await?;
-    if publish_pending_session_manager_events(&client, config, &session_manager_rx).await? {
+    prepare_group_member_sessions(&group.data.members, &runtime, &client, config).await?;
+    if publish_pending_session_manager_events(&client, config, &runtime).await? {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let mut pairwise_events: Vec<nostr::Event> = Vec::new();
     let mut pairwise_queue = PairwiseSessionEventQueue {
         storage,
-        session_manager: &session_manager,
-        session_manager_rx: &session_manager_rx,
+        runtime: &runtime,
+        my_owner_pubkey_hex: &owner_pubkey_hex,
         queued_events: &mut pairwise_events,
     };
     let mut send_pairwise = |recipient_owner: nostr::PublicKey,
@@ -962,8 +906,10 @@ pub async fn rotate_sender_key(
         );
         Ok(())
     };
-    let dist = group_manager
-        .rotate_sender_key(id, &mut send_pairwise, Some(now_ms))
+    let dist = runtime
+        .with_group_context(|_, group_manager, _| {
+            group_manager.rotate_sender_key(id, &mut send_pairwise, Some(now_ms))
+        })
         .map_err(|e| anyhow::anyhow!("Failed to rotate group sender key: {}", e))?;
 
     const MAX_DELIVERY_ATTEMPTS: usize = 20;

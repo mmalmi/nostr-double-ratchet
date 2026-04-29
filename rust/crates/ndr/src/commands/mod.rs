@@ -9,4 +9,5 @@ pub mod message;
 mod nip19;
 mod owner_claim;
 mod public_invite;
+mod runtime_support;
 mod session_delivery;

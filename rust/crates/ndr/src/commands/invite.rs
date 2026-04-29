@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::commands::owner_claim::resolve_verified_owner_pubkey;
+use crate::commands::runtime_support::build_runtime;
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_or_ignore};
 use crate::output::Output;
@@ -201,26 +202,9 @@ fn persist_session_in_session_manager(
     device_id: Option<String>,
     state: nostr_double_ratchet::SessionState,
 ) -> Result<()> {
-    let our_private_key = config.private_key_bytes()?;
-    let our_pubkey = nostr::PublicKey::from_hex(&config.public_key()?)?;
-    let owner_pubkey = nostr::PublicKey::from_hex(&config.owner_public_key_hex()?)?;
-
-    let sm_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> = std::sync::Arc::new(
-        nostr_double_ratchet::FileStorageAdapter::new(storage.data_dir().join("session_manager"))?,
-    );
-    let (sm_tx, _sm_rx) = crossbeam_channel::unbounded();
-    let manager = nostr_double_ratchet::SessionManager::new(
-        our_pubkey,
-        our_private_key,
-        config.public_key()?,
-        owner_pubkey,
-        sm_tx,
-        Some(sm_store),
-        None,
-    );
-    manager.init()?;
-    manager.import_session_state(peer_pubkey, device_id, state)?;
-    manager.setup_user(peer_pubkey);
+    let (runtime, _signing_keys, _owner_pubkey_hex) = build_runtime(config, storage)?;
+    runtime.import_session_state(peer_pubkey, device_id, state)?;
+    runtime.setup_user(peer_pubkey)?;
     Ok(())
 }
 

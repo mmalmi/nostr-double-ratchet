@@ -2,10 +2,10 @@ use anyhow::Result;
 
 use nostr::Tag;
 use nostr_double_ratchet::{
-    FileStorageAdapter, NdrRuntime, SessionManager, SessionManagerEvent, StorageAdapter,
-    CHAT_MESSAGE_KIND, EXPIRATION_TAG, MESSAGE_EVENT_KIND,
+    NdrRuntime, SessionManagerEvent, CHAT_MESSAGE_KIND, EXPIRATION_TAG, MESSAGE_EVENT_KIND,
 };
 
+use crate::commands::runtime_support::{build_runtime, sync_chats_from_runtime};
 use crate::commands::session_delivery::{
     is_double_ratchet_invite_event,
     prepare_recipient_delivery_sessions as prepare_session_manager_delivery_sessions,
@@ -13,7 +13,6 @@ use crate::commands::session_delivery::{
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_with_retry};
 use crate::output::Output;
-use crate::state_sync::select_canonical_session;
 use crate::storage::{Storage, StoredChat, StoredMessage, StoredReaction};
 
 use super::common::resolve_target_pubkey;
@@ -62,112 +61,6 @@ async fn resolve_or_join_chat(
             err
         )),
     }
-}
-
-pub(super) fn build_runtime(
-    config: &Config,
-    storage: &Storage,
-) -> Result<(NdrRuntime, nostr::Keys, String)> {
-    let our_private_key = config.private_key_bytes()?;
-    let our_pubkey_hex = config.public_key()?;
-    let our_pubkey = nostr::PublicKey::from_hex(&our_pubkey_hex)?;
-    let owner_pubkey_hex = config.owner_public_key_hex()?;
-    let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)?;
-
-    let session_manager_store: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(
-        FileStorageAdapter::new(storage.data_dir().join("session_manager"))?,
-    );
-
-    let runtime = NdrRuntime::new(
-        our_pubkey,
-        our_private_key,
-        our_pubkey_hex,
-        owner_pubkey,
-        Some(session_manager_store),
-        None,
-    );
-    runtime.init()?;
-
-    let signing_keys = nostr::Keys::new(nostr::SecretKey::from_slice(&our_private_key)?);
-    Ok((runtime, signing_keys, owner_pubkey_hex))
-}
-
-pub(super) fn sync_chats_from_session_manager(
-    storage: &Storage,
-    manager: &SessionManager,
-    my_owner_pubkey_hex: &str,
-) -> Result<()> {
-    use std::collections::HashMap;
-
-    let sessions = manager.export_active_sessions();
-    if sessions.is_empty() {
-        return Ok(());
-    }
-
-    let mut sessions_by_owner: HashMap<String, Vec<(String, nostr_double_ratchet::SessionState)>> =
-        HashMap::new();
-    for (owner_pubkey, device_id, state) in sessions {
-        let owner_hex = owner_pubkey.to_hex();
-        if owner_hex == my_owner_pubkey_hex {
-            continue;
-        }
-        sessions_by_owner
-            .entry(owner_hex)
-            .or_default()
-            .push((device_id, state));
-    }
-
-    if sessions_by_owner.is_empty() {
-        return Ok(());
-    }
-
-    let mut chats = storage.list_chats()?;
-
-    for (owner_hex, mut owner_sessions) in sessions_by_owner {
-        owner_sessions.sort_by(|a, b| a.0.cmp(&b.0));
-        let Some((selected_device_id, selected_state)) =
-            select_canonical_session(&owner_hex, &owner_sessions)
-        else {
-            continue;
-        };
-
-        if let Some(idx) = chats.iter().position(|chat| chat.their_pubkey == owner_hex) {
-            let mut changed = false;
-            let mut chat = chats[idx].clone();
-            let state_json = serde_json::to_string(&selected_state)?;
-
-            if chat.device_id.as_deref() != Some(selected_device_id.as_str()) {
-                chat.device_id = Some(selected_device_id.clone());
-                changed = true;
-            }
-            if chat.session_state != state_json {
-                chat.session_state = state_json;
-                changed = true;
-            }
-
-            if changed {
-                storage.save_chat(&chat)?;
-                chats[idx] = chat;
-            }
-            continue;
-        }
-
-        let chat = StoredChat {
-            id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
-            their_pubkey: owner_hex,
-            device_id: Some(selected_device_id),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs(),
-            last_message_at: None,
-            session_state: serde_json::to_string(&selected_state)?,
-            message_ttl_seconds: None,
-        };
-        storage.save_chat(&chat)?;
-        chats.push(chat);
-    }
-
-    Ok(())
 }
 
 async fn flush_session_manager_message_events(
@@ -223,8 +116,7 @@ async fn prepare_recipient_delivery_sessions(
     config: &Config,
     recipient: nostr::PublicKey,
 ) -> Result<()> {
-    prepare_session_manager_delivery_sessions(runtime.session_manager(), client, config, recipient)
-        .await
+    prepare_session_manager_delivery_sessions(runtime, client, config, recipient).await
 }
 
 #[cfg(test)]
@@ -430,7 +322,6 @@ pub(super) async fn send_message_impl(
     };
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
-    let manager = runtime.session_manager();
 
     let client = connect_client(config).await?;
     prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
@@ -440,7 +331,7 @@ pub(super) async fn send_message_impl(
     }
     let event_ids = runtime.send_event(recipient_pk, unsigned)?;
     let published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
+    sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
 
     if let Some(updated_chat) = storage.get_chat_by_pubkey(&recipient_pk.to_hex())? {
         chat = updated_chat;
@@ -493,7 +384,6 @@ pub async fn react(
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
-    let manager = runtime.session_manager();
 
     let client = connect_client(config).await?;
     prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
@@ -508,7 +398,7 @@ pub async fn react(
         None,
     )?;
     let published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
+    sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
 
     let pubkey = config.public_key()?;
     let timestamp = std::time::SystemTime::now()
@@ -578,7 +468,6 @@ pub async fn receipt(
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
-    let manager = runtime.session_manager();
     let message_ids_vec = message_ids.iter().map(|s| (*s).to_string()).collect();
 
     let client = connect_client(config).await?;
@@ -589,7 +478,7 @@ pub async fn receipt(
     }
     let _event_ids = runtime.send_receipt(recipient_pk, receipt_type, message_ids_vec, None)?;
     let _published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
+    sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
 
     output.success(
         "receipt",
@@ -620,7 +509,6 @@ pub async fn typing(
         .map_err(|_| anyhow::anyhow!("Chat has invalid their_pubkey: {}", chat.their_pubkey))?;
 
     let (runtime, signing_keys, owner_pubkey_hex) = build_runtime(config, storage)?;
-    let manager = runtime.session_manager();
 
     let client = connect_client(config).await?;
     prepare_recipient_delivery_sessions(&runtime, &client, config, recipient_pk).await?;
@@ -630,7 +518,7 @@ pub async fn typing(
     }
     let _event_ids = runtime.send_typing(recipient_pk, None)?;
     let published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
-    sync_chats_from_session_manager(storage, manager, &owner_pubkey_hex)?;
+    sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
 
     output.success(
         "typing",

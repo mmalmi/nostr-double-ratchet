@@ -2,6 +2,7 @@ use anyhow::Result;
 use nostr_sdk::Client;
 use serde::Serialize;
 
+use crate::commands::runtime_support::build_runtime;
 use crate::config::Config;
 use crate::nostr_client::send_event_or_ignore;
 use crate::output::Output;
@@ -59,23 +60,8 @@ fn persist_link_session(
     linked_device_pubkey: nostr::PublicKey,
     state: nostr_double_ratchet::SessionState,
 ) -> Result<()> {
-    let session_manager_store: std::sync::Arc<dyn nostr_double_ratchet::StorageAdapter> =
-        std::sync::Arc::new(nostr_double_ratchet::FileStorageAdapter::new(
-            storage.data_dir().join("session_manager"),
-        )?);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let our_pubkey_hex = config.public_key()?;
-    let manager = nostr_double_ratchet::SessionManager::new(
-        nostr::PublicKey::from_hex(&our_pubkey_hex)?,
-        config.private_key_bytes()?,
-        our_pubkey_hex,
-        owner_pubkey,
-        tx,
-        Some(session_manager_store),
-        None,
-    );
-    manager.init()?;
-    manager.import_session_state(owner_pubkey, Some(linked_device_pubkey.to_hex()), state)?;
+    let (runtime, _signing_keys, _owner_pubkey_hex) = build_runtime(config, storage)?;
+    runtime.import_session_state(owner_pubkey, Some(linked_device_pubkey.to_hex()), state)?;
     Ok(())
 }
 

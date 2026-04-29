@@ -1,6 +1,6 @@
 use anyhow::Result;
 use nostr::PublicKey;
-use nostr_double_ratchet::{SessionManager, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND};
+use nostr_double_ratchet::{Invite, NdrRuntime, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND};
 
 use crate::commands::owner_claim::fetch_latest_app_keys_snapshot_with_timeout;
 use crate::config::Config;
@@ -40,15 +40,15 @@ fn session_state_can_send(state: &nostr_double_ratchet::SessionState) -> bool {
     state.their_next_nostr_public_key.is_some() && state.our_current_nostr_key.is_some()
 }
 
-fn has_send_capable_session(session_manager: &SessionManager, recipient: PublicKey) -> bool {
-    session_manager
+fn has_send_capable_session(runtime: &NdrRuntime, recipient: PublicKey) -> bool {
+    runtime
         .export_active_sessions()
         .into_iter()
         .any(|(owner, _, state)| owner == recipient && session_state_can_send(&state))
 }
 
-fn known_recipient_device_count(session_manager: &SessionManager, recipient: PublicKey) -> usize {
-    session_manager
+fn known_recipient_device_count(runtime: &NdrRuntime, recipient: PublicKey) -> usize {
+    runtime
         .get_stored_user_record_json(recipient)
         .ok()
         .flatten()
@@ -63,7 +63,7 @@ fn known_recipient_device_count(session_manager: &SessionManager, recipient: Pub
 }
 
 pub(crate) async fn refresh_recipient_app_keys(
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
     recipient: PublicKey,
@@ -76,8 +76,8 @@ pub(crate) async fn refresh_recipient_app_keys(
     const APP_KEYS_DISCOVERY_DEFAULT: Duration = Duration::from_secs(15);
 
     let relays = config.resolved_relays();
-    let discovery_window = if has_send_capable_session(session_manager, recipient)
-        && known_recipient_device_count(session_manager, recipient) <= 1
+    let discovery_window = if has_send_capable_session(runtime, recipient)
+        && known_recipient_device_count(runtime, recipient) <= 1
     {
         APP_KEYS_DISCOVERY_WITH_EXISTING_DIRECT_SESSION
     } else {
@@ -100,11 +100,7 @@ pub(crate) async fn refresh_recipient_app_keys(
                 .map(|device| device.identity_pubkey)
                 .collect();
 
-            session_manager.ingest_app_keys_snapshot(
-                recipient,
-                snapshot.app_keys,
-                snapshot.created_at,
-            );
+            runtime.ingest_app_keys_snapshot(recipient, snapshot.app_keys, snapshot.created_at);
             return Ok(recipient_devices);
         }
 
@@ -114,20 +110,20 @@ pub(crate) async fn refresh_recipient_app_keys(
 }
 
 pub(crate) fn recipient_devices_missing_active_sessions(
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     recipient: PublicKey,
     recipient_devices: &std::collections::HashSet<PublicKey>,
 ) -> std::collections::HashSet<PublicKey> {
     use std::collections::HashSet;
 
-    let active_device_ids: HashSet<String> = session_manager
+    let active_device_ids: HashSet<String> = runtime
         .export_active_sessions()
         .into_iter()
         .filter_map(|(owner, device_id, state)| {
             (owner == recipient && session_state_can_send(&state)).then_some(device_id)
         })
         .collect();
-    let our_device_id = session_manager.get_device_id();
+    let our_device_id = runtime.get_device_id();
     let mut candidate_device_ids: HashSet<String> =
         recipient_devices.iter().map(PublicKey::to_hex).collect();
     candidate_device_ids.insert(recipient.to_hex());
@@ -143,7 +139,7 @@ pub(crate) fn recipient_devices_missing_active_sessions(
 }
 
 pub(crate) async fn process_recipient_device_invites(
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
     recipient: PublicKey,
@@ -159,7 +155,7 @@ pub(crate) async fn process_recipient_device_invites(
     }
 
     let relays = config.resolved_relays();
-    let discovery_window = if has_send_capable_session(session_manager, recipient) {
+    let discovery_window = if has_send_capable_session(runtime, recipient) {
         Duration::from_secs(3)
     } else {
         Duration::from_secs(15)
@@ -190,7 +186,9 @@ pub(crate) async fn process_recipient_device_invites(
                     && parts.get(1).map(|value| value.as_str()) == Some(expected_d.as_str())
             });
             if matches_device_invite && processed.insert(event.pubkey) {
-                session_manager.process_received_event(event);
+                if let Ok(invite) = Invite::from_event(&event) {
+                    let _ = runtime.accept_invite(&invite, Some(recipient));
+                }
             }
         }
 
@@ -205,7 +203,7 @@ pub(crate) async fn process_recipient_device_invites(
 }
 
 pub(crate) async fn backfill_recent_invite_responses(
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
 ) -> Result<()> {
@@ -213,8 +211,7 @@ pub(crate) async fn backfill_recent_invite_responses(
 
     const INVITE_RESPONSE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-    let Some(invite_response_pubkey) = session_manager.current_device_invite_response_pubkey()
-    else {
+    let Some(invite_response_pubkey) = runtime.current_device_invite_response_pubkey() else {
         return Ok(());
     };
 
@@ -232,24 +229,22 @@ pub(crate) async fn backfill_recent_invite_responses(
     invite_responses.sort_by_key(|event| (event.created_at.as_secs(), event.id.to_hex()));
 
     for event in invite_responses {
-        session_manager.process_received_event(event);
+        runtime.process_received_event(event);
     }
 
     Ok(())
 }
 
 pub(crate) async fn prepare_recipient_delivery_sessions(
-    session_manager: &SessionManager,
+    runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
     config: &Config,
     recipient: PublicKey,
 ) -> Result<()> {
-    let recipient_devices =
-        refresh_recipient_app_keys(session_manager, client, config, recipient).await?;
-    backfill_recent_invite_responses(session_manager, client, config).await?;
+    let recipient_devices = refresh_recipient_app_keys(runtime, client, config, recipient).await?;
+    backfill_recent_invite_responses(runtime, client, config).await?;
     let invite_targets =
-        recipient_devices_missing_active_sessions(session_manager, recipient, &recipient_devices);
-    process_recipient_device_invites(session_manager, client, config, recipient, &invite_targets)
-        .await?;
+        recipient_devices_missing_active_sessions(runtime, recipient, &recipient_devices);
+    process_recipient_device_invites(runtime, client, config, recipient, &invite_targets).await?;
     Ok(())
 }
