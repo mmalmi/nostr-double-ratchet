@@ -95,6 +95,23 @@ fn ensure_device_invite(
     Ok(invite)
 }
 
+async fn publish_device_invite(
+    config: &Config,
+    storage: &Storage,
+    client: &Client,
+) -> Result<nostr::Event> {
+    let device_invite = ensure_device_invite(config, storage)?;
+    let unsigned = device_invite.get_event()?;
+    let sk_bytes = config.private_key_bytes()?;
+    let sk = nostr::SecretKey::from_slice(&sk_bytes)?;
+    let keys = nostr::Keys::new(sk);
+    let event = unsigned
+        .sign_with_keys(&keys)
+        .map_err(|e| anyhow::anyhow!("Failed to sign device invite event: {}", e))?;
+    send_event_or_ignore(client, event.clone()).await?;
+    Ok(event)
+}
+
 fn render_qr(url: &str) -> Result<String> {
     // Implemented with an optional dependency (qrcode). If it fails for any reason,
     // we still want linking to work, so return the error to caller to decide.
@@ -130,33 +147,24 @@ pub async fn create(
 
     storage.save_invite(&stored)?;
 
-    // Ensure this device has a public Invite event (needed for multi-device AppKeys fanout).
-    let device_invite = ensure_device_invite(&config, storage)?;
+    // Ensure this device has a device-scoped invite available for explicit publication.
+    let _device_invite = ensure_device_invite(&config, storage)?;
     let mut device_invite_published = false;
     let mut device_invite_publish_error = None::<String>;
 
     if publish {
         let relays = config.resolved_relays();
         if !relays.is_empty() {
-            if let Ok(unsigned) = device_invite.get_event() {
-                let sk_bytes = config.private_key_bytes()?;
-                let sk = nostr::SecretKey::from_slice(&sk_bytes)?;
-                let keys = nostr::Keys::new(sk);
-                let event = unsigned
-                    .sign_with_keys(&keys)
-                    .map_err(|e| anyhow::anyhow!("Failed to sign device invite event: {}", e))?;
+            let client = Client::default();
+            for relay in &relays {
+                client.add_relay(relay).await?;
+            }
+            client.connect().await;
 
-                let client = Client::default();
-                for relay in &relays {
-                    client.add_relay(relay).await?;
-                }
-                client.connect().await;
-
-                match client.send_event(&event).await {
-                    Ok(_) => device_invite_published = true,
-                    Err(err) => {
-                        device_invite_publish_error = Some(err.to_string());
-                    }
+            match publish_device_invite(&config, storage, &client).await {
+                Ok(_) => device_invite_published = true,
+                Err(err) => {
+                    device_invite_publish_error = Some(err.to_string());
                 }
             }
         }

@@ -3,7 +3,10 @@ use nostr::PublicKey;
 use nostr_double_ratchet::{Invite, NdrRuntime, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND};
 
 use crate::commands::owner_claim::fetch_latest_app_keys_snapshot_with_timeout;
+use crate::commands::runtime_support::build_runtime;
 use crate::config::Config;
+use crate::nostr_client::send_event_or_ignore;
+use crate::storage::Storage;
 
 fn has_tag_value(event: &nostr::Event, name: &str, value: &str) -> bool {
     event.tags.iter().any(|tag| {
@@ -34,6 +37,39 @@ pub(crate) fn is_double_ratchet_invite_event(event: &nostr::Event) -> bool {
 pub(crate) fn is_double_ratchet_public_invite_event(event: &nostr::Event) -> bool {
     is_double_ratchet_invite_event(event)
         && has_tag_value(event, "d", "double-ratchet/invites/public")
+}
+
+pub(crate) async fn publish_runtime_device_invite(
+    config: &Config,
+    storage: &Storage,
+    client: &nostr_sdk::Client,
+) -> Result<bool> {
+    let (runtime, signing_keys, _) = build_runtime(config, storage)?;
+    let mut published = false;
+
+    for event in runtime.drain_events() {
+        let signed = match event {
+            nostr_double_ratchet::SessionManagerEvent::Publish(unsigned) => unsigned
+                .sign_with_keys(&signing_keys)
+                .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?,
+            nostr_double_ratchet::SessionManagerEvent::PublishSigned(signed) => signed,
+            nostr_double_ratchet::SessionManagerEvent::PublishSignedForInnerEvent {
+                event, ..
+            } => event,
+            _ => continue,
+        };
+
+        if !is_double_ratchet_invite_event(&signed)
+            || is_double_ratchet_public_invite_event(&signed)
+        {
+            continue;
+        }
+
+        send_event_or_ignore(client, signed).await?;
+        published = true;
+    }
+
+    Ok(published)
 }
 
 fn session_state_can_send(state: &nostr_double_ratchet::SessionState) -> bool {

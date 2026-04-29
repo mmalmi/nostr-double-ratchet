@@ -1898,6 +1898,13 @@ pub async fn listen(
                                 .await?;
 
                                 config.set_linked_owner(&owner_pubkey_hex)?;
+                                // Publish the runtime's own device invite, not the CLI link invite:
+                                // peer devices need this to establish sessions to the linked device.
+                                let _ =
+                                    crate::commands::session_delivery::publish_runtime_device_invite(
+                                        &config, storage, &client,
+                                    )
+                                    .await;
                                 storage.delete_invite(&stored_invite.id)?;
 
                                 output.event(
