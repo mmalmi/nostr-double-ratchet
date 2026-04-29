@@ -1231,6 +1231,53 @@ fn accept_invite_publishes_bootstrap_message_event() {
 }
 
 #[test]
+fn accept_owner_invite_can_send_first_message_after_app_keys_proof() {
+    let alice_owner_keys = Keys::generate();
+    let alice_owner = alice_owner_keys.public_key();
+    let alice_device_keys = Keys::generate();
+    let alice_device = alice_device_keys.public_key();
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        bob_pubkey,
+        bob_keys.secret_key().to_secret_bytes(),
+        bob_pubkey.to_hex(),
+        bob_pubkey,
+        tx,
+        Some(storage),
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    let mut invite =
+        Invite::create_new(alice_device, Some(alice_device.to_hex()), Some(1)).unwrap();
+    invite.owner_public_key = Some(alice_owner);
+
+    let app_keys = AppKeys::new(vec![DeviceEntry::new(alice_device, 1)]);
+    manager.ingest_app_keys_snapshot(alice_owner, app_keys, 1);
+
+    let accepted = manager.accept_invite(&invite, Some(alice_owner));
+    assert!(
+        accepted.is_ok(),
+        "accept_invite should succeed for owner/device public invite"
+    );
+    let _ = drain_events(&rx);
+
+    let event_ids = manager
+        .send_text(alice_owner, "first message".to_string(), None)
+        .unwrap();
+    assert_eq!(
+        event_ids.len(),
+        1,
+        "first message after accepting an owner/device invite should publish immediately"
+    );
+}
+
+#[test]
 fn accept_invite_retries_bootstrap_message_event_with_future_expiration() {
     let alice_keys = Keys::generate();
     let alice_pubkey = alice_keys.public_key();

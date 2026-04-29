@@ -1,4 +1,4 @@
-use crate::{is_app_keys_event, AppKeys};
+use crate::{is_app_keys_event, AppKeys, DeviceEntry};
 use nostr::{Event, PublicKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +43,43 @@ pub fn apply_app_keys_snapshot(
         app_keys: current_app_keys.merge(incoming_app_keys),
         created_at: current_created_at,
     }
+}
+
+pub fn apply_app_keys_snapshot_with_required_device(
+    current_app_keys: Option<&AppKeys>,
+    current_created_at: u64,
+    incoming_app_keys: &AppKeys,
+    incoming_created_at: u64,
+    required_device: Option<DeviceEntry>,
+) -> AppKeysSnapshot {
+    let Some(required_device) = required_device else {
+        return apply_app_keys_snapshot(
+            current_app_keys,
+            current_created_at,
+            incoming_app_keys,
+            incoming_created_at,
+        );
+    };
+
+    let mut incoming_with_required = incoming_app_keys.clone();
+    incoming_with_required.add_device(required_device.clone());
+    let mut applied = apply_app_keys_snapshot(
+        current_app_keys,
+        current_created_at,
+        &incoming_with_required,
+        incoming_created_at,
+    );
+
+    if applied
+        .app_keys
+        .get_device(&required_device.identity_pubkey)
+        .is_none()
+    {
+        applied.app_keys.add_device(required_device.clone());
+        applied.created_at = applied.created_at.max(required_device.created_at);
+    }
+
+    applied
 }
 
 pub fn select_latest_app_keys_from_events<'a, I>(events: I) -> Option<AppKeysSnapshot>
@@ -306,6 +343,45 @@ mod tests {
         );
         assert!(applied.app_keys.get_device(&device1).is_some());
         assert!(applied.app_keys.get_device(&device2).is_some());
+    }
+
+    #[test]
+    fn required_device_is_preserved_when_app_keys_snapshot_advances() {
+        let remote_device = Keys::generate().public_key();
+        let local_device = Keys::generate().public_key();
+        let incoming = AppKeys::new(vec![DeviceEntry::new(remote_device, 100)]);
+
+        let applied = apply_app_keys_snapshot_with_required_device(
+            None,
+            0,
+            &incoming,
+            100,
+            Some(DeviceEntry::new(local_device, 200)),
+        );
+
+        assert_eq!(applied.decision, AppKeysSnapshotDecision::Advanced);
+        assert!(applied.app_keys.get_device(&remote_device).is_some());
+        assert!(applied.app_keys.get_device(&local_device).is_some());
+    }
+
+    #[test]
+    fn required_device_is_preserved_when_app_keys_snapshot_is_stale() {
+        let local_device = Keys::generate().public_key();
+        let old_remote_device = Keys::generate().public_key();
+        let current = AppKeys::new(vec![DeviceEntry::new(local_device, 200)]);
+        let incoming = AppKeys::new(vec![DeviceEntry::new(old_remote_device, 100)]);
+
+        let applied = apply_app_keys_snapshot_with_required_device(
+            Some(&current),
+            200,
+            &incoming,
+            100,
+            Some(DeviceEntry::new(local_device, 200)),
+        );
+
+        assert_eq!(applied.decision, AppKeysSnapshotDecision::Stale);
+        assert!(applied.app_keys.get_device(&local_device).is_some());
+        assert!(applied.app_keys.get_device(&old_remote_device).is_none());
     }
 
     #[test]

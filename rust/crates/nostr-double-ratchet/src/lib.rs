@@ -37,9 +37,9 @@ pub use invite::{Invite, InviteResponse};
 pub use message_origin::{classify_message_origin, MessageOrigin};
 pub use message_queue::{MessageQueue, QueueEntry};
 pub use multi_device::{
-    apply_app_keys_snapshot, evaluate_device_registration_state,
-    resolve_conversation_candidate_pubkeys, resolve_invite_owner_routing,
-    resolve_rumor_peer_pubkey, select_latest_app_keys_from_events,
+    apply_app_keys_snapshot, apply_app_keys_snapshot_with_required_device,
+    evaluate_device_registration_state, resolve_conversation_candidate_pubkeys,
+    resolve_invite_owner_routing, resolve_rumor_peer_pubkey, select_latest_app_keys_from_events,
     should_require_relay_registration_confirmation, AppKeysSnapshot, AppKeysSnapshotDecision,
     DeviceRegistrationState, InviteOwnerRoutingResolution,
 };
