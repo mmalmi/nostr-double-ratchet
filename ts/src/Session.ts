@@ -347,7 +347,8 @@ export class Session {
     if (
       this.state.ourCurrentNostrKey &&
       (!this.state.theirCurrentNostrPublicKey ||
-        event.pubkey === this.state.theirCurrentNostrPublicKey)
+        event.pubkey === this.state.theirCurrentNostrPublicKey ||
+        event.pubkey === this.state.theirNextNostrPublicKey)
     ) {
       const currentSecret = nip44.getConversationKey(this.state.ourCurrentNostrKey.privateKey, event.pubkey);
       try {

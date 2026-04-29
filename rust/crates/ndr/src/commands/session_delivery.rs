@@ -271,6 +271,110 @@ pub(crate) async fn backfill_recent_invite_responses(
     Ok(())
 }
 
+pub(crate) async fn backfill_recent_pairwise_session_messages(
+    runtime: &NdrRuntime,
+    client: &nostr_sdk::Client,
+    config: &Config,
+    recipient: PublicKey,
+) -> Result<()> {
+    use std::collections::HashSet;
+    use tokio::time::{Duration, Instant};
+
+    use nostr_sdk::Filter;
+
+    const MESSAGE_DISCOVERY_WINDOW: Duration = Duration::from_millis(1_500);
+    const MESSAGE_FETCH_TIMEOUT: Duration = Duration::from_millis(750);
+    const MESSAGE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+    let authors = runtime.get_all_message_push_author_pubkeys();
+    if authors.is_empty() {
+        return Ok(());
+    }
+    if !recipient_has_send_only_session(runtime, recipient) {
+        return Ok(());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let relays = config.resolved_relays();
+    let filter = Filter::new()
+        .kind(nostr::Kind::Custom(
+            nostr_double_ratchet::MESSAGE_EVENT_KIND as u16,
+        ))
+        .authors(authors)
+        .since(nostr::Timestamp::from(now.saturating_sub(3600)));
+    let deadline = Instant::now() + MESSAGE_DISCOVERY_WINDOW;
+    let mut seen_event_ids = HashSet::new();
+    let mut before = pairwise_session_fingerprint(runtime);
+
+    loop {
+        let mut events = match crate::nostr_client::fetch_events_best_effort(
+            client,
+            &relays,
+            filter.clone(),
+            MESSAGE_FETCH_TIMEOUT,
+        )
+        .await
+        {
+            Ok(events) => events,
+            Err(_) => break,
+        };
+
+        events.sort_by_key(|event| (event.created_at.as_secs(), event.id.to_hex()));
+        let mut processed_new_event = false;
+        for event in events {
+            if seen_event_ids.insert(event.id.to_hex()) {
+                runtime.process_received_event(event);
+                processed_new_event = true;
+            }
+        }
+
+        let after = pairwise_session_fingerprint(runtime);
+        if processed_new_event
+            || (!recipient_has_send_only_session(runtime, recipient) && after != before)
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+        before = after;
+        tokio::time::sleep(MESSAGE_POLL_INTERVAL).await;
+    }
+
+    Ok(())
+}
+
+fn pairwise_session_fingerprint(runtime: &NdrRuntime) -> Vec<String> {
+    let mut sessions = runtime
+        .export_active_sessions()
+        .into_iter()
+        .map(|(owner, device_id, state)| {
+            format!(
+                "{}:{}:{}",
+                owner.to_hex(),
+                device_id,
+                serde_json::to_string(&state).unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    sessions.sort();
+    sessions
+}
+
+fn recipient_has_send_only_session(runtime: &NdrRuntime, recipient: PublicKey) -> bool {
+    runtime
+        .export_active_sessions()
+        .into_iter()
+        .any(|(owner, _, state)| {
+            let can_send = state.their_next_nostr_public_key.is_some()
+                && state.our_current_nostr_key.is_some();
+            let can_receive = state.receiving_chain_key.is_some()
+                || state.their_current_nostr_public_key.is_some()
+                || state.receiving_chain_message_number > 0;
+            owner == recipient && can_send && !can_receive
+        })
+}
+
 pub(crate) async fn prepare_recipient_delivery_sessions(
     runtime: &NdrRuntime,
     client: &nostr_sdk::Client,
@@ -279,6 +383,7 @@ pub(crate) async fn prepare_recipient_delivery_sessions(
 ) -> Result<()> {
     let recipient_devices = refresh_recipient_app_keys(runtime, client, config, recipient).await?;
     backfill_recent_invite_responses(runtime, client, config).await?;
+    backfill_recent_pairwise_session_messages(runtime, client, config, recipient).await?;
     let invite_targets =
         recipient_devices_missing_active_sessions(runtime, recipient, &recipient_devices);
     process_recipient_device_invites(runtime, client, config, recipient, &invite_targets).await?;

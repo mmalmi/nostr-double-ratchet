@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.124 - 2026-04-29
+
+- Fix linked-device direct-message fanout by preferring the active bidirectional ratchet session over stale inactive receive snapshots while still falling back to send-capable inactive sessions when needed.
+- Backfill recent pairwise session events before one-shot `ndr send` delivery so the CLI can catch up with relay-visible device/session state.
+- Align TypeScript header decryption with Rust for same-chain events authored by the peer's advertised next ratchet key.
+
 ## 0.0.123 - 2026-04-29
 
 - Publish the Rust crates with linked-secondary group delivery fixed for `ndr listen`.

@@ -29,6 +29,14 @@ async fn e2e_test_permit() -> tokio::sync::SemaphorePermit<'static> {
         .expect("e2e semaphore should stay open")
 }
 
+async fn e2e_exclusive_test_permit() -> tokio::sync::SemaphorePermit<'static> {
+    E2E_TEST_SEMAPHORE
+        .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_E2E_TESTS))
+        .acquire_many(MAX_CONCURRENT_E2E_TESTS as u32)
+        .await
+        .expect("e2e semaphore should stay open")
+}
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -853,7 +861,7 @@ async fn test_group_metadata_reaches_linked_second_device_without_owner_mirror()
 
 #[tokio::test]
 async fn test_group_chat_three_users_two_clients_each_every_client_receives() {
-    let _guard = e2e_test_permit().await;
+    let _guard = e2e_exclusive_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);
@@ -1421,7 +1429,7 @@ async fn test_group_sender_key_rotation() {
 
 #[tokio::test]
 async fn test_group_chat_six_participants_everyone_receives() {
-    let _guard = e2e_test_permit().await;
+    let _guard = e2e_exclusive_test_permit().await;
     let mut relay = common::WsRelay::new();
     let addr = relay.start().await.expect("Failed to start relay");
     let relay_url = format!("ws://{}", addr);

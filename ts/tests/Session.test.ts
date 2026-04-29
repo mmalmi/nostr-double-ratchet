@@ -119,6 +119,25 @@ describe("Session", () => {
     expect(deliver(bob, message2).content).toBe("Message 2")
   })
 
+  it("decrypts same-chain follow-ups from the previously advertised next author", () => {
+    const { alice, bob } = createPair()
+
+    const message1 = alice.send("Message 1").event
+    const advertisedNext = alice.state.ourNextNostrKey
+    expect(deliver(bob, message1).content).toBe("Message 1")
+
+    const nextPrivateKey = generateSecretKey()
+    alice.state.ourCurrentNostrKey = advertisedNext
+    alice.state.ourNextNostrKey = {
+      publicKey: getPublicKey(nextPrivateKey),
+      privateKey: nextPrivateKey,
+    }
+
+    const message2 = alice.send("Message 2").event
+    expect(message2.pubkey).toBe(advertisedNext.publicKey)
+    expect(deliver(bob, message2).content).toBe("Message 2")
+  })
+
   it("maintains conversation state through serialization", async () => {
     const { alice, bob } = createPair()
 

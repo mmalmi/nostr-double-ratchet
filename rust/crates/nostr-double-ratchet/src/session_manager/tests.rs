@@ -404,6 +404,162 @@ fn send_uses_send_capable_inactive_session_when_active_session_cannot_send() {
 }
 
 #[test]
+fn send_uses_most_advanced_send_capable_inactive_session() {
+    let mut active_receive_only_state = test_session_state();
+    active_receive_only_state.our_current_nostr_key = None;
+    active_receive_only_state.sending_chain_key = None;
+    let active_receive_only =
+        crate::Session::new(active_receive_only_state, "active-receive-only".to_string());
+    assert!(!active_receive_only.can_send());
+
+    let mut stale_send_only_state = test_session_state();
+    stale_send_only_state.receiving_chain_key = None;
+    stale_send_only_state.their_current_nostr_public_key = None;
+    stale_send_only_state.receiving_chain_message_number = 0;
+    stale_send_only_state.sending_chain_message_number = 3;
+    let stale_author = stale_send_only_state
+        .our_current_nostr_key
+        .as_ref()
+        .unwrap()
+        .public_key;
+    let stale_send_only = crate::Session::new(stale_send_only_state, "stale".to_string());
+    assert!(stale_send_only.can_send());
+
+    let mut advanced_state = test_session_state();
+    advanced_state.receiving_chain_message_number = 4;
+    advanced_state.sending_chain_message_number = 0;
+    let advanced_author = advanced_state
+        .our_current_nostr_key
+        .as_ref()
+        .unwrap()
+        .public_key;
+    let advanced = crate::Session::new(advanced_state, "advanced".to_string());
+    assert!(advanced.can_send());
+
+    let mut device_record = crate::DeviceRecord {
+        device_id: "peer-device".to_string(),
+        public_key: String::new(),
+        active_session: Some(active_receive_only),
+        inactive_sessions: vec![stale_send_only, advanced],
+        created_at: 0,
+        is_stale: false,
+        stale_timestamp: None,
+        last_activity: Some(0),
+    };
+
+    let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "best inactive")
+        .build(Keys::generate().public_key());
+
+    let signed = SessionManager::send_event_with_best_session(&mut device_record, event)
+        .expect("expected send through advanced inactive session");
+
+    assert_eq!(signed.pubkey, advanced_author);
+    assert_ne!(signed.pubkey, stale_author);
+    assert_eq!(
+        device_record
+            .active_session
+            .as_ref()
+            .and_then(|session| session.state.our_current_nostr_key.as_ref())
+            .map(|key| key.public_key),
+        Some(advanced_author)
+    );
+}
+
+#[test]
+fn send_prefers_active_bidirectional_session_over_higher_receive_inactive() {
+    let mut active_state = test_session_state();
+    active_state.receiving_chain_message_number = 1;
+    active_state.sending_chain_message_number = 0;
+    active_state.previous_sending_chain_message_count = 1;
+    let active_author = active_state
+        .our_current_nostr_key
+        .as_ref()
+        .unwrap()
+        .public_key;
+    let active = crate::Session::new(active_state, "active".to_string());
+    assert!(active.can_send());
+
+    let mut inactive_state = test_session_state();
+    inactive_state.receiving_chain_message_number = 4;
+    inactive_state.sending_chain_message_number = 0;
+    inactive_state.previous_sending_chain_message_count = 0;
+    let inactive_author = inactive_state
+        .our_current_nostr_key
+        .as_ref()
+        .unwrap()
+        .public_key;
+    let inactive = crate::Session::new(inactive_state, "inactive".to_string());
+    assert!(inactive.can_send());
+
+    let mut device_record = crate::DeviceRecord {
+        device_id: "peer-device".to_string(),
+        public_key: String::new(),
+        active_session: Some(active),
+        inactive_sessions: vec![inactive],
+        created_at: 0,
+        is_stale: false,
+        stale_timestamp: None,
+        last_activity: Some(0),
+    };
+
+    let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "active session")
+        .build(Keys::generate().public_key());
+
+    let signed = SessionManager::send_event_with_best_session(&mut device_record, event)
+        .expect("expected send through active session");
+
+    assert_eq!(signed.pubkey, active_author);
+    assert_ne!(signed.pubkey, inactive_author);
+}
+
+#[test]
+fn send_prefers_new_ratchet_epoch_over_higher_old_chain_send_count() {
+    let mut old_epoch_state = test_session_state();
+    old_epoch_state.receiving_chain_message_number = 1;
+    old_epoch_state.sending_chain_message_number = 1;
+    old_epoch_state.previous_sending_chain_message_count = 0;
+    let old_epoch_author = old_epoch_state
+        .our_current_nostr_key
+        .as_ref()
+        .unwrap()
+        .public_key;
+    let old_epoch = crate::Session::new(old_epoch_state, "old-epoch".to_string());
+    assert!(old_epoch.can_send());
+
+    let mut new_epoch_state = test_session_state();
+    new_epoch_state.receiving_chain_message_number = 1;
+    new_epoch_state.sending_chain_message_number = 0;
+    new_epoch_state.previous_sending_chain_message_count = 5;
+    let new_epoch_author = new_epoch_state
+        .our_current_nostr_key
+        .as_ref()
+        .unwrap()
+        .public_key;
+    let new_epoch = crate::Session::new(new_epoch_state, "new-epoch".to_string());
+    assert!(new_epoch.can_send());
+
+    let mut device_record = crate::DeviceRecord {
+        device_id: "peer-device".to_string(),
+        public_key: String::new(),
+        active_session: Some(new_epoch),
+        inactive_sessions: vec![old_epoch],
+        created_at: 0,
+        is_stale: false,
+        stale_timestamp: None,
+        last_activity: Some(0),
+    };
+
+    let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "new ratchet epoch")
+        .build(Keys::generate().public_key());
+
+    let signed = SessionManager::send_event_with_best_session(&mut device_record, event)
+        .expect("expected send through new ratchet epoch");
+
+    assert_eq!(signed.pubkey, new_epoch_author);
+    assert_ne!(signed.pubkey, old_epoch_author);
+}
+
+#[test]
 fn init_compacts_duplicate_stored_sessions_and_exposes_unique_message_authors() {
     let our_keys = Keys::generate();
     let peer = Keys::generate().public_key();

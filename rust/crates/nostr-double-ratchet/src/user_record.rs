@@ -86,7 +86,7 @@ impl UserRecord {
             .active_session
             .as_ref()
             .map(Self::session_priority)
-            .unwrap_or((0, 0, 0));
+            .unwrap_or((0, 0, 0, 0));
 
         if let Some(old_session) = device.active_session.take() {
             // Keep the richer session active for this device. In practice this avoids
@@ -118,7 +118,7 @@ impl UserRecord {
         );
     }
 
-    fn session_priority(session: &Session) -> (u8, u32, u32) {
+    fn session_priority(session: &Session) -> (u8, u32, u32, u32) {
         let can_send = session.can_send();
         let can_receive = session.state.receiving_chain_key.is_some()
             || session.state.their_current_nostr_public_key.is_some()
@@ -134,6 +134,7 @@ impl UserRecord {
         (
             directionality,
             session.state.receiving_chain_message_number,
+            session.state.previous_sending_chain_message_count,
             session.state.sending_chain_message_number,
         )
     }

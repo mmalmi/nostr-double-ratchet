@@ -101,8 +101,8 @@ impl SessionManager {
         (
             directionality,
             state.receiving_chain_message_number,
-            state.sending_chain_message_number,
             state.previous_sending_chain_message_count,
+            state.sending_chain_message_number,
         )
     }
 
@@ -343,21 +343,45 @@ impl SessionManager {
         device_record: &mut crate::DeviceRecord,
         event: UnsignedEvent,
     ) -> Option<nostr::Event> {
-        if let Some(ref mut session) = device_record.active_session {
-            if let Ok(signed_event) = session.send_event(event.clone()) {
-                return Some(signed_event);
+        let mut candidates = Vec::new();
+        if let Some(ref session) = device_record.active_session {
+            if session.can_send() {
+                candidates.push((None, SessionManager::session_send_priority(session, true)));
             }
         }
 
         for idx in 0..device_record.inactive_sessions.len() {
-            let signed_event = {
-                let session = &mut device_record.inactive_sessions[idx];
-                session.send_event(event.clone()).ok()
-            };
+            let session = &device_record.inactive_sessions[idx];
+            if session.can_send() {
+                candidates.push((
+                    Some(idx),
+                    SessionManager::session_send_priority(session, false),
+                ));
+            }
+        }
 
-            if let Some(signed_event) = signed_event {
-                SessionManager::promote_device_record_session_to_active(device_record, idx);
-                return Some(signed_event);
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (session_index, _) in candidates {
+            match session_index {
+                None => {
+                    if let Some(ref mut session) = device_record.active_session {
+                        if let Ok(signed_event) = session.send_event(event.clone()) {
+                            return Some(signed_event);
+                        }
+                    }
+                }
+                Some(idx) => {
+                    let signed_event = {
+                        let session = &mut device_record.inactive_sessions[idx];
+                        session.send_event(event.clone()).ok()
+                    };
+
+                    if let Some(signed_event) = signed_event {
+                        SessionManager::promote_device_record_session_to_active(device_record, idx);
+                        return Some(signed_event);
+                    }
+                }
             }
         }
 

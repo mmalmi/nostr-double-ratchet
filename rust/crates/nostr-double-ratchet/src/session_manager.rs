@@ -148,6 +148,25 @@ impl SessionManager {
         Self::session_state_can_receive(&session.state)
     }
 
+    fn session_send_priority(session: &crate::Session, is_active: bool) -> (u8, u8, u32, u32, u32) {
+        let can_send = session.can_send();
+        let can_receive = Self::session_can_receive(session);
+        let directionality = match (can_send, can_receive) {
+            (true, true) => 3,
+            (true, false) => 2,
+            (false, true) => 1,
+            (false, false) => 0,
+        };
+
+        (
+            directionality,
+            u8::from(is_active && can_receive),
+            session.state.receiving_chain_message_number,
+            session.state.previous_sending_chain_message_count,
+            session.state.sending_chain_message_number,
+        )
+    }
+
     fn session_state_can_receive(state: &crate::SessionState) -> bool {
         state.receiving_chain_key.is_some()
             || state.their_current_nostr_public_key.is_some()
