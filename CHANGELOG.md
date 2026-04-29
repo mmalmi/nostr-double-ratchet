@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.123 - 2026-04-29
+
+- Publish the Rust crates with linked-secondary group delivery fixed for `ndr listen`.
+- Publish the runtime device invite after link acceptance so peer devices can establish sessions to linked devices without re-enabling public invite discovery.
+
 ## 0.0.122 - 2026-04-29
 
 - Publish the Rust crates with `ndr` command handling routed through `NdrRuntime`.
