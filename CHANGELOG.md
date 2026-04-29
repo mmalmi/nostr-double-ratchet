@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.122 - 2026-04-29
+
+- Publish the Rust crates with `ndr` command handling routed through `NdrRuntime`.
+- Add runtime support APIs for CLI session, invite, group, listen, and send workflows without direct `SessionManager` access.
+- Harden public invite publication, preserve required AppKeys devices in snapshots, and reduce CLI relay send latency.
+
 ## 0.0.121 - 2026-04-28
 
 - Decrypt encrypted AppKeys device labels when owner-key runtimes backfill or subscribe to their own AppKeys events, preserving human device labels after relay refreshes.
