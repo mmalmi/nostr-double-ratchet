@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::commands::owner_claim::fetch_latest_app_keys_snapshot;
 use crate::config::Config;
-use crate::nostr_client::{connect_client, send_event_or_ignore};
+use crate::nostr_client::{connect_client, fetch_events_best_effort, send_event_or_ignore};
 use crate::storage::{Storage, StoredChat};
 
 pub(super) struct PublicInviteJoinResult {
@@ -194,7 +194,13 @@ pub(super) async fn join_via_public_invite(
         .author(target_pubkey)
         .limit(20);
 
-    let events = client.fetch_events(filter, Duration::from_secs(10)).await?;
+    let events = fetch_events_best_effort(
+        &client,
+        &config.resolved_relays(),
+        filter,
+        Duration::from_secs(3),
+    )
+    .await?;
 
     let has_tag = |event: &nostr::Event, name: &str, value: &str| {
         event.tags.iter().any(|t| {

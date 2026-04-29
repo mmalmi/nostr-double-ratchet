@@ -1,5 +1,6 @@
 use anyhow::Result;
 use nostr_sdk::{Client, Filter};
+use tokio::task::JoinSet;
 
 const SUBSCRIBE_TIMEOUT_SECS: u64 = 3;
 const SEND_EVENT_TIMEOUT_SECS: u64 = 2;
@@ -34,25 +35,34 @@ async fn send_event_once(client: &Client, event: nostr::Event) -> Result<()> {
     let mut relay_urls: Vec<String> = relays.keys().map(|url| url.to_string()).collect();
     relay_urls.sort();
 
+    let mut tasks = JoinSet::new();
+    for relay in relay_urls {
+        let client = client.clone();
+        let event = event.clone();
+        tasks.spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(SEND_EVENT_TIMEOUT_SECS),
+                client.send_event_to([relay.as_str()], &event),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(err)) => Err(err.into()),
+                Err(_) => Err(anyhow::anyhow!("send_event timed out for relay {}", relay)),
+            }
+        });
+    }
+
     let mut last_error: Option<anyhow::Error> = None;
     let mut any_success = false;
-
-    for relay in relay_urls {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(SEND_EVENT_TIMEOUT_SECS),
-            client.send_event_to([relay.as_str()], &event),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => {
                 any_success = true;
             }
-            Ok(Err(err)) => {
-                last_error = Some(err.into());
-            }
-            Err(_) => {
-                last_error = Some(anyhow::anyhow!("send_event timed out for relay {}", relay));
-            }
+            Ok(Err(err)) => last_error = Some(err),
+            Err(err) => last_error = Some(err.into()),
         }
     }
 
@@ -159,25 +169,35 @@ pub(crate) async fn subscribe_filters_best_effort(
         return Ok(());
     }
 
+    let mut tasks = JoinSet::new();
+    for relay in relays {
+        let relay = relay.clone();
+        let client = client.clone();
+        let filters = filters.clone();
+        tasks.spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(SUBSCRIBE_TIMEOUT_SECS),
+                subscribe_filters_to_relay(&client, &relay, filters),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(anyhow::anyhow!("subscribe timed out for relay {}", relay)),
+            }
+        });
+    }
+
     let mut last_error: Option<anyhow::Error> = None;
     let mut any_success = false;
-
-    for relay in relays {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(SUBSCRIBE_TIMEOUT_SECS),
-            subscribe_filters_to_relay(client, relay, filters.clone()),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => {
                 any_success = true;
             }
-            Ok(Err(err)) => {
-                last_error = Some(err.into());
-            }
-            Err(_) => {
-                last_error = Some(anyhow::anyhow!("subscribe timed out for relay {}", relay));
-            }
+            Ok(Err(err)) => last_error = Some(err),
+            Err(err) => last_error = Some(err.into()),
         }
     }
 
@@ -214,36 +234,46 @@ pub(crate) async fn fetch_events_best_effort(
         return Ok(events.iter().cloned().collect());
     }
 
+    let mut tasks = JoinSet::new();
+    for relay in relays {
+        let relay = relay.clone();
+        let client = client.clone();
+        let filter = filter.clone();
+        tasks.spawn(async move {
+            let result = tokio::time::timeout(
+                timeout + std::time::Duration::from_millis(250),
+                client.fetch_events_from([relay.as_str()], filter, timeout),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(events)) => Ok(events.iter().cloned().collect::<Vec<_>>()),
+                Ok(Err(err)) => Err(err.into()),
+                Err(_) => Err(anyhow::anyhow!(
+                    "fetch_events timed out for relay {}",
+                    relay
+                )),
+            }
+        });
+    }
+
     let mut last_error: Option<anyhow::Error> = None;
     let mut any_success = false;
     let mut seen_event_ids = std::collections::HashSet::new();
     let mut collected = Vec::new();
-
-    for relay in relays {
-        match tokio::time::timeout(
-            timeout + std::time::Duration::from_millis(250),
-            client.fetch_events_from([relay.as_str()], filter.clone(), timeout),
-        )
-        .await
-        {
+    while let Some(result) = tasks.join_next().await {
+        match result {
             Ok(Ok(events)) => {
                 any_success = true;
-                for event in events.iter() {
+                for event in events {
                     let event_id = event.id;
                     if seen_event_ids.insert(event_id) {
-                        collected.push(event.clone());
+                        collected.push(event);
                     }
                 }
             }
-            Ok(Err(err)) => {
-                last_error = Some(err.into());
-            }
-            Err(_) => {
-                last_error = Some(anyhow::anyhow!(
-                    "fetch_events timed out for relay {}",
-                    relay
-                ));
-            }
+            Ok(Err(err)) => last_error = Some(err),
+            Err(err) => last_error = Some(err.into()),
         }
     }
 

@@ -115,6 +115,7 @@ pub(crate) async fn process_recipient_device_invites(
     session_manager: &SessionManager,
     client: &nostr_sdk::Client,
     config: &Config,
+    recipient: PublicKey,
     recipient_devices: &std::collections::HashSet<PublicKey>,
 ) -> Result<()> {
     use nostr_sdk::Filter;
@@ -127,7 +128,12 @@ pub(crate) async fn process_recipient_device_invites(
     }
 
     let relays = config.resolved_relays();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let discovery_window = if has_send_capable_session(session_manager, recipient) {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_secs(15)
+    };
+    let deadline = Instant::now() + discovery_window;
     let mut processed = std::collections::HashSet::new();
 
     while Instant::now() <= deadline {
@@ -212,6 +218,7 @@ pub(crate) async fn prepare_recipient_delivery_sessions(
     backfill_recent_invite_responses(session_manager, client, config).await?;
     let invite_targets =
         recipient_devices_missing_active_sessions(session_manager, recipient, &recipient_devices);
-    process_recipient_device_invites(session_manager, client, config, &invite_targets).await?;
+    process_recipient_device_invites(session_manager, client, config, recipient, &invite_targets)
+        .await?;
     Ok(())
 }
