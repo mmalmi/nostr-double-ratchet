@@ -6,7 +6,10 @@ use nostr_double_ratchet::{
     CHAT_MESSAGE_KIND, EXPIRATION_TAG, MESSAGE_EVENT_KIND,
 };
 
-use crate::commands::session_delivery::prepare_recipient_delivery_sessions as prepare_session_manager_delivery_sessions;
+use crate::commands::session_delivery::{
+    is_double_ratchet_invite_event,
+    prepare_recipient_delivery_sessions as prepare_session_manager_delivery_sessions,
+};
 use crate::config::Config;
 use crate::nostr_client::{connect_client, send_event_with_retry};
 use crate::output::Output;
@@ -190,6 +193,10 @@ async fn flush_session_manager_message_events(
             | SessionManagerEvent::ReceivedEvent(_)
             | SessionManagerEvent::DecryptedMessage { .. } => continue,
         };
+
+        if is_double_ratchet_invite_event(&signed) {
+            continue;
+        }
 
         send_event_with_retry(
             client,

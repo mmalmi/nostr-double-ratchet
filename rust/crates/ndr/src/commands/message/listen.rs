@@ -12,6 +12,7 @@ use crate::commands::owner_claim::{
     fetch_latest_app_keys, fetch_latest_app_keys_snapshot,
     fetch_latest_app_keys_snapshot_with_timeout, resolve_verified_owner_pubkey,
 };
+use crate::commands::session_delivery::is_double_ratchet_invite_event;
 use crate::config::Config;
 use crate::nostr_client::{
     fetch_events_best_effort, send_event_or_ignore, subscribe_filters_best_effort,
@@ -1259,12 +1260,21 @@ async fn flush_session_manager_events(
                 let signed = unsigned
                     .sign_with_keys(&keys)
                     .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?;
+                if is_double_ratchet_invite_event(&signed) {
+                    continue;
+                }
                 send_event_or_ignore(client, signed).await?;
             }
             SessionManagerEvent::PublishSigned(signed) => {
+                if is_double_ratchet_invite_event(&signed) {
+                    continue;
+                }
                 send_event_or_ignore(client, signed).await?;
             }
             SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => {
+                if is_double_ratchet_invite_event(&event) {
+                    continue;
+                }
                 send_event_or_ignore(client, event).await?;
             }
             SessionManagerEvent::Subscribe { filter_json, .. } => {

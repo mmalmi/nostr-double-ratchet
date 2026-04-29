@@ -10,7 +10,10 @@ use nostr_sdk::Client;
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::commands::session_delivery::prepare_recipient_delivery_sessions as prepare_member_delivery_sessions;
+use crate::commands::session_delivery::{
+    is_double_ratchet_invite_event,
+    prepare_recipient_delivery_sessions as prepare_member_delivery_sessions,
+};
 use crate::config::Config;
 use crate::nostr_client::{send_event_or_ignore, send_event_with_retry, send_events_with_retry};
 use crate::output::Output;
@@ -207,6 +210,10 @@ async fn publish_pending_session_manager_events(
             Ok(_) => continue,
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         };
+
+        if is_double_ratchet_invite_event(&signed) {
+            continue;
+        }
 
         send_event_with_retry(client, signed, MAX_DELIVERY_ATTEMPTS, DELIVERY_RETRY_MS).await?;
         published_any = true;

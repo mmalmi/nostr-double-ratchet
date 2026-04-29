@@ -6,6 +6,9 @@ use nostr_double_ratchet::{
 use std::sync::Arc;
 
 use crate::commands::owner_claim::fetch_latest_app_keys_snapshot;
+use crate::commands::session_delivery::{
+    is_double_ratchet_invite_event, is_double_ratchet_public_invite_event,
+};
 use crate::config::Config;
 use crate::nostr_client::{connect_client, fetch_events_best_effort, send_event_or_ignore};
 use crate::storage::{Storage, StoredChat};
@@ -101,6 +104,9 @@ async fn flush_session_manager_events(
         match event {
             SessionManagerEvent::Publish(unsigned) => {
                 let signed = unsigned.sign_with_keys(signing_keys)?;
+                if is_double_ratchet_invite_event(&signed) {
+                    continue;
+                }
                 if signed.kind.as_u16() == INVITE_RESPONSE_KIND as u16 && invite_response.is_none()
                 {
                     invite_response = Some(signed.clone());
@@ -108,6 +114,9 @@ async fn flush_session_manager_events(
                 send_event_or_ignore(client, signed).await?;
             }
             SessionManagerEvent::PublishSigned(signed) => {
+                if is_double_ratchet_invite_event(&signed) {
+                    continue;
+                }
                 if signed.kind.as_u16() == INVITE_RESPONSE_KIND as u16 && invite_response.is_none()
                 {
                     invite_response = Some(signed.clone());
@@ -115,6 +124,9 @@ async fn flush_session_manager_events(
                 send_event_or_ignore(client, signed).await?;
             }
             SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => {
+                if is_double_ratchet_invite_event(&event) {
+                    continue;
+                }
                 if event.kind.as_u16() == INVITE_RESPONSE_KIND as u16 && invite_response.is_none() {
                     invite_response = Some(event.clone());
                 }
@@ -202,16 +214,8 @@ pub(super) async fn join_via_public_invite(
     )
     .await?;
 
-    let has_tag = |event: &nostr::Event, name: &str, value: &str| {
-        event.tags.iter().any(|t| {
-            let parts = t.as_slice();
-            parts.first().map(|s| s.as_str()) == Some(name)
-                && parts.get(1).map(|s| s.as_str()) == Some(value)
-        })
-    };
-
     let public_invite = events.iter().find_map(|event| {
-        if has_tag(event, "d", "double-ratchet/invites/public") {
+        if is_double_ratchet_public_invite_event(event) {
             Invite::from_event(event).ok()
         } else {
             None
@@ -219,11 +223,6 @@ pub(super) async fn join_via_public_invite(
     });
 
     let invite = public_invite
-        .or_else(|| {
-            events
-                .iter()
-                .find_map(|event| Invite::from_event(event).ok())
-        })
         .ok_or_else(|| anyhow::anyhow!("No public invite found for {}", target_pubkey_hex))?;
 
     drop(client);

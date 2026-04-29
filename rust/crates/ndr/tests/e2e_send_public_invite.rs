@@ -8,8 +8,8 @@ use tokio::time::{sleep, Duration};
 use nostr_double_ratchet::{Invite, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND};
 
 /// Run ndr CLI command and return JSON output
-async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
-    let output = tokio::process::Command::new(common::ndr_binary())
+async fn run_ndr_output(data_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    tokio::process::Command::new(common::ndr_binary())
         .env("NOSTR_PREFER_LOCAL", "0")
         .arg("--json")
         .arg("--data-dir")
@@ -17,7 +17,11 @@ async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value
         .args(args)
         .output()
         .await
-        .expect("Failed to run ndr");
+        .expect("Failed to run ndr")
+}
+
+async fn run_ndr(data_dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let output = run_ndr_output(data_dir, args).await;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -80,8 +84,11 @@ async fn test_send_prefers_public_invite() {
     )
     .unwrap();
 
-    let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let login = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
+    let alice_sk_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let alice_sk = nostr::SecretKey::from_hex(alice_sk_hex).unwrap();
+    let alice_keys = nostr::Keys::new(alice_sk);
+    let alice_pubkey_hex = alice_keys.public_key().to_hex();
+    let login = run_ndr(alice_dir.path(), &["login", alice_sk_hex]).await;
     assert_eq!(login["status"], "ok");
 
     let send = run_ndr(alice_dir.path(), &["send", &bob_npub, "hello from alice"]).await;
@@ -91,6 +98,16 @@ async fn test_send_prefers_public_invite() {
 
     let events = relay.events().await;
     assert!(events.iter().any(|e| e.kind == INVITE_EVENT_KIND));
+    assert!(
+        !events.iter().any(|e| {
+            e.kind == INVITE_EVENT_KIND
+                && e.pubkey == alice_pubkey_hex
+                && e.tags.iter().any(|tag| {
+                    tag.len() >= 2 && tag[0] == "l" && tag[1] == "double-ratchet/invites"
+                })
+        }),
+        "send should not publish Alice's local device invite"
+    );
     assert!(events.iter().any(|e| e.kind == INVITE_RESPONSE_KIND));
     assert!(events.iter().any(|e| e.kind == MESSAGE_EVENT_KIND));
 
@@ -115,6 +132,66 @@ async fn test_send_prefers_public_invite() {
     assert!(
         chat.is_some(),
         "Expected chat to be created for public invite"
+    );
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn test_send_does_not_accept_device_invite_as_public_invite() {
+    let mut relay = common::WsRelay::new();
+    let addr = relay.start().await.expect("Failed to start relay");
+    let relay_url = format!("ws://{}", addr);
+
+    let bob_sk = "1111111111111111111111111111111111111111111111111111111111111111";
+    let bob_sk = nostr::SecretKey::from_hex(bob_sk).unwrap();
+    let bob_keys = nostr::Keys::new(bob_sk);
+    let bob_npub = nostr::ToBech32::to_bech32(&bob_keys.public_key()).unwrap();
+
+    let mut device_invite = Invite::create_new(
+        bob_keys.public_key(),
+        Some(bob_keys.public_key().to_hex()),
+        None,
+    )
+    .unwrap();
+    device_invite.created_at = 1;
+    let device_event = device_invite
+        .get_event()
+        .unwrap()
+        .sign_with_keys(&bob_keys)
+        .unwrap();
+
+    let client = nostr_sdk::Client::default();
+    client.add_relay(&relay_url).await.unwrap();
+    client.connect().await;
+    client.send_event(&device_event).await.unwrap();
+
+    sleep(Duration::from_millis(200)).await;
+
+    let alice_dir = TempDir::new().unwrap();
+    let config_content = serde_json::json!({
+        "relays": [&relay_url]
+    });
+    std::fs::write(
+        alice_dir.path().join("config.json"),
+        serde_json::to_string(&config_content).unwrap(),
+    )
+    .unwrap();
+
+    let alice_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let login = run_ndr(alice_dir.path(), &["login", alice_sk]).await;
+    assert_eq!(login["status"], "ok");
+
+    let send = run_ndr_output(alice_dir.path(), &["send", &bob_npub, "hello"]).await;
+    assert!(
+        !send.status.success(),
+        "send should fail when only a device invite exists"
+    );
+    let stderr = String::from_utf8_lossy(&send.stderr);
+    assert!(
+        stderr.contains("No public invite found"),
+        "expected no-public-invite error, got stderr={}",
+        stderr
     );
 
     relay.stop().await;

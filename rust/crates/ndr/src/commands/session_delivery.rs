@@ -5,6 +5,37 @@ use nostr_double_ratchet::{SessionManager, INVITE_EVENT_KIND, INVITE_RESPONSE_KI
 use crate::commands::owner_claim::fetch_latest_app_keys_snapshot_with_timeout;
 use crate::config::Config;
 
+fn has_tag_value(event: &nostr::Event, name: &str, value: &str) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(|part| part.as_str()) == Some(name)
+            && parts.get(1).map(|part| part.as_str()) == Some(value)
+    })
+}
+
+pub(crate) fn is_double_ratchet_invite_event(event: &nostr::Event) -> bool {
+    if event.kind.as_u16() != INVITE_EVENT_KIND as u16 {
+        return false;
+    }
+
+    let has_invite_label = has_tag_value(event, "l", "double-ratchet/invites");
+    let has_invite_d = event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(|part| part.as_str()) == Some("d")
+            && parts
+                .get(1)
+                .map(|part| part.as_str().starts_with("double-ratchet/invites/"))
+                .unwrap_or(false)
+    });
+
+    has_invite_label && has_invite_d
+}
+
+pub(crate) fn is_double_ratchet_public_invite_event(event: &nostr::Event) -> bool {
+    is_double_ratchet_invite_event(event)
+        && has_tag_value(event, "d", "double-ratchet/invites/public")
+}
+
 fn session_state_can_send(state: &nostr_double_ratchet::SessionState) -> bool {
     state.their_next_nostr_public_key.is_some() && state.our_current_nostr_key.is_some()
 }
