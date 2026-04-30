@@ -7,6 +7,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+nearby = ["dep:flate2"]
+
 [dependencies]
 nostr.workspace = true
 tracing.workspace = true
@@ -21,6 +25,7 @@ urlencoding.workspace = true
 rand.workspace = true
 crossbeam-channel.workspace = true
 uuid.workspace = true
+flate2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

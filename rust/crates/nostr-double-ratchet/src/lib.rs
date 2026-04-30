@@ -10,6 +10,8 @@ pub mod invite;
 pub mod message_origin;
 pub mod message_queue;
 pub mod multi_device;
+#[cfg(feature = "nearby")]
+pub mod nearby;
 pub mod one_to_many;
 pub mod protocol_backfill;
 pub mod pubsub;
@@ -43,6 +45,12 @@ pub use multi_device::{
     resolve_invite_owner_routing, resolve_rumor_peer_pubkey, select_latest_app_keys_from_events,
     should_require_relay_registration_confirmation, AppKeysSnapshot, AppKeysSnapshotDecision,
     DeviceRegistrationState, InviteOwnerRoutingResolution,
+};
+#[cfg(feature = "nearby")]
+pub use nearby::{
+    decode_nearby_frame_json, encode_nearby_frame_json, nearby_frame_body_len_from_header,
+    read_nearby_frame, NearbyFrameAssembler, NEARBY_FRAME_HEADER_BYTES,
+    NEARBY_MAX_FRAME_BODY_BYTES,
 };
 pub use one_to_many::*;
 pub use protocol_backfill::{
