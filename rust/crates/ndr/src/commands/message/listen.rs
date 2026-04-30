@@ -205,6 +205,7 @@ async fn backfill_recent_pairwise_session_messages(
     seen_event_ids: &mut std::collections::HashSet<String>,
     seen_event_ids_order: &mut std::collections::VecDeque<String>,
     owner_pubkey_hex: &str,
+    nearby: Option<&crate::nearby::NearbyService>,
 ) -> Result<()> {
     let author_pubkeys: Vec<nostr::PublicKey> = pubkeys
         .iter()
@@ -249,6 +250,7 @@ async fn backfill_recent_pairwise_session_messages(
             storage,
             output,
             subscribed_manager_filters,
+            nearby,
         )
         .await?;
         let handled_group_routed = apply_session_group_decrypts(
@@ -304,6 +306,7 @@ async fn backfill_recent_pairwise_session_messages(
         owner_pubkey_hex,
         seen_event_ids,
         seen_event_ids_order,
+        nearby,
     )
     .await?;
 
@@ -834,12 +837,14 @@ async fn process_session_manager_event(
     storage: &Storage,
     output: &Output,
     subscribed_manager_filters: &mut std::collections::HashSet<String>,
+    nearby: Option<&crate::nearby::NearbyService>,
 ) -> Result<SessionManagerProcessingResult> {
     let current_event_id = event.id.to_hex();
     let current_timestamp = event.created_at.as_secs();
     runtime.process_received_event(event.clone());
     let decrypted_events =
-        flush_session_manager_events(runtime, client, config, subscribed_manager_filters).await?;
+        flush_session_manager_events(runtime, client, config, subscribed_manager_filters, nearby)
+            .await?;
     let session_group_decrypts: Vec<SessionGroupDecrypt> = decrypted_events
         .iter()
         .filter_map(|decrypted| {
@@ -936,6 +941,7 @@ async fn retry_pending_session_manager_message_events(
     owner_pubkey_hex: &str,
     seen_event_ids: &mut std::collections::HashSet<String>,
     seen_event_ids_order: &mut std::collections::VecDeque<String>,
+    nearby: Option<&crate::nearby::NearbyService>,
 ) -> Result<()> {
     if pending_events.is_empty() {
         return Ok(());
@@ -959,6 +965,7 @@ async fn retry_pending_session_manager_message_events(
             storage,
             output,
             subscribed_manager_filters,
+            nearby,
         )
         .await?;
         let handled_group_routed = apply_session_group_decrypts(
@@ -1168,6 +1175,7 @@ async fn flush_session_manager_events(
     client: &nostr_sdk::Client,
     config: &Config,
     subscribed_manager_filters: &mut std::collections::HashSet<String>,
+    nearby: Option<&crate::nearby::NearbyService>,
 ) -> Result<Vec<SessionManagerDecrypted>> {
     let mut decrypted = Vec::new();
 
@@ -1184,19 +1192,19 @@ async fn flush_session_manager_events(
                 if is_double_ratchet_invite_event(&signed) {
                     continue;
                 }
-                send_event_or_ignore(client, signed).await?;
+                publish_session_manager_signed_event(client, signed, nearby).await?;
             }
             SessionManagerEvent::PublishSigned(signed) => {
                 if is_double_ratchet_invite_event(&signed) {
                     continue;
                 }
-                send_event_or_ignore(client, signed).await?;
+                publish_session_manager_signed_event(client, signed, nearby).await?;
             }
             SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => {
                 if is_double_ratchet_invite_event(&event) {
                     continue;
                 }
-                send_event_or_ignore(client, event).await?;
+                publish_session_manager_signed_event(client, event, nearby).await?;
             }
             SessionManagerEvent::Subscribe { filter_json, .. } => {
                 if !subscribed_manager_filters.insert(filter_json.clone()) {
@@ -1230,6 +1238,22 @@ async fn flush_session_manager_events(
     }
 
     Ok(decrypted)
+}
+
+async fn publish_session_manager_signed_event(
+    client: &nostr_sdk::Client,
+    event: nostr::Event,
+    nearby: Option<&crate::nearby::NearbyService>,
+) -> Result<()> {
+    let relay_result = send_event_or_ignore(client, event.clone()).await;
+    let mut nearby_delivered = 0;
+    if let Some(nearby) = nearby {
+        nearby_delivered = nearby.publish_event(&event).await;
+    }
+    if relay_result.is_err() && nearby_delivered > 0 {
+        return Ok(());
+    }
+    relay_result
 }
 
 /// Listen for new messages and invite responses
@@ -1456,6 +1480,20 @@ pub async fn listen(
     let mut pending_session_manager_message_events: HashMap<String, nostr::Event> = HashMap::new();
     let mut pending_session_manager_message_event_order: VecDeque<String> = VecDeque::new();
 
+    let mut nearby = match crate::nearby::start(&config, storage, my_pubkey.clone()).await {
+        Ok(service) => service,
+        Err(err) => {
+            output.event(
+                "nearby",
+                serde_json::json!({
+                    "enabled": false,
+                    "error": err.to_string(),
+                }),
+            );
+            None
+        }
+    };
+
     output.success_message(
         "listen",
         &format!(
@@ -1493,6 +1531,7 @@ pub async fn listen(
             &client,
             &config,
             &mut subscribed_manager_filters,
+            nearby.as_ref(),
         )
         .await?;
         backfill_recent_pairwise_session_messages(
@@ -1510,6 +1549,7 @@ pub async fn listen(
             &mut seen_event_ids,
             &mut seen_event_ids_order,
             &owner_pubkey_hex,
+            nearby.as_ref(),
         )
         .await?;
     }
@@ -1575,6 +1615,7 @@ pub async fn listen(
                 &client,
                 &config,
                 &mut subscribed_manager_filters,
+                nearby.as_ref(),
             )
             .await?;
             retry_pending_session_manager_message_events(
@@ -1590,6 +1631,7 @@ pub async fn listen(
                 &owner_pubkey_hex,
                 &mut seen_event_ids,
                 &mut seen_event_ids_order,
+                nearby.as_ref(),
             )
             .await?;
             backfill_recent_pairwise_session_messages(
@@ -1607,6 +1649,7 @@ pub async fn listen(
                 &mut seen_event_ids,
                 &mut seen_event_ids_order,
                 &owner_pubkey_hex,
+                nearby.as_ref(),
             )
             .await?;
             has_subscription = true;
@@ -1643,6 +1686,7 @@ pub async fn listen(
                     &client,
                     &config,
                     &mut subscribed_manager_filters,
+                    nearby.as_ref(),
                 )
                 .await?;
                 retry_pending_session_manager_message_events(
@@ -1658,6 +1702,7 @@ pub async fn listen(
                     &owner_pubkey_hex,
                     &mut seen_event_ids,
                     &mut seen_event_ids_order,
+                    nearby.as_ref(),
                 )
                 .await?;
             }
@@ -1715,26 +1760,43 @@ pub async fn listen(
                     &mut seen_event_ids,
                     &mut seen_event_ids_order,
                     &owner_pubkey_hex,
+                    nearby.as_ref(),
                 )
                 .await?;
             }
             last_refresh = Instant::now();
         }
 
-        // Wait for relay notification with timeout to allow fs check
-        let notification = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            notifications.recv(),
-        )
-        .await;
-
-        let notification = match notification {
-            Ok(Ok(n)) => n,
-            Ok(Err(_)) => break, // Channel closed
-            Err(_) => continue,  // Timeout, loop to check fs
+        // Wait for relay or nearby events with a timeout to allow fs checks.
+        let incoming_event = if let Some(nearby_service) = nearby.as_mut() {
+            tokio::select! {
+                nearby_event = nearby_service.recv() => nearby_event.map(|incoming| incoming.event),
+                notification = notifications.recv() => match notification {
+                    Ok(RelayPoolNotification::Event { event, .. }) => Some((*event).clone()),
+                    Ok(_) => None,
+                    Err(_) => break,
+                },
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => None,
+            }
+        } else {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                notifications.recv(),
+            )
+            .await
+            {
+                Ok(Ok(RelayPoolNotification::Event { event, .. })) => Some((*event).clone()),
+                Ok(Ok(_)) => None,
+                Ok(Err(_)) => break,
+                Err(_) => None,
+            }
         };
 
-        if let RelayPoolNotification::Event { event, .. } = notification {
+        let Some(event) = incoming_event else {
+            continue;
+        };
+
+        {
             refresh_runtime_state_from_storage(&runtime, storage, &owner_pubkey_hex)?;
             let current_event_id = event.id.to_hex();
             if seen_event_ids.contains(&current_event_id) {
@@ -1755,6 +1817,7 @@ pub async fn listen(
                 storage,
                 output,
                 &mut subscribed_manager_filters,
+                nearby.as_ref(),
             )
             .await?;
             if event.kind.as_u16() as u32 == INVITE_RESPONSE_KIND {
@@ -1764,6 +1827,7 @@ pub async fn listen(
                     &client,
                     &config,
                     &mut subscribed_manager_filters,
+                    nearby.as_ref(),
                 )
                 .await?;
                 sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
@@ -1780,6 +1844,7 @@ pub async fn listen(
                     &owner_pubkey_hex,
                     &mut seen_event_ids,
                     &mut seen_event_ids_order,
+                    nearby.as_ref(),
                 )
                 .await?;
             }
@@ -1894,6 +1959,7 @@ pub async fn listen(
                                     &client,
                                     &config,
                                     &mut subscribed_manager_filters,
+                                    nearby.as_ref(),
                                 )
                                 .await?;
 
@@ -2002,6 +2068,7 @@ pub async fn listen(
                                 &client,
                                 &config,
                                 &mut subscribed_manager_filters,
+                                nearby.as_ref(),
                             )
                             .await?;
                             sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
@@ -2018,6 +2085,7 @@ pub async fn listen(
                                 &owner_pubkey_hex,
                                 &mut seen_event_ids,
                                 &mut seen_event_ids_order,
+                                nearby.as_ref(),
                             )
                             .await?;
                             storage.delete_invite(&stored_invite.id)?;
@@ -2052,6 +2120,7 @@ pub async fn listen(
                                     &mut seen_event_ids,
                                     &mut seen_event_ids_order,
                                     &owner_pubkey_hex,
+                                    nearby.as_ref(),
                                 )
                                 .await?;
                             }
@@ -2298,6 +2367,7 @@ pub async fn listen(
                             &client,
                             &config,
                             &mut subscribed_manager_filters,
+                            nearby.as_ref(),
                         )
                         .await?;
 
@@ -2330,6 +2400,7 @@ pub async fn listen(
                                 &mut seen_event_ids,
                                 &mut seen_event_ids_order,
                                 &owner_pubkey_hex,
+                                nearby.as_ref(),
                             )
                             .await?;
                         }

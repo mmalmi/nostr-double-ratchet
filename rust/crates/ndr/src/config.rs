@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 /// CLI configuration
@@ -17,9 +18,25 @@ pub struct Config {
     #[serde(default = "default_relays")]
     pub relays: Vec<String>,
 
+    /// Local nearby transport, used by ndr listen.
+    #[serde(default = "default_true")]
+    pub nearby_enabled: bool,
+
+    /// Local/private nearby TCP peers.
+    #[serde(default)]
+    pub nearby_peers: Vec<String>,
+
+    /// Nearby listen bind address. Empty means auto-select a private LAN address.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nearby_bind: String,
+
     /// Path to the config file
     #[serde(skip)]
     pub path: PathBuf,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_relays() -> Vec<String> {
@@ -38,6 +55,9 @@ impl Default for Config {
             private_key: None,
             linked_owner: None,
             relays: default_relays(),
+            nearby_enabled: default_true(),
+            nearby_peers: Vec::new(),
+            nearby_bind: String::new(),
             path: PathBuf::new(),
         }
     }
@@ -140,6 +160,79 @@ impl Config {
     pub fn resolved_relays(&self) -> Vec<String> {
         resolve_relays(&self.relays)
     }
+
+    /// Resolve nearby enablement with environment override.
+    pub fn nearby_enabled(&self) -> bool {
+        match parse_env_bool("NDR_NEARBY") {
+            Some(enabled) => enabled,
+            None => self.nearby_enabled,
+        }
+    }
+
+    pub fn set_nearby_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.nearby_enabled = enabled;
+        self.save()
+    }
+
+    pub fn nearby_bind_addr(&self) -> Result<Option<SocketAddr>> {
+        let bind = std::env::var("NDR_NEARBY_BIND").unwrap_or_else(|_| self.nearby_bind.clone());
+        let bind = bind.trim();
+        if bind.is_empty() {
+            return Ok(None);
+        }
+        bind.parse()
+            .with_context(|| format!("Invalid nearby bind address: {bind}"))
+            .map(Some)
+    }
+
+    pub fn nearby_peer_addresses(&self) -> Vec<SocketAddr> {
+        let mut raw = self.nearby_peers.clone();
+        if let Some(env_peers) = parse_env_list("NDR_NEARBY_PEERS") {
+            raw.extend(env_peers);
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut peers = Vec::new();
+        for item in raw {
+            let trimmed = item.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(addr) = trimmed.parse::<SocketAddr>() else {
+                continue;
+            };
+            if seen.insert(addr) {
+                peers.push(addr);
+            }
+        }
+        peers
+    }
+
+    pub fn add_nearby_peer(&mut self, address: &str) -> Result<()> {
+        let addr: SocketAddr = address
+            .parse()
+            .with_context(|| format!("Invalid nearby peer address: {address}"))?;
+        let normalized = addr.to_string();
+        if !self.nearby_peers.iter().any(|peer| peer == &normalized) {
+            self.nearby_peers.push(normalized);
+            self.nearby_peers.sort();
+        }
+        self.save()
+    }
+
+    pub fn remove_nearby_peer(&mut self, address: &str) -> Result<bool> {
+        let addr: SocketAddr = address
+            .parse()
+            .with_context(|| format!("Invalid nearby peer address: {address}"))?;
+        let normalized = addr.to_string();
+        let before = self.nearby_peers.len();
+        self.nearby_peers.retain(|peer| peer != &normalized);
+        let removed = self.nearby_peers.len() != before;
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
+    }
 }
 
 fn resolve_relays(config_relays: &[String]) -> Vec<String> {
@@ -232,6 +325,18 @@ fn prefer_local_relay() -> bool {
         }
     }
     true
+}
+
+fn parse_env_bool(var: &str) -> Option<bool> {
+    let value = std::env::var(var).ok()?;
+    let value = value.trim().to_lowercase();
+    if matches!(value.as_str(), "0" | "false" | "no" | "off") {
+        Some(false)
+    } else if matches!(value.as_str(), "1" | "true" | "yes" | "on") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 fn parse_env_list(var: &str) -> Option<Vec<String>> {
@@ -342,6 +447,7 @@ mod tests {
         let config = Config::default();
         assert!(config.private_key.is_none());
         assert!(!config.relays.is_empty());
+        assert!(config.nearby_enabled);
         assert!(!config.is_logged_in());
     }
 
@@ -439,5 +545,32 @@ mod tests {
             resolved,
             vec!["wss://relay.one".to_string(), "wss://relay.two".to_string()]
         );
+    }
+
+    #[test]
+    fn test_nearby_env_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _nearby = EnvGuard::set("NDR_NEARBY", "off");
+        let config = Config::default();
+        assert!(!config.nearby_enabled());
+    }
+
+    #[test]
+    fn test_nearby_peers_dedupe_config_and_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _peers = EnvGuard::set("NDR_NEARBY_PEERS", "127.0.0.1:9001,127.0.0.1:9000");
+        let config = Config {
+            nearby_peers: vec!["127.0.0.1:9000".to_string()],
+            ..Config::default()
+        };
+
+        let peers = config.nearby_peer_addresses();
+        assert_eq!(peers.len(), 2);
+        assert!(peers
+            .iter()
+            .any(|addr| addr.to_string() == "127.0.0.1:9000"));
+        assert!(peers
+            .iter()
+            .any(|addr| addr.to_string() == "127.0.0.1:9001"));
     }
 }

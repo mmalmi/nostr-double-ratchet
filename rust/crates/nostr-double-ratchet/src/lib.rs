@@ -12,6 +12,8 @@ pub mod message_queue;
 pub mod multi_device;
 #[cfg(feature = "nearby")]
 pub mod nearby;
+#[cfg(feature = "nearby-mdns")]
+pub mod nearby_lan;
 pub mod one_to_many;
 pub mod protocol_backfill;
 pub mod pubsub;
@@ -51,6 +53,11 @@ pub use nearby::{
     decode_nearby_frame_json, encode_nearby_frame_json, nearby_frame_body_len_from_header,
     read_nearby_frame, NearbyFrameAssembler, NEARBY_FRAME_HEADER_BYTES,
     NEARBY_MAX_FRAME_BODY_BYTES,
+};
+#[cfg(feature = "nearby-mdns")]
+pub use nearby_lan::{
+    is_allowed_nearby_peer, NearbyLanConfig, NearbyLanError, NearbyLanIncoming, NearbyLanService,
+    IRIS_NEARBY_SERVICE_TYPE,
 };
 pub use one_to_many::*;
 pub use protocol_backfill::{

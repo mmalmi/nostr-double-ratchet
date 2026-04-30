@@ -5,6 +5,7 @@ pub mod identity;
 pub mod invite;
 pub mod link;
 pub mod message;
+pub mod nearby;
 
 mod nip19;
 mod owner_claim;

@@ -10,6 +10,7 @@ repository.workspace = true
 [features]
 default = []
 nearby = ["dep:flate2"]
+nearby-mdns = ["nearby", "dep:mdns-sd", "dep:tokio"]
 
 [dependencies]
 nostr.workspace = true
@@ -26,6 +27,8 @@ rand.workspace = true
 crossbeam-channel.workspace = true
 uuid.workspace = true
 flate2 = { workspace = true, optional = true }
+mdns-sd = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

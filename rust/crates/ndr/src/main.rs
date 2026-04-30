@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod config;
+mod nearby;
 mod nostr_client;
 mod output;
 mod state_sync;
@@ -124,6 +125,10 @@ enum Commands {
         #[arg(short, long)]
         chat: Option<String>,
     },
+
+    /// Local nearby transport
+    #[command(subcommand)]
+    Nearby(NearbyCommands),
 
     /// Group management
     #[command(subcommand)]
@@ -357,6 +362,33 @@ enum ChatCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum NearbyCommands {
+    /// Show nearby status
+    Status,
+
+    /// Enable nearby
+    On,
+
+    /// Disable nearby
+    Off,
+
+    /// List configured nearby peers
+    Peers,
+
+    /// Add a local/private peer address, for example 127.0.0.1:9000
+    AddPeer {
+        /// TCP host:port
+        address: String,
+    },
+
+    /// Remove a configured peer address
+    RemovePeer {
+        /// TCP host:port
+        address: String,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -506,6 +538,18 @@ async fn run(cli: Cli, output: &Output) -> anyhow::Result<()> {
         Commands::Listen { chat } => {
             commands::message::listen(chat.as_deref(), &config, &storage, output).await
         }
+        Commands::Nearby(cmd) => match cmd {
+            NearbyCommands::Status => commands::nearby::status(&config, output).await,
+            NearbyCommands::On => commands::nearby::set_enabled(&mut config, true, output).await,
+            NearbyCommands::Off => commands::nearby::set_enabled(&mut config, false, output).await,
+            NearbyCommands::Peers => commands::nearby::peers(&config, output).await,
+            NearbyCommands::AddPeer { address } => {
+                commands::nearby::add_peer(&mut config, &address, output).await
+            }
+            NearbyCommands::RemovePeer { address } => {
+                commands::nearby::remove_peer(&mut config, &address, output).await
+            }
+        },
         Commands::Group(cmd) => match cmd {
             GroupCommands::Create { name, members } => {
                 commands::group::create(&name, &members, &config, &storage, output).await

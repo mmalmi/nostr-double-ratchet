@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-nostr-double-ratchet.workspace = true
+nostr-double-ratchet = { workspace = true, features = ["nearby-mdns"] }
 nostr.workspace = true
 nostr-sdk.workspace = true
 tokio.workspace = true
