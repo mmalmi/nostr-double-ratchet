@@ -21,6 +21,7 @@ pub enum SessionManagerEvent {
     PublishSignedForInnerEvent {
         event: nostr::Event,
         inner_event_id: Option<String>,
+        target_device_id: Option<String>,
     },
     ReceivedEvent(nostr::Event),
     DecryptedMessage {

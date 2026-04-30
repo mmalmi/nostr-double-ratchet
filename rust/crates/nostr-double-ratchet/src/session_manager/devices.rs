@@ -56,6 +56,61 @@ impl SessionManager {
         let _ = self.store_user_record(&owner_pubkey);
     }
 
+    pub(super) fn apply_app_keys_device_roster(&self, owner_pubkey: PublicKey, app_keys: &AppKeys) {
+        self.update_delegate_mapping(owner_pubkey, app_keys);
+
+        let devices = app_keys.get_all_devices();
+        let _ = self.expand_discovery_queue(owner_pubkey, &devices);
+        let mut active_ids: HashSet<String> = devices
+            .iter()
+            .map(|d| hex::encode(d.identity_pubkey.to_bytes()))
+            .collect();
+        active_ids.insert(owner_pubkey.to_hex());
+
+        let existing_devices = self.with_user_records(move |records| {
+            records
+                .get(&owner_pubkey)
+                .map(|r| r.device_records.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        });
+
+        for device_id in existing_devices {
+            if !active_ids.contains(&device_id) {
+                self.cleanup_device(owner_pubkey, &device_id);
+                self.invite_subscriptions
+                    .lock()
+                    .unwrap()
+                    .retain(|pk| hex::encode(pk.to_bytes()) != device_id);
+            }
+        }
+
+        for device in &devices {
+            self.subscribe_to_device_invite(owner_pubkey, device.identity_pubkey);
+        }
+
+        self.retry_pending_invite_responses(owner_pubkey);
+
+        for device in &devices {
+            let device_id = device.identity_pubkey.to_hex();
+            if device_id == self.device_id {
+                continue;
+            }
+            let has_active_session = self.with_user_records({
+                let device_id = device_id.clone();
+                move |records| {
+                    records
+                        .get(&owner_pubkey)
+                        .and_then(|r| r.device_records.get(&device_id))
+                        .and_then(|d| d.active_session.as_ref())
+                        .is_some()
+                }
+            });
+            if has_active_session {
+                let _ = self.flush_message_queue(&device_id);
+            }
+        }
+    }
+
     pub(super) fn is_device_authorized(
         &self,
         owner_pubkey: PublicKey,
@@ -360,7 +415,11 @@ impl SessionManager {
         for (entry_id, maybe_event_id, signed_event) in pending_publishes {
             if self
                 .pubsub
-                .publish_signed_for_inner_event(signed_event, maybe_event_id.clone())
+                .publish_signed_for_inner_event_to_device(
+                    signed_event,
+                    maybe_event_id.clone(),
+                    Some(device_identity.to_string()),
+                )
                 .is_ok()
             {
                 sent.push((entry_id, maybe_event_id));

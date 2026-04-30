@@ -178,7 +178,15 @@ impl SessionManager {
 
             if let Some(signed_event) = maybe_signed_event {
                 event_ids.push(signed_event.id.to_string());
-                if self.pubsub.publish_signed(signed_event).is_ok() {
+                if self
+                    .pubsub
+                    .publish_signed_for_inner_event_to_device(
+                        signed_event,
+                        inner_event_id.clone(),
+                        Some(device_id.clone()),
+                    )
+                    .is_ok()
+                {
                     published_device_ids.push(device_id.clone());
                 }
             }

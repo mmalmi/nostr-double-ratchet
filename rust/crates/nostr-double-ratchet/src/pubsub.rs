@@ -18,6 +18,14 @@ pub trait NostrPubSub: Send + Sync {
     ) -> Result<()> {
         self.publish_signed(event)
     }
+    fn publish_signed_for_inner_event_to_device(
+        &self,
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+        _target_device_id: Option<String>,
+    ) -> Result<()> {
+        self.publish_signed_for_inner_event(event, inner_event_id)
+    }
     fn subscribe(&self, subid: String, filter_json: String) -> Result<()>;
     fn unsubscribe(&self, subid: String) -> Result<()>;
     fn decrypted_message(
@@ -46,9 +54,19 @@ impl NostrPubSub for crossbeam_channel::Sender<SessionManagerEvent> {
         event: nostr::Event,
         inner_event_id: Option<String>,
     ) -> Result<()> {
+        self.publish_signed_for_inner_event_to_device(event, inner_event_id, None)
+    }
+
+    fn publish_signed_for_inner_event_to_device(
+        &self,
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+        target_device_id: Option<String>,
+    ) -> Result<()> {
         self.send(SessionManagerEvent::PublishSignedForInnerEvent {
             event,
             inner_event_id,
+            target_device_id,
         })
         .map_err(|_| Error::Storage("Failed to send publish".to_string()))
     }
@@ -119,6 +137,16 @@ impl NostrPubSub for ChannelPubSub {
             .publish_signed_for_inner_event(event, inner_event_id)
     }
 
+    fn publish_signed_for_inner_event_to_device(
+        &self,
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+        target_device_id: Option<String>,
+    ) -> Result<()> {
+        self.tx
+            .publish_signed_for_inner_event_to_device(event, inner_event_id, target_device_id)
+    }
+
     fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {
         self.tx.subscribe(subid, filter_json)
     }
@@ -187,6 +215,16 @@ impl NostrPubSub for DedupingPubSub {
     ) -> Result<()> {
         self.inner
             .publish_signed_for_inner_event(event, inner_event_id)
+    }
+
+    fn publish_signed_for_inner_event_to_device(
+        &self,
+        event: nostr::Event,
+        inner_event_id: Option<String>,
+        target_device_id: Option<String>,
+    ) -> Result<()> {
+        self.inner
+            .publish_signed_for_inner_event_to_device(event, inner_event_id, target_device_id)
     }
 
     fn subscribe(&self, subid: String, filter_json: String) -> Result<()> {

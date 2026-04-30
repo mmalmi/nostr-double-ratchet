@@ -92,6 +92,7 @@ fn queued_publish_inner_event_id(event: &SessionManagerEvent) -> Option<&str> {
         SessionManagerEvent::PublishSignedForInnerEvent {
             event,
             inner_event_id,
+            ..
         } if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16 => inner_event_id.as_deref(),
         _ => None,
     }
@@ -376,13 +377,7 @@ fn send_uses_send_capable_inactive_session_when_active_session_cannot_send() {
 
     let events = drain_events(&rx);
     assert!(
-        events.iter().any(|ev| {
-            matches!(
-                ev,
-                SessionManagerEvent::PublishSigned(event)
-                    if event.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-            )
-        }),
+        events.iter().any(is_message_publish),
         "expected send to publish using promoted inactive session"
     );
 
@@ -701,13 +696,7 @@ fn imported_device_session_is_authorized_for_owner_fanout() {
     assert_eq!(published_ids.len(), 1);
 
     let events = drain_events(&rx);
-    assert!(events.iter().any(|event| {
-        matches!(
-            event,
-            SessionManagerEvent::PublishSigned(signed)
-                if signed.kind.as_u16() == crate::MESSAGE_EVENT_KIND as u16
-        )
-    }));
+    assert!(events.iter().any(is_message_publish));
 }
 
 #[test]
@@ -1434,6 +1423,79 @@ fn accept_owner_invite_can_send_first_message_after_app_keys_proof() {
 }
 
 #[test]
+fn accept_invite_expands_stored_owner_roster_to_sibling_public_invites() {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let bob_owner = Keys::generate().public_key();
+    let bob_device_keys = Keys::generate();
+    let bob_device = bob_device_keys.public_key();
+    let bob_sibling_device = Keys::generate().public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let stored = crate::StoredUserRecord {
+        user_id: bob_owner.to_hex(),
+        devices: Vec::new(),
+        known_device_identities: vec![bob_device.to_hex(), bob_sibling_device.to_hex()],
+    };
+    storage
+        .put(
+            &format!("user/{}", bob_owner.to_hex()),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_pubkey.to_hex(),
+        alice_pubkey,
+        tx,
+        Some(storage),
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    let mut invite = Invite::create_new(bob_device, Some(bob_device.to_hex()), Some(1)).unwrap();
+    invite.owner_public_key = Some(bob_owner);
+
+    manager
+        .accept_invite(&invite, Some(bob_owner))
+        .expect("accept_invite should succeed with stored owner roster proof");
+
+    let events = drain_events(&rx);
+    assert!(
+        events.iter().any(|event| {
+            let SessionManagerEvent::Subscribe { filter_json, .. } = event else {
+                return false;
+            };
+            let Ok(filter) = serde_json::from_str::<serde_json::Value>(filter_json) else {
+                return false;
+            };
+            let has_invite_kind = filter
+                .get("kinds")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|kinds| {
+                    kinds
+                        .iter()
+                        .any(|kind| kind.as_u64() == Some(crate::INVITE_EVENT_KIND as u64))
+                });
+            let has_sibling_author = filter
+                .get("authors")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|authors| {
+                    authors
+                        .iter()
+                        .any(|author| author.as_str() == Some(bob_sibling_device.to_hex().as_str()))
+                });
+            has_invite_kind && has_sibling_author
+        }),
+        "expected accept_invite to subscribe to sibling device public invites from the verified owner roster"
+    );
+}
+
+#[test]
 fn accept_invite_retries_bootstrap_message_event_with_future_expiration() {
     let alice_keys = Keys::generate();
     let alice_pubkey = alice_keys.public_key();
@@ -1730,6 +1792,51 @@ fn appkeys_replacement_cleans_revoked_device_queue_entries() {
     assert!(
         events.iter().any(is_message_publish),
         "expected queued message to publish for still-authorized device"
+    );
+}
+
+#[test]
+fn appkeys_replacement_preserves_owner_device_session_when_owner_not_listed() {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let bob_owner_keys = Keys::generate();
+    let bob_owner_pubkey = bob_owner_keys.public_key();
+    let bob_delegate_keys = Keys::generate();
+    let bob_owner_id = bob_owner_pubkey.to_hex();
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_pubkey.to_hex(),
+        alice_pubkey,
+        tx,
+        None,
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    manager
+        .import_session_state(
+            bob_owner_pubkey,
+            Some(bob_owner_id.clone()),
+            test_session_state(),
+        )
+        .unwrap();
+
+    let mut app_keys = AppKeys::new(vec![]);
+    app_keys.add_device(DeviceEntry::new(bob_delegate_keys.public_key(), 1));
+    let app_keys_event =
+        sign_app_keys_event_with_created_at(&app_keys, bob_owner_pubkey, &bob_owner_keys, 1);
+    manager.process_received_event(app_keys_event);
+
+    assert!(
+        manager
+            .export_active_sessions()
+            .into_iter()
+            .any(|(owner, device_id, _)| owner == bob_owner_pubkey && device_id == bob_owner_id),
+        "owner device session should remain valid even when AppKeys only lists delegate devices"
     );
 }
 

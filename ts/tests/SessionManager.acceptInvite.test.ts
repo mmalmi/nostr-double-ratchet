@@ -125,6 +125,59 @@ describe("SessionManager.acceptInvite", () => {
     expect(messageEventsAfter.length).toBeGreaterThan(messageEventCountBefore)
   })
 
+  it("expands verified owner AppKeys and accepts sibling public invites when accepting an invite", async () => {
+    const relay = new MockRelay()
+
+    const bob = await createMockSessionManager("bob-device-1", relay)
+    const alice = await createMockSessionManager("alice-device-1", relay)
+
+    const bobSecondDeviceSecretKey = generateSecretKey()
+    const bobSecondDevicePublicKey = getPublicKey(bobSecondDeviceSecretKey)
+    const createdAt = Math.floor(Date.now() / 1000)
+    const bobAppKeys = new AppKeys()
+    bobAppKeys.addDevice({
+      identityPubkey: bob.manager.getDeviceId(),
+      createdAt,
+    })
+    bobAppKeys.addDevice({
+      identityPubkey: bobSecondDevicePublicKey,
+      createdAt: createdAt + 1,
+    })
+    relay.storeAndDeliver(
+      finalizeEvent(bobAppKeys.getEvent(), bob.secretKey) as VerifiedEvent
+    )
+
+    const bobSecondInvite = Invite.createNew(
+      bobSecondDevicePublicKey,
+      bobSecondDevicePublicKey,
+      1,
+      { ownerPubkey: bob.publicKey }
+    )
+    relay.storeAndDeliver(
+      finalizeEvent(bobSecondInvite.getEvent(), bobSecondDeviceSecretKey) as VerifiedEvent
+    )
+
+    const invite = extractInviteForOwner(relay, bob.publicKey)
+    await alice.manager.acceptInvite(invite, {
+      ownerPublicKey: bob.publicKey,
+    })
+
+    await vi.waitFor(() => {
+      const bobRecord = alice.manager.getUserRecords().get(bob.publicKey)
+      expect(bobRecord).toBeDefined()
+      expect(
+        bobRecord?.appKeys?.getAllDevices().map((device) => device.identityPubkey)
+      ).toContain(bobSecondDevicePublicKey)
+
+      const siblingDevice = bobRecord?.devices.get(bobSecondDevicePublicKey)
+      expect(siblingDevice).toBeDefined()
+      expect(
+        Boolean(siblingDevice?.activeSession) ||
+        (siblingDevice?.inactiveSessions.length ?? 0) > 0
+      ).toBe(true)
+    }, { timeout: 5_000 })
+  }, 10_000)
+
   it("includes the account owner pubkey in link invite responses from registered owner devices", async () => {
     const relay = new MockRelay()
 

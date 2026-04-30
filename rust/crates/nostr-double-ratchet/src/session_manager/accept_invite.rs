@@ -20,6 +20,7 @@ impl SessionManager {
             .unwrap_or_else(|| self.resolve_to_owner(&inviter_device_pubkey));
         let mut owner_pubkey = claimed_owner_pubkey;
         let mut used_link_bootstrap_exception = false;
+        let mut verified_owner_app_keys: Option<AppKeys> = None;
 
         if claimed_owner_pubkey != inviter_device_pubkey {
             let cached_app_keys = self
@@ -40,6 +41,9 @@ impl SessionManager {
                 used_link_bootstrap_exception = routing.used_link_bootstrap_exception;
                 if owner_pubkey == claimed_owner_pubkey {
                     self.update_delegate_mapping(claimed_owner_pubkey, &app_keys);
+                    if routing.verified_with_app_keys {
+                        verified_owner_app_keys = Some(app_keys);
+                    }
                 }
             } else {
                 let known_device_identities = self.with_user_records(move |records| {
@@ -73,6 +77,9 @@ impl SessionManager {
                 if owner_pubkey == claimed_owner_pubkey {
                     if let Some(app_keys) = stored_app_keys.as_ref() {
                         self.update_delegate_mapping(claimed_owner_pubkey, app_keys);
+                        if routing.verified_with_app_keys {
+                            verified_owner_app_keys = Some(app_keys.clone());
+                        }
                     }
                 }
             }
@@ -141,6 +148,9 @@ impl SessionManager {
                 any_send_capable && (any_receive_capable || any_session_has_activity)
             },
         ) {
+            if let Some(app_keys) = verified_owner_app_keys.as_ref() {
+                self.apply_app_keys_device_roster(owner_pubkey, app_keys);
+            }
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             return Ok(AcceptInviteResult {
                 owner_pubkey,
@@ -166,6 +176,9 @@ impl SessionManager {
                 },
             )
         {
+            if let Some(app_keys) = verified_owner_app_keys.as_ref() {
+                self.apply_app_keys_device_roster(owner_pubkey, app_keys);
+            }
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             return Ok(AcceptInviteResult {
                 owner_pubkey,
@@ -262,6 +275,9 @@ impl SessionManager {
 
             self.record_known_device_identity(owner_pubkey, inviter_device_pubkey);
             let _ = self.store_user_record(&owner_pubkey);
+            if let Some(app_keys) = verified_owner_app_keys.as_ref() {
+                self.apply_app_keys_device_roster(owner_pubkey, app_keys);
+            }
             self.send_message_history(owner_pubkey, &device_id);
             if !invite_bootstrap_events.is_empty() {
                 self.publish_bootstrap_schedule(invite_bootstrap_events);

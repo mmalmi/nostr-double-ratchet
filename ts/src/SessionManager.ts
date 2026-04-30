@@ -1175,6 +1175,7 @@ export class SessionManager {
 
     let ownerPublicKey = claimedOwnerPublicKey
     let preloadedAppKeys: AppKeys | null = null
+    let shouldApplyPreloadedRoster = false
 
     // When an invite claims delegate ownership, verify against AppKeys when available.
     // If claim verification fails for chat invites, fall back to device-identity routing.
@@ -1196,6 +1197,7 @@ export class SessionManager {
         })
         if (!routing.fellBackToDeviceIdentity && persistedAppKeys) {
           preloadedAppKeys = persistedAppKeys
+          shouldApplyPreloadedRoster = routing.verifiedWithAppKeys
           this.updateDelegateMapping(claimedOwnerPublicKey, persistedAppKeys)
         }
         ownerPublicKey = routing.ownerPublicKey
@@ -1207,7 +1209,16 @@ export class SessionManager {
 
     const userRecord = this.getOrCreateUserRecord(ownerPublicKey)
     if (preloadedAppKeys && ownerPublicKey === claimedOwnerPublicKey) {
-      userRecord.appKeys = preloadedAppKeys
+      userRecord.setAppKeys(preloadedAppKeys)
+    }
+    const applyPreloadedRoster = async () => {
+      if (
+        preloadedAppKeys &&
+        shouldApplyPreloadedRoster &&
+        ownerPublicKey === claimedOwnerPublicKey
+      ) {
+        await userRecord.onAppKeys(preloadedAppKeys).catch(() => {})
+      }
     }
 
     const existingRecord = userRecord.devices.get(deviceId)
@@ -1216,6 +1227,7 @@ export class SessionManager {
       ...(existingRecord?.inactiveSessions ?? []),
     ]
     if (invite.purpose === "link" && existingSessions.length > 0) {
+      await applyPreloadedRoster()
       return { ownerPublicKey, deviceId, session: existingSessions[0] }
     }
     const reusableEstablishedSession = existingSessions.find(
@@ -1224,6 +1236,7 @@ export class SessionManager {
         (SessionManager.sessionCanReceive(session) || SessionManager.sessionHasActivity(session))
     )
     if (reusableEstablishedSession) {
+      await applyPreloadedRoster()
       return { ownerPublicKey, deviceId, session: reusableEstablishedSession }
     }
 
@@ -1239,6 +1252,7 @@ export class SessionManager {
           !SessionManager.sessionHasActivity(session)
       )
     if (hasDormantImportedPlaceholder) {
+      await applyPreloadedRoster()
       return { ownerPublicKey, deviceId, session: existingSessions[0] }
     }
 
@@ -1264,6 +1278,7 @@ export class SessionManager {
     }
     await this.flushMessageQueue(deviceId).catch(() => {})
     await this.storeUserRecord(ownerPublicKey).catch(() => {})
+    await applyPreloadedRoster()
 
     return { ownerPublicKey, deviceId, session }
   }

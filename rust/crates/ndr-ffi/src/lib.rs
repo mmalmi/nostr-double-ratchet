@@ -1238,6 +1238,7 @@ impl SessionManagerHandle {
                 SessionManagerEvent::PublishSignedForInnerEvent {
                     event,
                     inner_event_id,
+                    ..
                 } => PubSubEvent {
                     kind: "publish_signed".to_string(),
                     subid: None,

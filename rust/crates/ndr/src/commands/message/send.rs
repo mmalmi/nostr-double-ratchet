@@ -30,8 +30,75 @@ pub(super) struct PreparedSendMessage {
 }
 
 struct FlushedSessionManagerEvents {
-    message_events: Vec<nostr::Event>,
+    message_events: Vec<FlushedMessageEvent>,
     published_any: bool,
+}
+
+struct FlushedMessageEvent {
+    event: nostr::Event,
+    inner_event_id: Option<String>,
+    target_device_id: Option<String>,
+}
+
+fn select_published_message_event<'a>(
+    published: &'a FlushedSessionManagerEvents,
+    inner_event_id: Option<&str>,
+    event_ids: &[String],
+    preferred_target_device_id: Option<&str>,
+) -> Option<&'a nostr::Event> {
+    let preferred_target_device_id = preferred_target_device_id.filter(|id| !id.is_empty());
+    let matches_inner = |message: &&FlushedMessageEvent, inner: &str| {
+        message.inner_event_id.as_deref() == Some(inner)
+    };
+    let matches_event_id = |message: &&FlushedMessageEvent| {
+        event_ids
+            .iter()
+            .any(|id| id == &message.event.id.to_string())
+    };
+    let matches_target = |message: &&FlushedMessageEvent, target: &str| {
+        message.target_device_id.as_deref() == Some(target)
+    };
+
+    published
+        .message_events
+        .iter()
+        .find(|message| {
+            inner_event_id.is_some_and(|inner| matches_inner(message, inner))
+                && preferred_target_device_id.is_some_and(|target| matches_target(message, target))
+        })
+        .or_else(|| {
+            published.message_events.iter().find(|message| {
+                !event_ids.is_empty()
+                    && matches_event_id(message)
+                    && preferred_target_device_id
+                        .is_some_and(|target| matches_target(message, target))
+            })
+        })
+        .or_else(|| {
+            published
+                .message_events
+                .iter()
+                .find(|message| inner_event_id.is_some_and(|inner| matches_inner(message, inner)))
+        })
+        .or_else(|| {
+            published
+                .message_events
+                .iter()
+                .find(|message| !event_ids.is_empty() && matches_event_id(message))
+        })
+        .or_else(|| {
+            published.message_events.iter().find(|message| {
+                preferred_target_device_id.is_some_and(|target| matches_target(message, target))
+            })
+        })
+        .or_else(|| {
+            (inner_event_id.is_none()
+                && event_ids.is_empty()
+                && preferred_target_device_id.is_none())
+            .then(|| published.message_events.first())
+            .flatten()
+        })
+        .map(|message| &message.event)
 }
 
 async fn resolve_or_join_chat(
@@ -75,12 +142,17 @@ async fn flush_session_manager_message_events(
     let mut published_any = false;
 
     for event in runtime.drain_events() {
-        let signed = match event {
+        let (signed, inner_event_id, target_device_id) = match event {
             SessionManagerEvent::Publish(unsigned) => unsigned
                 .sign_with_keys(signing_keys)
+                .map(|signed| (signed, None, None))
                 .map_err(|e| anyhow::anyhow!("Failed to sign SessionManager event: {}", e))?,
-            SessionManagerEvent::PublishSigned(signed) => signed,
-            SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => event,
+            SessionManagerEvent::PublishSigned(signed) => (signed, None, None),
+            SessionManagerEvent::PublishSignedForInnerEvent {
+                event,
+                inner_event_id,
+                target_device_id,
+            } => (event, inner_event_id, target_device_id),
             SessionManagerEvent::Subscribe { .. }
             | SessionManagerEvent::Unsubscribe(_)
             | SessionManagerEvent::ReceivedEvent(_)
@@ -100,7 +172,11 @@ async fn flush_session_manager_message_events(
         .await?;
         published_any = true;
         if signed.kind.as_u16() == MESSAGE_EVENT_KIND as u16 {
-            message_events.push(signed);
+            message_events.push(FlushedMessageEvent {
+                event: signed,
+                inner_event_id,
+                target_device_id,
+            });
         }
     }
 
@@ -271,6 +347,7 @@ pub(super) async fn send_message_impl(
     }
 
     let mut chat = resolve_or_join_chat(target, config, storage).await?;
+    let preferred_device_id = chat.device_id.clone();
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let now_s = now.as_secs();
@@ -350,6 +427,15 @@ pub(super) async fn send_message_impl(
     };
     storage.save_message(&stored_message)?;
 
+    let event_json = select_published_message_event(
+        &published,
+        Some(stable_message_id.as_str()),
+        &event_ids,
+        preferred_device_id.as_deref(),
+    )
+    .map(nostr::JsonUtil::as_json)
+    .unwrap_or_default();
+
     Ok(MessageSent {
         id: stable_message_id.clone(),
         inner_message_id: inner_id,
@@ -357,11 +443,7 @@ pub(super) async fn send_message_impl(
         chat_id: chat.id,
         content: message.to_string(),
         timestamp: now_s,
-        event: published
-            .message_events
-            .first()
-            .map(nostr::JsonUtil::as_json)
-            .unwrap_or_default(),
+        event: event_json,
     })
 }
 
@@ -405,9 +487,10 @@ pub async fn react(
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
 
-    let reaction_id = published
-        .message_events
-        .first()
+    let selected_event =
+        select_published_message_event(&published, None, &event_ids, chat.device_id.as_deref());
+
+    let reaction_id = selected_event
         .map(|evt| evt.id.to_hex())
         .or_else(|| event_ids.first().cloned())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -430,9 +513,7 @@ pub async fn react(
             "message_id": message_id,
             "emoji": emoji,
             "timestamp": timestamp,
-            "event": published
-                .message_events
-                .first()
+            "event": selected_event
                 .map(nostr::JsonUtil::as_json)
                 .unwrap_or_default(),
         }),
@@ -516,7 +597,7 @@ pub async fn typing(
     if bootstrap.published_any {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
-    let _event_ids = runtime.send_typing(recipient_pk, None)?;
+    let event_ids = runtime.send_typing(recipient_pk, None)?;
     let published = flush_session_manager_message_events(&runtime, &signing_keys, &client).await?;
     sync_chats_from_runtime(storage, &runtime, &owner_pubkey_hex)?;
 
@@ -524,9 +605,12 @@ pub async fn typing(
         "typing",
         serde_json::json!({
             "chat_id": chat_id,
-            "event": published
-                .message_events
-                .first()
+            "event": select_published_message_event(
+                &published,
+                None,
+                &event_ids,
+                chat.device_id.as_deref(),
+            )
                 .map(nostr::JsonUtil::as_json)
                 .unwrap_or_default(),
         }),
