@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.126 - 2026-04-30
+
+- Route `ndr-ffi` session operations through `NdrRuntime` wrapper APIs so FFI consumers do not depend on direct `SessionManager` access.
+
 ## 0.0.125 - 2026-04-30
 
 - Add `NdrRuntime::protocol_backfill_filters(...)` so host apps fetch NDR protocol catch-up through the runtime boundary instead of rebuilding AppKeys, device-invite, invite-response, and message-author filters themselves.

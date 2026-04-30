@@ -8,8 +8,9 @@ use nostr::{Event, PublicKey, UnsignedEvent};
 
 use crate::{
     group::GroupData, AcceptInviteResult, AppKeys, GroupDecryptedEvent, GroupManager,
-    GroupManagerOptions, GroupOuterSubscriptionPlan, InMemoryStorage, Invite, Result, SendOptions,
-    SessionManager, SessionManagerEvent, StorageAdapter, MESSAGE_EVENT_KIND,
+    GroupManagerOptions, GroupOuterSubscriptionPlan, InMemoryStorage, Invite,
+    MessagePushSessionStateSnapshot, Result, SendOptions, SessionManager, SessionManagerEvent,
+    StorageAdapter, MESSAGE_EVENT_KIND,
 };
 
 #[derive(Debug, Clone)]
@@ -251,6 +252,27 @@ impl NdrRuntime {
 
     pub fn get_all_message_push_author_pubkeys(&self) -> Vec<PublicKey> {
         self.session_manager.get_all_message_push_author_pubkeys()
+    }
+
+    pub fn get_message_push_author_pubkeys(&self, peer_owner_pubkey: PublicKey) -> Vec<PublicKey> {
+        self.session_manager
+            .get_message_push_author_pubkeys(peer_owner_pubkey)
+    }
+
+    pub fn get_message_push_session_states(
+        &self,
+        peer_owner_pubkey: PublicKey,
+    ) -> Vec<MessagePushSessionStateSnapshot> {
+        self.session_manager
+            .get_message_push_session_states(peer_owner_pubkey)
+    }
+
+    pub fn known_peer_owner_pubkeys(&self) -> Vec<PublicKey> {
+        self.session_manager.known_peer_owner_pubkeys()
+    }
+
+    pub fn get_total_sessions(&self) -> usize {
+        self.session_manager.get_total_sessions()
     }
 
     pub fn ingest_app_keys_snapshot(

@@ -947,29 +947,25 @@ impl SessionManagerHandle {
 
     /// Return known sender-event pubkeys used for one-to-many group transport.
     pub fn group_known_sender_event_pubkeys(&self) -> Vec<String> {
-        self.runtime.with_group_context(|_, group_manager, _| {
-            group_manager
-                .known_sender_event_pubkeys()
-                .into_iter()
-                .map(|pk| pk.to_hex())
-                .collect()
-        })
+        self.runtime
+            .group_known_sender_event_pubkeys()
+            .into_iter()
+            .map(|pk| pk.to_hex())
+            .collect()
     }
 
     /// Return the current group outer authors and which ones were newly added
     /// since the last sync plan request for this handle.
     pub fn group_outer_subscription_plan(&self) -> GroupOuterSubscriptionPlanResult {
-        self.runtime.with_group_context(|_, group_manager, _| {
-            let plan = group_manager.outer_subscription_plan();
-            GroupOuterSubscriptionPlanResult {
-                authors: plan.authors.into_iter().map(|pk| pk.to_hex()).collect(),
-                added_authors: plan
-                    .added_authors
-                    .into_iter()
-                    .map(|pk| pk.to_hex())
-                    .collect(),
-            }
-        })
+        let plan = self.runtime.group_outer_subscription_plan();
+        GroupOuterSubscriptionPlanResult {
+            authors: plan.authors.into_iter().map(|pk| pk.to_hex()).collect(),
+            added_authors: plan
+                .added_authors
+                .into_iter()
+                .map(|pk| pk.to_hex())
+                .collect(),
+        }
     }
 
     /// Send a group event through GroupManager.
@@ -1043,13 +1039,11 @@ impl SessionManagerHandle {
             None => Some(event.pubkey),
         };
 
-        let decrypted = self.runtime.with_group_context(|_, group_manager, _| {
-            group_manager.handle_incoming_session_event(
-                &event,
-                from_owner_pubkey,
-                from_sender_device_pubkey,
-            )
-        });
+        let decrypted = self.runtime.group_handle_incoming_session_event(
+            &event,
+            from_owner_pubkey,
+            from_sender_device_pubkey,
+        );
         Ok(decrypted
             .into_iter()
             .map(group_decrypted_to_result)
@@ -1062,11 +1056,10 @@ impl SessionManagerHandle {
         event_json: String,
     ) -> Result<Option<GroupDecryptedResult>, NdrError> {
         let event: nostr::Event = serde_json::from_str(&event_json)?;
-        Ok(self.runtime.with_group_context(|_, group_manager, _| {
-            group_manager
-                .handle_outer_event(&event)
-                .map(group_decrypted_to_result)
-        }))
+        Ok(self
+            .runtime
+            .group_handle_outer_event(&event)
+            .map(group_decrypted_to_result))
     }
 
     /// Send a delivery/read receipt for messages.
@@ -1082,12 +1075,9 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(self.runtime.session_manager().send_receipt(
-            recipient,
-            &receipt_type,
-            message_ids,
-            options,
-        )?)
+        Ok(self
+            .runtime
+            .send_receipt(recipient, &receipt_type, message_ids, options)?)
     }
 
     /// Send a typing indicator.
@@ -1101,10 +1091,7 @@ impl SessionManagerHandle {
             expires_at: Some(expires_at),
             ttl_seconds: None,
         });
-        Ok(self
-            .runtime
-            .session_manager()
-            .send_typing(recipient, options)?)
+        Ok(self.runtime.send_typing(recipient, options)?)
     }
 
     /// Send an emoji reaction (kind 7) to a specific message id.
@@ -1122,7 +1109,6 @@ impl SessionManagerHandle {
         });
         Ok(self
             .runtime
-            .session_manager()
             .send_reaction(recipient, message_id, emoji, options)?)
     }
 
@@ -1147,11 +1133,7 @@ impl SessionManagerHandle {
         peer_pubkey_hex: String,
     ) -> Result<Option<String>, NdrError> {
         let peer_pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&peer_pubkey_hex)?;
-        if let Some(state) = self
-            .runtime
-            .session_manager()
-            .export_active_session_state(peer_pubkey)?
-        {
+        if let Some(state) = self.runtime.export_active_session_state(peer_pubkey)? {
             Ok(Some(nostr_double_ratchet::utils::serialize_session_state(
                 &state,
             )?))
@@ -1163,7 +1145,6 @@ impl SessionManagerHandle {
     /// List peer owner pubkeys known from loaded state or persisted storage.
     pub fn known_peer_owner_pubkeys(&self) -> Vec<String> {
         self.runtime
-            .session_manager()
             .known_peer_owner_pubkeys()
             .into_iter()
             .map(|pubkey| pubkey.to_hex())
@@ -1179,7 +1160,6 @@ impl SessionManagerHandle {
             nostr_double_ratchet::utils::pubkey_from_hex(&peer_owner_pubkey_hex)?;
         Ok(self
             .runtime
-            .session_manager()
             .get_stored_user_record_json(peer_owner_pubkey)?)
     }
 
@@ -1192,7 +1172,6 @@ impl SessionManagerHandle {
             nostr_double_ratchet::utils::pubkey_from_hex(&peer_owner_pubkey_hex)?;
         Ok(self
             .runtime
-            .session_manager()
             .get_message_push_author_pubkeys(peer_owner_pubkey)
             .into_iter()
             .map(|pubkey| pubkey.to_hex())
@@ -1207,7 +1186,6 @@ impl SessionManagerHandle {
         let peer_owner_pubkey =
             nostr_double_ratchet::utils::pubkey_from_hex(&peer_owner_pubkey_hex)?;
         self.runtime
-            .session_manager()
             .get_message_push_session_states(peer_owner_pubkey)
             .into_iter()
             .map(|snapshot| {
@@ -1229,7 +1207,7 @@ impl SessionManagerHandle {
     /// Process a received Nostr event JSON.
     pub fn process_event(&self, event_json: String) -> Result<(), NdrError> {
         let event: nostr::Event = serde_json::from_str(&event_json)?;
-        self.runtime.session_manager().process_received_event(event);
+        self.runtime.process_received_event(event);
         Ok(())
     }
 
@@ -1334,7 +1312,20 @@ impl SessionManagerHandle {
 
     /// Get total active sessions.
     pub fn get_total_sessions(&self) -> u64 {
-        self.runtime.session_manager().get_total_sessions() as u64
+        self.runtime.get_total_sessions() as u64
+    }
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    #[test]
+    fn ffi_handle_does_not_reach_into_session_manager() {
+        let source = include_str!("lib.rs");
+        let banned = concat!(".session_", "manager()");
+        assert!(
+            !source.contains(banned),
+            "FFI should use NdrRuntime APIs instead of direct SessionManager access"
+        );
     }
 }
 

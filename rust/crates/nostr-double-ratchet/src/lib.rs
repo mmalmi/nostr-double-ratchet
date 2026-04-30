@@ -53,7 +53,9 @@ pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
 pub use runtime::NdrRuntime;
 pub use sender_key::*;
 pub use session::Session;
-pub use session_manager::{AcceptInviteResult, SessionManager, SessionManagerEvent};
+pub use session_manager::{
+    AcceptInviteResult, MessagePushSessionStateSnapshot, SessionManager, SessionManagerEvent,
+};
 pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};
 pub use types::*;
