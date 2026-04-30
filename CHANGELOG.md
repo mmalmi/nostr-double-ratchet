@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.127 - 2026-04-30
+
+- Apply a verified owner's full AppKeys roster immediately when accepting invite-link and public-invite devices, including sibling public invite discovery.
+- Preserve the owner-device session when AppKeys lists delegate devices only, so replies keep using the established peer session.
+- Carry inner-message and target-device publish metadata through Rust, FFI, and `ndr send` so CLI interop returns the encrypted event for the intended device.
+
 ## 0.0.126 - 2026-04-30
 
 - Route `ndr-ffi` session operations through `NdrRuntime` wrapper APIs so FFI consumers do not depend on direct `SessionManager` access.
