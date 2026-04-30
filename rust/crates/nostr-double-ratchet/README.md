@@ -138,7 +138,7 @@ for event in runtime.drain_events() {
 }
 
 // Feed relay events back into the manager.
-runtime.session_manager().process_received_event(relay_event);
+runtime.process_received_event(relay_event);
 
 // Group outer events still need explicit handling.
 let maybe_group = runtime.group_handle_outer_event(&outer_event);
@@ -147,8 +147,9 @@ let maybe_group = runtime.group_handle_outer_event(&outer_event);
 
 Two practical notes:
 
-- The host app still owns relay bootstrap/backfill around `setup_user(...)` and AppKeys/invite
-  fetches.
+- The host app still owns relay bootstrap and event transport, but protocol catch-up should be
+  driven from `NdrRuntime::protocol_backfill_filters(...)`. Fetch those filters from your relays
+  and feed the resulting events back through `process_received_event(...)`.
 - If you want the manager to advance immediately after your own publish, loop locally published
   events back through `process_received_event(...)` instead of waiting for relay echo alone.
 
@@ -159,10 +160,11 @@ Use NIP-40-style `["expiration", "<unix seconds>"]` tags in inner rumors.
 
 ## Direct Message Catch-Up
 
-`SessionManager` owns session routing and emits subscription events, but the caller still owns relay
-history fetch. When a new `session-current-*` or `session-next-*` author appears, run a short
-replay/backfill immediately with `DirectMessageSubscriptionTracker` and
-`build_direct_message_backfill_filter(...)` instead of waiting for a periodic sweep.
+`NdrRuntime` owns the protocol filter set needed for session recovery. Call
+`protocol_backfill_filters(...)` on startup, reconnect, and after AppKeys/invite changes; fetch the
+returned filters from relays, then pass events into `process_received_event(...)`. The filter set
+includes AppKeys, device invites, current-device invite responses, and active 1:1/group message
+authors so linked-device sessions can be recovered after offline periods.
 
 ## 1:1 Chat Settings Signaling
 

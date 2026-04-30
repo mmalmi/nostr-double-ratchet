@@ -524,6 +524,54 @@ impl SessionManager {
         pubkeys
     }
 
+    pub(crate) fn known_device_identity_pubkeys_for_owners(
+        &self,
+        owners: impl IntoIterator<Item = PublicKey>,
+    ) -> Vec<PublicKey> {
+        let owners = owners.into_iter().collect::<HashSet<_>>();
+        if owners.is_empty() {
+            return Vec::new();
+        }
+
+        let mut devices = HashSet::new();
+        {
+            let cached_app_keys = self.cached_app_keys.lock().unwrap();
+            for owner in &owners {
+                if let Some(app_keys) = cached_app_keys.get(owner) {
+                    devices.extend(
+                        app_keys
+                            .get_all_devices()
+                            .into_iter()
+                            .map(|device| device.identity_pubkey),
+                    );
+                }
+            }
+        }
+
+        let stored_devices = self.with_user_records({
+            let owners = owners.clone();
+            move |records| {
+                let mut devices = HashSet::new();
+                for owner in &owners {
+                    let Some(record) = records.get(owner) else {
+                        continue;
+                    };
+                    for identity_hex in &record.known_device_identities {
+                        if let Ok(pubkey) = crate::utils::pubkey_from_hex(identity_hex) {
+                            devices.insert(pubkey);
+                        }
+                    }
+                }
+                devices
+            }
+        });
+        devices.extend(stored_devices);
+
+        let mut devices = devices.into_iter().collect::<Vec<_>>();
+        devices.sort_by_key(|pubkey| pubkey.to_hex());
+        devices
+    }
+
     pub fn get_stored_user_record_json(
         &self,
         peer_owner_pubkey: PublicKey,

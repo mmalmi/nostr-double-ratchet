@@ -11,6 +11,7 @@ pub mod message_origin;
 pub mod message_queue;
 pub mod multi_device;
 pub mod one_to_many;
+pub mod protocol_backfill;
 pub mod pubsub;
 pub mod runtime;
 pub mod sender_key;
@@ -44,6 +45,10 @@ pub use multi_device::{
     DeviceRegistrationState, InviteOwnerRoutingResolution,
 };
 pub use one_to_many::*;
+pub use protocol_backfill::{
+    NdrProtocolBackfillOptions, DEFAULT_INVITE_BACKFILL_LOOKBACK_SECS,
+    DEFAULT_MESSAGE_BACKFILL_LOOKBACK_SECS,
+};
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
 pub use runtime::NdrRuntime;
 pub use sender_key::*;

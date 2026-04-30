@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.125 - 2026-04-30
+
+- Add `NdrRuntime::protocol_backfill_filters(...)` so host apps fetch NDR protocol catch-up through the runtime boundary instead of rebuilding AppKeys, device-invite, invite-response, and message-author filters themselves.
+- Include current-device invite-response backfill in the runtime-owned filter set so linked devices can recover sibling sessions after offline periods.
+
 ## 0.0.124 - 2026-04-29
 
 - Fix linked-device direct-message fanout by preferring the active bidirectional ratchet session over stale inactive receive snapshots while still falling back to send-capable inactive sessions when needed.
