@@ -10,17 +10,9 @@ Reference integrations:
 [`iris-client`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-client),
 [`iris-chat`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat),
 [`iris-chat-flutter`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-flutter).
-Used by [chat.iris.to](https://chat.iris.to) and by CLI tooling in this repo.
-
-## Install `ndr` CLI (latest release)
-
-Linux/macOS one-liner (auto-detect arch + OS):
-
-```bash
-curl -fsSL "https://github.com/mmalmi/nostr-double-ratchet/releases/latest/download/ndr-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/apple-darwin/' | sed 's/linux/unknown-linux-musl/').tar.gz" | tar -xz && cd ndr && ./install.sh
-```
-
-For Windows/manual install options, see [Releases](https://github.com/mmalmi/nostr-double-ratchet/releases/latest).
+Used by [chat.iris.to](https://chat.iris.to). For command-line chat tooling,
+use the `iris` CLI from the
+[`iris-chat`](https://crates.io/crates/iris-chat) crate.
 
 ## Status
 
@@ -181,7 +173,6 @@ For iOS/Android integration (for example Flutter/native apps), use:
 
 - `ts/`: TypeScript library
 - `rust/crates/nostr-double-ratchet/`: Rust core library
-- `rust/crates/ndr/`: CLI built on the Rust library
 
 ## Development And Tests
 
@@ -191,12 +182,9 @@ pnpm -C ts test:once
 
 # Rust library tests
 cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
-
-# ndr (CLI + e2e + cross-language)
-cargo test -p ndr --manifest-path rust/Cargo.toml
 ```
 
-For exact integration behavior, treat the README as onboarding and the runtime/invite/e2e tests
+For exact integration behavior, treat the README as onboarding and the runtime/invite tests
 as the behavioral source of truth.
 
 ## Multi-Device Test Policy
@@ -204,7 +192,7 @@ as the behavioral source of truth.
 - Keep one explicit same-second AppKeys regression in library tests.
 - Normal end-to-end and interop tests should avoid same-second AppKeys publishes unless the test
   is explicitly about that edge case.
-- Keep heterogeneous-client coverage in the matrix. `ndr`, `iris-chat`, `iris-client`, and
+- Keep heterogeneous-client coverage in the matrix. `iris-chat`, `iris-client`, and
   `iris-chat-flutter` should not each trust only their own same-client tests.
 - When possible, assert both self-sync and peer fanout across owner and linked devices.
 

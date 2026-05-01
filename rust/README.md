@@ -7,7 +7,6 @@ Rust implementation and tooling for Double Ratchet messaging on Nostr.
 | Crate | Description |
 |-------|-------------|
 | [nostr-double-ratchet](./crates/nostr-double-ratchet) | Core library: sessions, invites, session manager, groups |
-| [ndr](./crates/ndr) | CLI built on the core library |
 | [ndr-ffi](./crates/ndr-ffi) | UniFFI bindings for mobile integration |
 
 ## Security Properties (Rust Stack)
@@ -90,12 +89,6 @@ Commands below assume you run them from the repository root.
 ```bash
 # Run all Rust tests in workspace
 cargo test --manifest-path rust/Cargo.toml
-
-# Install CLI
-cargo install --path rust/crates/ndr
-
-# Run CLI directly
-cargo run -p ndr --manifest-path rust/Cargo.toml -- --help
 ```
 
 ## Important Test Targets
@@ -103,13 +96,6 @@ cargo run -p ndr --manifest-path rust/Cargo.toml -- --help
 ```bash
 # Core library
 cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
-
-# CLI + e2e + interop
-cargo test -p ndr --manifest-path rust/Cargo.toml
-
-# Explicit cross-language suites
-cargo test -p ndr --test e2e_crosslang --manifest-path rust/Cargo.toml
-cargo test -p ndr --test e2e_group_crosslang --manifest-path rust/Cargo.toml
 ```
 
 ## Multi-Device Test Policy
@@ -117,7 +103,7 @@ cargo test -p ndr --test e2e_group_crosslang --manifest-path rust/Cargo.toml
 - Keep one explicit same-second AppKeys regression in the core library tests.
 - Normal CLI and client interop tests should avoid same-second AppKeys publication unless they are
   intentionally testing that edge case.
-- Keep `ndr` in the heterogeneous-client matrix, not only library-level tests.
+- Keep heterogeneous clients in the matrix, not only library-level tests.
 
 ## Publishing
 

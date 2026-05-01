@@ -179,9 +179,3 @@ Receivers can auto-adopt or reject incoming settings policy.
 ```bash
 cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
 ```
-
-For CLI/e2e coverage (including cross-language tests), run:
-
-```bash
-cargo test -p ndr --manifest-path rust/Cargo.toml
-```
