@@ -1,7 +1,7 @@
 [package]
 name = "ndr"
-description = "CLI for encrypted Nostr messaging using double ratchet"
-version.workspace = true
+description = "Deprecated: use the iris-chat crate and iris CLI instead"
+version = "0.0.128"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

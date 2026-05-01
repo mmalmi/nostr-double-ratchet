@@ -1,5 +1,23 @@
 # ndr
 
+Deprecated. Use the `iris` CLI from the `iris-chat` crate instead:
+
+```bash
+cargo install iris-chat
+iris --help
+```
+
+Current source:
+
+- https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-rs
+- https://crates.io/crates/iris-chat
+
+`ndr` is no longer maintained as a separate CLI. The Iris CLI uses the shared
+Iris app core and SQLite state so scripts, agents, and GUI apps exercise the
+same message handling code.
+
+## Historical docs
+
 CLI for encrypted Nostr messaging using the double ratchet protocol.
 
 Designed for humans, AI agents, and automation. Compatible with [chat.iris.to](https://chat.iris.to).

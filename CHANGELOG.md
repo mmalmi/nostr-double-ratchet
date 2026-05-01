@@ -1,5 +1,10 @@
 # Changelog
 
+## ndr 0.0.128 - 2026-05-01
+
+- Mark the `ndr` CLI crate as deprecated. Use the `iris` CLI from the
+  `iris-chat` crate instead.
+
 ## 0.0.127 - 2026-04-30
 
 - Apply a verified owner's full AppKeys roster immediately when accepting invite-link and public-invite devices, including sibling public invite discovery.
