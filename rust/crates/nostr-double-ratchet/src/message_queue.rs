@@ -57,6 +57,16 @@ impl MessageQueue {
     }
 
     pub fn get_for_target(&self, target_key: &str) -> Result<Vec<QueueEntry>> {
+        let mut out = Vec::new();
+        for entry in self.entries()? {
+            if entry.target_key == target_key {
+                out.push(entry);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn entries(&self) -> Result<Vec<QueueEntry>> {
         let keys = self.storage.list(&self.prefix)?;
         let mut out = Vec::new();
         for key in keys {
@@ -66,9 +76,7 @@ impl MessageQueue {
             let Ok(entry) = serde_json::from_str::<QueueEntry>(&raw) else {
                 continue;
             };
-            if entry.target_key == target_key {
-                out.push(entry);
-            }
+            out.push(entry);
         }
         out.sort_by_key(|entry| entry.created_at);
         Ok(out)

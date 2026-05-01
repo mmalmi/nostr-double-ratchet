@@ -273,6 +273,57 @@ impl SessionManager {
         self.discovery_queue.remove_expired(max_age_ms)
     }
 
+    pub fn queued_message_diagnostics(
+        &self,
+        inner_event_id: Option<&str>,
+    ) -> Result<Vec<crate::QueuedMessageDiagnostic>> {
+        let mut out = Vec::new();
+        let device_to_owner = self.with_user_records(|records| {
+            records
+                .iter()
+                .flat_map(|(owner, record)| {
+                    record
+                        .device_records
+                        .keys()
+                        .chain(record.known_device_identities.iter())
+                        .map(|device_id| (device_id.clone(), *owner))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<HashMap<_, _>>()
+        });
+
+        for entry in self.discovery_queue.entries()? {
+            let entry_inner_id = entry.event.id.as_ref().map(ToString::to_string);
+            if inner_event_id.is_some_and(|id| entry_inner_id.as_deref() != Some(id)) {
+                continue;
+            }
+            out.push(crate::QueuedMessageDiagnostic {
+                stage: crate::QueuedMessageStage::Discovery,
+                owner_pubkey: crate::utils::pubkey_from_hex(&entry.target_key).ok(),
+                target_key: entry.target_key,
+                inner_event_id: entry_inner_id,
+                created_at_ms: entry.created_at,
+            });
+        }
+
+        for entry in self.message_queue.entries()? {
+            let entry_inner_id = entry.event.id.as_ref().map(ToString::to_string);
+            if inner_event_id.is_some_and(|id| entry_inner_id.as_deref() != Some(id)) {
+                continue;
+            }
+            out.push(crate::QueuedMessageDiagnostic {
+                stage: crate::QueuedMessageStage::Device,
+                owner_pubkey: device_to_owner.get(&entry.target_key).copied(),
+                target_key: entry.target_key,
+                inner_event_id: entry_inner_id,
+                created_at_ms: entry.created_at,
+            });
+        }
+
+        out.sort_by_key(|entry| entry.created_at_ms);
+        Ok(out)
+    }
+
     #[deprecated(
         note = "use send_text(recipient, text, Some(SendOptions{ expires_at: Some(...) }))"
     )]

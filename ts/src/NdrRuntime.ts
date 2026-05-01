@@ -22,6 +22,7 @@ import {
   type AcceptInviteOptions,
   type AcceptInviteResult,
   type OnEventCallback,
+  type QueuedMessageDiagnostic,
   type SendMessageOptions,
   type SessionManagerEvent,
 } from "./SessionManager";
@@ -44,10 +45,8 @@ import {
   type SendGroupEventOptions,
 } from "./RuntimeGroupController";
 
-export type {
-  RuntimeGroupEvent,
-  SendGroupEventOptions,
-} from "./RuntimeGroupController";
+export type { QueuedMessageDiagnostic } from "./SessionManager";
+export type { RuntimeGroupEvent, SendGroupEventOptions } from "./RuntimeGroupController";
 
 export interface NdrRuntimeOptions {
   nostrSubscribe: NostrSubscribe;
@@ -438,6 +437,16 @@ export class NdrRuntime {
       await this.flushSessionManagerEvents();
       this.syncDirectMessageSubscription();
     }
+  }
+
+  async queuedMessageDiagnostics(
+    innerEventId?: string,
+    ownerPubkey?: string,
+  ): Promise<QueuedMessageDiagnostic[]> {
+    const manager = await this.waitForSessionManager(
+      this.resolveActiveOwnerPubkey(ownerPubkey),
+    );
+    return manager.queuedMessageDiagnostics(innerEventId);
   }
 
   async sendMessage(

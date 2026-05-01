@@ -1044,6 +1044,18 @@ fn queued_message_survives_restart_and_flushes_after_session_creation() {
         !storage.list("v1/discovery-queue/").unwrap().is_empty(),
         "expected discovery queue entries when recipient devices are unknown"
     );
+    let discovery_diagnostics = manager1
+        .queued_message_diagnostics(Some(&inner_id))
+        .expect("queued diagnostics");
+    let bob_discovery = discovery_diagnostics
+        .iter()
+        .find(|entry| entry.owner_pubkey == Some(bob_pubkey))
+        .expect("bob discovery queue diagnostic");
+    assert_eq!(bob_discovery.stage, QueuedMessageStage::Discovery);
+    assert_eq!(
+        bob_discovery.inner_event_id.as_deref(),
+        Some(inner_id.as_str())
+    );
 
     drop(manager1);
 
@@ -1076,6 +1088,15 @@ fn queued_message_survives_restart_and_flushes_after_session_creation() {
             .any(|k| k.contains(&format!("{}/{}", inner_id, bob_device_id))),
         "expected discovery entry to expand into message queue for bob device"
     );
+    let device_diagnostics = manager2
+        .queued_message_diagnostics(Some(&inner_id))
+        .expect("queued diagnostics");
+    let bob_device = device_diagnostics
+        .iter()
+        .find(|entry| entry.target_key == bob_device_id)
+        .expect("bob device queue diagnostic");
+    assert_eq!(bob_device.stage, QueuedMessageStage::Device);
+    assert_eq!(bob_device.owner_pubkey, Some(bob_pubkey));
 
     let invite = Invite::create_new(bob_pubkey, Some(bob_device_id.clone()), None).unwrap();
     let invite_event = invite

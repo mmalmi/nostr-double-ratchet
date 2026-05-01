@@ -70,6 +70,16 @@ export interface SendMessageOptions extends ExpirationOptions {
   expiration?: ExpirationOptions | null
 }
 
+export type QueuedMessageStage = "discovery" | "device"
+
+export interface QueuedMessageDiagnostic {
+  stage: QueuedMessageStage
+  targetKey: string
+  ownerPubkey?: string
+  innerEventId?: string
+  createdAt: number
+}
+
 type PendingInviteResponse = {
   eventId: string
   ownerPublicKey: string
@@ -1034,6 +1044,49 @@ export class SessionManager {
     const prefix = this.sessionKeyPrefix(userPubkey)
     const keys = await this.storage.list(prefix)
     await Promise.all(keys.map((key) => this.storage.del(key)))
+  }
+
+  async queuedMessageDiagnostics(innerEventId?: string): Promise<QueuedMessageDiagnostic[]> {
+    await this.init()
+
+    const deviceToOwner = new Map<string, string>()
+    for (const [ownerPubkey, record] of this.userRecords) {
+      for (const deviceId of record.devices.keys()) {
+        deviceToOwner.set(deviceId, ownerPubkey)
+      }
+      for (const device of record.appKeys?.getAllDevices() ?? []) {
+        if (device.identityPubkey) {
+          deviceToOwner.set(device.identityPubkey, ownerPubkey)
+        }
+      }
+    }
+
+    const diagnostics: QueuedMessageDiagnostic[] = []
+    for (const entry of await this.discoveryQueue.entries()) {
+      const entryInnerEventId = entry.event.id
+      if (innerEventId && entryInnerEventId !== innerEventId) continue
+      diagnostics.push({
+        stage: "discovery",
+        targetKey: entry.targetKey,
+        ownerPubkey: entry.targetKey,
+        innerEventId: entryInnerEventId,
+        createdAt: entry.createdAt,
+      })
+    }
+
+    for (const entry of await this.messageQueue.entries()) {
+      const entryInnerEventId = entry.event.id
+      if (innerEventId && entryInnerEventId !== innerEventId) continue
+      diagnostics.push({
+        stage: "device",
+        targetKey: entry.targetKey,
+        ownerPubkey: deviceToOwner.get(entry.targetKey),
+        innerEventId: entryInnerEventId,
+        createdAt: entry.createdAt,
+      })
+    }
+
+    return diagnostics.sort((a, b) => a.createdAt - b.createdAt)
   }
 
   private async flushMessageQueue(deviceIdentity: string): Promise<void> {

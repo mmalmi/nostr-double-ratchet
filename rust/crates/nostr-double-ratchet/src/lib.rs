@@ -69,7 +69,8 @@ pub use runtime::NdrRuntime;
 pub use sender_key::*;
 pub use session::Session;
 pub use session_manager::{
-    AcceptInviteResult, MessagePushSessionStateSnapshot, SessionManager, SessionManagerEvent,
+    AcceptInviteResult, MessagePushSessionStateSnapshot, QueuedMessageDiagnostic,
+    QueuedMessageStage, SessionManager, SessionManagerEvent,
 };
 pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};

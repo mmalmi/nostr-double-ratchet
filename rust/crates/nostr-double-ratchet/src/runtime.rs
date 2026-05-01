@@ -536,6 +536,14 @@ impl NdrRuntime {
         let event_rx = self.event_rx.lock().unwrap();
         event_rx.try_iter().collect()
     }
+
+    pub fn queued_message_diagnostics(
+        &self,
+        inner_event_id: Option<&str>,
+    ) -> Result<Vec<crate::QueuedMessageDiagnostic>> {
+        self.session_manager
+            .queued_message_diagnostics(inner_event_id)
+    }
 }
 
 #[cfg(test)]

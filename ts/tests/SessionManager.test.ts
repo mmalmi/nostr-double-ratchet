@@ -4,7 +4,7 @@ import { createControlledMockSessionManager } from "./helpers/controlledMockSess
 import { MockRelay } from "./helpers/mockRelay"
 import { ControlledMockRelay } from "./helpers/ControlledMockRelay"
 import { runScenario } from "./helpers/scenario"
-import { finalizeEvent, generateSecretKey, getPublicKey, type UnsignedEvent, type VerifiedEvent } from "nostr-tools"
+import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey, type UnsignedEvent, type VerifiedEvent } from "nostr-tools"
 import { Invite } from "../src/Invite"
 import { decryptInviteResponse, generateEphemeralKeypair, generateSharedSecret } from "../src/inviteUtils"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
@@ -67,6 +67,49 @@ describe("SessionManager", () => {
       })
     })
     expect(bobReceivedMessage).toBe(true)
+  })
+
+  it("reports queued diagnostics for unsendable messages", async () => {
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const peerSecretKey = generateSecretKey()
+    const peerPublicKey = getPublicKey(peerSecretKey)
+
+    const manager = SessionManager.createForRuntime(
+      ownerPublicKey,
+      ownerSecretKey,
+      ownerPublicKey,
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter(),
+    )
+
+    const now = Date.now()
+    const rumor = {
+      content: "queued diagnostic",
+      kind: 14,
+      created_at: Math.floor(now / 1000),
+      tags: [["p", peerPublicKey], ["ms", String(now)]],
+      pubkey: ownerPublicKey,
+      id: "",
+    }
+    rumor.id = getEventHash(rumor)
+    await manager.sendEvent(peerPublicKey, rumor)
+
+    await vi.waitFor(async () => {
+      const diagnostics = await manager.queuedMessageDiagnostics(rumor.id)
+      const peerDiagnostic = diagnostics.find((entry) => entry.ownerPubkey === peerPublicKey)
+
+      expect(peerDiagnostic).toMatchObject({
+        stage: "device",
+        targetKey: peerPublicKey,
+        ownerPubkey: peerPublicKey,
+        innerEventId: rumor.id,
+      })
+    })
   })
 
   it("should bootstrap a linked device session to a single-device peer via that peer's public invite", async () => {

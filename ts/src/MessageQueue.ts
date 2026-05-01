@@ -37,6 +37,18 @@ export class MessageQueue {
     return sorted
   }
 
+  async entries(): Promise<QueueEntry[]> {
+    const keys = await this.storage.list(this.prefix)
+    const entries: QueueEntry[] = []
+    for (const key of keys) {
+      const entry = await this.storage.get<QueueEntry>(key)
+      if (entry) {
+        entries.push(entry)
+      }
+    }
+    return entries.sort((a, b) => a.createdAt - b.createdAt)
+  }
+
   async removeForTarget(targetKey: string): Promise<void> {
     const keys = await this.storage.list(this.prefix)
     for (const key of keys) {

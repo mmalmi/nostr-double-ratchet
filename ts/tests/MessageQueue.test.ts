@@ -115,6 +115,29 @@ describe("MessageQueue", () => {
     })
   })
 
+  describe("entries", () => {
+    it("returns all entries for the queue prefix sorted by creation time", async () => {
+      const { queue, storage } = createQueue()
+
+      await storage.put("v1/test-queue/z-late", {
+        id: "z-late",
+        targetKey: "device-b",
+        event: makeRumor("evt2", "second"),
+        createdAt: 2000,
+      })
+      await storage.put("v1/test-queue/a-early", {
+        id: "a-early",
+        targetKey: "device-a",
+        event: makeRumor("evt1", "first"),
+        createdAt: 1000,
+      })
+
+      const entries = await queue.entries()
+      expect(entries.map((entry) => entry.targetKey)).toEqual(["device-a", "device-b"])
+      expect(entries.map((entry) => entry.event.content)).toEqual(["first", "second"])
+    })
+  })
+
   describe("removeForTarget", () => {
     it("should remove all entries for a target", async () => {
       const { queue } = createQueue()

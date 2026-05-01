@@ -40,6 +40,21 @@ pub struct AcceptInviteResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueuedMessageStage {
+    Discovery,
+    Device,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedMessageDiagnostic {
+    pub stage: QueuedMessageStage,
+    pub target_key: String,
+    pub owner_pubkey: Option<PublicKey>,
+    pub inner_event_id: Option<String>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagePushSessionStateSnapshot {
     pub state: crate::SessionState,
     pub tracked_sender_pubkeys: Vec<PublicKey>,
