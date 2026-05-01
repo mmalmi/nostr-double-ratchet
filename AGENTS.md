@@ -42,3 +42,4 @@
 
 ## Quality Bar
 - Fix build warnings and failing tests even if unrelated to your changes.
+- The message recipient's long-term public key must not be published in double ratchet message events.
