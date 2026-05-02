@@ -31,6 +31,7 @@ export interface DeviceRecord {
   activeSession?: Session
   inactiveSessions: Session[]
   createdAt: number
+  prepareOutboundEvent(rumor: Rumor): VerifiedEvent | undefined
 }
 
 export interface UserRecord {

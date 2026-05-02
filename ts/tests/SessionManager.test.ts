@@ -9,7 +9,7 @@ import { Invite } from "../src/Invite"
 import { decryptInviteResponse, generateEphemeralKeypair, generateSharedSecret } from "../src/inviteUtils"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
 import { SessionManager } from "../src/SessionManager"
-import { APP_KEYS_EVENT_KIND } from "../src/types"
+import { APP_KEYS_EVENT_KIND, MESSAGE_EVENT_KIND } from "../src/types"
 
 type DeviceRecordSnapshot = { inactiveSessions: unknown[] }
 
@@ -110,6 +110,67 @@ describe("SessionManager", () => {
         innerEventId: rumor.id,
       })
     })
+  })
+
+  it("delegates outbound publishing to device records without requiring an active session", async () => {
+    const ownerSecretKey = generateSecretKey()
+    const ownerPublicKey = getPublicKey(ownerSecretKey)
+    const peerSecretKey = generateSecretKey()
+    const peerPublicKey = getPublicKey(peerSecretKey)
+    const preparedEvent = finalizeEvent(
+      {
+        content: "prepared",
+        kind: MESSAGE_EVENT_KIND,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+      },
+      peerSecretKey,
+    ) as VerifiedEvent
+    const publish = vi.fn(async (event: UnsignedEvent | VerifiedEvent) => event as VerifiedEvent)
+
+    const manager = new SessionManager(
+      ownerPublicKey,
+      ownerSecretKey,
+      ownerPublicKey,
+      () => () => {},
+      publish,
+      ownerPublicKey,
+      {
+        ephemeralKeypair: generateEphemeralKeypair(),
+        sharedSecret: generateSharedSecret(),
+      },
+      new InMemoryStorageAdapter(),
+    )
+    await manager.init()
+
+    const userRecord = (manager as unknown as {
+      getOrCreateUserRecord(publicKey: string): { devices: Map<string, unknown> }
+    }).getOrCreateUserRecord(peerPublicKey)
+    const prepareOutboundEvent = vi.fn(() => preparedEvent)
+    userRecord.devices.set(peerPublicKey, {
+      deviceId: peerPublicKey,
+      activeSession: undefined,
+      inactiveSessions: [],
+      createdAt: Date.now(),
+      prepareOutboundEvent,
+      flushMessageQueue: vi.fn(async () => {}),
+    })
+
+    const now = Date.now()
+    const rumor = {
+      content: "via delegated device record",
+      kind: 14,
+      created_at: Math.floor(now / 1000),
+      tags: [["p", peerPublicKey], ["ms", String(now)]],
+      pubkey: ownerPublicKey,
+      id: "",
+    }
+    rumor.id = getEventHash(rumor)
+
+    await manager.sendEvent(peerPublicKey, rumor)
+
+    expect(prepareOutboundEvent).toHaveBeenCalledWith(rumor)
+    expect(publish).toHaveBeenCalledWith(preparedEvent)
   })
 
   it("should bootstrap a linked device session to a single-device peer via that peer's public invite", async () => {

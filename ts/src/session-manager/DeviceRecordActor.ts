@@ -63,6 +63,19 @@ export class DeviceRecordActor implements DeviceRecordShape {
     ]
   }
 
+  private static compareSessionPriority(
+    left: [number, number, number],
+    right: [number, number, number],
+  ): number {
+    for (let i = 0; i < left.length; i += 1) {
+      const diff = left[i] - right[i]
+      if (diff !== 0) {
+        return diff
+      }
+    }
+    return 0
+  }
+
   private detachSession(session: Session): void {
     session.close()
   }
@@ -261,8 +274,10 @@ export class DeviceRecordActor implements DeviceRecordShape {
       this.activeSession = nextSession
     } else if (
       current &&
-      DeviceRecordActor.sessionPriority(current) >=
-        DeviceRecordActor.sessionPriority(nextSession)
+      DeviceRecordActor.compareSessionPriority(
+        DeviceRecordActor.sessionPriority(current),
+        DeviceRecordActor.sessionPriority(nextSession),
+      ) >= 0
     ) {
       this.inactiveSessions.unshift(nextSession)
       this.activeSession = current
@@ -273,6 +288,58 @@ export class DeviceRecordActor implements DeviceRecordShape {
       this.activeSession = nextSession
     }
     this.trimInactiveSessions()
+  }
+
+  private sendEventWithBestSession(rumor: Rumor): VerifiedEvent | undefined {
+    const candidates: Array<{
+      session: Session
+      active: boolean
+      priority: [number, number, number]
+    }> = []
+
+    if (this.activeSession && DeviceRecordActor.sessionCanSend(this.activeSession)) {
+      candidates.push({
+        session: this.activeSession,
+        active: true,
+        priority: DeviceRecordActor.sessionPriority(this.activeSession),
+      })
+    }
+
+    for (const session of this.inactiveSessions) {
+      if (!DeviceRecordActor.sessionCanSend(session)) {
+        continue
+      }
+      candidates.push({
+        session,
+        active: false,
+        priority: DeviceRecordActor.sessionPriority(session),
+      })
+    }
+
+    candidates.sort((left, right) =>
+      DeviceRecordActor.compareSessionPriority(right.priority, left.priority)
+    )
+
+    for (const candidate of candidates) {
+      try {
+        const { event } = candidate.session.sendEvent(rumor)
+        if (!candidate.active) {
+          this.promoteToActive(candidate.session, { force: true })
+        }
+        return event
+      } catch {
+        // Try the next send-capable session.
+      }
+    }
+
+    return undefined
+  }
+
+  prepareOutboundEvent(rumor: Rumor): VerifiedEvent | undefined {
+    if (this.state === "revoked") {
+      return undefined
+    }
+    return this.sendEventWithBestSession(rumor)
   }
 
   private handleSessionRumor(
@@ -370,7 +437,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
   }
 
   async flushMessageQueue(): Promise<void> {
-    if (!this.activeSession || this.state === "revoked") {
+    if (this.state === "revoked") {
       return
     }
 
@@ -380,8 +447,11 @@ export class DeviceRecordActor implements DeviceRecordShape {
     }
 
     for (const entry of entries) {
+      const event = this.prepareOutboundEvent(entry.event)
+      if (!event) {
+        continue
+      }
       try {
-        const { event } = this.activeSession.sendEvent(entry.event)
         await this.deps.nostr.publish(event)
         await this.deps.messageQueue.removeByTargetAndEventId(this.deviceId, entry.event.id)
       } catch {

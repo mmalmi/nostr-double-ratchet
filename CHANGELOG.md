@@ -1,9 +1,12 @@
 # Changelog
 
-## ndr 0.0.128 - 2026-05-01
+## 0.0.128 - 2026-05-02
 
 - Mark the `ndr` CLI crate as deprecated. Use the `iris` CLI from the
   `iris-chat` crate instead.
+- Align TypeScript direct sends and queued flushes around the same best-session
+  device path, so an inactive send-capable ratchet can recover when the active
+  session is receive-only.
 
 ## 0.0.127 - 2026-04-30
 

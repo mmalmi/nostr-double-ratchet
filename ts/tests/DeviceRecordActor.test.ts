@@ -245,6 +245,67 @@ describe("DeviceRecordActor", () => {
     expect(nostr.publish).toHaveBeenCalled()
   })
 
+  it("flushes queued messages with a send-capable inactive session when active cannot send", async () => {
+    const deviceKey = getPublicKey(generateSecretKey())
+    const ourDeviceKey = getPublicKey(generateSecretKey())
+    const messageQueue = new MessageQueue(
+      new InMemoryStorageAdapter(),
+      "v1/device-record-inactive-send-test/",
+    )
+
+    const userHooks: DeviceRecordUserHooks = {
+      isDeviceAuthorized: vi.fn(() => true),
+      onDeviceRumor: vi.fn(),
+      onDeviceDirty: vi.fn(),
+    }
+
+    const nostr: NostrFacade = {
+      subscribe: () => () => {},
+      publish: vi.fn(async () => undefined as never),
+    }
+
+    const actor = new DeviceRecordActor(deviceKey, {
+      ownerPubkey: "owner-a",
+      user: userHooks,
+      nostr,
+      messageQueue,
+      ourDeviceId: ourDeviceKey,
+      ourOwnerPubkey: "our-owner",
+      identityKey: generateSecretKey(),
+    })
+
+    const receiveOnly = makeSession("receive-only-active", {
+      canSend: false,
+      canReceive: true,
+      receivingChainMessageNumber: 2,
+    })
+    const sendCapable = makeSession("send-capable-inactive", {
+      canSend: true,
+      canReceive: false,
+      sendingChainMessageNumber: 1,
+    })
+
+    actor.installSession(receiveOnly)
+    actor.installSession(sendCapable, true)
+
+    const queuedRumor: Rumor = {
+      id: `queued-${Date.now()}`,
+      pubkey: ourDeviceKey,
+      kind: 14,
+      content: "queued via inactive",
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["p", deviceKey]],
+    }
+    await messageQueue.add(deviceKey, queuedRumor)
+
+    await actor.flushMessageQueue()
+
+    expect(nostr.publish).toHaveBeenCalledTimes(1)
+    expect(actor.activeSession).toBe(sendCapable)
+    expect(actor.inactiveSessions).toContain(receiveOnly)
+    await expect(messageQueue.getForTarget(deviceKey)).resolves.toHaveLength(0)
+  })
+
   it("promotes a decrypting inactive session and forwards its rumor before AppKeys catch up", async () => {
     const relay = new MockRelay()
     const subscribe = createSubscribe(relay)

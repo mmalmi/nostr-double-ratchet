@@ -1422,24 +1422,18 @@ export class SessionManager {
     const toPublish: Parameters<NostrPublish>[0][] = []
     const sentDeviceIds: string[] = []
     for (const device of devices) {
-      const { activeSession } = device
-      if (!activeSession) {
-        continue
-      }
-
       // Check if device is still authorized
       const deviceOwner = this.resolveToOwner(device.deviceId)
       if (deviceOwner !== device.deviceId && !this.isDeviceAuthorized(deviceOwner, device.deviceId)) {
         continue
       }
 
-      try {
-        const { event: verifiedEvent } = activeSession.sendEvent(event)
-        toPublish.push(verifiedEvent)
-        sentDeviceIds.push(device.deviceId)
-      } catch {
-        // Ignore send errors for a single device.
+      const verifiedEvent = device.prepareOutboundEvent(completeEvent)
+      if (!verifiedEvent) {
+        continue
       }
+      toPublish.push(verifiedEvent)
+      sentDeviceIds.push(device.deviceId)
     }
 
     // Persist recipient + owner records before publishing (best-effort).
