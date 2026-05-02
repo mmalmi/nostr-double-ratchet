@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.129 - 2026-05-02
+
+- Add the `IrisRuntime` app-facing alias for the existing `NdrRuntime` API while keeping the compatibility name.
+- Split Rust `SessionManager` internals into focused policy, queue, invite bootstrap, and session-selection modules.
+- Split TypeScript expiration policy and device session selection into reusable helpers with focused regression coverage.
+- Rename nearby LAN service labels from `ndr` to `iris`.
+
 ## 0.0.128 - 2026-05-02
 
 - Mark the `ndr` CLI crate as deprecated. Use the `iris` CLI from the
