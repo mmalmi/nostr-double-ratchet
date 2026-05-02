@@ -1,6 +1,7 @@
 use super::*;
 use nostr::Keys;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Clone)]
 struct FailFirstMessageQueuePutStorage {
@@ -2229,4 +2230,71 @@ fn test_auto_adopt_chat_settings_sender_copy_uses_p_tag_peer() {
         .unwrap();
     assert_eq!(opts_disable.ttl_seconds, None);
     assert_eq!(opts_disable.expires_at, None);
+}
+
+#[test]
+fn message_policy_builds_expiration_tag_and_rejects_conflicting_options() {
+    let tag = SessionManager::expiration_tag_for_options(
+        &crate::SendOptions {
+            expires_at: None,
+            ttl_seconds: Some(30),
+        },
+        1_700_000_000,
+    )
+    .unwrap()
+    .unwrap();
+
+    let values = tag.to_vec();
+    assert_eq!(
+        values.first().map(|s| s.as_str()),
+        Some(crate::EXPIRATION_TAG)
+    );
+    assert_eq!(values.get(1).map(|s| s.as_str()), Some("1700000030"));
+
+    let conflict = SessionManager::expiration_tag_for_options(
+        &crate::SendOptions {
+            expires_at: Some(1_700_000_100),
+            ttl_seconds: Some(30),
+        },
+        1_700_000_000,
+    );
+    assert!(conflict.is_err());
+}
+
+#[test]
+fn message_policy_interprets_chat_settings_payloads() {
+    let set_payload = serde_json::json!({
+        "type": "chat-settings",
+        "v": 1,
+        "messageTtlSeconds": 42,
+    });
+    match SessionManager::chat_settings_update_from_payload(&set_payload) {
+        super::message_policy::PeerSendOptionsUpdate::SetOverride(options) => {
+            assert_eq!(options.ttl_seconds, Some(42));
+            assert_eq!(options.expires_at, None);
+        }
+        _ => panic!("expected set override"),
+    }
+
+    let clear_payload = serde_json::json!({
+        "type": "chat-settings",
+        "v": 1,
+    });
+    assert!(matches!(
+        SessionManager::chat_settings_update_from_payload(&clear_payload),
+        super::message_policy::PeerSendOptionsUpdate::ClearOverride
+    ));
+
+    let disable_payload = serde_json::json!({
+        "type": "chat-settings",
+        "v": 1,
+        "messageTtlSeconds": null,
+    });
+    match SessionManager::chat_settings_update_from_payload(&disable_payload) {
+        super::message_policy::PeerSendOptionsUpdate::SetOverride(options) => {
+            assert_eq!(options.ttl_seconds, None);
+            assert_eq!(options.expires_at, None);
+        }
+        _ => panic!("expected disable override"),
+    }
 }

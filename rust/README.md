@@ -49,7 +49,7 @@ should wait until relays reflect the updated AppKeys snapshot.
 
 ## Direct Message Catch-Up
 
-`SessionManager` and `NdrRuntime` emit subscribe/unsubscribe events, but they do not fetch relay
+`SessionManager` and `IrisRuntime` (`NdrRuntime` compatibility name) emit subscribe/unsubscribe events, but they do not fetch relay
 history for you. If a new direct-message author gets added to a session subscription, consume that
 signal immediately:
 

@@ -33,37 +33,6 @@ impl SessionManager {
         self.apply_app_keys_device_roster(owner_pubkey, &effective_app_keys);
     }
 
-    pub(super) fn session_state_priority(state: &crate::SessionState) -> (u8, u32, u32, u32) {
-        let can_send =
-            state.their_next_nostr_public_key.is_some() && state.our_current_nostr_key.is_some();
-        let can_receive = state.receiving_chain_key.is_some()
-            || state.their_current_nostr_public_key.is_some()
-            || state.receiving_chain_message_number > 0;
-
-        let directionality = match (can_send, can_receive) {
-            (true, true) => 3,
-            (true, false) => 2,
-            (false, true) => 1,
-            (false, false) => 0,
-        };
-
-        (
-            directionality,
-            state.receiving_chain_message_number,
-            state.previous_sending_chain_message_count,
-            state.sending_chain_message_number,
-        )
-    }
-
-    pub(super) fn push_unique_session_state(
-        sessions: &mut Vec<crate::SessionState>,
-        state: crate::SessionState,
-    ) {
-        if !sessions.contains(&state) {
-            sessions.push(state);
-        }
-    }
-
     pub(super) fn merge_stored_device_record(
         mut existing: crate::StoredDeviceRecord,
         current: crate::StoredDeviceRecord,
@@ -254,86 +223,5 @@ impl SessionManager {
         });
 
         Ok(())
-    }
-
-    pub(super) fn promote_session_to_active(
-        user_record: &mut UserRecord,
-        device_id: &str,
-        session_index: usize,
-    ) {
-        let Some(device_record) = user_record.device_records.get_mut(device_id) else {
-            return;
-        };
-
-        SessionManager::promote_device_record_session_to_active(device_record, session_index);
-    }
-
-    pub(super) fn promote_device_record_session_to_active(
-        device_record: &mut crate::DeviceRecord,
-        session_index: usize,
-    ) {
-        if session_index >= device_record.inactive_sessions.len() {
-            return;
-        }
-
-        let session = device_record.inactive_sessions.remove(session_index);
-        if let Some(active) = device_record.active_session.take() {
-            device_record.inactive_sessions.insert(0, active);
-        }
-        device_record.active_session = Some(session);
-
-        const MAX_INACTIVE: usize = 10;
-        if device_record.inactive_sessions.len() > MAX_INACTIVE {
-            device_record.inactive_sessions.truncate(MAX_INACTIVE);
-        }
-    }
-
-    pub(super) fn send_event_with_best_session(
-        device_record: &mut crate::DeviceRecord,
-        event: UnsignedEvent,
-    ) -> Option<nostr::Event> {
-        let mut candidates = Vec::new();
-        if let Some(ref session) = device_record.active_session {
-            if session.can_send() {
-                candidates.push((None, SessionManager::session_send_priority(session, true)));
-            }
-        }
-
-        for idx in 0..device_record.inactive_sessions.len() {
-            let session = &device_record.inactive_sessions[idx];
-            if session.can_send() {
-                candidates.push((
-                    Some(idx),
-                    SessionManager::session_send_priority(session, false),
-                ));
-            }
-        }
-
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
-
-        for (session_index, _) in candidates {
-            match session_index {
-                None => {
-                    if let Some(ref mut session) = device_record.active_session {
-                        if let Ok(signed_event) = session.send_event(event.clone()) {
-                            return Some(signed_event);
-                        }
-                    }
-                }
-                Some(idx) => {
-                    let signed_event = {
-                        let session = &mut device_record.inactive_sessions[idx];
-                        session.send_event(event.clone()).ok()
-                    };
-
-                    if let Some(signed_event) = signed_event {
-                        SessionManager::promote_device_record_session_to_active(device_record, idx);
-                        return Some(signed_event);
-                    }
-                }
-            }
-        }
-
-        None
     }
 }

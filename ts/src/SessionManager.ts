@@ -20,12 +20,10 @@ import { MessageQueue } from "./MessageQueue"
 import { AppKeys, isAppKeysEvent } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
-import { GROUP_METADATA_KIND } from "./GroupMeta"
 import {
   deserializeSessionState,
   resolveExpirationSeconds,
   serializeSessionState,
-  upsertExpirationTag,
 } from "./utils"
 import { resolveInviteOwnerRouting } from "./multiDevice"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
@@ -36,6 +34,11 @@ import {
   isSelfOrigin,
 } from "./MessageOrigin"
 import { DeviceRecordActor } from "./session-manager/DeviceRecordActor"
+import {
+  applyExpirationPolicy,
+  chatSettingsAdoptionForRumor,
+  expirationOverrideFromSendOptions,
+} from "./session-manager/messagePolicy"
 import { UserRecordActor } from "./session-manager/UserRecordActor"
 import type {
   AcceptInviteOptions,
@@ -1484,50 +1487,18 @@ export class SessionManager {
       rumor.tags.push(["ms", String(now)])
     }
 
-    // Expiration defaults can be configured per peer/group, but some inner rumor kinds must never expire.
-    if (kind !== GROUP_METADATA_KIND && kind !== CHAT_SETTINGS_KIND) {
-      const nowSeconds = Math.floor(now / 1000)
-
-      const groupId = builtTags.find(t => t[0] === "l")?.[1]
-
-      // Determine per-send expiration override:
-      // - `expiration: null` disables expiration entirely (even if defaults exist)
-      // - `expiration: {…}` overrides defaults
-      // - legacy `expiresAt` / `ttlSeconds` on the options object are treated as an override when provided
-      let expirationOverride: ExpirationOptions | null | undefined = options.expiration
-      const legacyOverride =
-        options.expiresAt !== undefined || options.ttlSeconds !== undefined
-
-      if (expirationOverride === undefined && legacyOverride) {
-        expirationOverride = { expiresAt: options.expiresAt, ttlSeconds: options.ttlSeconds }
-      }
-
-      if (expirationOverride !== null) {
-        let disabledByPolicy = false
-        let effective: ExpirationOptions | undefined
-
-        if (expirationOverride !== undefined) {
-          effective = expirationOverride
-        } else if (groupId && this.groupExpiration.has(groupId)) {
-          const v = this.groupExpiration.get(groupId)
-          if (v === null) disabledByPolicy = true
-          else effective = v
-        } else if (this.peerExpiration.has(recipientPublicKey)) {
-          const v = this.peerExpiration.get(recipientPublicKey)
-          if (v === null) disabledByPolicy = true
-          else effective = v
-        } else {
-          effective = this.defaultExpiration
-        }
-
-        if (!disabledByPolicy && effective) {
-          const expiresAt = resolveExpirationSeconds(effective, nowSeconds)
-          if (expiresAt !== undefined) {
-            upsertExpirationTag(rumor.tags, expiresAt)
-          }
-        }
-      }
-    }
+    const groupId = builtTags.find(t => t[0] === "l")?.[1]
+    applyExpirationPolicy({
+      kind,
+      nowSeconds: Math.floor(now / 1000),
+      tags: rumor.tags,
+      expirationOverride: expirationOverrideFromSendOptions(options),
+      defaultExpiration: this.defaultExpiration,
+      peerExpiration: this.peerExpiration.get(recipientPublicKey),
+      hasPeerExpiration: this.peerExpiration.has(recipientPublicKey),
+      groupExpiration: groupId ? this.groupExpiration.get(groupId) : undefined,
+      hasGroupExpiration: groupId ? this.groupExpiration.has(groupId) : false,
+    })
 
     rumor.id = getEventHash(rumor)
 
@@ -1601,63 +1572,14 @@ export class SessionManager {
 
   private maybeAutoAdoptChatSettings(event: Rumor, fromOwnerPubkey: string): void {
     if (!this.autoAdoptChatSettings) return
-    if (event.kind !== CHAT_SETTINGS_KIND) return
+    const adoption = chatSettingsAdoptionForRumor(
+      event,
+      fromOwnerPubkey,
+      this.ownerPublicKey,
+    )
+    if (!adoption) return
 
-    let payload: unknown
-    try {
-      payload = JSON.parse(event.content)
-    } catch {
-      return
-    }
-
-    const p = payload as Partial<ChatSettingsPayloadV1>
-    if (p?.type !== "chat-settings" || p?.v !== 1) return
-
-    const recipientP = event.tags?.find((t) => t[0] === "p")?.[1]
-
-    // Determine which peer this setting applies to:
-    // - for incoming messages, `fromOwnerPubkey` is the peer
-    // - for sender-copy sync across our own devices, `["p", <peer>]` indicates the peer
-    const us = this.ownerPublicKey
-    const peer =
-      recipientP && recipientP !== us
-        ? recipientP
-        : fromOwnerPubkey && fromOwnerPubkey !== us
-          ? fromOwnerPubkey
-          : undefined
-    if (!peer || peer === us) return
-
-    const ttl = (p as ChatSettingsPayloadV1).messageTtlSeconds
-
-    // Adopt:
-    // - number > 0: set per-peer ttlSeconds
-    // - 0 or null: disable per-peer expiration (even if a global default exists)
-    // - undefined: clear per-peer override (fall back to global default)
-    if (ttl === undefined) {
-      this.setExpirationForPeer(peer, undefined).catch(() => {})
-      return
-    }
-
-    if (ttl === null) {
-      this.setExpirationForPeer(peer, null).catch(() => {})
-      return
-    }
-
-    if (
-      typeof ttl !== "number" ||
-      !Number.isFinite(ttl) ||
-      !Number.isSafeInteger(ttl) ||
-      ttl < 0
-    ) {
-      return
-    }
-
-    if (ttl === 0) {
-      this.setExpirationForPeer(peer, null).catch(() => {})
-      return
-    }
-
-    this.setExpirationForPeer(peer, { ttlSeconds: ttl }).catch(() => {})
+    this.setExpirationForPeer(adoption.peerPubkey, adoption.options).catch(() => {})
   }
 
   private buildMessageTags(

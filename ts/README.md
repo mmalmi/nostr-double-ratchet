@@ -15,7 +15,7 @@ pnpm add nostr-double-ratchet
 - `SessionManager`: multi-device session orchestration and routing
 - `SessionGroupRuntime`: group transport bound to an existing `SessionManager`
 - `DelegateManager` / `AppKeysManager`: device lifecycle and owner authorization
-- `NdrRuntime`: high-level runtime that owns AppKeys, delegate/session state, and group transport
+- `IrisRuntime` (`NdrRuntime` compatibility name): high-level runtime that owns AppKeys, delegate/session state, and group transport
 - `Group`: sender-key group messaging helper (transport-agnostic)
 - `SharedChannel`: encrypted shared-channel primitive used by higher-level group bootstrap flows
 
@@ -23,17 +23,17 @@ pnpm add nostr-double-ratchet
 
 | Mode | Use it when | What it owns |
 | --- | --- | --- |
-| `NdrRuntime` | You want the default production path for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`. |
+| `IrisRuntime` (`NdrRuntime` compatibility name) | You want the default production path for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager`. |
 | `SessionManager` | You want multi-device routing, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and emitted pubsub/decrypted-message events. |
 | `Session` | You want the smallest 1:1 primitive and already own invite/bootstrap, persistence, and relay transport. Good for negotiated 1:1 channels or app-specific direct links. | Only the ratchet session state itself. |
 
 Supporting pieces around those modes:
 
-- `SessionGroupRuntime`: add the same group transport surface that `NdrRuntime` uses to an
+- `SessionGroupRuntime`: add the same group transport surface that `IrisRuntime` uses to an
   existing `SessionManager`.
 - `Invite`: bootstrap primitive when you build around plain `Session`.
 
-If you are unsure, start with `NdrRuntime`. Drop down to `SessionManager` only when you want to
+If you are unsure, start with `IrisRuntime`. Drop down to `SessionManager` only when you want to
 keep more app-owned runtime structure, and use plain `Session` only when a small 1:1-only surface
 is actually the goal.
 
@@ -43,7 +43,7 @@ Reference web integrations:
 [`iris-client`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-client),
 [`iris-chat`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat).
 
-They use one `NdrRuntime` singleton over app-owned transport and persistent storage.
+They use one `IrisRuntime` singleton over app-owned transport and persistent storage.
 
 ```typescript
 type NostrSubscribe = (
@@ -65,14 +65,14 @@ interface StorageAdapter {
 }
 ```
 
-If you can provide those four pieces, start with `NdrRuntime`.
+If you can provide those four pieces, start with `IrisRuntime`.
 
-## Quick Start (`NdrRuntime`)
+## Quick Start (`IrisRuntime`)
 
 ```typescript
-import { NdrRuntime } from "nostr-double-ratchet";
+import { IrisRuntime } from "nostr-double-ratchet";
 
-const runtime = new NdrRuntime({
+const runtime = new IrisRuntime({
   nostrSubscribe,
   nostrPublish,
   nostrFetch,
@@ -99,7 +99,7 @@ await runtime.sendGroupMessage(created.group.id, "Hello group!");
 console.log(groupManager.managedGroupIds());
 ```
 
-`NdrRuntime` does not own your relay client. It still relies on your `nostrSubscribe`,
+`IrisRuntime` does not own your relay client. It still relies on your `nostrSubscribe`,
 `nostrFetch`, and `nostrPublish` functions.
 
 `initForOwner(...)` initializes the runtime for a specific owner/device identity. For owner-key
@@ -117,7 +117,7 @@ If you want metadata fanout immediately instead of waiting for queue flush, prew
 
 ### Runtime Group API
 
-If you want the high-level path, keep groups on `NdrRuntime` instead of building a parallel
+If you want the high-level path, keep groups on `IrisRuntime` instead of building a parallel
 group transport layer:
 
 - `setupUser(...)`
@@ -136,7 +136,7 @@ group transport layer:
 
 Reference web integrations do this:
 
-1. Create one long-lived `NdrRuntime` per active identity with persistent storage.
+1. Create one long-lived `IrisRuntime` per active identity with persistent storage.
 2. Wrap `nostrSubscribe` with `DirectMessageSubscriptionTracker` +
    `buildDirectMessageBackfillFilter(...)` so newly added direct-message authors trigger a short
    relay backfill immediately.
@@ -149,7 +149,7 @@ Reference web integrations do this:
 ## Mid-Level Setup (`SessionGroupRuntime`)
 
 If your app already owns `SessionManager`, `SessionGroupRuntime` gives you the same group-focused
-API shape that `NdrRuntime` uses internally:
+API shape that `IrisRuntime` uses internally:
 
 ```typescript
 import { SessionGroupRuntime } from "nostr-double-ratchet";
@@ -298,7 +298,7 @@ const trackedSubscribe = (filter, onEvent) => {
 - Group messages are published once as one-to-many outer events (per sender device key).
 - Receiver attribution for group payloads is derived from authenticated distribution/session context, not inner rumor `pubkey`.
 - `createGroupData(...)` is a pure local constructor. `GroupManager.createGroup(...)` is the app-level helper that creates local group state and, by default, fans out metadata (kind 40) to members.
-- `NdrRuntime` now exposes the same high-level group path as Rust/FFI: `createGroup(...)`,
+- `IrisRuntime` now exposes the same high-level group path as Rust/FFI: `createGroup(...)`,
   `sendGroupEvent(...)`, `sendGroupMessage(...)`, `syncGroups(...)`, and `onGroupEvent(...)`.
 
 ## Disappearing Messages (Expiration)

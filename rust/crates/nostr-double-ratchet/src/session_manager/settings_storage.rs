@@ -1,3 +1,4 @@
+use super::message_policy::PeerSendOptionsUpdate;
 use super::*;
 
 impl SessionManager {
@@ -162,41 +163,18 @@ impl SessionManager {
             Err(_) => return,
         };
 
-        let typ = payload.get("type").and_then(|v| v.as_str());
-        let v = payload.get("v").and_then(|v| v.as_u64());
-        if typ != Some("chat-settings") || v != Some(1) {
-            return;
-        }
-
         let Some(peer_pubkey) = self.chat_settings_peer_pubkey(from_owner_pubkey, rumor) else {
             return;
         };
 
-        match payload.get("messageTtlSeconds") {
-            // Missing: clear per-peer override (fall back to global default).
-            None => {
+        match Self::chat_settings_update_from_payload(&payload) {
+            PeerSendOptionsUpdate::ClearOverride => {
                 let _ = self.set_peer_send_options(peer_pubkey, None);
             }
-            // Null: disable per-peer expiration (even if a global default exists).
-            Some(serde_json::Value::Null) => {
-                let _ =
-                    self.set_peer_send_options(peer_pubkey, Some(crate::SendOptions::default()));
+            PeerSendOptionsUpdate::SetOverride(options) => {
+                let _ = self.set_peer_send_options(peer_pubkey, Some(options));
             }
-            Some(serde_json::Value::Number(n)) => {
-                let Some(ttl) = n.as_u64() else {
-                    return;
-                };
-                let opts = if ttl == 0 {
-                    crate::SendOptions::default()
-                } else {
-                    crate::SendOptions {
-                        ttl_seconds: Some(ttl),
-                        expires_at: None,
-                    }
-                };
-                let _ = self.set_peer_send_options(peer_pubkey, Some(opts));
-            }
-            _ => {}
+            PeerSendOptionsUpdate::Ignore => {}
         }
     }
 

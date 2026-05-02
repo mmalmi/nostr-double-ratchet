@@ -273,57 +273,6 @@ impl SessionManager {
         self.discovery_queue.remove_expired(max_age_ms)
     }
 
-    pub fn queued_message_diagnostics(
-        &self,
-        inner_event_id: Option<&str>,
-    ) -> Result<Vec<crate::QueuedMessageDiagnostic>> {
-        let mut out = Vec::new();
-        let device_to_owner = self.with_user_records(|records| {
-            records
-                .iter()
-                .flat_map(|(owner, record)| {
-                    record
-                        .device_records
-                        .keys()
-                        .chain(record.known_device_identities.iter())
-                        .map(|device_id| (device_id.clone(), *owner))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<HashMap<_, _>>()
-        });
-
-        for entry in self.discovery_queue.entries()? {
-            let entry_inner_id = entry.event.id.as_ref().map(ToString::to_string);
-            if inner_event_id.is_some_and(|id| entry_inner_id.as_deref() != Some(id)) {
-                continue;
-            }
-            out.push(crate::QueuedMessageDiagnostic {
-                stage: crate::QueuedMessageStage::Discovery,
-                owner_pubkey: crate::utils::pubkey_from_hex(&entry.target_key).ok(),
-                target_key: entry.target_key,
-                inner_event_id: entry_inner_id,
-                created_at_ms: entry.created_at,
-            });
-        }
-
-        for entry in self.message_queue.entries()? {
-            let entry_inner_id = entry.event.id.as_ref().map(ToString::to_string);
-            if inner_event_id.is_some_and(|id| entry_inner_id.as_deref() != Some(id)) {
-                continue;
-            }
-            out.push(crate::QueuedMessageDiagnostic {
-                stage: crate::QueuedMessageStage::Device,
-                owner_pubkey: device_to_owner.get(&entry.target_key).copied(),
-                target_key: entry.target_key,
-                inner_event_id: entry_inner_id,
-                created_at_ms: entry.created_at,
-            });
-        }
-
-        out.sort_by_key(|entry| entry.created_at_ms);
-        Ok(out)
-    }
-
     #[deprecated(
         note = "use send_text(recipient, text, Some(SendOptions{ expires_at: Some(...) }))"
     )]
@@ -357,17 +306,8 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
         let mut tags: Vec<Tag> = Vec::new();
-        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
-        }
+        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event = self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, tags)?;
 
@@ -389,12 +329,7 @@ impl SessionManager {
         recipient: PublicKey,
         message_ttl_seconds: u64,
     ) -> Result<Vec<String>> {
-        let payload = crate::ChatSettingsPayloadV1 {
-            typ: "chat-settings".to_string(),
-            v: 1,
-            message_ttl_seconds: Some(message_ttl_seconds),
-        };
-
+        let payload = Self::chat_settings_payload(message_ttl_seconds);
         let content = serde_json::to_string(&payload)?;
         let event =
             self.build_message_event(recipient, crate::CHAT_SETTINGS_KIND, content, vec![])?;
@@ -411,14 +346,7 @@ impl SessionManager {
         peer_pubkey: PublicKey,
         message_ttl_seconds: u64,
     ) -> Result<Vec<String>> {
-        let opts = if message_ttl_seconds == 0 {
-            crate::SendOptions::default()
-        } else {
-            crate::SendOptions {
-                ttl_seconds: Some(message_ttl_seconds),
-                expires_at: None,
-            }
-        };
+        let opts = Self::send_options_for_chat_ttl(message_ttl_seconds);
         self.set_peer_send_options(peer_pubkey, Some(opts))?;
         self.send_chat_settings(peer_pubkey, message_ttl_seconds)
     }
@@ -444,16 +372,7 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
-        }
+        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event = self.build_message_event(
             recipient,
@@ -472,17 +391,8 @@ impl SessionManager {
     ) -> Result<Vec<String>> {
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
         let mut tags: Vec<Tag> = Vec::new();
-        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
-        }
+        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event =
             self.build_message_event(recipient, crate::TYPING_KIND, "typing".to_string(), tags)?;
@@ -513,16 +423,7 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        let now_s = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        if let Some(expires_at) = crate::utils::resolve_expiration_seconds(&options, now_s)? {
-            tags.push(
-                Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
-        }
+        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event = self.build_message_event(recipient, crate::REACTION_KIND, emoji, tags)?;
 

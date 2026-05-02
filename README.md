@@ -20,7 +20,7 @@ use the `iris` CLI from the
 - Multi-device identity model (owner key + device keys) with AppKeys
 - Invite and link flows for session bootstrapping
 - Group messaging with sender keys and one-to-many outer events
-- High-level `NdrRuntime` path that owns both session and group transport
+- High-level `IrisRuntime` / `NdrRuntime` path that owns both session and group transport
 - Cross-language TS/Rust interoperability tests
 - Breaking changes are still possible while APIs settle
 
@@ -28,18 +28,18 @@ use the `iris` CLI from the
 
 | Mode | Use it when | What it owns |
 | --- | --- | --- |
-| `NdrRuntime` | You want the default production path with one app-facing surface for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager` in TypeScript. |
+| `IrisRuntime` (`NdrRuntime` compatibility name) | You want the default production path with one app-facing surface for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager` in TypeScript. |
 | `SessionManager` | You want multi-device routing and storage, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and emitted pubsub/decrypted-message events. |
 | `Session` | You want the simplest 1:1 primitive and you already own invite/bootstrap, persistence, and transport. Good for negotiated 1:1 channels or other app-specific direct links. | Only the ratchet session state itself. |
 
 Add-ons around those layers:
 
-- `SessionGroupRuntime`: attach the same group transport surface that `NdrRuntime` uses to an
+- `SessionGroupRuntime`: attach the same group transport surface that `IrisRuntime` uses to an
   existing `SessionManager`.
 - `GroupManager`: direct group transport helper if you want to wire group state yourself.
 - `Invite`: handshake/bootstrap primitive when you build around plain `Session`.
 
-Use `NdrRuntime` when you want one concrete app-facing surface for:
+Use `IrisRuntime` when you want one concrete app-facing surface for:
 
 - `setupUser(...)`
 - `sendEvent(...)`, `sendMessage(...)`
@@ -133,7 +133,7 @@ re-implementing policy ad hoc.
   `DirectMessageSubscriptionTracker`, `build_direct_message_backfill_filter`,
   `resolve_rumor_peer_pubkey`
 
-`NdrRuntime` and `SessionManager` own session state and emit pubsub/decrypted-message events, but
+`IrisRuntime`/`NdrRuntime` and `SessionManager` own session state and emit pubsub/decrypted-message events, but
 they do not own relay history fetch. Consumers should treat new direct-message subscription authors
 as a transport catch-up signal and run a short replay/backfill with the shared helpers above.
 

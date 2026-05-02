@@ -8,7 +8,7 @@ use nostr::{Keys, PublicKey, Tag, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub enum SessionManagerEvent {
     Subscribe {
@@ -88,8 +88,6 @@ type GroupSenderKeySlot = (PublicKey, u32);
 type GroupSenderKeyPending = HashMap<GroupSenderKeySlot, Vec<nostr::Event>>;
 type SessionBookTask = Box<dyn FnOnce(&mut HashMap<PublicKey, UserRecord>) + Send + 'static>;
 
-const INVITE_BOOTSTRAP_EXPIRATION_SECONDS: u64 = 60;
-const INVITE_BOOTSTRAP_RETRY_DELAYS_MS: [u64; 3] = [0, 500, 1500];
 const MAX_PENDING_INVITE_RESPONSES: usize = 1_000;
 
 #[derive(Clone)]
@@ -160,99 +158,6 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    fn session_can_receive(session: &crate::Session) -> bool {
-        Self::session_state_can_receive(&session.state)
-    }
-
-    fn session_send_priority(session: &crate::Session, is_active: bool) -> (u8, u8, u32, u32, u32) {
-        let can_send = session.can_send();
-        let can_receive = Self::session_can_receive(session);
-        let directionality = match (can_send, can_receive) {
-            (true, true) => 3,
-            (true, false) => 2,
-            (false, true) => 1,
-            (false, false) => 0,
-        };
-
-        (
-            directionality,
-            u8::from(is_active && can_receive),
-            session.state.receiving_chain_message_number,
-            session.state.previous_sending_chain_message_count,
-            session.state.sending_chain_message_number,
-        )
-    }
-
-    fn session_state_can_receive(state: &crate::SessionState) -> bool {
-        state.receiving_chain_key.is_some()
-            || state.their_current_nostr_public_key.is_some()
-            || state.receiving_chain_message_number > 0
-    }
-
-    fn session_state_tracked_sender_pubkeys(state: &crate::SessionState) -> Vec<PublicKey> {
-        let mut pubkeys = HashSet::new();
-        if let Some(pubkey) = state.their_current_nostr_public_key {
-            pubkeys.insert(pubkey);
-        }
-        if let Some(pubkey) = state.their_next_nostr_public_key {
-            pubkeys.insert(pubkey);
-        }
-
-        let mut pubkeys: Vec<PublicKey> = pubkeys.into_iter().collect();
-        pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
-        pubkeys
-    }
-
-    fn message_push_session_snapshots(
-        user_record: &UserRecord,
-    ) -> Vec<MessagePushSessionStateSnapshot> {
-        let mut snapshots = Vec::new();
-        let mut seen_states = HashSet::new();
-
-        for device in user_record.device_records.values() {
-            for session in device
-                .active_session
-                .iter()
-                .chain(device.inactive_sessions.iter())
-            {
-                let state = session.state.clone();
-                let Ok(state_json) = serde_json::to_string(&state) else {
-                    continue;
-                };
-                if !seen_states.insert(state_json) {
-                    continue;
-                }
-
-                snapshots.push(MessagePushSessionStateSnapshot {
-                    tracked_sender_pubkeys: Self::session_state_tracked_sender_pubkeys(&state),
-                    has_receiving_capability: Self::session_state_can_receive(&state),
-                    state,
-                });
-            }
-        }
-
-        snapshots
-            .sort_by_key(|snapshot| serde_json::to_string(&snapshot.state).unwrap_or_default());
-        snapshots
-    }
-
-    fn message_push_author_pubkeys_for_records(
-        records: &HashMap<PublicKey, UserRecord>,
-    ) -> Vec<PublicKey> {
-        let mut authors = HashSet::new();
-        for user_record in records.values() {
-            for snapshot in Self::message_push_session_snapshots(user_record) {
-                for author in snapshot.tracked_sender_pubkeys {
-                    authors.insert(author);
-                }
-            }
-        }
-
-        let mut authors: Vec<PublicKey> = authors.into_iter().collect();
-        authors.sort_by_key(|pubkey| pubkey.to_hex());
-        authors
-    }
-
     fn stored_user_record_json(user_record: &UserRecord) -> Result<String> {
         Ok(serde_json::to_string(&user_record.to_stored())?)
     }
@@ -270,8 +175,12 @@ mod api;
 mod devices;
 mod event_processing;
 mod group_sender_keys;
+mod invite_bootstrap;
+mod message_policy;
+mod queues;
 mod records;
 mod sending;
+mod session_selection;
 mod settings_storage;
 
 #[cfg(test)]

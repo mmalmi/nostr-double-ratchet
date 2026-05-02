@@ -2,6 +2,14 @@ import { Invite } from "../Invite"
 import { Session } from "../Session"
 import type { VerifiedEvent } from "nostr-tools"
 import { INVITE_EVENT_KIND, type Rumor } from "../types"
+import {
+  compareSessionPriority,
+  sessionCanReceive,
+  sessionCanSend,
+  sessionHasActivity,
+  sessionPriority,
+  sortedSendableSessionCandidates,
+} from "./sessionSelection"
 import type {
   DeviceRecord as DeviceRecordShape,
   DeviceRecordDeps,
@@ -26,54 +34,6 @@ export class DeviceRecordActor implements DeviceRecordShape {
     private readonly deps: DeviceRecordDeps,
   ) {
     this.createdAt = deps.createdAt ?? Date.now()
-  }
-
-  private static sessionCanSend(session: Session): boolean {
-    return Boolean(session.state.theirNextNostrPublicKey && session.state.ourCurrentNostrKey)
-  }
-
-  private static sessionCanReceive(session: Session): boolean {
-    return Boolean(
-      session.state.receivingChainKey ||
-      session.state.theirCurrentNostrPublicKey ||
-      session.state.receivingChainMessageNumber > 0
-    )
-  }
-
-  private static sessionHasActivity(session: Session): boolean {
-    return (
-      session.state.sendingChainMessageNumber > 0 ||
-      session.state.receivingChainMessageNumber > 0
-    )
-  }
-
-  private static sessionPriority(session: Session): [number, number, number] {
-    const canSend = DeviceRecordActor.sessionCanSend(session)
-    const canReceive = DeviceRecordActor.sessionCanReceive(session)
-    const directionality =
-      canSend && canReceive ? 3
-      : canSend ? 2
-      : canReceive ? 1
-      : 0
-
-    return [
-      directionality,
-      session.state.receivingChainMessageNumber,
-      session.state.sendingChainMessageNumber,
-    ]
-  }
-
-  private static compareSessionPriority(
-    left: [number, number, number],
-    right: [number, number, number],
-  ): number {
-    for (let i = 0; i < left.length; i += 1) {
-      const diff = left[i] - right[i]
-      if (diff !== 0) {
-        return diff
-      }
-    }
-    return 0
   }
 
   private detachSession(session: Session): void {
@@ -105,10 +65,10 @@ export class DeviceRecordActor implements DeviceRecordShape {
     }
 
     return (
-      DeviceRecordActor.sessionCanSend(this.activeSession) &&
+      sessionCanSend(this.activeSession) &&
       (
-        DeviceRecordActor.sessionCanReceive(this.activeSession) ||
-        DeviceRecordActor.sessionHasActivity(this.activeSession)
+        sessionCanReceive(this.activeSession) ||
+        sessionHasActivity(this.activeSession)
       )
     )
   }
@@ -274,9 +234,9 @@ export class DeviceRecordActor implements DeviceRecordShape {
       this.activeSession = nextSession
     } else if (
       current &&
-      DeviceRecordActor.compareSessionPriority(
-        DeviceRecordActor.sessionPriority(current),
-        DeviceRecordActor.sessionPriority(nextSession),
+      compareSessionPriority(
+        sessionPriority(current),
+        sessionPriority(nextSession),
       ) >= 0
     ) {
       this.inactiveSessions.unshift(nextSession)
@@ -291,36 +251,10 @@ export class DeviceRecordActor implements DeviceRecordShape {
   }
 
   private sendEventWithBestSession(rumor: Rumor): VerifiedEvent | undefined {
-    const candidates: Array<{
-      session: Session
-      active: boolean
-      priority: [number, number, number]
-    }> = []
-
-    if (this.activeSession && DeviceRecordActor.sessionCanSend(this.activeSession)) {
-      candidates.push({
-        session: this.activeSession,
-        active: true,
-        priority: DeviceRecordActor.sessionPriority(this.activeSession),
-      })
-    }
-
-    for (const session of this.inactiveSessions) {
-      if (!DeviceRecordActor.sessionCanSend(session)) {
-        continue
-      }
-      candidates.push({
-        session,
-        active: false,
-        priority: DeviceRecordActor.sessionPriority(session),
-      })
-    }
-
-    candidates.sort((left, right) =>
-      DeviceRecordActor.compareSessionPriority(right.priority, left.priority)
-    )
-
-    for (const candidate of candidates) {
+    for (const candidate of sortedSendableSessionCandidates(
+      this.activeSession,
+      this.inactiveSessions,
+    )) {
       try {
         const { event } = candidate.session.sendEvent(rumor)
         if (!candidate.active) {

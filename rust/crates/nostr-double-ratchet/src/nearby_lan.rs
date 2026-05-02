@@ -20,7 +20,7 @@ use crate::{
 pub const IRIS_NEARBY_SERVICE_TYPE: &str = "_iris-chat._tcp.local.";
 
 const CONNECT_TIMEOUT_MS: u64 = 750;
-const HELLO_NAME: &str = "ndr";
+const HELLO_NAME: &str = "iris";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NearbyLanError {
@@ -50,7 +50,7 @@ pub struct NearbyLanConfig {
 impl NearbyLanConfig {
     pub fn new(peer_id: impl Into<String>) -> Self {
         let peer_id = peer_id.into();
-        let service_name = format!("ndr-{}", short_hash(&peer_id));
+        let service_name = format!("iris-{}", short_hash(&peer_id));
         Self {
             peer_id,
             bind_addr: None,
@@ -235,7 +235,7 @@ fn start_mdns(
     let thread_known_peers = Arc::clone(&known_peers);
     let runtime_handle = tokio::runtime::Handle::current();
     let thread = std::thread::Builder::new()
-        .name("ndr-nearby-mdns".to_string())
+        .name("iris-nearby-mdns".to_string())
         .spawn(move || {
             while let Ok(event) = receiver.recv() {
                 match event {
@@ -474,7 +474,7 @@ fn sanitize_service_label(value: &str) -> String {
         .take(40)
         .collect::<String>();
     if out.is_empty() {
-        out = "ndr".to_string();
+        out = "iris".to_string();
     }
     out
 }
