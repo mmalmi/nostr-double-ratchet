@@ -19,22 +19,24 @@ impl SessionManager {
                 return;
             }
 
-            if let Some(state) = self.invite_state.lock().unwrap().as_ref() {
-                match state
-                    .invite
-                    .process_invite_response(&event, state.our_identity_key)
-                {
-                    Ok(Some(response)) => {
-                        let claimed_owner = response
-                            .owner_public_key
-                            .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
-                        if !self.install_invite_response_session(event.id.to_string(), response) {
-                            self.setup_user(claimed_owner);
-                            self.queue_pending_invite_response(event.clone());
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
+            if let Some((response_pubkey, response)) =
+                self.decode_registered_invite_response(&event)
+            {
+                let invitee_identity = response.invitee_identity;
+                let claimed_owner = response
+                    .owner_public_key
+                    .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
+                let allow_unverified_owner_claim =
+                    self.invite_allows_unverified_response_owner(response_pubkey);
+                if self.install_invite_response_session(
+                    event.id.to_string(),
+                    response,
+                    allow_unverified_owner_claim,
+                ) {
+                    self.mark_invite_response_used(response_pubkey, invitee_identity);
+                } else {
+                    self.setup_user(claimed_owner);
+                    self.queue_pending_invite_response(event.clone());
                 }
             }
             return;

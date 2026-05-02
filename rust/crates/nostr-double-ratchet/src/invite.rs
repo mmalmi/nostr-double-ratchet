@@ -103,6 +103,22 @@ impl Invite {
                 serde_json::Value::String(purpose.clone()),
             );
         }
+        if let Some(device_id) = &self.device_id {
+            data.insert(
+                "deviceId".to_string(),
+                serde_json::Value::String(device_id.clone()),
+            );
+        }
+        if let Some(max_uses) = self.max_uses {
+            data.insert(
+                "maxUses".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(max_uses)),
+            );
+        }
+        data.insert(
+            "createdAt".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(self.created_at)),
+        );
         if let Some(owner_pk) = &self.owner_public_key {
             data.insert(
                 "owner".to_string(),
@@ -147,6 +163,7 @@ impl Invite {
         let owner_public_key = data["owner"]
             .as_str()
             .or_else(|| data["ownerPubkey"].as_str())
+            .or_else(|| data["ownerPublicKey"].as_str())
             .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
 
         Ok(Self {
@@ -154,10 +171,10 @@ impl Invite {
             shared_secret,
             inviter,
             inviter_ephemeral_private_key: None,
-            device_id: None,
-            max_uses: None,
+            device_id: data["deviceId"].as_str().map(String::from),
+            max_uses: data["maxUses"].as_u64().map(|u| u as usize),
             used_by: Vec::new(),
-            created_at: 0,
+            created_at: data["createdAt"].as_u64().unwrap_or(0),
             purpose,
             owner_public_key,
         })
@@ -576,5 +593,25 @@ mod tests {
 
         assert_eq!(parsed.device_id, None);
         assert_eq!(parsed.inviter, keys.public_key());
+    }
+
+    #[test]
+    fn url_roundtrip_preserves_private_invite_metadata() {
+        let keys = Keys::generate();
+        let owner = Keys::generate();
+        let device_id = keys.public_key().to_hex();
+        let mut invite =
+            Invite::create_new(keys.public_key(), Some(device_id.clone()), Some(1)).unwrap();
+        invite.owner_public_key = Some(owner.public_key());
+        invite.purpose = Some("private".to_string());
+
+        let url = invite.get_url("https://chat.iris.to").unwrap();
+        let parsed = Invite::from_url(&url).unwrap();
+
+        assert_eq!(parsed.device_id, Some(device_id));
+        assert_eq!(parsed.max_uses, Some(1));
+        assert_eq!(parsed.created_at, invite.created_at);
+        assert_eq!(parsed.owner_public_key, Some(owner.public_key()));
+        assert_eq!(parsed.purpose.as_deref(), Some("private"));
     }
 }

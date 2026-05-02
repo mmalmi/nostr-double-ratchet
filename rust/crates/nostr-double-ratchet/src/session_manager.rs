@@ -61,6 +61,7 @@ pub struct MessagePushSessionStateSnapshot {
     pub has_receiving_capability: bool,
 }
 
+#[derive(Clone)]
 struct InviteState {
     invite: Invite,
     our_identity_key: [u8; 32],
@@ -134,7 +135,7 @@ pub struct SessionManager {
     storage: Arc<dyn StorageAdapter>,
     pubsub: Arc<dyn NostrPubSub>,
     initialized: Arc<Mutex<bool>>,
-    invite_state: Arc<Mutex<Option<InviteState>>>,
+    invite_states: Arc<Mutex<Vec<InviteState>>>,
     provided_invite: Option<Invite>,
     delegate_to_owner: Arc<Mutex<HashMap<PublicKey, PublicKey>>>,
     cached_app_keys: Arc<Mutex<HashMap<PublicKey, AppKeys>>>,

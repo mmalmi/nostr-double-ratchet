@@ -118,7 +118,7 @@ impl SessionManager {
             storage,
             pubsub,
             initialized: Arc::new(Mutex::new(false)),
-            invite_state: Arc::new(Mutex::new(None)),
+            invite_states: Arc::new(Mutex::new(Vec::new())),
             provided_invite: invite,
             delegate_to_owner: Arc::new(Mutex::new(HashMap::new())),
             cached_app_keys: Arc::new(Mutex::new(HashMap::new())),
@@ -204,21 +204,7 @@ impl SessionManager {
             ));
         }
 
-        *self.invite_state.lock().unwrap() = Some(InviteState {
-            invite: invite.clone(),
-            our_identity_key: self.our_identity_key,
-        });
-
-        // Subscribe to invite responses using Invite's own filter (with #p tag)
-        invite.listen_with_pubsub(self.pubsub.as_ref())?;
-
-        // Publish our invite (signed with device identity key)
-        if let Ok(unsigned) = invite.get_event() {
-            let keys = Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
-            if let Ok(signed) = unsigned.sign_with_keys(&keys) {
-                let _ = self.pubsub.publish_signed(signed);
-            }
-        }
+        self.register_invite_inner(invite.clone(), true)?;
 
         let active_device_ids = self.with_user_records({
             move |records| {
@@ -252,6 +238,54 @@ impl SessionManager {
 
     pub fn reload_from_storage(&self) -> Result<()> {
         self.load_all_user_records()
+    }
+
+    fn register_invite_inner(&self, invite: Invite, publish: bool) -> Result<()> {
+        if invite.inviter_ephemeral_private_key.is_none() {
+            return Err(crate::Error::Invite(
+                "Invite missing ephemeral keys".to_string(),
+            ));
+        }
+
+        let response_pubkey = invite.inviter_ephemeral_public_key;
+        let should_subscribe = {
+            let mut states = self.invite_states.lock().unwrap();
+            if let Some(existing) = states
+                .iter_mut()
+                .find(|state| state.invite.inviter_ephemeral_public_key == response_pubkey)
+            {
+                existing.invite = invite.clone();
+                false
+            } else {
+                states.push(InviteState {
+                    invite: invite.clone(),
+                    our_identity_key: self.our_identity_key,
+                });
+                true
+            }
+        };
+
+        if should_subscribe {
+            invite.listen_with_pubsub(self.pubsub.as_ref())?;
+        }
+
+        if publish {
+            if let Ok(unsigned) = invite.get_event() {
+                let keys = Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
+                if let Ok(signed) = unsigned.sign_with_keys(&keys) {
+                    let _ = self.pubsub.publish_signed(signed);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Register an additional local invite for response handling without
+    /// publishing it as a relay-discoverable invite event.
+    pub fn register_invite(&self, invite: Invite) -> Result<()> {
+        self.init()?;
+        self.register_invite_inner(invite, false)
     }
 
     pub fn send_text(
@@ -435,11 +469,18 @@ impl SessionManager {
     }
 
     pub fn current_device_invite_response_pubkey(&self) -> Option<PublicKey> {
-        self.invite_state
+        self.current_device_invite_response_pubkeys()
+            .into_iter()
+            .next()
+    }
+
+    pub fn current_device_invite_response_pubkeys(&self) -> Vec<PublicKey> {
+        self.invite_states
             .lock()
             .unwrap()
-            .as_ref()
+            .iter()
             .map(|state| state.invite.inviter_ephemeral_public_key)
+            .collect()
     }
 
     pub fn get_user_pubkeys(&self) -> Vec<PublicKey> {
@@ -729,15 +770,10 @@ impl SessionManager {
     }
 
     pub fn pending_invite_response_owner_pubkeys(&self) -> Vec<PublicKey> {
-        let Some((invite, our_identity_key)) = self
-            .invite_state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|state| (state.invite.clone(), state.our_identity_key))
-        else {
+        let states = self.invite_states.lock().unwrap().clone();
+        if states.is_empty() {
             return Vec::new();
-        };
+        }
 
         let processed = self.processed_invite_responses.lock().unwrap().clone();
         let pending_events: Vec<nostr::Event> = self
@@ -754,16 +790,27 @@ impl SessionManager {
                 continue;
             }
 
-            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key)
-            else {
-                continue;
-            };
+            for state in &states {
+                let Ok(Some(response)) = state
+                    .invite
+                    .process_invite_response(&event, state.our_identity_key)
+                else {
+                    continue;
+                };
+                if !self.invite_response_has_capacity(
+                    state.invite.inviter_ephemeral_public_key,
+                    response.invitee_identity,
+                ) {
+                    continue;
+                }
 
-            owners.insert(
-                response
-                    .owner_public_key
-                    .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity)),
-            );
+                owners.insert(
+                    response
+                        .owner_public_key
+                        .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity)),
+                );
+                break;
+            }
         }
 
         let mut owners: Vec<PublicKey> = owners.into_iter().collect();

@@ -146,10 +146,82 @@ impl SessionManager {
         }
     }
 
+    pub(super) fn decode_registered_invite_response(
+        &self,
+        event: &nostr::Event,
+    ) -> Option<(PublicKey, crate::InviteResponse)> {
+        let states = self.invite_states.lock().unwrap().clone();
+        for state in states {
+            let Ok(Some(response)) = state
+                .invite
+                .process_invite_response(event, state.our_identity_key)
+            else {
+                continue;
+            };
+
+            let response_pubkey = state.invite.inviter_ephemeral_public_key;
+            if self.invite_response_has_capacity(response_pubkey, response.invitee_identity) {
+                return Some((response_pubkey, response));
+            }
+        }
+
+        None
+    }
+
+    pub(super) fn invite_response_has_capacity(
+        &self,
+        response_pubkey: PublicKey,
+        invitee_identity: PublicKey,
+    ) -> bool {
+        let states = self.invite_states.lock().unwrap();
+        let Some(state) = states
+            .iter()
+            .find(|state| state.invite.inviter_ephemeral_public_key == response_pubkey)
+        else {
+            return false;
+        };
+
+        let Some(max_uses) = state.invite.max_uses else {
+            return true;
+        };
+        state.invite.used_by.contains(&invitee_identity) || state.invite.used_by.len() < max_uses
+    }
+
+    pub(super) fn mark_invite_response_used(
+        &self,
+        response_pubkey: PublicKey,
+        invitee_identity: PublicKey,
+    ) {
+        let mut states = self.invite_states.lock().unwrap();
+        let Some(state) = states
+            .iter_mut()
+            .find(|state| state.invite.inviter_ephemeral_public_key == response_pubkey)
+        else {
+            return;
+        };
+
+        if !state.invite.used_by.contains(&invitee_identity) {
+            state.invite.used_by.push(invitee_identity);
+        }
+    }
+
+    pub(super) fn invite_allows_unverified_response_owner(
+        &self,
+        response_pubkey: PublicKey,
+    ) -> bool {
+        self.invite_states
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|state| state.invite.inviter_ephemeral_public_key == response_pubkey)
+            .is_some_and(|state| state.invite.purpose.as_deref() == Some("private"))
+    }
+
     pub(super) fn install_invite_response_session(
         &self,
         event_id: String,
         response: crate::InviteResponse,
+        allow_unverified_owner_claim: bool,
     ) -> bool {
         if response.invitee_identity == self.our_public_key {
             return false;
@@ -159,7 +231,9 @@ impl SessionManager {
             .owner_public_key
             .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
 
-        if !self.is_device_authorized(owner_pubkey, response.invitee_identity) {
+        if !allow_unverified_owner_claim
+            && !self.is_device_authorized(owner_pubkey, response.invitee_identity)
+        {
             return false;
         }
 
@@ -200,15 +274,10 @@ impl SessionManager {
     }
 
     pub(super) fn retry_pending_invite_responses(&self, owner_pubkey: PublicKey) {
-        let Some((invite, our_identity_key)) = self
-            .invite_state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|state| (state.invite.clone(), state.our_identity_key))
-        else {
+        let states = self.invite_states.lock().unwrap().clone();
+        if states.is_empty() {
             return;
-        };
+        }
 
         let pending_events: Vec<nostr::Event> = self
             .pending_invite_responses
@@ -228,19 +297,37 @@ impl SessionManager {
                 continue;
             }
 
-            let Ok(Some(response)) = invite.process_invite_response(&event, our_identity_key)
-            else {
-                continue;
-            };
+            for state in &states {
+                let Ok(Some(response)) = state
+                    .invite
+                    .process_invite_response(&event, state.our_identity_key)
+                else {
+                    continue;
+                };
+                let response_pubkey = state.invite.inviter_ephemeral_public_key;
+                if !self.invite_response_has_capacity(response_pubkey, response.invitee_identity) {
+                    continue;
+                }
 
-            let resolved_owner = response
-                .owner_public_key
-                .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
-            if resolved_owner != owner_pubkey {
-                continue;
+                let resolved_owner = response
+                    .owner_public_key
+                    .unwrap_or_else(|| self.resolve_to_owner(&response.invitee_identity));
+                if resolved_owner != owner_pubkey {
+                    continue;
+                }
+
+                let invitee_identity = response.invitee_identity;
+                let allow_unverified_owner_claim =
+                    self.invite_allows_unverified_response_owner(response_pubkey);
+                if self.install_invite_response_session(
+                    event.id.to_string(),
+                    response,
+                    allow_unverified_owner_claim,
+                ) {
+                    self.mark_invite_response_used(response_pubkey, invitee_identity);
+                }
+                break;
             }
-
-            let _ = self.install_invite_response_session(event.id.to_string(), response);
         }
     }
 

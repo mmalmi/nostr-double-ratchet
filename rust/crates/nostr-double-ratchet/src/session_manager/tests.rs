@@ -1396,6 +1396,207 @@ fn pending_invite_response_subscribes_to_claimed_owner_appkeys() {
 }
 
 #[test]
+fn registered_private_invite_processes_response_without_publishing_invite_event() {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let alice_device_id = alice_pubkey.to_hex();
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_device_id.clone(),
+        alice_pubkey,
+        tx,
+        Some(Arc::new(InMemoryStorage::new())),
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    let mut private_invite =
+        Invite::create_new(alice_pubkey, Some(alice_device_id), Some(1)).unwrap();
+    private_invite.owner_public_key = Some(alice_pubkey);
+
+    manager.register_invite(private_invite.clone()).unwrap();
+    let registration_events = drain_events(&rx);
+    assert!(
+        registration_events.iter().any(|event| {
+            let SessionManagerEvent::Subscribe { filter_json, .. } = event else {
+                return false;
+            };
+            let Ok(filter) = serde_json::from_str::<serde_json::Value>(filter_json) else {
+                return false;
+            };
+            filter
+                .get("#p")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|pubkeys| {
+                    pubkeys.iter().any(|pubkey| {
+                        pubkey.as_str()
+                            == Some(
+                                private_invite
+                                    .inviter_ephemeral_public_key
+                                    .to_hex()
+                                    .as_str(),
+                            )
+                    })
+                })
+        }),
+        "registered private invite should subscribe for its response pubkey"
+    );
+    assert!(
+        registration_events.iter().all(|event| {
+            !matches!(
+                event,
+                SessionManagerEvent::PublishSigned(signed)
+                    if signed.kind.as_u16() == crate::INVITE_EVENT_KIND as u16
+            )
+        }),
+        "registering a private invite must not publish a public invite event"
+    );
+
+    let (_, response_event) = private_invite
+        .accept_with_owner(
+            bob_pubkey,
+            bob_keys.secret_key().to_secret_bytes(),
+            Some(bob_pubkey.to_hex()),
+            Some(bob_pubkey),
+        )
+        .unwrap();
+
+    manager.process_received_event(response_event);
+    assert!(
+        manager
+            .export_active_session_state(bob_pubkey)
+            .unwrap()
+            .is_some(),
+        "creator should install the session from the registered private invite response"
+    );
+}
+
+#[test]
+fn registered_private_invite_enforces_max_uses_after_successful_response() {
+    let alice_keys = Keys::generate();
+    let alice_pubkey = alice_keys.public_key();
+    let alice_device_id = alice_pubkey.to_hex();
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+    let carol_keys = Keys::generate();
+    let carol_pubkey = carol_keys.public_key();
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        alice_pubkey,
+        alice_keys.secret_key().to_secret_bytes(),
+        alice_device_id.clone(),
+        alice_pubkey,
+        tx,
+        Some(Arc::new(InMemoryStorage::new())),
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    let mut private_invite =
+        Invite::create_new(alice_pubkey, Some(alice_device_id), Some(1)).unwrap();
+    private_invite.owner_public_key = Some(alice_pubkey);
+    manager.register_invite(private_invite.clone()).unwrap();
+    let _ = drain_events(&rx);
+
+    let (_, bob_response) = private_invite
+        .accept_with_owner(
+            bob_pubkey,
+            bob_keys.secret_key().to_secret_bytes(),
+            Some(bob_pubkey.to_hex()),
+            Some(bob_pubkey),
+        )
+        .unwrap();
+    manager.process_received_event(bob_response);
+    assert!(manager
+        .export_active_session_state(bob_pubkey)
+        .unwrap()
+        .is_some());
+
+    let (_, carol_response) = private_invite
+        .accept_with_owner(
+            carol_pubkey,
+            carol_keys.secret_key().to_secret_bytes(),
+            Some(carol_pubkey.to_hex()),
+            Some(carol_pubkey),
+        )
+        .unwrap();
+    manager.process_received_event(carol_response);
+    assert!(
+        manager
+            .export_active_session_state(carol_pubkey)
+            .unwrap()
+            .is_none(),
+        "second acceptor should be ignored after a one-use private invite is consumed"
+    );
+}
+
+#[test]
+fn registered_private_invite_accepts_response_claimed_owner_without_cached_appkeys() {
+    let alice_owner_keys = Keys::generate();
+    let alice_owner = alice_owner_keys.public_key();
+    let alice_device_keys = Keys::generate();
+    let alice_device = alice_device_keys.public_key();
+    let bob_owner_keys = Keys::generate();
+    let bob_owner = bob_owner_keys.public_key();
+    let bob_device_keys = Keys::generate();
+    let bob_device = bob_device_keys.public_key();
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        alice_device,
+        alice_device_keys.secret_key().to_secret_bytes(),
+        alice_device.to_hex(),
+        alice_owner,
+        tx,
+        Some(Arc::new(InMemoryStorage::new())),
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    let mut private_invite =
+        Invite::create_new(alice_device, Some(alice_device.to_hex()), Some(1)).unwrap();
+    private_invite.owner_public_key = Some(alice_owner);
+    private_invite.purpose = Some("private".to_string());
+    manager.register_invite(private_invite.clone()).unwrap();
+    let _ = drain_events(&rx);
+
+    let (_, response_event) = private_invite
+        .accept_with_owner(
+            bob_device,
+            bob_device_keys.secret_key().to_secret_bytes(),
+            Some(bob_device.to_hex()),
+            Some(bob_owner),
+        )
+        .unwrap();
+
+    manager.process_received_event(response_event);
+
+    assert!(
+        manager
+            .export_active_session_state(bob_owner)
+            .unwrap()
+            .is_some(),
+        "private invite response should be stored under the invitee's claimed owner"
+    );
+    assert!(
+        manager
+            .export_active_session_state(bob_device)
+            .unwrap()
+            .is_none(),
+        "private invite response should not fall back to the invitee device"
+    );
+}
+
+#[test]
 fn owner_side_link_invite_accepts_new_device_not_yet_in_cached_appkeys() {
     let owner_keys = Keys::generate();
     let owner_pubkey = owner_keys.public_key();
@@ -1438,6 +1639,55 @@ fn owner_side_link_invite_accepts_new_device_not_yet_in_cached_appkeys() {
         "owner-side link invite should allow pre-registration acceptance"
     );
     assert!(accepted.unwrap().created_new_session);
+}
+
+#[test]
+fn accept_private_invite_uses_claimed_owner_without_cached_appkeys() {
+    let alice_owner_keys = Keys::generate();
+    let alice_owner = alice_owner_keys.public_key();
+    let alice_device_keys = Keys::generate();
+    let alice_device = alice_device_keys.public_key();
+    let bob_keys = Keys::generate();
+    let bob_pubkey = bob_keys.public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        bob_pubkey,
+        bob_keys.secret_key().to_secret_bytes(),
+        bob_pubkey.to_hex(),
+        bob_pubkey,
+        tx,
+        Some(storage),
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    let mut invite =
+        Invite::create_new(alice_device, Some(alice_device.to_hex()), Some(1)).unwrap();
+    invite.owner_public_key = Some(alice_owner);
+    invite.purpose = Some("private".to_string());
+
+    let accepted = manager
+        .accept_invite(&invite, Some(alice_owner))
+        .expect("private invite should accept claimed owner");
+
+    assert_eq!(accepted.owner_pubkey, alice_owner);
+    assert!(
+        manager
+            .export_active_session_state(alice_owner)
+            .unwrap()
+            .is_some(),
+        "private invite session should be stored under the claimed owner"
+    );
+    assert!(
+        manager
+            .export_active_session_state(alice_device)
+            .unwrap()
+            .is_none(),
+        "private invite should not fall back to the device identity"
+    );
 }
 
 #[test]

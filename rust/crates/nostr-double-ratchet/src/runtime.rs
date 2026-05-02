@@ -138,6 +138,10 @@ impl NdrRuntime {
         Ok(result)
     }
 
+    pub fn register_invite(&self, invite: Invite) -> Result<()> {
+        self.session_manager.register_invite(invite)
+    }
+
     pub fn send_text(
         &self,
         recipient: PublicKey,
@@ -467,6 +471,11 @@ impl NdrRuntime {
 
     pub fn current_device_invite_response_pubkey(&self) -> Option<PublicKey> {
         self.session_manager.current_device_invite_response_pubkey()
+    }
+
+    pub fn current_device_invite_response_pubkeys(&self) -> Vec<PublicKey> {
+        self.session_manager
+            .current_device_invite_response_pubkeys()
     }
 
     pub fn get_owner_pubkey(&self) -> PublicKey {

@@ -310,6 +310,18 @@ pub fn resolve_invite_owner_routing(
         };
     }
 
+    // A private invite is a bearer-capability link, not a relay-discoverable
+    // owner/device assertion, so the out-of-band link carries the owner claim.
+    if invite_purpose == Some("private") {
+        return InviteOwnerRoutingResolution {
+            owner_pubkey: claimed_owner_pubkey,
+            claimed_owner_pubkey,
+            verified_with_app_keys: false,
+            used_link_bootstrap_exception: false,
+            fell_back_to_device_identity: false,
+        };
+    }
+
     InviteOwnerRoutingResolution {
         owner_pubkey: device_pubkey,
         claimed_owner_pubkey,

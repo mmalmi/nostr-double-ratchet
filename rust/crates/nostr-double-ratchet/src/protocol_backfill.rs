@@ -37,10 +37,7 @@ impl NdrRuntime {
         let owners = self.protocol_backfill_owner_pubkeys(options.owner_pubkeys);
         let invite_authors =
             self.protocol_backfill_invite_authors(&owners, options.invite_author_pubkeys);
-        let invite_response_pubkeys = self
-            .current_device_invite_response_pubkey()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let invite_response_pubkeys = self.current_device_invite_response_pubkeys();
         let message_authors =
             self.protocol_backfill_message_authors(options.message_author_pubkeys);
 
@@ -285,6 +282,47 @@ mod tests {
                 .get("since")
                 .and_then(|since| since.as_u64()),
             Some(1_777_159_500 - crate::DEFAULT_INVITE_BACKFILL_LOOKBACK_SECS)
+        );
+    }
+
+    #[test]
+    fn runtime_backfill_filters_include_registered_private_invite_responses() {
+        let owner = Keys::generate();
+        let device = Keys::generate();
+        let device_id = device.public_key().to_hex();
+        let invite =
+            Invite::create_new(device.public_key(), Some(device_id.clone()), None).expect("invite");
+        let mut private_invite =
+            Invite::create_new(device.public_key(), Some(device_id.clone()), Some(1))
+                .expect("private invite");
+        private_invite.purpose = Some("private".to_string());
+        private_invite.owner_public_key = Some(owner.public_key());
+        let private_invite_response_pubkey = private_invite.inviter_ephemeral_public_key;
+        let runtime = NdrRuntime::new(
+            device.public_key(),
+            device.secret_key().secret_bytes(),
+            device_id,
+            owner.public_key(),
+            None,
+            Some(invite),
+        );
+        runtime.init().expect("runtime init");
+        runtime
+            .register_invite(private_invite)
+            .expect("register private invite");
+
+        let filters =
+            runtime.protocol_backfill_filters(NdrProtocolBackfillOptions::new(1_777_159_500));
+
+        let response_filter = filter_with_kind(&filters, crate::INVITE_RESPONSE_KIND as u64);
+        assert!(
+            response_filter
+                .get("#p")
+                .and_then(|pubkeys| pubkeys.as_array())
+                .is_some_and(|pubkeys| pubkeys.iter().any(|pubkey| {
+                    pubkey.as_str() == Some(private_invite_response_pubkey.to_hex().as_str())
+                })),
+            "expected private invite response pubkey in backfill filter"
         );
     }
 
