@@ -672,7 +672,7 @@ export class NdrRuntime {
     //
     //   1. Identical author set → no-op.
     //   2. Newly added authors are subscribed immediately. They may already
-    //      have relay events waiting, and delaying them can miss live delivery.
+    //      have relay events waiting, and delaying them hurts live delivery.
     //   3. Pure removals honour a 1.5 s trailing throttle so bursts of
     //      ratchet steps collapse into one relay REQ. If the throttle window
     //      has not elapsed we schedule a single trailing flush so stale
