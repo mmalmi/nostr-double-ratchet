@@ -176,6 +176,8 @@ fn dedupe_pubkeys(values: impl IntoIterator<Item = PublicKey>) -> Vec<PublicKey>
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
     use nostr::Keys;
 
     use crate::{AppKeys, DeviceEntry, Invite, NdrProtocolBackfillOptions, NdrRuntime};
@@ -216,6 +218,33 @@ mod tests {
                         })
             })
             .expect("invite filter")
+    }
+
+    fn test_session_state() -> crate::SessionState {
+        let their_current = Keys::generate().public_key();
+        let their_next = Keys::generate().public_key();
+        let our_current = Keys::generate();
+        let our_next = Keys::generate();
+
+        crate::SessionState {
+            root_key: [0u8; 32],
+            their_current_nostr_public_key: Some(their_current),
+            their_next_nostr_public_key: Some(their_next),
+            our_current_nostr_key: Some(crate::SerializableKeyPair {
+                public_key: our_current.public_key(),
+                private_key: our_current.secret_key().to_secret_bytes(),
+            }),
+            our_next_nostr_key: crate::SerializableKeyPair {
+                public_key: our_next.public_key(),
+                private_key: our_next.secret_key().to_secret_bytes(),
+            },
+            receiving_chain_key: Some([1u8; 32]),
+            sending_chain_key: Some([2u8; 32]),
+            sending_chain_message_number: 0,
+            receiving_chain_message_number: 0,
+            previous_sending_chain_message_count: 0,
+            skipped_keys: HashMap::new(),
+        }
     }
 
     #[test]
@@ -301,6 +330,66 @@ mod tests {
         assert!(
             authors.iter().any(|author| *author == peer_device_hex),
             "missing peer device author {peer_device_hex} in {authors:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_backfill_filters_include_stored_device_records_for_invites() {
+        let owner = Keys::generate();
+        let local_device = Keys::generate();
+        let peer_owner = Keys::generate();
+        let peer_device = Keys::generate();
+        let storage: Arc<dyn crate::StorageAdapter> = Arc::new(crate::InMemoryStorage::new());
+        let stored = crate::StoredUserRecord {
+            user_id: peer_owner.public_key().to_hex(),
+            devices: vec![crate::StoredDeviceRecord {
+                device_id: peer_device.public_key().to_hex(),
+                active_session: Some(test_session_state()),
+                inactive_sessions: Vec::new(),
+                created_at: 1,
+                is_stale: false,
+                stale_timestamp: None,
+                last_activity: Some(1),
+            }],
+            known_device_identities: Vec::new(),
+        };
+        storage
+            .put(
+                &format!("user/{}", peer_owner.public_key().to_hex()),
+                serde_json::to_string(&stored).unwrap(),
+            )
+            .unwrap();
+        let runtime = NdrRuntime::new(
+            local_device.public_key(),
+            local_device.secret_key().secret_bytes(),
+            local_device.public_key().to_hex(),
+            owner.public_key(),
+            Some(storage),
+            None,
+        );
+        runtime.init().expect("runtime init");
+
+        let mut options = NdrProtocolBackfillOptions::new(1_777_159_500);
+        options.owner_pubkeys.push(peer_owner.public_key());
+        let filters = runtime.protocol_backfill_filters(options);
+
+        let invite_filter = invite_filter(&filters);
+        let authors = invite_filter
+            .get("authors")
+            .and_then(|authors| authors.as_array())
+            .expect("authors")
+            .iter()
+            .filter_map(|author| author.as_str())
+            .collect::<Vec<_>>();
+        let local_device_hex = local_device.public_key().to_hex();
+        let peer_device_hex = peer_device.public_key().to_hex();
+        assert!(
+            authors.iter().any(|author| *author == local_device_hex),
+            "missing local device author {local_device_hex} in {authors:?}"
+        );
+        assert!(
+            authors.iter().any(|author| *author == peer_device_hex),
+            "missing peer stored device author {peer_device_hex} in {authors:?}"
         );
     }
 }
