@@ -66,6 +66,9 @@ impl SessionManager {
         if let Some(pubkey) = state.their_next_nostr_public_key {
             pubkeys.insert(pubkey);
         }
+        for pubkey in state.skipped_keys.keys() {
+            pubkeys.insert(*pubkey);
+        }
 
         let mut pubkeys: Vec<PublicKey> = pubkeys.into_iter().collect();
         pubkeys.sort_by_key(|pubkey| pubkey.to_hex());

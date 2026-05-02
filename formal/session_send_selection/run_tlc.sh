@@ -8,7 +8,7 @@ MODE="all"
 usage() {
   cat <<'USAGE'
 Usage:
-  ./formal/direct_message_subscriptions/run_tlc.sh [--mode all|ci]
+  ./formal/session_send_selection/run_tlc.sh [--mode all|ci]
 
 Modes:
   all  Run explanatory failing configs first, then pass-expected configs.
@@ -56,16 +56,15 @@ run_cfg() {
     -cleanup \
     -deadlock \
     -config "${cfg}" \
-    DirectMessageSubscriptions.tla
+    SessionSendSelection.tla
 }
 
 cd "${ROOT_DIR}"
 
 if [[ "${MODE}" == "all" ]]; then
   for cfg in \
-    DirectMessageSubscriptions.current.cfg \
-    DirectMessageSubscriptions.added-author.current.cfg \
-    DirectMessageSubscriptions.skipped-author.current.cfg
+    SessionSendSelection.active-bonus.current.cfg \
+    SessionSendSelection.previous-chain.current.cfg
   do
     if run_cfg "${cfg}"; then
       echo "Expected ${cfg} to fail, but it passed." >&2
@@ -76,5 +75,5 @@ if [[ "${MODE}" == "all" ]]; then
   done
 fi
 
-run_cfg DirectMessageSubscriptions.fixed.cfg
-run_cfg DirectMessageSubscriptions.cleanup.pass.cfg
+run_cfg SessionSendSelection.fixed.cfg
+run_cfg SessionSendSelection.previous-chain.pass.cfg

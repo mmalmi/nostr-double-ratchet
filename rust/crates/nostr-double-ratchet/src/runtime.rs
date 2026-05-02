@@ -307,26 +307,31 @@ impl NdrRuntime {
         // relay replay all matching historical events, which slams the event
         // pipeline and the UI with redundant work.
         //
-        // Two-stage filter:
+        // Three-stage filter:
         //   1. Identical author set → no-op.
-        //   2. Otherwise honour a 1.5 s trailing throttle: bursts of ratchet
-        //      steps collapse into one relay REQ. If the window has not
-        //      elapsed we spawn a one-shot worker that fires the latest
-        //      sync at the boundary, even if no further runtime call comes
-        //      along to drive it.
+        //   2. Newly added authors are subscribed immediately. They may already
+        //      have relay events waiting, and delaying them can miss live delivery.
+        //   3. Pure removals honour a 1.5 s trailing throttle so bursts of
+        //      ratchet steps collapse into one relay REQ. If the window has not
+        //      elapsed we spawn a one-shot worker that fires the latest sync at
+        //      the boundary, even if no further runtime call comes along to drive it.
         let next_authors = self.session_manager.get_all_message_push_author_pubkeys();
 
-        let unchanged = self
+        let current_authors = self
             .direct_message_subscription
             .current
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|subscription| subscription.authors == next_authors);
-        if unchanged {
+            .map(|subscription| subscription.authors.clone())
+            .unwrap_or_default();
+        if current_authors == next_authors {
             return Ok(());
         }
 
+        let has_added_authors = next_authors
+            .iter()
+            .any(|author| !current_authors.contains(author));
         let elapsed_since_last_change = self
             .direct_message_subscription
             .last_change
@@ -334,7 +339,7 @@ impl NdrRuntime {
             .unwrap()
             .map(|last| last.elapsed());
         if let Some(elapsed) = elapsed_since_last_change {
-            if elapsed < DM_SUBSCRIPTION_THROTTLE {
+            if elapsed < DM_SUBSCRIPTION_THROTTLE && !has_added_authors {
                 self.schedule_direct_message_subscription_flush(DM_SUBSCRIPTION_THROTTLE - elapsed);
                 return Ok(());
             }
@@ -743,6 +748,64 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(event, SessionManagerEvent::Unsubscribe(unsubid) if unsubid == &subid)
         }));
+    }
+
+    #[test]
+    fn runtime_subscribes_added_direct_message_authors_without_throttle() {
+        let alice = Keys::generate();
+        let peer1 = Keys::generate().public_key();
+        let peer1_device = Keys::generate().public_key();
+        let peer1_current = Keys::generate().public_key();
+        let peer1_next = Keys::generate().public_key();
+        let peer2 = Keys::generate().public_key();
+        let peer2_device = Keys::generate().public_key();
+        let peer2_current = Keys::generate().public_key();
+        let peer2_next = Keys::generate().public_key();
+        let runtime = NdrRuntime::new(
+            alice.public_key(),
+            alice.secret_key().secret_bytes(),
+            alice.public_key().to_hex(),
+            alice.public_key(),
+            None,
+            None,
+        );
+
+        runtime
+            .import_session_state(
+                peer1,
+                Some(peer1_device.to_hex()),
+                session_state_tracking(peer1_current, peer1_next),
+            )
+            .unwrap();
+        let _ = runtime.drain_events();
+
+        runtime
+            .import_session_state(
+                peer2,
+                Some(peer2_device.to_hex()),
+                session_state_tracking(peer2_current, peer2_next),
+            )
+            .unwrap();
+
+        let events = runtime.drain_events();
+        let latest_subscribe = events.iter().rev().find_map(|event| match event {
+            SessionManagerEvent::Subscribe { filter_json, .. } => {
+                Some(serde_json::from_str::<serde_json::Value>(filter_json).unwrap())
+            }
+            _ => None,
+        });
+        let filter = latest_subscribe.expect("new authors should resubscribe immediately");
+        let authors = filter
+            .get("authors")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(authors.contains(&peer1_current.to_hex().as_str()));
+        assert!(authors.contains(&peer1_next.to_hex().as_str()));
+        assert!(authors.contains(&peer2_current.to_hex().as_str()));
+        assert!(authors.contains(&peer2_next.to_hex().as_str()));
     }
 
     #[test]

@@ -24,7 +24,9 @@ practice.
   sender-key distribution and recovery for groups.
 - [`direct_message_subscriptions`](./direct_message_subscriptions):
   runtime-owned direct-message subscription synchronization from `SessionManager` message-push
-  author state.
+  author state, including skipped-key senders and throttled cleanup semantics.
+- [`session_send_selection`](./session_send_selection):
+  outbound session selection priority across active/inactive ratchet sessions.
 
 ## Main Lessons So Far
 
@@ -43,6 +45,12 @@ practice.
 - Direct-message subscriptions are runtime/consumer state. `SessionManager` should expose the
   author pubkeys that can carry ratchet messages, and the runtime must sync its relay subscription
   whenever that author set changes. Otherwise valid ratchet state can still miss inbound messages.
+- Newly added direct-message authors must bypass subscription throttling; only pure removals can be
+  delayed. Skipped-key sender pubkeys also remain part of the watched author set until their cached
+  keys are consumed or discarded.
+- Outbound session selection needs a stable priority order, not just "highest message counter":
+  active bidirectional sessions and newer ratchet epochs avoid accidentally sending on stale
+  inactive sessions.
 
 ## Running Models
 

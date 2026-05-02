@@ -658,6 +658,44 @@ fn session_manager_exposes_message_authors_without_emitting_subscriptions() {
 }
 
 #[test]
+fn message_push_authors_include_skipped_key_senders() {
+    let peer = Keys::generate().public_key();
+    let device = Keys::generate().public_key();
+    let skipped_sender = Keys::generate().public_key();
+    let mut state = test_session_state();
+    state.skipped_keys.insert(
+        skipped_sender,
+        crate::SkippedKeysEntry {
+            header_keys: Vec::new(),
+            message_keys: HashMap::new(),
+        },
+    );
+
+    let mut user_record = UserRecord::new(peer.to_hex());
+    user_record.device_records.insert(
+        device.to_hex(),
+        crate::DeviceRecord {
+            device_id: device.to_hex(),
+            public_key: String::new(),
+            active_session: Some(crate::Session::new(state, "skipped".to_string())),
+            inactive_sessions: Vec::new(),
+            created_at: 0,
+            is_stale: false,
+            stale_timestamp: None,
+            last_activity: Some(0),
+        },
+    );
+    let mut records = HashMap::new();
+    records.insert(peer, user_record);
+
+    let authors = SessionManager::message_push_author_pubkeys_for_records(&records);
+    assert!(
+        authors.contains(&skipped_sender),
+        "skipped-key senders must stay subscribed for out-of-order delivery"
+    );
+}
+
+#[test]
 fn imported_device_session_is_authorized_for_owner_fanout() {
     let owner_keys = Keys::generate();
     let owner = owner_keys.public_key();

@@ -28,8 +28,10 @@ To keep TLC state space finite/deterministic, transport duplication is bounded b
 
 The key switch is `RemoveDiscoveryOnPartialExpansion`:
 
-- `TRUE`: matches current behavior where discovery is removed even if some per-device enqueue fails.
-- `FALSE`: keeps discovery until expansion succeeds for all currently known devices.
+- `TRUE`: historical lossy behavior where discovery is removed even if some per-device enqueue
+  fails.
+- `FALSE`: current behavior; keep discovery until expansion succeeds for all currently known
+  devices.
 
 The model now also tracks the latest AppKeys `created_at` value:
 

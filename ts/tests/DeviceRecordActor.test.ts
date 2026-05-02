@@ -25,11 +25,13 @@ function makeSession(
     canReceive,
     sendingChainMessageNumber = 0,
     receivingChainMessageNumber = 0,
+    previousSendingChainMessageCount = 0,
   }: {
     canSend: boolean
     canReceive: boolean
     sendingChainMessageNumber?: number
     receivingChainMessageNumber?: number
+    previousSendingChainMessageCount?: number
   },
 ): Session {
   const ourCurrentPrivateKey = generateSecretKey()
@@ -57,7 +59,7 @@ function makeSession(
     sendingChainKey: canSend ? new Uint8Array(32).fill(3) : undefined,
     sendingChainMessageNumber,
     receivingChainMessageNumber,
-    previousSendingChainMessageCount: 0,
+    previousSendingChainMessageCount,
     skippedKeys: {},
   }
 
@@ -307,6 +309,103 @@ describe("DeviceRecordActor", () => {
     expect(actor.activeSession).toBe(sendCapable)
     expect(actor.inactiveSessions).toContain(receiveOnly)
     await expect(messageQueue.getForTarget(deviceKey)).resolves.toHaveLength(0)
+  })
+
+  it("sends with the active bidirectional session before a higher-count inactive candidate", () => {
+    const deviceKey = getPublicKey(generateSecretKey())
+    const ourDeviceKey = getPublicKey(generateSecretKey())
+    const messageQueue = new MessageQueue(
+      new InMemoryStorageAdapter(),
+      "v1/device-record-active-send-priority-test/",
+    )
+    const actor = new DeviceRecordActor(deviceKey, {
+      ownerPubkey: "owner-a",
+      user: {
+        isDeviceAuthorized: vi.fn(() => true),
+        onDeviceRumor: vi.fn(),
+        onDeviceDirty: vi.fn(),
+      },
+      nostr: {
+        subscribe: () => () => {},
+        publish: vi.fn(async () => undefined as never),
+      },
+      messageQueue,
+      ourDeviceId: ourDeviceKey,
+      ourOwnerPubkey: "our-owner",
+      identityKey: generateSecretKey(),
+    })
+
+    const active = makeSession("active", {
+      canSend: true,
+      canReceive: true,
+      receivingChainMessageNumber: 1,
+      previousSendingChainMessageCount: 1,
+    })
+    const inactive = makeSession("inactive", {
+      canSend: true,
+      canReceive: true,
+      receivingChainMessageNumber: 4,
+    })
+    const activeAuthor = active.state.ourCurrentNostrKey?.publicKey
+
+    actor.installSession(active)
+    actor.installSession(inactive, true)
+
+    const event = actor.prepareOutboundEvent(
+      buildTextRumor("active-priority", { pubkey: ourDeviceKey }),
+    )
+
+    expect(event?.pubkey).toBe(activeAuthor)
+    expect(actor.activeSession).toBe(active)
+  })
+
+  it("sends with the newer ratchet epoch before an older chain with a higher send count", () => {
+    const deviceKey = getPublicKey(generateSecretKey())
+    const ourDeviceKey = getPublicKey(generateSecretKey())
+    const messageQueue = new MessageQueue(
+      new InMemoryStorageAdapter(),
+      "v1/device-record-epoch-priority-test/",
+    )
+    const actor = new DeviceRecordActor(deviceKey, {
+      ownerPubkey: "owner-a",
+      user: {
+        isDeviceAuthorized: vi.fn(() => true),
+        onDeviceRumor: vi.fn(),
+        onDeviceDirty: vi.fn(),
+      },
+      nostr: {
+        subscribe: () => () => {},
+        publish: vi.fn(async () => undefined as never),
+      },
+      messageQueue,
+      ourDeviceId: ourDeviceKey,
+      ourOwnerPubkey: "our-owner",
+      identityKey: generateSecretKey(),
+    })
+
+    const oldEpoch = makeSession("old-epoch", {
+      canSend: true,
+      canReceive: true,
+      receivingChainMessageNumber: 1,
+      sendingChainMessageNumber: 1,
+    })
+    const newEpoch = makeSession("new-epoch", {
+      canSend: true,
+      canReceive: true,
+      receivingChainMessageNumber: 1,
+      previousSendingChainMessageCount: 5,
+    })
+    const newEpochAuthor = newEpoch.state.ourCurrentNostrKey?.publicKey
+
+    actor.installSession(oldEpoch, true)
+    actor.installSession(newEpoch, true)
+
+    const event = actor.prepareOutboundEvent(
+      buildTextRumor("epoch-priority", { pubkey: ourDeviceKey }),
+    )
+
+    expect(event?.pubkey).toBe(newEpochAuthor)
+    expect(actor.activeSession).toBe(newEpoch)
   })
 
   it("promotes a decrypting inactive session and forwards its rumor before AppKeys catch up", async () => {

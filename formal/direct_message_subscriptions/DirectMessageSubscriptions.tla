@@ -4,20 +4,40 @@ EXTENDS FiniteSets, Naturals
 CONSTANTS
     Authors,
     InitialMessageAuthors,
+    InitialSkippedMessageAuthors,
     UpdatedMessageAuthors,
+    UpdatedSkippedMessageAuthors,
     BugSessionManagerOwnsDirectSubscriptions,
     BugRuntimeSkipsSync,
-    BugRuntimeLeavesStaleSubscriptions
+    BugRuntimeLeavesStaleSubscriptions,
+    BugSessionManagerOmitsSkippedAuthors,
+    BugThrottleAddedAuthors
 
 ASSUME Authors # {}
 ASSUME InitialMessageAuthors \subseteq Authors
+ASSUME InitialSkippedMessageAuthors \subseteq Authors
 ASSUME UpdatedMessageAuthors \subseteq Authors
+ASSUME UpdatedSkippedMessageAuthors \subseteq Authors
+ASSUME BugSessionManagerOwnsDirectSubscriptions \in BOOLEAN
+ASSUME BugRuntimeSkipsSync \in BOOLEAN
+ASSUME BugRuntimeLeavesStaleSubscriptions \in BOOLEAN
+ASSUME BugSessionManagerOmitsSkippedAuthors \in BOOLEAN
+ASSUME BugThrottleAddedAuthors \in BOOLEAN
+
+TrackedAuthors(chainAuthors, skippedAuthors) ==
+    IF BugSessionManagerOmitsSkippedAuthors
+        THEN chainAuthors
+        ELSE chainAuthors \cup skippedAuthors
 
 VARIABLES
+    managerChainAuthors,
+    managerSkippedAuthors,
     managerAuthors,
     runtimeSubscriptionAuthors,
     managerDirectSubscriptionAuthors,
     needsSync,
+    throttlePending,
+    syncedOnce,
     changeDone,
     relayUp,
     relayBag,
@@ -25,15 +45,21 @@ VARIABLES
     delivered
 
 vars ==
-    <<managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-      needsSync, changeDone, relayUp, relayBag, published, delivered>>
+    <<managerChainAuthors, managerSkippedAuthors, managerAuthors,
+      runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
+      needsSync, throttlePending, syncedOnce, changeDone,
+      relayUp, relayBag, published, delivered>>
 
 Init ==
-    /\ managerAuthors = InitialMessageAuthors
+    /\ managerChainAuthors = InitialMessageAuthors
+    /\ managerSkippedAuthors = InitialSkippedMessageAuthors
+    /\ managerAuthors = TrackedAuthors(InitialMessageAuthors, InitialSkippedMessageAuthors)
     /\ runtimeSubscriptionAuthors = {}
     /\ managerDirectSubscriptionAuthors =
-        IF BugSessionManagerOwnsDirectSubscriptions THEN InitialMessageAuthors ELSE {}
-    /\ needsSync = (InitialMessageAuthors # {})
+        IF BugSessionManagerOwnsDirectSubscriptions THEN managerAuthors ELSE {}
+    /\ needsSync = (managerAuthors # {})
+    /\ throttlePending = FALSE
+    /\ syncedOnce = (managerAuthors = {})
     /\ changeDone = FALSE
     /\ relayUp = TRUE
     /\ relayBag = {}
@@ -43,12 +69,29 @@ Init ==
 SessionStateChanges ==
     /\ ~changeDone
     /\ ~needsSync
-    /\ managerAuthors' = UpdatedMessageAuthors
-    /\ managerDirectSubscriptionAuthors' =
-        IF BugSessionManagerOwnsDirectSubscriptions THEN UpdatedMessageAuthors ELSE {}
-    /\ needsSync' = TRUE
+    /\ syncedOnce
+    /\ LET nextAuthors == TrackedAuthors(UpdatedMessageAuthors, UpdatedSkippedMessageAuthors)
+           addedAuthors == nextAuthors \ runtimeSubscriptionAuthors
+       IN
+       /\ managerChainAuthors' = UpdatedMessageAuthors
+       /\ managerSkippedAuthors' = UpdatedSkippedMessageAuthors
+       /\ managerAuthors' = nextAuthors
+       /\ managerDirectSubscriptionAuthors' =
+           IF BugSessionManagerOwnsDirectSubscriptions THEN nextAuthors ELSE {}
+       /\ IF addedAuthors # {} /\ ~BugRuntimeSkipsSync /\ ~BugThrottleAddedAuthors
+             THEN /\ runtimeSubscriptionAuthors' =
+                       IF BugRuntimeLeavesStaleSubscriptions
+                           THEN runtimeSubscriptionAuthors \cup nextAuthors
+                           ELSE nextAuthors
+                  /\ needsSync' = FALSE
+                  /\ throttlePending' = FALSE
+                  /\ syncedOnce' = TRUE
+             ELSE /\ runtimeSubscriptionAuthors' = runtimeSubscriptionAuthors
+                  /\ needsSync' = (nextAuthors # runtimeSubscriptionAuthors)
+                  /\ throttlePending' = (nextAuthors # runtimeSubscriptionAuthors)
+                  /\ syncedOnce' = syncedOnce
     /\ changeDone' = TRUE
-    /\ UNCHANGED <<runtimeSubscriptionAuthors, relayUp, relayBag, published, delivered>>
+    /\ UNCHANGED <<relayUp, relayBag, published, delivered>>
 
 SyncRuntimeSubscription ==
     /\ needsSync
@@ -58,8 +101,11 @@ SyncRuntimeSubscription ==
             THEN runtimeSubscriptionAuthors \cup managerAuthors
             ELSE managerAuthors
     /\ needsSync' = FALSE
+    /\ throttlePending' = FALSE
+    /\ syncedOnce' = TRUE
     /\ UNCHANGED <<
-        managerAuthors, managerDirectSubscriptionAuthors, changeDone,
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, changeDone,
         relayUp, relayBag, published, delivered
       >>
 
@@ -69,8 +115,9 @@ PublishInbound(a) ==
     /\ relayBag' = relayBag \cup {a}
     /\ published' = published \cup {a}
     /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors,
         managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, changeDone, relayUp, delivered
+        needsSync, throttlePending, syncedOnce, changeDone, relayUp, delivered
       >>
 
 RelayDeliver(a) ==
@@ -80,24 +127,27 @@ RelayDeliver(a) ==
     /\ relayBag' = relayBag \ {a}
     /\ delivered' = delivered \cup {a}
     /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors,
         managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, changeDone, relayUp, published
+        needsSync, throttlePending, syncedOnce, changeDone, relayUp, published
       >>
 
 RelayPartition ==
     /\ relayUp
     /\ relayUp' = FALSE
     /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors,
         managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, changeDone, relayBag, published, delivered
+        needsSync, throttlePending, syncedOnce, changeDone, relayBag, published, delivered
       >>
 
 RelayRecover ==
     /\ ~relayUp
     /\ relayUp' = TRUE
     /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors,
         managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, changeDone, relayBag, published, delivered
+        needsSync, throttlePending, syncedOnce, changeDone, relayBag, published, delivered
       >>
 
 RelayDelay ==
@@ -137,6 +187,12 @@ SessionManagerDoesNotOwnDirectMessageSubscriptions ==
 
 CleanRuntimeSubscriptionMirrorsSessionManager ==
     ~needsSync => runtimeSubscriptionAuthors = managerAuthors
+
+NewAuthorsSubscribedImmediately ==
+    syncedOnce => managerAuthors \subseteq runtimeSubscriptionAuthors
+
+SkippedMessageAuthorsAreTracked ==
+    managerSkippedAuthors \subseteq managerAuthors
 
 RuntimeSubscriptionAuthorsAreKnown ==
     runtimeSubscriptionAuthors \subseteq Authors
