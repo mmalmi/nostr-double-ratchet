@@ -65,7 +65,7 @@ pub use protocol_backfill::{
     DEFAULT_MESSAGE_BACKFILL_LOOKBACK_SECS,
 };
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
-pub use runtime::{IrisRuntime, NdrRuntime};
+pub use runtime::NdrRuntime;
 pub use sender_key::*;
 pub use session::Session;
 pub use session_manager::{

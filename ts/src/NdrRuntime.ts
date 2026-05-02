@@ -73,9 +73,6 @@ export interface NdrRuntimeState extends DeviceRegistrationState {
   appKeysSubscriptionActive: boolean;
 }
 
-export type IrisRuntimeOptions = NdrRuntimeOptions;
-export type IrisRuntimeState = NdrRuntimeState;
-
 export interface PrepareRegistrationOptions {
   ownerPubkey: string;
   timeoutMs?: number;
@@ -352,7 +349,7 @@ export class NdrRuntime {
     if (this.sessionManager) {
       if (this.state.ownerPubkey && this.state.ownerPubkey !== ownerPubkey) {
         throw new Error(
-          `IrisRuntime already initialized for owner ${this.state.ownerPubkey}`,
+          `NdrRuntime already initialized for owner ${this.state.ownerPubkey}`,
         );
       }
       return this.sessionManager;
@@ -1275,5 +1272,3 @@ export class NdrRuntime {
     }
   }
 }
-
-export { NdrRuntime as IrisRuntime };

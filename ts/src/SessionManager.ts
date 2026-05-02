@@ -22,7 +22,6 @@ import { Invite } from "./Invite"
 import { Session } from "./Session"
 import {
   deserializeSessionState,
-  resolveExpirationSeconds,
   serializeSessionState,
 } from "./utils"
 import { resolveInviteOwnerRouting } from "./multiDevice"
@@ -34,11 +33,29 @@ import {
   isSelfOrigin,
 } from "./MessageOrigin"
 import { DeviceRecordActor } from "./session-manager/DeviceRecordActor"
+import { ExpirationSettings } from "./session-manager/expirationSettings"
+import {
+  planInviteBootstrapEvents,
+  scheduleInviteBootstrapRetryEvents,
+} from "./session-manager/inviteBootstrap"
+import {
+  collectAllMessagePushAuthorPubkeys,
+  collectMessagePushAuthorPubkeys,
+} from "./session-manager/messageAuthors"
 import {
   applyExpirationPolicy,
   chatSettingsAdoptionForRumor,
   expirationOverrideFromSendOptions,
 } from "./session-manager/messagePolicy"
+import {
+  queuedMessageDiagnostics,
+  type QueuedMessageDiagnostic,
+} from "./session-manager/queueDiagnostics"
+import {
+  sessionCanReceive,
+  sessionCanSend,
+  sessionHasActivity,
+} from "./session-manager/sessionSelection"
 import { UserRecordActor } from "./session-manager/UserRecordActor"
 import type {
   AcceptInviteOptions,
@@ -67,20 +84,15 @@ export type {
   UserRecord,
 } from "./session-manager/types"
 
+export type {
+  QueuedMessageDiagnostic,
+  QueuedMessageStage,
+} from "./session-manager/queueDiagnostics"
+
 export interface SendMessageOptions extends ExpirationOptions {
   kind?: number
   tags?: string[][]
   expiration?: ExpirationOptions | null
-}
-
-export type QueuedMessageStage = "discovery" | "device"
-
-export interface QueuedMessageDiagnostic {
-  stage: QueuedMessageStage
-  targetKey: string
-  ownerPubkey?: string
-  innerEventId?: string
-  createdAt: number
 }
 
 type PendingInviteResponse = {
@@ -93,42 +105,6 @@ type PendingInviteResponse = {
 }
 
 export class SessionManager {
-  private static readonly INVITE_BOOTSTRAP_EXPIRATION_SECONDS = 60
-  private static readonly INVITE_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1500] as const
-
-  private static sessionCanSend(session: Session): boolean {
-    return Boolean(session.state.theirNextNostrPublicKey && session.state.ourCurrentNostrKey)
-  }
-
-  private static sessionCanReceive(session: Session): boolean {
-    return Boolean(
-      session.state.receivingChainKey ||
-      session.state.theirCurrentNostrPublicKey ||
-      session.state.receivingChainMessageNumber > 0
-    )
-  }
-
-  private static sessionHasActivity(session: Session): boolean {
-    return (
-      session.state.sendingChainMessageNumber > 0 ||
-      session.state.receivingChainMessageNumber > 0
-    )
-  }
-
-  private static sessionMessageAuthorPubkeys(session: Session): string[] {
-    const authors = new Set<string>()
-    if (session.state.theirCurrentNostrPublicKey) {
-      authors.add(session.state.theirCurrentNostrPublicKey)
-    }
-    if (session.state.theirNextNostrPublicKey) {
-      authors.add(session.state.theirNextNostrPublicKey)
-    }
-    for (const author of Object.keys(session.state.skippedKeys || {})) {
-      authors.add(author)
-    }
-    return [...authors].sort()
-  }
-
   // Versioning
   private readonly storageVersion = "1"
   private readonly versionPrefix: string
@@ -157,10 +133,7 @@ export class SessionManager {
   private processedInviteResponses: Set<string> = new Set()
   private pendingInviteResponses: Map<string, PendingInviteResponse> = new Map()
   private inviteAcceptPromises: Map<string, Promise<AcceptInviteResult>> = new Map()
-  // Expiration defaults (persisted)
-  private defaultExpiration: ExpirationOptions | undefined
-  private peerExpiration: Map<string, ExpirationOptions | null> = new Map()
-  private groupExpiration: Map<string, ExpirationOptions | null> = new Map()
+  private expirationSettings!: ExpirationSettings
   private autoAdoptChatSettings: boolean = true
 
   // Persist user records in-order per key so older async writes can't overwrite newer state.
@@ -182,89 +155,6 @@ export class SessionManager {
 
   // Initialization flag
   private initialized: boolean = false
-
-  private expirationDefaultKey(): string {
-    return `${this.versionPrefix}/expiration/default`
-  }
-
-  private expirationPeerPrefix(): string {
-    return `${this.versionPrefix}/expiration/peer/`
-  }
-
-  private expirationPeerKey(peerPubkey: string): string {
-    return `${this.expirationPeerPrefix()}${peerPubkey}`
-  }
-
-  private expirationGroupPrefix(): string {
-    return `${this.versionPrefix}/expiration/group/`
-  }
-
-  private expirationGroupKey(groupId: string): string {
-    return `${this.expirationGroupPrefix()}${encodeURIComponent(groupId)}`
-  }
-
-  private validateExpirationOptions(options: ExpirationOptions | undefined): void {
-    if (!options) return
-    // Validates mutual exclusivity + integer seconds.
-    resolveExpirationSeconds(options, 0)
-  }
-
-  private async loadExpirationSettings(): Promise<void> {
-    // Default
-    const def = await this.storage.get<ExpirationOptions>(this.expirationDefaultKey())
-    if (def) {
-      try {
-        this.validateExpirationOptions(def)
-        this.defaultExpiration = def
-      } catch {
-        // Ignore invalid stored values
-      }
-    }
-
-    // Per-peer
-    const peerKeys = await this.storage.list(this.expirationPeerPrefix())
-    for (const k of peerKeys) {
-      const peer = k.slice(this.expirationPeerPrefix().length)
-      if (!peer) continue
-      const v = await this.storage.get<ExpirationOptions | null>(k)
-      if (v === undefined) continue
-      if (v === null) {
-        this.peerExpiration.set(peer, null)
-        continue
-      }
-      try {
-        this.validateExpirationOptions(v)
-        this.peerExpiration.set(peer, v)
-      } catch {
-        // Ignore invalid stored values
-      }
-    }
-
-    // Per-group
-    const groupKeys = await this.storage.list(this.expirationGroupPrefix())
-    for (const k of groupKeys) {
-      const enc = k.slice(this.expirationGroupPrefix().length)
-      if (!enc) continue
-      let groupId: string
-      try {
-        groupId = decodeURIComponent(enc)
-      } catch {
-        continue
-      }
-      const v = await this.storage.get<ExpirationOptions | null>(k)
-      if (v === undefined) continue
-      if (v === null) {
-        this.groupExpiration.set(groupId, null)
-        continue
-      }
-      try {
-        this.validateExpirationOptions(v)
-        this.groupExpiration.set(groupId, v)
-      } catch {
-        // Ignore invalid stored values
-      }
-    }
-  }
 
   constructor(
     ourPublicKey: string,
@@ -288,6 +178,7 @@ export class SessionManager {
     this.versionPrefix = `v${this.storageVersion}`
     this.messageQueue = new MessageQueue(this.storage, "v1/message-queue/")
     this.discoveryQueue = new MessageQueue(this.storage, "v1/discovery-queue/")
+    this.expirationSettings = new ExpirationSettings(this.storage, this.versionPrefix)
     this.nostrFacade = {
       subscribe: (subid, filter, onEvent) => this.emitSubscribe(subid, filter, onEvent),
       publish: (event, innerEventId) => this.emitPublish(event, innerEventId),
@@ -419,7 +310,7 @@ export class SessionManager {
       // Failed to load user records
     })
 
-    await this.loadExpirationSettings().catch(() => {
+    await this.expirationSettings.load().catch(() => {
       // Failed to load expiration settings
     })
 
@@ -784,17 +675,11 @@ export class SessionManager {
   getMessagePushAuthorPubkeys(peerPubkey: string): string[] {
     const ownerPubkey = this.resolveToOwner(peerPubkey)
     const userRecord = this.userRecords.get(ownerPubkey)
-    return this.collectMessagePushAuthorPubkeys(userRecord)
+    return collectMessagePushAuthorPubkeys(userRecord)
   }
 
   getAllMessagePushAuthorPubkeys(): string[] {
-    const authors = new Set<string>()
-    for (const userRecord of this.userRecords.values()) {
-      for (const author of this.collectMessagePushAuthorPubkeys(userRecord)) {
-        authors.add(author)
-      }
-    }
-    return [...authors].sort()
+    return collectAllMessagePushAuthorPubkeys(this.userRecords.values())
   }
 
   feedEvent(event: VerifiedEvent): boolean {
@@ -910,39 +795,12 @@ export class SessionManager {
     return handled
   }
 
-  private collectMessagePushAuthorPubkeys(userRecord?: UserRecordActor): string[] {
-    if (!userRecord) {
-      return []
-    }
-
-    const authors = new Set<string>()
-    for (const device of userRecord.devices.values()) {
-      const sessions = [
-        ...(device.activeSession ? [device.activeSession] : []),
-        ...device.inactiveSessions,
-      ]
-      for (const session of sessions) {
-        for (const author of SessionManager.sessionMessageAuthorPubkeys(session)) {
-          authors.add(author)
-        }
-      }
-    }
-    return [...authors].sort()
-  }
-
   /**
    * Set a global default expiration for outgoing rumors sent via this SessionManager.
    * Pass `undefined` to clear.
    */
   async setDefaultExpiration(options: ExpirationOptions | undefined): Promise<void> {
-    this.validateExpirationOptions(options)
-    this.defaultExpiration = options
-    const key = this.expirationDefaultKey()
-    if (!options) {
-      await this.storage.del(key).catch(() => {})
-      return
-    }
-    await this.storage.put(key, options).catch(() => {})
+    await this.expirationSettings.setDefault(options)
   }
 
   /**
@@ -952,14 +810,7 @@ export class SessionManager {
     peerPubkey: string,
     options: ExpirationOptions | null | undefined
   ): Promise<void> {
-    this.validateExpirationOptions(options || undefined)
-    if (options === undefined) {
-      this.peerExpiration.delete(peerPubkey)
-      await this.storage.del(this.expirationPeerKey(peerPubkey)).catch(() => {})
-      return
-    }
-    this.peerExpiration.set(peerPubkey, options)
-    await this.storage.put(this.expirationPeerKey(peerPubkey), options).catch(() => {})
+    await this.expirationSettings.setPeer(peerPubkey, options)
   }
 
   /**
@@ -970,14 +821,7 @@ export class SessionManager {
     groupId: string,
     options: ExpirationOptions | null | undefined
   ): Promise<void> {
-    this.validateExpirationOptions(options || undefined)
-    if (options === undefined) {
-      this.groupExpiration.delete(groupId)
-      await this.storage.del(this.expirationGroupKey(groupId)).catch(() => {})
-      return
-    }
-    this.groupExpiration.set(groupId, options)
-    await this.storage.put(this.expirationGroupKey(groupId), options).catch(() => {})
+    await this.expirationSettings.setGroup(groupId, options)
   }
 
   close() {
@@ -1051,45 +895,12 @@ export class SessionManager {
 
   async queuedMessageDiagnostics(innerEventId?: string): Promise<QueuedMessageDiagnostic[]> {
     await this.init()
-
-    const deviceToOwner = new Map<string, string>()
-    for (const [ownerPubkey, record] of this.userRecords) {
-      for (const deviceId of record.devices.keys()) {
-        deviceToOwner.set(deviceId, ownerPubkey)
-      }
-      for (const device of record.appKeys?.getAllDevices() ?? []) {
-        if (device.identityPubkey) {
-          deviceToOwner.set(device.identityPubkey, ownerPubkey)
-        }
-      }
-    }
-
-    const diagnostics: QueuedMessageDiagnostic[] = []
-    for (const entry of await this.discoveryQueue.entries()) {
-      const entryInnerEventId = entry.event.id
-      if (innerEventId && entryInnerEventId !== innerEventId) continue
-      diagnostics.push({
-        stage: "discovery",
-        targetKey: entry.targetKey,
-        ownerPubkey: entry.targetKey,
-        innerEventId: entryInnerEventId,
-        createdAt: entry.createdAt,
-      })
-    }
-
-    for (const entry of await this.messageQueue.entries()) {
-      const entryInnerEventId = entry.event.id
-      if (innerEventId && entryInnerEventId !== innerEventId) continue
-      diagnostics.push({
-        stage: "device",
-        targetKey: entry.targetKey,
-        ownerPubkey: deviceToOwner.get(entry.targetKey),
-        innerEventId: entryInnerEventId,
-        createdAt: entry.createdAt,
-      })
-    }
-
-    return diagnostics.sort((a, b) => a.createdAt - b.createdAt)
+    return queuedMessageDiagnostics({
+      userRecords: this.userRecords,
+      discoveryQueue: this.discoveryQueue,
+      messageQueue: this.messageQueue,
+      innerEventId,
+    })
   }
 
   private async flushMessageQueue(deviceIdentity: string): Promise<void> {
@@ -1104,29 +915,6 @@ export class SessionManager {
     await this.storeUserRecord(ownerPubkey).catch(() => {})
   }
 
-  private planBootstrapEvents(session: Session): VerifiedEvent[] {
-    const expiresAt =
-      Math.floor(Date.now() / 1000) +
-      SessionManager.INVITE_BOOTSTRAP_EXPIRATION_SECONDS
-
-    return SessionManager.INVITE_BOOTSTRAP_RETRY_DELAYS_MS.map(
-      () => session.sendTyping({ expiresAt }).event
-    )
-  }
-
-  private scheduleBootstrapRetryEvents(events: VerifiedEvent[]): void {
-    events.slice(1).forEach((event, index) => {
-      const timeout = setTimeout(() => {
-        this.bootstrapRetryTimeouts.delete(timeout)
-        void this.emitPublish(event).catch(() => {
-          // Best-effort retry publish. A later inbound event can still recover the session.
-        })
-      }, SessionManager.INVITE_BOOTSTRAP_RETRY_DELAYS_MS[index + 1])
-
-      this.bootstrapRetryTimeouts.add(timeout)
-    })
-  }
-
   private async sendLinkBootstrap(
     ownerPublicKey: string,
     deviceId: string,
@@ -1138,13 +926,17 @@ export class SessionManager {
     }
 
     try {
-      const bootstrapEvents = this.planBootstrapEvents(session)
+      const bootstrapEvents = planInviteBootstrapEvents(session)
       const [initialBootstrap] = bootstrapEvents
       if (!initialBootstrap) {
         return
       }
       await this.emitPublish(initialBootstrap)
-      this.scheduleBootstrapRetryEvents(bootstrapEvents)
+      scheduleInviteBootstrapRetryEvents(
+        bootstrapEvents,
+        (event) => this.emitPublish(event),
+        this.bootstrapRetryTimeouts,
+      )
       await this.storeUserRecord(ownerPublicKey).catch(() => {})
     } catch {
       // Ignore bootstrap send failures; the next valid inbound event will retry queue flush.
@@ -1153,13 +945,17 @@ export class SessionManager {
 
   private async sendInviteBootstrap(session: Session): Promise<void> {
     try {
-      const bootstrapEvents = this.planBootstrapEvents(session)
+      const bootstrapEvents = planInviteBootstrapEvents(session)
       const [initialBootstrap] = bootstrapEvents
       if (!initialBootstrap) {
         return
       }
       await this.emitPublish(initialBootstrap)
-      this.scheduleBootstrapRetryEvents(bootstrapEvents)
+      scheduleInviteBootstrapRetryEvents(
+        bootstrapEvents,
+        (event) => this.emitPublish(event),
+        this.bootstrapRetryTimeouts,
+      )
     } catch {
       // The session is still established even if the bootstrap publish fails.
     }
@@ -1288,8 +1084,8 @@ export class SessionManager {
     }
     const reusableEstablishedSession = existingSessions.find(
       (session) =>
-        SessionManager.sessionCanSend(session) &&
-        (SessionManager.sessionCanReceive(session) || SessionManager.sessionHasActivity(session))
+        sessionCanSend(session) &&
+        (sessionCanReceive(session) || sessionHasActivity(session))
     )
     if (reusableEstablishedSession) {
       await applyPreloadedRoster()
@@ -1303,9 +1099,9 @@ export class SessionManager {
       hasAnySession &&
       existingSessions.every(
         (session) =>
-          !SessionManager.sessionCanSend(session) &&
-          !SessionManager.sessionCanReceive(session) &&
-          !SessionManager.sessionHasActivity(session)
+          !sessionCanSend(session) &&
+          !sessionCanReceive(session) &&
+          !sessionHasActivity(session)
       )
     if (hasDormantImportedPlaceholder) {
       await applyPreloadedRoster()
@@ -1493,11 +1289,11 @@ export class SessionManager {
       nowSeconds: Math.floor(now / 1000),
       tags: rumor.tags,
       expirationOverride: expirationOverrideFromSendOptions(options),
-      defaultExpiration: this.defaultExpiration,
-      peerExpiration: this.peerExpiration.get(recipientPublicKey),
-      hasPeerExpiration: this.peerExpiration.has(recipientPublicKey),
-      groupExpiration: groupId ? this.groupExpiration.get(groupId) : undefined,
-      hasGroupExpiration: groupId ? this.groupExpiration.has(groupId) : false,
+      defaultExpiration: this.expirationSettings.default,
+      peerExpiration: this.expirationSettings.peer(recipientPublicKey),
+      hasPeerExpiration: this.expirationSettings.hasPeer(recipientPublicKey),
+      groupExpiration: groupId ? this.expirationSettings.group(groupId) : undefined,
+      hasGroupExpiration: groupId ? this.expirationSettings.hasGroup(groupId) : false,
     })
 
     rumor.id = getEventHash(rumor)

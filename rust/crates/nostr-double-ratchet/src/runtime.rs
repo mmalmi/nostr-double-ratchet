@@ -39,9 +39,6 @@ pub struct NdrRuntime {
     direct_message_subscription: Arc<DirectMessageSubscriptionShared>,
 }
 
-/// Preferred app-facing runtime name. `NdrRuntime` remains as a compatibility alias.
-pub type IrisRuntime = NdrRuntime;
-
 impl NdrRuntime {
     pub fn new(
         our_public_key: PublicKey,

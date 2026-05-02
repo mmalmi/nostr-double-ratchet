@@ -1,8 +1,12 @@
 # Changelog
 
+## 0.0.130 - 2026-05-02
+
+- Remove the product-specific `IrisRuntime` alias from the neutral `nostr-double-ratchet` API and docs.
+- Continue splitting TypeScript `SessionManager` internals into smaller policy and helper modules.
+
 ## 0.0.129 - 2026-05-02
 
-- Add the `IrisRuntime` app-facing alias for the existing `NdrRuntime` API while keeping the compatibility name.
 - Split Rust `SessionManager` internals into focused policy, queue, invite bootstrap, and session-selection modules.
 - Split TypeScript expiration policy and device session selection into reusable helpers with focused regression coverage.
 - Rename nearby LAN service labels from `ndr` to `iris`.
