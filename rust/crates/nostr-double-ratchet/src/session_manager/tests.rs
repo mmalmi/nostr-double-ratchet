@@ -701,6 +701,52 @@ fn imported_device_session_is_authorized_for_owner_fanout() {
 }
 
 #[test]
+fn known_device_identities_include_loaded_device_records_without_appkeys() {
+    let our_keys = Keys::generate();
+    let peer = Keys::generate().public_key();
+    let peer_device = Keys::generate().public_key();
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+    let stored = crate::StoredUserRecord {
+        user_id: peer.to_hex(),
+        devices: vec![crate::StoredDeviceRecord {
+            device_id: peer_device.to_hex(),
+            active_session: Some(test_session_state()),
+            inactive_sessions: Vec::new(),
+            created_at: 1,
+            is_stale: false,
+            stale_timestamp: None,
+            last_activity: Some(1),
+        }],
+        known_device_identities: Vec::new(),
+    };
+    storage
+        .put(
+            &format!("user/{}", peer.to_hex()),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let manager = SessionManager::new(
+        our_keys.public_key(),
+        our_keys.secret_key().to_secret_bytes(),
+        our_keys.public_key().to_hex(),
+        our_keys.public_key(),
+        tx,
+        Some(storage),
+        None,
+    );
+    manager.init().unwrap();
+    let _ = drain_events(&rx);
+
+    assert_eq!(
+        manager.known_device_identity_pubkeys_for_owner(peer),
+        vec![peer_device]
+    );
+}
+
+#[test]
 fn test_delete_chat_removes_local_state_and_allows_reinit() {
     let keys = Keys::generate();
     let pubkey = keys.public_key();

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.133 - 2026-05-02
+
+- Include stored device-record identities in the Rust known-device roster helper, matching the TypeScript runtime surface when AppKeys are not cached.
+- Add Rust coverage for loaded device records without AppKeys still contributing to protocol backfill/device roster inspection.
+
 ## 0.0.132 - 2026-05-02
 
 - Expose known device identity rosters through `SessionManager` and `NdrRuntime` in Rust and TypeScript.

@@ -513,6 +513,11 @@ impl SessionManager {
                             devices.insert(pubkey);
                         }
                     }
+                    for device_id in record.device_records.keys() {
+                        if let Ok(pubkey) = crate::utils::pubkey_from_hex(device_id) {
+                            devices.insert(pubkey);
+                        }
+                    }
                 }
                 devices
             }
