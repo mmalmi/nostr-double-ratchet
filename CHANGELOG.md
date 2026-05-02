@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.131 - 2026-05-02
+
+- Add runtime coverage for a fresh same-owner client with existing AppKeys sending into an existing peer chat and syncing the sender copy to the old device.
+- Move TypeScript user-record storage, hydration, ordered writes, deletion, and legacy migrations out of `SessionManager`.
+
 ## 0.0.130 - 2026-05-02
 
 - Remove the product-specific `IrisRuntime` alias from the neutral `nostr-double-ratchet` API and docs.

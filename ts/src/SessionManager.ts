@@ -20,10 +20,6 @@ import { MessageQueue } from "./MessageQueue"
 import { AppKeys, isAppKeysEvent } from "./AppKeys"
 import { Invite } from "./Invite"
 import { Session } from "./Session"
-import {
-  deserializeSessionState,
-  serializeSessionState,
-} from "./utils"
 import { resolveInviteOwnerRouting } from "./multiDevice"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
 import { getEventHash, type VerifiedEvent } from "nostr-tools"
@@ -57,6 +53,8 @@ import {
   sessionHasActivity,
 } from "./session-manager/sessionSelection"
 import { UserRecordActor } from "./session-manager/UserRecordActor"
+import { hydrateUserRecord } from "./session-manager/userRecordHydration"
+import { UserRecordStorage } from "./session-manager/userRecordStorage"
 import type {
   AcceptInviteOptions,
   AcceptInviteResult,
@@ -67,8 +65,6 @@ import type {
   OnEventMeta,
   SessionManagerEvent,
   SessionManagerEventsAvailableCallback,
-  StoredSessionEntry,
-  StoredUserRecord,
   UserRecord,
 } from "./session-manager/types"
 
@@ -134,10 +130,9 @@ export class SessionManager {
   private pendingInviteResponses: Map<string, PendingInviteResponse> = new Map()
   private inviteAcceptPromises: Map<string, Promise<AcceptInviteResult>> = new Map()
   private expirationSettings!: ExpirationSettings
+  private userRecordStorage!: UserRecordStorage
   private autoAdoptChatSettings: boolean = true
 
-  // Persist user records in-order per key so older async writes can't overwrite newer state.
-  private userRecordWriteChain: Map<string, Promise<void>> = new Map()
   private userSetupPromises: Map<string, Promise<void>> = new Map()
   private bootstrapRetryTimeouts: Set<ReturnType<typeof setTimeout>> = new Set()
 
@@ -179,6 +174,7 @@ export class SessionManager {
     this.messageQueue = new MessageQueue(this.storage, "v1/message-queue/")
     this.discoveryQueue = new MessageQueue(this.storage, "v1/discovery-queue/")
     this.expirationSettings = new ExpirationSettings(this.storage, this.versionPrefix)
+    this.userRecordStorage = new UserRecordStorage(this.storage, this.versionPrefix)
     this.nostrFacade = {
       subscribe: (subid, filter, onEvent) => this.emitSubscribe(subid, filter, onEvent),
       publish: (event, innerEventId) => this.emitPublish(event, innerEventId),
@@ -302,7 +298,7 @@ export class SessionManager {
     if (this.initialized) return
     this.initialized = true
 
-    await this.runMigrations().catch(() => {
+    await this.userRecordStorage.runMigrations().catch(() => {
       // Failed to run migrations
     })
 
@@ -433,21 +429,6 @@ export class SessionManager {
 
   private upsertDeviceRecord(userRecord: UserRecordActor, deviceId: string): DeviceRecordActor {
     return userRecord.ensureDevice(deviceId)
-  }
-
-  private sessionKeyPrefix(userPubkey: string) {
-    return `${this.versionPrefix}/session/${userPubkey}/`
-  }
-
-  private userRecordKey(publicKey: string) {
-    return `${this.userRecordKeyPrefix()}${publicKey}`
-  }
-
-  private userRecordKeyPrefix() {
-    return `${this.versionPrefix}/user/`
-  }
-  private versionKey() {
-    return `storage-version`
   }
 
   /**
@@ -881,16 +862,7 @@ export class SessionManager {
       }
     }
 
-    await Promise.allSettled([
-      this.deleteUserSessionsFromStorage(ownerPubkey),
-      this.storage.del(this.userRecordKey(ownerPubkey)),
-    ])
-  }
-
-  private async deleteUserSessionsFromStorage(userPubkey: string): Promise<void> {
-    const prefix = this.sessionKeyPrefix(userPubkey)
-    const keys = await this.storage.list(prefix)
-    await Promise.all(keys.map((key) => this.storage.del(key)))
+    await this.userRecordStorage.deleteUserData(ownerPubkey)
   }
 
   async queuedMessageDiagnostics(innerEventId?: string): Promise<QueuedMessageDiagnostic[]> {
@@ -1393,93 +1365,25 @@ export class SessionManager {
 
   private storeUserRecord(publicKey: string) {
     const userRecord = this.userRecords.get(publicKey)
-    const devices = Array.from(userRecord?.devices.entries() || [])
-    const serializeSession = (session: Session): StoredSessionEntry => ({
-      name: session.name,
-      state: serializeSessionState(session.state)
-    })
-
-    const data: StoredUserRecord = {
-      publicKey: publicKey,
-      devices: devices.map(
-        ([, device]) => ({
-          deviceId: device.deviceId,
-          activeSession: device.activeSession
-            ? serializeSession(device.activeSession)
-            : null,
-          inactiveSessions: device.inactiveSessions.map(serializeSession),
-          createdAt: device.createdAt,
-        })
-      ),
-      appKeys: userRecord?.appKeys?.serialize(),
-    }
-    const key = this.userRecordKey(publicKey)
-    const prev = this.userRecordWriteChain.get(key) || Promise.resolve()
-    const next = prev
-      .catch(() => {})
-      .then(() => this.storage.put(key, data))
-    this.userRecordWriteChain.set(key, next)
-    return next
+    return this.userRecordStorage.storeUserRecord(publicKey, userRecord)
   }
 
   private loadUserRecord(publicKey: string) {
-    return this.storage
-      .get<StoredUserRecord>(this.userRecordKey(publicKey))
+    return this.userRecordStorage
+      .loadUserRecord(publicKey)
       .then((data) => {
         if (!data) return
-        const userRecord = this.getOrCreateUserRecord(publicKey)
-        userRecord.close()
-        userRecord.devices.clear()
-
-        const deserializeSession = (entry: StoredSessionEntry): Session => {
-          const session = new Session(deserializeSessionState(entry.state))
-          session.name = entry.name
-          this.processedInviteResponses.add(entry.name)
-          return session
-        }
-
-        let appKeys: AppKeys | undefined
-        if (data.appKeys) {
-          try {
-            appKeys = AppKeys.deserialize(data.appKeys)
-          } catch {
-            // Failed to deserialize AppKeys
-          }
-        }
-
-        userRecord.setAppKeys(appKeys)
-
-        // Rebuild delegateToOwner mapping from persisted AppKeys
-        if (appKeys) {
-          for (const device of appKeys.getAllDevices()) {
-            if (device.identityPubkey) {
-              this.delegateToOwner.set(device.identityPubkey, publicKey)
-            }
-          }
-        }
-
-        for (const deviceData of data.devices) {
-          const {
-            deviceId,
-            activeSession: serializedActive,
-            inactiveSessions: serializedInactive,
-            createdAt,
-          } = deviceData
-
-          try {
-            const device = userRecord.ensureDevice(deviceId, createdAt)
-
-            for (const session of serializedInactive.map(deserializeSession).reverse()) {
-              device.installSession(session, true, { persist: false })
-            }
-
-            if (serializedActive) {
-              device.installSession(deserializeSession(serializedActive), false, { persist: false })
-            }
-          } catch {
-            // Failed to deserialize session
-          }
-        }
+        hydrateUserRecord({
+          data,
+          publicKey,
+          getOrCreateUserRecord: (ownerPubkey) => this.getOrCreateUserRecord(ownerPubkey),
+          rememberDelegate: (deviceId, ownerPubkey) => {
+            this.delegateToOwner.set(deviceId, ownerPubkey)
+          },
+          rememberProcessedInviteResponse: (eventId) => {
+            this.processedInviteResponses.add(eventId)
+          },
+        })
       })
       .catch(() => {
         // Failed to load user record
@@ -1487,58 +1391,10 @@ export class SessionManager {
   }
 
   private loadAllUserRecords() {
-    const prefix = this.userRecordKeyPrefix()
-    return this.storage.list(prefix).then((keys) => {
-      return Promise.all(
-        keys.map((key) => {
-          const publicKey = key.slice(prefix.length)
-          return this.loadUserRecord(publicKey)
-        })
-      )
-    })
-  }
-
-  private async runMigrations() {
-    // Run migrations sequentially
-    let version = await this.storage.get<string>(this.versionKey())
-
-    // First migration
-    if (!version) {
-      // Delete old invite data (legacy format no longer supported)
-      const oldInvitePrefix = "invite/"
-      const inviteKeys = await this.storage.list(oldInvitePrefix)
-      await Promise.all(inviteKeys.map((key) => this.storage.del(key)))
-
-      // Migrate old user records (clear sessions, keep device records)
-      const oldUserRecordPrefix = "user/"
-      const sessionKeys = await this.storage.list(oldUserRecordPrefix)
-      await Promise.all(
-        sessionKeys.map(async (key) => {
-          try {
-            const publicKey = key.slice(oldUserRecordPrefix.length)
-            const userRecordData = await this.storage.get<StoredUserRecord>(key)
-            if (userRecordData) {
-              const newKey = this.userRecordKey(publicKey)
-              const newUserRecordData: StoredUserRecord = {
-                publicKey: userRecordData.publicKey,
-                devices: userRecordData.devices.map((device) => ({
-                  deviceId: device.deviceId,
-                  activeSession: null,
-                  createdAt: device.createdAt,
-                  inactiveSessions: [],
-                })),
-              }
-              await this.storage.put(newKey, newUserRecordData)
-              await this.storage.del(key)
-            }
-          } catch {
-            // Migration error for user record
-          }
-        })
-      )
-
-      version = "1"
-      await this.storage.put(this.versionKey(), version)
-    }
+    return this.userRecordStorage
+      .loadAllUserRecordPubkeys()
+      .then((publicKeys) => Promise.all(
+        publicKeys.map((publicKey) => this.loadUserRecord(publicKey))
+      ))
   }
 }

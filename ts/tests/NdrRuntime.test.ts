@@ -488,6 +488,130 @@ describe("NdrRuntime", () => {
     await aliceReceived
   })
 
+  it("fresh same-nsec runtime sends into an existing peer chat and self-syncs to the old device", async () => {
+    const relay = new MockRelay()
+
+    const aliceOwnerPrivateKey = generateSecretKey()
+    const aliceOwnerPubkey = getPublicKey(aliceOwnerPrivateKey)
+    const aliceRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: aliceOwnerPrivateKey,
+    })
+    await aliceRuntime.initForOwner(aliceOwnerPubkey)
+    await aliceRuntime.registerCurrentDevice({ ownerPubkey: aliceOwnerPubkey })
+    await aliceRuntime.republishInvite()
+
+    const bobOwnerPrivateKey = generateSecretKey()
+    const bobOwnerPubkey = getPublicKey(bobOwnerPrivateKey)
+    const bobRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: bobOwnerPrivateKey,
+    })
+    await bobRuntime.initForOwner(bobOwnerPubkey)
+    await bobRuntime.registerCurrentDevice({ ownerPubkey: bobOwnerPubkey })
+    await bobRuntime.republishInvite()
+
+    const initialBobReceive = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("bob did not receive initial alice message")),
+        5_000,
+      )
+      const unsubscribe = bobRuntime.onSessionEvent((event, from, meta) => {
+        if (event.content !== "initial existing chat message") return
+        expect(from).toBe(aliceOwnerPubkey)
+        expect(meta?.isSelf).toBe(false)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await aliceRuntime.sendMessage(bobOwnerPubkey, "initial existing chat message")
+    await initialBobReceive
+
+    const initialAliceReceive = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("alice did not receive bob's initial reply")),
+        5_000,
+      )
+      const unsubscribe = aliceRuntime.onSessionEvent((event, from, meta) => {
+        if (event.content !== "initial bob reply") return
+        expect(from).toBe(bobOwnerPubkey)
+        expect(meta?.isSelf).toBe(false)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await bobRuntime.sendMessage(aliceOwnerPubkey, "initial bob reply")
+    await initialAliceReceive
+
+    const freshAliceRuntime = createRuntime({
+      relay,
+      ownerPrivateKey: aliceOwnerPrivateKey,
+    })
+    await freshAliceRuntime.initForOwner(aliceOwnerPubkey)
+    await freshAliceRuntime.registerCurrentDevice({
+      ownerPubkey: aliceOwnerPubkey,
+      timeoutMs: 500,
+    })
+    await freshAliceRuntime.republishInvite()
+
+    await Promise.all([
+      aliceRuntime.setupUser(aliceOwnerPubkey),
+      freshAliceRuntime.setupUser(aliceOwnerPubkey),
+      freshAliceRuntime.setupUser(bobOwnerPubkey),
+      bobRuntime.setupUser(aliceOwnerPubkey),
+    ])
+
+    const freshAliceDevicePubkey = freshAliceRuntime.getState().currentDevicePubkey
+    if (!freshAliceDevicePubkey) {
+      throw new Error("fresh alice device pubkey missing")
+    }
+
+    const message = "fresh same nsec existing chat send"
+    const bobReceivedFreshSend = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("bob did not receive fresh same-nsec send")),
+        5_000,
+      )
+      const unsubscribe = bobRuntime.onSessionEvent((event, from, meta) => {
+        if (event.content !== message) return
+        expect(from).toBe(aliceOwnerPubkey)
+        expect(event.pubkey).toBe(freshAliceDevicePubkey)
+        expect(meta?.senderOwnerPubkey).toBe(aliceOwnerPubkey)
+        expect(meta?.senderDevicePubkey).toBe(freshAliceDevicePubkey)
+        expect(meta?.isSelf).toBe(false)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    const oldAliceReceivedSenderCopy = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("old alice device did not receive fresh-device sender copy")),
+        5_000,
+      )
+      const unsubscribe = aliceRuntime.onSessionEvent((event, from, meta) => {
+        if (event.content !== message) return
+        expect(from).toBe(aliceOwnerPubkey)
+        expect(event.pubkey).toBe(freshAliceDevicePubkey)
+        expect(meta?.isCrossDeviceSelf).toBe(true)
+        expect(
+          event.tags.some((tag) => tag[0] === "p" && tag[1] === bobOwnerPubkey),
+        ).toBe(true)
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      })
+    })
+
+    await freshAliceRuntime.sendMessage(bobOwnerPubkey, message)
+    await Promise.all([bobReceivedFreshSend, oldAliceReceivedSenderCopy])
+  })
+
   it("delivers owner messages to a linked runtime after link invite registration", async () => {
     const relay = new MockRelay()
     const ownerPrivateKey = generateSecretKey()
