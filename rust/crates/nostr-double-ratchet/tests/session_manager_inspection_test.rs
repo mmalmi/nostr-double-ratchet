@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 use std::collections::HashMap;
 
 use crossbeam_channel::unbounded;

@@ -897,6 +897,7 @@ fn group_sender_key_distribution_allows_decrypting_one_to_many_outer_messages() 
         SessionManagerEvent::DecryptedMessage {
             sender,
             sender_device,
+            conversation_owner: _,
             content,
             event_id,
         } => Some((*sender, *sender_device, content.clone(), event_id.clone())),

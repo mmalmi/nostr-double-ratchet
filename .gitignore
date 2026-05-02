@@ -11,7 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
-docs
+docs/*
+!docs/
+!docs/EXPERIMENTAL_INSPIRED_ARCHITECTURE.md
 
 # Editor directories and files
 .vscode/*

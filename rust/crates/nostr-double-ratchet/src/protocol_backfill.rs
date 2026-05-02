@@ -63,7 +63,7 @@ impl NdrRuntime {
             extra_owner_pubkeys
                 .into_iter()
                 .chain(std::iter::once(self.get_owner_pubkey()))
-                .chain(self.session_manager().known_peer_owner_pubkeys())
+                .chain(self.known_peer_owner_pubkeys())
                 .chain(self.pending_invite_response_owner_pubkeys()),
         )
     }
@@ -78,8 +78,7 @@ impl NdrRuntime {
                 .into_iter()
                 .chain(std::iter::once(self.get_our_pubkey()))
                 .chain(
-                    self.session_manager()
-                        .known_device_identity_pubkeys_for_owners(owner_pubkeys.iter().copied()),
+                    self.known_device_identity_pubkeys_for_owners(owner_pubkeys.iter().copied()),
                 ),
         )
     }
@@ -176,11 +175,13 @@ fn dedupe_pubkeys(values: impl IntoIterator<Item = PublicKey>) -> Vec<PublicKey>
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::BTreeMap, sync::Arc};
 
     use nostr::Keys;
 
-    use crate::{AppKeys, DeviceEntry, Invite, NdrProtocolBackfillOptions, NdrRuntime};
+    use crate::{
+        AppKeys, DeviceEntry, DevicePubkey, Invite, NdrProtocolBackfillOptions, NdrRuntime,
+    };
 
     fn filter_with_kind(filters: &[nostr::Filter], kind: u64) -> serde_json::Value {
         filters
@@ -228,14 +229,17 @@ mod tests {
 
         crate::SessionState {
             root_key: [0u8; 32],
-            their_current_nostr_public_key: Some(their_current),
-            their_next_nostr_public_key: Some(their_next),
+            their_current_nostr_public_key: Some(DevicePubkey::from_bytes(
+                their_current.to_bytes(),
+            )),
+            their_next_nostr_public_key: Some(DevicePubkey::from_bytes(their_next.to_bytes())),
+            our_previous_nostr_key: None,
             our_current_nostr_key: Some(crate::SerializableKeyPair {
-                public_key: our_current.public_key(),
+                public_key: DevicePubkey::from_bytes(our_current.public_key().to_bytes()),
                 private_key: our_current.secret_key().to_secret_bytes(),
             }),
             our_next_nostr_key: crate::SerializableKeyPair {
-                public_key: our_next.public_key(),
+                public_key: DevicePubkey::from_bytes(our_next.public_key().to_bytes()),
                 private_key: our_next.secret_key().to_secret_bytes(),
             },
             receiving_chain_key: Some([1u8; 32]),
@@ -243,7 +247,7 @@ mod tests {
             sending_chain_message_number: 0,
             receiving_chain_message_number: 0,
             previous_sending_chain_message_count: 0,
-            skipped_keys: HashMap::new(),
+            skipped_keys: BTreeMap::new(),
         }
     }
 
@@ -339,35 +343,22 @@ mod tests {
         let local_device = Keys::generate();
         let peer_owner = Keys::generate();
         let peer_device = Keys::generate();
-        let storage: Arc<dyn crate::StorageAdapter> = Arc::new(crate::InMemoryStorage::new());
-        let stored = crate::StoredUserRecord {
-            user_id: peer_owner.public_key().to_hex(),
-            devices: vec![crate::StoredDeviceRecord {
-                device_id: peer_device.public_key().to_hex(),
-                active_session: Some(test_session_state()),
-                inactive_sessions: Vec::new(),
-                created_at: 1,
-                is_stale: false,
-                stale_timestamp: None,
-                last_activity: Some(1),
-            }],
-            known_device_identities: Vec::new(),
-        };
-        storage
-            .put(
-                &format!("user/{}", peer_owner.public_key().to_hex()),
-                serde_json::to_string(&stored).unwrap(),
-            )
-            .unwrap();
         let runtime = NdrRuntime::new(
             local_device.public_key(),
             local_device.secret_key().secret_bytes(),
             local_device.public_key().to_hex(),
             owner.public_key(),
-            Some(storage),
+            Some(Arc::new(crate::InMemoryStorage::new())),
             None,
         );
         runtime.init().expect("runtime init");
+        runtime
+            .import_session_state(
+                peer_owner.public_key(),
+                Some(peer_device.public_key().to_hex()),
+                test_session_state(),
+            )
+            .expect("import peer session");
 
         let mut options = NdrProtocolBackfillOptions::new(1_777_159_500);
         options.owner_pubkeys.push(peer_owner.public_key());

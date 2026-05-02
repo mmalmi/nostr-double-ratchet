@@ -91,6 +91,7 @@ impl NostrPubSub for crossbeam_channel::Sender<SessionManagerEvent> {
         self.send(SessionManagerEvent::DecryptedMessage {
             sender,
             sender_device,
+            conversation_owner: None,
             content,
             event_id,
         })
@@ -340,6 +341,7 @@ pub enum SessionEvent {
     DecryptedMessage {
         sender: PublicKey,
         sender_device: Option<PublicKey>,
+        conversation_owner: Option<PublicKey>,
         content: String,
         event_id: Option<String>,
     },
@@ -428,47 +430,42 @@ pub mod test_utils {
 
     /// Receives SessionManagerEvent from a channel and converts to structured events.
     pub struct SessionEventReceiver {
-        rx: crossbeam_channel::Receiver<crate::session_manager::SessionManagerEvent>,
+        rx: crossbeam_channel::Receiver<crate::SessionManagerEvent>,
     }
 
     impl SessionEventReceiver {
-        pub fn new(
-            rx: crossbeam_channel::Receiver<crate::session_manager::SessionManagerEvent>,
-        ) -> Self {
+        pub fn new(rx: crossbeam_channel::Receiver<crate::SessionManagerEvent>) -> Self {
             Self { rx }
         }
 
         /// Try to receive the next session event (non-blocking)
         pub fn try_recv(&self) -> Option<SessionEvent> {
             self.rx.try_recv().ok().map(|event| match event {
-                crate::session_manager::SessionManagerEvent::Publish(unsigned) => {
-                    SessionEvent::Publish(unsigned)
-                }
-                crate::session_manager::SessionManagerEvent::PublishSigned(signed) => {
+                crate::SessionManagerEvent::Publish(unsigned) => SessionEvent::Publish(unsigned),
+                crate::SessionManagerEvent::PublishSigned(signed) => {
                     SessionEvent::PublishSigned(signed)
                 }
-                crate::session_manager::SessionManagerEvent::PublishSignedForInnerEvent {
-                    event,
-                    ..
-                } => SessionEvent::PublishSigned(event),
-                crate::session_manager::SessionManagerEvent::Subscribe { subid, filter_json } => {
+                crate::SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => {
+                    SessionEvent::PublishSigned(event)
+                }
+                crate::SessionManagerEvent::Subscribe { subid, filter_json } => {
                     SessionEvent::Subscribe { subid, filter_json }
                 }
-                crate::session_manager::SessionManagerEvent::Unsubscribe(subid) => {
-                    SessionEvent::Unsubscribe(subid)
-                }
-                crate::session_manager::SessionManagerEvent::DecryptedMessage {
+                crate::SessionManagerEvent::Unsubscribe(subid) => SessionEvent::Unsubscribe(subid),
+                crate::SessionManagerEvent::DecryptedMessage {
                     sender,
                     sender_device,
+                    conversation_owner,
                     content,
                     event_id,
                 } => SessionEvent::DecryptedMessage {
                     sender,
                     sender_device,
+                    conversation_owner,
                     content,
                     event_id,
                 },
-                crate::session_manager::SessionManagerEvent::ReceivedEvent(event) => {
+                crate::SessionManagerEvent::ReceivedEvent(event) => {
                     SessionEvent::ReceivedEvent(event)
                 }
             })

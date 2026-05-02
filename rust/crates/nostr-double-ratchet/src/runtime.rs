@@ -1,42 +1,130 @@
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender};
-use nostr::{Event, PublicKey, UnsignedEvent};
+use nostr::{Event, Filter, Keys, Kind, PublicKey, UnsignedEvent};
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    group::GroupData, AcceptInviteResult, AppKeys, GroupDecryptedEvent, GroupManager,
-    GroupManagerOptions, GroupOuterSubscriptionPlan, InMemoryStorage, Invite,
-    MessagePushSessionStateSnapshot, Result, SendOptions, SessionManager, SessionManagerEvent,
-    StorageAdapter, MESSAGE_EVENT_KIND,
+    group::GroupData, nostr_codec, pairwise_codec, AppKeys, AuthorizedDevice, DevicePubkey,
+    DeviceRoster, Error, GroupDecryptedEvent, GroupManager, GroupManagerOptions,
+    GroupOuterSubscriptionPlan, InMemoryStorage, Invite, OwnerPubkey, ProtocolContext, RelayGap,
+    Result, SendOptions, SessionManager, SessionManagerSnapshot, SessionState, StorageAdapter,
+    UnixSeconds, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
 };
 
+const RUNTIME_STATE_KEY: &str = "v2/runtime-state";
+const PROTOCOL_SUBID: &str = "ndr-runtime-protocol";
+const MESSAGE_SUBID: &str = "ndr-runtime-messages";
+
 #[derive(Debug, Clone)]
+pub enum SessionManagerEvent {
+    Subscribe {
+        subid: String,
+        filter_json: String,
+    },
+    Unsubscribe(String),
+    Publish(UnsignedEvent),
+    PublishSigned(Event),
+    PublishSignedForInnerEvent {
+        event: Event,
+        inner_event_id: Option<String>,
+        target_device_id: Option<String>,
+    },
+    ReceivedEvent(Event),
+    DecryptedMessage {
+        sender: PublicKey,
+        sender_device: Option<PublicKey>,
+        conversation_owner: Option<PublicKey>,
+        content: String,
+        event_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptInviteResult {
+    pub owner_pubkey: PublicKey,
+    pub inviter_device_pubkey: PublicKey,
+    pub device_id: String,
+    pub created_new_session: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueuedMessageStage {
+    Discovery,
+    Device,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedMessageDiagnostic {
+    pub stage: QueuedMessageStage,
+    pub target_key: String,
+    pub owner_pubkey: Option<PublicKey>,
+    pub inner_event_id: Option<String>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagePushSessionStateSnapshot {
+    pub state: SessionState,
+    pub tracked_sender_pubkeys: Vec<PublicKey>,
+    pub has_receiving_capability: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredRuntimeState {
+    core: SessionManagerSnapshot,
+    pending_outbound: Vec<PendingOutbound>,
+    processed_invite_response_ids: Vec<String>,
+    latest_app_keys_created_at: HashMap<String, u64>,
+    #[serde(default)]
+    tracked_owner_pubkeys: Vec<PublicKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingOutbound {
+    recipient_owner: OwnerPubkey,
+    remote_payload: Vec<u8>,
+    local_sibling_payload: Option<Vec<u8>>,
+    inner_event_id: Option<String>,
+    created_at_ms: u64,
+    reason: QueuedMessageStage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSiblingPayload {
+    protocol: String,
+    version: u32,
+    conversation_owner: String,
+    payload: String,
+}
+
+struct RuntimeState {
+    core: SessionManager,
+    pending_outbound: Vec<PendingOutbound>,
+    processed_invite_response_ids: HashSet<String>,
+    latest_app_keys_created_at: HashMap<PublicKey, u64>,
+    tracked_owner_pubkeys: BTreeSet<PublicKey>,
+}
+
 struct DirectMessageSubscription {
-    subid: String,
     authors: Vec<PublicKey>,
 }
 
-const DM_SUBSCRIPTION_THROTTLE: Duration = Duration::from_millis(1500);
-
-/// Shared between `NdrRuntime` and the trailing-flush worker thread. Holding
-/// the throttle state, current sub, session pubkey query helper, and outbound
-/// event channel here lets the timer thread re-run the sync without needing
-/// to hold a reference to the full runtime.
-struct DirectMessageSubscriptionShared {
-    current: Mutex<Option<DirectMessageSubscription>>,
-    last_change: Mutex<Option<Instant>>,
-    flush_pending: AtomicBool,
-}
-
 pub struct NdrRuntime {
-    session_manager: Arc<SessionManager>,
+    state: Mutex<RuntimeState>,
     group_manager: Mutex<GroupManager>,
     event_rx: Mutex<Receiver<SessionManagerEvent>>,
     event_tx: Sender<SessionManagerEvent>,
-    direct_message_subscription: Arc<DirectMessageSubscriptionShared>,
+    storage: Arc<dyn StorageAdapter>,
+    our_public_key: PublicKey,
+    our_identity_key: [u8; 32],
+    device_id: String,
+    owner_public_key: PublicKey,
+    direct_message_subscription: Mutex<Option<DirectMessageSubscription>>,
 }
 
 impl NdrRuntime {
@@ -68,18 +156,22 @@ impl NdrRuntime {
         group_storage: Option<Arc<dyn StorageAdapter>>,
         invite: Option<Invite>,
     ) -> Self {
-        let session_storage = session_storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
-        let group_storage = group_storage.unwrap_or_else(|| Arc::clone(&session_storage));
+        let storage = session_storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
+        let group_storage = group_storage.unwrap_or_else(|| Arc::clone(&storage));
         let (event_tx, event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
-        let session_manager = SessionManager::new(
-            our_public_key,
-            our_identity_key,
-            device_id,
-            owner_public_key,
-            event_tx.clone(),
-            Some(session_storage),
-            invite,
-        );
+        let mut state = RuntimeState::load(storage.as_ref(), owner_public_key, our_identity_key)
+            .unwrap_or_else(|| RuntimeState {
+                core: SessionManager::new(owner(owner_public_key), our_identity_key),
+                pending_outbound: Vec::new(),
+                processed_invite_response_ids: HashSet::new(),
+                latest_app_keys_created_at: HashMap::new(),
+                tracked_owner_pubkeys: BTreeSet::new(),
+            });
+
+        if let Some(invite) = invite {
+            state.core.replace_local_invite(invite);
+        }
+
         let group_manager = GroupManager::new(GroupManagerOptions {
             our_owner_pubkey: owner_public_key,
             our_device_pubkey: our_public_key,
@@ -88,41 +180,70 @@ impl NdrRuntime {
         });
 
         Self {
-            session_manager: Arc::new(session_manager),
+            state: Mutex::new(state),
             group_manager: Mutex::new(group_manager),
             event_rx: Mutex::new(event_rx),
             event_tx,
-            direct_message_subscription: Arc::new(DirectMessageSubscriptionShared {
-                current: Mutex::new(None),
-                last_change: Mutex::new(None),
-                flush_pending: AtomicBool::new(false),
-            }),
+            storage,
+            our_public_key,
+            our_identity_key,
+            device_id,
+            owner_public_key,
+            direct_message_subscription: Mutex::new(None),
         }
     }
 
     pub fn init(&self) -> Result<()> {
-        self.session_manager.init()?;
+        let now = now();
+        {
+            let mut rng = OsRng;
+            let mut ctx = ProtocolContext::new(now, &mut rng);
+            let mut state = self.state.lock().unwrap();
+            let local_roster = DeviceRoster::new(
+                now,
+                vec![AuthorizedDevice::new(device(self.our_public_key), now)],
+            );
+            state.core.apply_local_roster(local_roster);
+            let invite = state.core.ensure_local_invite(&mut ctx)?.clone();
+            drop(state);
+            self.publish_local_invite(&invite)?;
+        }
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
         self.sync_direct_message_subscriptions()
     }
 
     pub fn setup_user(&self, user_pubkey: PublicKey) -> Result<()> {
-        self.session_manager.init()?;
-        self.session_manager.setup_user(user_pubkey);
+        self.observe_owner_if_absent(user_pubkey);
+        self.refresh_protocol_subscriptions()?;
         self.sync_direct_message_subscriptions()
     }
 
     pub fn reload_from_storage(&self) -> Result<()> {
-        self.session_manager.reload_from_storage()?;
+        if let Some(loaded) = RuntimeState::load(
+            self.storage.as_ref(),
+            self.owner_public_key,
+            self.our_identity_key,
+        ) {
+            *self.state.lock().unwrap() = loaded;
+        }
+        self.refresh_protocol_subscriptions()?;
         self.sync_direct_message_subscriptions()
     }
 
     pub fn delete_chat(&self, user_pubkey: PublicKey) -> Result<()> {
-        self.session_manager.delete_chat(user_pubkey)?;
+        self.state
+            .lock()
+            .unwrap()
+            .core
+            .delete_user(owner(user_pubkey));
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
         self.sync_direct_message_subscriptions()
     }
 
-    pub fn cleanup_discovery_queue(&self, max_age_ms: u64) -> Result<usize> {
-        self.session_manager.cleanup_discovery_queue(max_age_ms)
+    pub fn cleanup_discovery_queue(&self, _max_age_ms: u64) -> Result<usize> {
+        Ok(0)
     }
 
     pub fn accept_invite(
@@ -130,12 +251,40 @@ impl NdrRuntime {
         invite: &Invite,
         owner_pubkey_hint: Option<PublicKey>,
     ) -> Result<AcceptInviteResult> {
-        self.session_manager.init()?;
-        let result = self
-            .session_manager
-            .accept_invite(invite, owner_pubkey_hint)?;
-        self.sync_direct_message_subscriptions()?;
-        Ok(result)
+        let invite_owner = owner_pubkey_hint
+            .or_else(|| invite.inviter_owner_pubkey.map(public_owner))
+            .unwrap_or_else(|| public_device(invite.inviter_device_pubkey));
+        let mut invite = invite.clone();
+        invite.inviter_owner_pubkey = Some(owner(invite_owner));
+        {
+            let mut state = self.state.lock().unwrap();
+            state
+                .core
+                .observe_device_invite(owner(invite_owner), invite.clone())?;
+            state.core.observe_peer_roster(
+                owner(invite_owner),
+                DeviceRoster::new(
+                    now(),
+                    vec![AuthorizedDevice::new(
+                        invite.inviter_device_pubkey,
+                        invite.created_at,
+                    )],
+                ),
+            );
+        }
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+
+        if invite.purpose.as_deref() == Some("link") {
+            self.send_link_bootstrap(invite_owner)?;
+        }
+
+        Ok(AcceptInviteResult {
+            owner_pubkey: invite_owner,
+            inviter_device_pubkey: public_device(invite.inviter_device_pubkey),
+            device_id: public_device(invite.inviter_device_pubkey).to_hex(),
+            created_new_session: false,
+        })
     }
 
     pub fn send_text(
@@ -144,8 +293,10 @@ impl NdrRuntime {
         text: String,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        let ids = self.session_manager.send_text(recipient, text, options)?;
-        self.sync_direct_message_subscriptions()?;
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let (_, ids) = self.send_text_with_inner_id(recipient, text, options)?;
         Ok(ids)
     }
 
@@ -155,21 +306,47 @@ impl NdrRuntime {
         text: String,
         options: Option<SendOptions>,
     ) -> Result<(String, Vec<String>)> {
-        let result = self
-            .session_manager
-            .send_text_with_inner_id(recipient, text, options)?;
-        self.sync_direct_message_subscriptions()?;
-        Ok(result)
+        if text.trim().is_empty() {
+            return Ok((String::new(), Vec::new()));
+        }
+        let now = now();
+        let now_ms = current_unix_millis();
+        let expiration = options
+            .as_ref()
+            .map(|options| crate::utils::resolve_expiration_seconds(options, now.get()))
+            .transpose()?
+            .flatten();
+        let encode_options = expiration
+            .map(|expiration| {
+                pairwise_codec::EncodeOptions::new(now.get(), now_ms).with_expiration(expiration)
+            })
+            .unwrap_or_else(|| pairwise_codec::EncodeOptions::new(now.get(), now_ms));
+        let event = pairwise_codec::message_event(self.owner_public_key, text, encode_options)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        let inner_id = event
+            .id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let ids = self.send_event(recipient, event)?;
+        Ok((inner_id, ids))
     }
 
     pub fn send_event(
         &self,
         recipient: PublicKey,
-        event: nostr::UnsignedEvent,
+        mut event: UnsignedEvent,
     ) -> Result<Vec<String>> {
-        let ids = self.session_manager.send_event(recipient, event)?;
-        self.sync_direct_message_subscriptions()?;
-        Ok(ids)
+        event.ensure_id();
+        let inner_id = event.id.as_ref().map(ToString::to_string);
+        let remote_payload = serde_json::to_vec(&event)?;
+        let local_payload = local_sibling_payload(recipient, &remote_payload)?;
+        self.prepare_and_publish(
+            owner(recipient),
+            remote_payload,
+            Some(local_payload),
+            inner_id,
+        )
     }
 
     pub fn send_reaction(
@@ -179,11 +356,26 @@ impl NdrRuntime {
         emoji: String,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        let ids = self
-            .session_manager
-            .send_reaction(recipient, message_id, emoji, options)?;
-        self.sync_direct_message_subscriptions()?;
-        Ok(ids)
+        let now = now();
+        let now_ms = current_unix_millis();
+        let expiration = options
+            .as_ref()
+            .map(|options| crate::utils::resolve_expiration_seconds(options, now.get()))
+            .transpose()?
+            .flatten();
+        let encode_options = expiration
+            .map(|expiration| {
+                pairwise_codec::EncodeOptions::new(now.get(), now_ms).with_expiration(expiration)
+            })
+            .unwrap_or_else(|| pairwise_codec::EncodeOptions::new(now.get(), now_ms));
+        let event = pairwise_codec::reaction_event(
+            self.owner_public_key,
+            message_id,
+            emoji,
+            encode_options,
+        )
+        .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        self.send_event(recipient, event)
     }
 
     pub fn send_receipt(
@@ -193,11 +385,31 @@ impl NdrRuntime {
         message_ids: Vec<String>,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        let ids =
-            self.session_manager
-                .send_receipt(recipient, receipt_type, message_ids, options)?;
-        self.sync_direct_message_subscriptions()?;
-        Ok(ids)
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = now();
+        let now_ms = current_unix_millis();
+        let receipt_type = pairwise_codec::ReceiptType::try_from(receipt_type)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        let expiration = options
+            .as_ref()
+            .map(|options| crate::utils::resolve_expiration_seconds(options, now.get()))
+            .transpose()?
+            .flatten();
+        let encode_options = expiration
+            .map(|expiration| {
+                pairwise_codec::EncodeOptions::new(now.get(), now_ms).with_expiration(expiration)
+            })
+            .unwrap_or_else(|| pairwise_codec::EncodeOptions::new(now.get(), now_ms));
+        let event = pairwise_codec::receipt_event(
+            self.owner_public_key,
+            receipt_type,
+            message_ids,
+            encode_options,
+        )
+        .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        self.send_event(recipient, event)
     }
 
     pub fn send_typing(
@@ -205,9 +417,21 @@ impl NdrRuntime {
         recipient: PublicKey,
         options: Option<SendOptions>,
     ) -> Result<Vec<String>> {
-        let ids = self.session_manager.send_typing(recipient, options)?;
-        self.sync_direct_message_subscriptions()?;
-        Ok(ids)
+        let now = now();
+        let now_ms = current_unix_millis();
+        let expiration = options
+            .as_ref()
+            .map(|options| crate::utils::resolve_expiration_seconds(options, now.get()))
+            .transpose()?
+            .flatten();
+        let encode_options = expiration
+            .map(|expiration| {
+                pairwise_codec::EncodeOptions::new(now.get(), now_ms).with_expiration(expiration)
+            })
+            .unwrap_or_else(|| pairwise_codec::EncodeOptions::new(now.get(), now_ms));
+        let event = pairwise_codec::typing_event(self.owner_public_key, encode_options)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        self.send_event(recipient, event)
     }
 
     pub fn send_chat_settings(
@@ -215,72 +439,172 @@ impl NdrRuntime {
         recipient: PublicKey,
         ttl_seconds: u64,
     ) -> Result<Vec<String>> {
-        let ids = self
-            .session_manager
-            .send_chat_settings(recipient, ttl_seconds)?;
-        self.sync_direct_message_subscriptions()?;
-        Ok(ids)
+        let ttl = if ttl_seconds == 0 {
+            pairwise_codec::ChatSettingsTtl::DisablePeerExpiration
+        } else {
+            pairwise_codec::ChatSettingsTtl::Seconds(ttl_seconds)
+        };
+        let event = pairwise_codec::chat_settings_event(
+            self.owner_public_key,
+            ttl,
+            now().get(),
+            current_unix_millis(),
+        )
+        .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        self.send_event(recipient, event)
     }
 
     pub fn import_session_state(
         &self,
         peer_pubkey: PublicKey,
         device_id: Option<String>,
-        state: crate::SessionState,
+        state: SessionState,
     ) -> Result<()> {
-        self.session_manager
-            .import_session_state(peer_pubkey, device_id, state)?;
+        let device_pubkey = device_id
+            .as_deref()
+            .and_then(|value| PublicKey::parse(value).ok())
+            .map(device)
+            .unwrap_or_else(|| device(peer_pubkey));
+        self.state.lock().unwrap().core.import_session_state(
+            owner(peer_pubkey),
+            device_pubkey,
+            state,
+            now(),
+        );
+        self.persist_state()?;
         self.sync_direct_message_subscriptions()
     }
 
-    pub fn export_active_sessions(&self) -> Vec<(PublicKey, String, crate::SessionState)> {
-        self.session_manager.export_active_sessions()
+    pub fn export_active_sessions(&self) -> Vec<(PublicKey, String, SessionState)> {
+        let snapshot = self.state.lock().unwrap().core.snapshot();
+        snapshot
+            .users
+            .into_iter()
+            .flat_map(|user| {
+                user.devices.into_iter().filter_map(move |device_record| {
+                    device_record.active_session.map(|state| {
+                        (
+                            public_owner(user.owner_pubkey),
+                            public_device(device_record.device_pubkey).to_hex(),
+                            state,
+                        )
+                    })
+                })
+            })
+            .collect()
     }
 
     pub fn export_active_session_state(
         &self,
         peer_pubkey: PublicKey,
-    ) -> Result<Option<crate::SessionState>> {
-        self.session_manager
-            .export_active_session_state(peer_pubkey)
+    ) -> Result<Option<SessionState>> {
+        Ok(self
+            .export_active_sessions()
+            .into_iter()
+            .find(|(owner_pubkey, _, _)| *owner_pubkey == peer_pubkey)
+            .map(|(_, _, state)| state))
     }
 
     pub fn get_stored_user_record_json(&self, user_pubkey: PublicKey) -> Result<Option<String>> {
-        self.session_manager
-            .get_stored_user_record_json(user_pubkey)
+        let snapshot = self.state.lock().unwrap().core.snapshot();
+        let user = snapshot
+            .users
+            .into_iter()
+            .find(|user| user.owner_pubkey == owner(user_pubkey));
+        user.map(|user| serde_json::to_string(&user).map_err(Into::into))
+            .transpose()
     }
 
     pub fn get_all_message_push_author_pubkeys(&self) -> Vec<PublicKey> {
-        self.session_manager.get_all_message_push_author_pubkeys()
+        let mut authors = BTreeSet::new();
+        for (_, _, state) in self.export_all_session_states() {
+            collect_expected_senders(&state, &mut authors);
+        }
+        authors.into_iter().collect()
     }
 
     pub fn get_message_push_author_pubkeys(&self, peer_owner_pubkey: PublicKey) -> Vec<PublicKey> {
-        self.session_manager
-            .get_message_push_author_pubkeys(peer_owner_pubkey)
+        let mut authors = BTreeSet::new();
+        for (owner_pubkey, _, state) in self.export_all_session_states() {
+            if owner_pubkey == peer_owner_pubkey {
+                collect_expected_senders(&state, &mut authors);
+            }
+        }
+        authors.into_iter().collect()
     }
 
     pub fn get_message_push_session_states(
         &self,
         peer_owner_pubkey: PublicKey,
     ) -> Vec<MessagePushSessionStateSnapshot> {
-        self.session_manager
-            .get_message_push_session_states(peer_owner_pubkey)
+        self.export_all_session_states()
+            .into_iter()
+            .filter(|(owner_pubkey, _, _)| *owner_pubkey == peer_owner_pubkey)
+            .map(|(_, _, state)| {
+                let mut tracked = BTreeSet::new();
+                collect_expected_senders(&state, &mut tracked);
+                MessagePushSessionStateSnapshot {
+                    has_receiving_capability: state.receiving_chain_key.is_some()
+                        || state.their_current_nostr_public_key.is_some(),
+                    state,
+                    tracked_sender_pubkeys: tracked.into_iter().collect(),
+                }
+            })
+            .collect()
     }
 
     pub fn known_peer_owner_pubkeys(&self) -> Vec<PublicKey> {
-        self.session_manager.known_peer_owner_pubkeys()
+        let mut owners = Vec::new();
+        for user in self.state.lock().unwrap().core.snapshot().users {
+            owners.push(public_owner(user.owner_pubkey));
+            owners.extend(
+                user.devices
+                    .into_iter()
+                    .filter_map(|device| device.claimed_owner_pubkey)
+                    .map(public_owner),
+            );
+        }
+        owners.retain(|pubkey| *pubkey != self.owner_public_key);
+        owners.sort_by_key(|pubkey| pubkey.to_hex());
+        owners.dedup();
+        owners
     }
 
     pub fn known_device_identity_pubkeys_for_owner(
         &self,
         owner_pubkey: PublicKey,
     ) -> Vec<PublicKey> {
-        self.session_manager
-            .known_device_identity_pubkeys_for_owner(owner_pubkey)
+        self.state
+            .lock()
+            .unwrap()
+            .core
+            .snapshot()
+            .users
+            .into_iter()
+            .find(|user| user.owner_pubkey == owner(owner_pubkey))
+            .map(|user| {
+                user.devices
+                    .into_iter()
+                    .filter(|device| device.authorized && !device.is_stale)
+                    .map(|device| public_device(device.device_pubkey))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn known_device_identity_pubkeys_for_owners(
+        &self,
+        owners: impl IntoIterator<Item = PublicKey>,
+    ) -> Vec<PublicKey> {
+        let mut devices = BTreeSet::new();
+        for owner_pubkey in owners {
+            devices.extend(self.known_device_identity_pubkeys_for_owner(owner_pubkey));
+        }
+        devices.into_iter().collect()
     }
 
     pub fn get_total_sessions(&self) -> usize {
-        self.session_manager.get_total_sessions()
+        self.export_all_session_states().len()
     }
 
     pub fn ingest_app_keys_snapshot(
@@ -289,212 +613,137 @@ impl NdrRuntime {
         app_keys: AppKeys,
         created_at: u64,
     ) {
-        self.session_manager
-            .ingest_app_keys_snapshot(owner_pubkey, app_keys, created_at);
+        let mut state = self.state.lock().unwrap();
+        let latest = state
+            .latest_app_keys_created_at
+            .get(&owner_pubkey)
+            .copied()
+            .unwrap_or(0);
+        if created_at < latest {
+            return;
+        }
+        state
+            .latest_app_keys_created_at
+            .insert(owner_pubkey, created_at);
+        let roster = DeviceRoster::new(
+            UnixSeconds(created_at),
+            app_keys
+                .get_all_devices()
+                .into_iter()
+                .map(|entry| {
+                    AuthorizedDevice::new(
+                        device(entry.identity_pubkey),
+                        UnixSeconds(entry.created_at),
+                    )
+                })
+                .collect(),
+        );
+        if owner_pubkey == self.owner_public_key {
+            state.core.apply_local_roster(roster);
+        } else {
+            state.core.observe_peer_roster(owner(owner_pubkey), roster);
+        }
+        drop(state);
+        let _ = self.persist_state();
+        let _ = self.retry_pending_outbound();
+        let _ = self.refresh_protocol_subscriptions();
         let _ = self.sync_direct_message_subscriptions();
     }
 
     pub fn process_received_event(&self, event: Event) {
-        self.session_manager.process_received_event(event);
-        let _ = self.sync_direct_message_subscriptions();
+        let kind = event.kind.as_u16() as u32;
+        let event_id = event.id.to_string();
+        let result = match kind {
+            APP_KEYS_EVENT_KIND if crate::is_app_keys_event(&event) => AppKeys::from_event(&event)
+                .map(|app_keys| {
+                    self.ingest_app_keys_snapshot(
+                        event.pubkey,
+                        app_keys,
+                        event.created_at.as_secs(),
+                    )
+                }),
+            INVITE_EVENT_KIND => self.process_invite_event(&event),
+            INVITE_RESPONSE_KIND => self.process_invite_response_event(&event),
+            MESSAGE_EVENT_KIND => self.process_message_event(&event, Some(event_id)),
+            _ => Ok(()),
+        };
+        if result.is_ok() {
+            let _ = self.sync_direct_message_subscriptions();
+        }
     }
 
     pub fn sync_direct_message_subscriptions(&self) -> Result<()> {
-        // The relay REQ for direct messages is filtered by author pubkeys.
-        // The double-ratchet rotates `their_current_nostr_public_key` /
-        // `their_next_nostr_public_key` on every step, so this set churns
-        // continuously while a chat is active. Each REQ rebuild makes every
-        // relay replay all matching historical events, which slams the event
-        // pipeline and the UI with redundant work.
-        //
-        // Three-stage filter:
-        //   1. Identical author set → no-op.
-        //   2. Newly added authors are subscribed immediately. They may already
-        //      have relay events waiting, and delaying them can miss live delivery.
-        //   3. Pure removals honour a 1.5 s trailing throttle so bursts of
-        //      ratchet steps collapse into one relay REQ. If the window has not
-        //      elapsed we spawn a one-shot worker that fires the latest sync at
-        //      the boundary, even if no further runtime call comes along to drive it.
-        let next_authors = self.session_manager.get_all_message_push_author_pubkeys();
-
-        let current_authors = self
-            .direct_message_subscription
-            .current
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|subscription| subscription.authors.clone())
-            .unwrap_or_default();
-        if current_authors == next_authors {
-            return Ok(());
-        }
-
-        let has_added_authors = next_authors
-            .iter()
-            .any(|author| !current_authors.contains(author));
-        let elapsed_since_last_change = self
-            .direct_message_subscription
-            .last_change
-            .lock()
-            .unwrap()
-            .map(|last| last.elapsed());
-        if let Some(elapsed) = elapsed_since_last_change {
-            if elapsed < DM_SUBSCRIPTION_THROTTLE && !has_added_authors {
-                self.schedule_direct_message_subscription_flush(DM_SUBSCRIPTION_THROTTLE - elapsed);
-                return Ok(());
-            }
-        }
-
-        self.apply_direct_message_subscription(next_authors)
-    }
-
-    fn apply_direct_message_subscription(&self, next_authors: Vec<PublicKey>) -> Result<()> {
-        let mut current = self.direct_message_subscription.current.lock().unwrap();
-        let mut last_change = self.direct_message_subscription.last_change.lock().unwrap();
-
+        let next_authors = self.get_all_message_push_author_pubkeys();
+        let mut current = self.direct_message_subscription.lock().unwrap();
         if current
             .as_ref()
             .is_some_and(|subscription| subscription.authors == next_authors)
         {
             return Ok(());
         }
-
-        if let Some(subscription) = current.take() {
-            let _ = self
-                .event_tx
-                .send(SessionManagerEvent::Unsubscribe(subscription.subid));
+        if current.is_some() {
+            self.event_tx
+                .send(SessionManagerEvent::Unsubscribe(MESSAGE_SUBID.to_string()))
+                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
         }
-
         if next_authors.is_empty() {
-            *last_change = Some(Instant::now());
+            *current = None;
             return Ok(());
         }
-
-        let filter = crate::pubsub::build_filter()
-            .kinds(vec![MESSAGE_EVENT_KIND as u64])
-            .authors(next_authors.clone())
-            .build();
-        let filter_json = serde_json::to_string(&filter)?;
-        let subid = format!("ndr-runtime-messages-{}", uuid::Uuid::new_v4());
-        let _ = self.event_tx.send(SessionManagerEvent::Subscribe {
-            subid: subid.clone(),
-            filter_json,
-        });
+        let filter = Filter::new()
+            .kind(Kind::from(MESSAGE_EVENT_KIND as u16))
+            .authors(next_authors.clone());
+        self.event_tx
+            .send(SessionManagerEvent::Subscribe {
+                subid: MESSAGE_SUBID.to_string(),
+                filter_json: serde_json::to_string(&filter)?,
+            })
+            .map_err(|_| Error::Storage("event queue closed".to_string()))?;
         *current = Some(DirectMessageSubscription {
-            subid,
             authors: next_authors,
         });
-        *last_change = Some(Instant::now());
-
         Ok(())
     }
 
-    fn schedule_direct_message_subscription_flush(&self, delay: Duration) {
-        // One-shot trailing flush. `flush_pending` deduplicates so a burst of
-        // throttled calls only spawns a single worker thread.
-        if self
-            .direct_message_subscription
-            .flush_pending
-            .swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-
-        let shared_weak = Arc::downgrade(&self.direct_message_subscription);
-        let session_manager = Arc::clone(&self.session_manager);
-        let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(delay);
-            let Some(shared) = shared_weak.upgrade() else {
-                return;
-            };
-            shared.flush_pending.store(false, Ordering::Release);
-            DirectMessageSubscriptionShared::flush_now(&shared, &session_manager, &event_tx);
-        });
-    }
-}
-
-impl DirectMessageSubscriptionShared {
-    fn flush_now(
-        shared: &Arc<Self>,
-        session_manager: &SessionManager,
-        event_tx: &Sender<SessionManagerEvent>,
-    ) {
-        let next_authors = session_manager.get_all_message_push_author_pubkeys();
-
-        let mut current = shared.current.lock().unwrap();
-        if current
-            .as_ref()
-            .is_some_and(|subscription| subscription.authors == next_authors)
-        {
-            return;
-        }
-        let mut last_change = shared.last_change.lock().unwrap();
-
-        if let Some(subscription) = current.take() {
-            let _ = event_tx.send(SessionManagerEvent::Unsubscribe(subscription.subid));
-        }
-
-        if next_authors.is_empty() {
-            *last_change = Some(Instant::now());
-            return;
-        }
-
-        let filter = crate::pubsub::build_filter()
-            .kinds(vec![MESSAGE_EVENT_KIND as u64])
-            .authors(next_authors.clone())
-            .build();
-        let Ok(filter_json) = serde_json::to_string(&filter) else {
-            return;
-        };
-        let subid = format!("ndr-runtime-messages-{}", uuid::Uuid::new_v4());
-        let _ = event_tx.send(SessionManagerEvent::Subscribe {
-            subid: subid.clone(),
-            filter_json,
-        });
-        *current = Some(DirectMessageSubscription {
-            subid,
-            authors: next_authors,
-        });
-        *last_change = Some(Instant::now());
-    }
-}
-
-impl NdrRuntime {
     pub fn pending_invite_response_owner_pubkeys(&self) -> Vec<PublicKey> {
-        self.session_manager.pending_invite_response_owner_pubkeys()
+        Vec::new()
     }
 
     pub fn current_device_invite_response_pubkey(&self) -> Option<PublicKey> {
-        self.session_manager.current_device_invite_response_pubkey()
+        self.state
+            .lock()
+            .unwrap()
+            .core
+            .snapshot()
+            .local_invite
+            .map(|invite| public_device(invite.inviter_ephemeral_public_key))
+    }
+
+    pub fn local_invite(&self) -> Option<Invite> {
+        self.state.lock().unwrap().core.snapshot().local_invite
     }
 
     pub fn get_owner_pubkey(&self) -> PublicKey {
-        self.session_manager.get_owner_pubkey()
+        self.owner_public_key
     }
 
     pub fn get_our_pubkey(&self) -> PublicKey {
-        self.session_manager.get_our_pubkey()
+        self.our_public_key
     }
 
     pub fn get_device_id(&self) -> &str {
-        self.session_manager.get_device_id()
+        &self.device_id
     }
 
-    pub fn set_auto_adopt_chat_settings(&self, enabled: bool) {
-        self.session_manager.set_auto_adopt_chat_settings(enabled)
-    }
-
-    pub fn session_manager(&self) -> &SessionManager {
-        &self.session_manager
-    }
+    pub fn set_auto_adopt_chat_settings(&self, _enabled: bool) {}
 
     pub fn with_group_context<R>(
         &self,
         f: impl FnOnce(&SessionManager, &mut GroupManager, &Sender<SessionManagerEvent>) -> R,
     ) -> R {
+        let core_snapshot = self.state.lock().unwrap().core.clone();
         let mut group_manager = self.group_manager.lock().unwrap();
-        f(&self.session_manager, &mut group_manager, &self.event_tx)
+        f(&core_snapshot, &mut group_manager, &self.event_tx)
     }
 
     pub fn sync_groups(&self, groups: Vec<GroupData>) -> Result<()> {
@@ -506,14 +755,12 @@ impl NdrRuntime {
                 .into_iter()
                 .filter(|group_id| !next_group_ids.contains(group_id))
                 .collect();
-
             for group in groups {
                 group_manager.upsert_group(group)?;
             }
             for group_id in stale_group_ids {
                 group_manager.remove_group(&group_id);
             }
-
             Ok(())
         })
     }
@@ -546,406 +793,502 @@ impl NdrRuntime {
     }
 
     pub fn drain_events(&self) -> Vec<SessionManagerEvent> {
-        let event_rx = self.event_rx.lock().unwrap();
-        event_rx.try_iter().collect()
+        self.event_rx.lock().unwrap().try_iter().collect()
     }
 
     pub fn queued_message_diagnostics(
         &self,
         inner_event_id: Option<&str>,
-    ) -> Result<Vec<crate::QueuedMessageDiagnostic>> {
-        self.session_manager
-            .queued_message_diagnostics(inner_event_id)
+    ) -> Result<Vec<QueuedMessageDiagnostic>> {
+        let diagnostics = self
+            .state
+            .lock()
+            .unwrap()
+            .pending_outbound
+            .iter()
+            .filter(|pending| {
+                inner_event_id
+                    .map(|id| pending.inner_event_id.as_deref() == Some(id))
+                    .unwrap_or(true)
+            })
+            .map(|pending| QueuedMessageDiagnostic {
+                stage: pending.reason.clone(),
+                target_key: public_owner(pending.recipient_owner).to_hex(),
+                owner_pubkey: Some(public_owner(pending.recipient_owner)),
+                inner_event_id: pending.inner_event_id.clone(),
+                created_at_ms: pending.created_at_ms,
+            })
+            .collect();
+        Ok(diagnostics)
+    }
+
+    fn process_invite_event(&self, event: &Event) -> Result<()> {
+        let invite = nostr_codec::parse_invite_event(event)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        let invite_owner = invite
+            .inviter_owner_pubkey
+            .map(public_owner)
+            .unwrap_or_else(|| public_device(invite.inviter_device_pubkey));
+        self.state
+            .lock()
+            .unwrap()
+            .core
+            .observe_device_invite(owner(invite_owner), invite)?;
+        self.persist_state()?;
+        self.retry_pending_outbound()
+    }
+
+    fn process_invite_response_event(&self, event: &Event) -> Result<()> {
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .processed_invite_response_ids
+            .contains(&event.id.to_string())
+        {
+            return Ok(());
+        }
+        let envelope = nostr_codec::parse_invite_response_event(event)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now(), &mut rng);
+        let processed = self
+            .state
+            .lock()
+            .unwrap()
+            .core
+            .observe_invite_response(&mut ctx, &envelope)?;
+        if processed.is_some() {
+            self.state
+                .lock()
+                .unwrap()
+                .processed_invite_response_ids
+                .insert(event.id.to_string());
+            self.persist_state()?;
+            self.retry_pending_outbound()?;
+            self.refresh_protocol_subscriptions()?;
+            self.sync_direct_message_subscriptions()?;
+        }
+        Ok(())
+    }
+
+    fn process_message_event(&self, event: &Event, event_id: Option<String>) -> Result<()> {
+        let envelope = nostr_codec::parse_message_event(event)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        let sender_owner = self
+            .resolve_message_sender_owner(envelope.sender)
+            .unwrap_or_else(|| owner(public_device(envelope.sender)));
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now(), &mut rng);
+        let received =
+            self.state
+                .lock()
+                .unwrap()
+                .core
+                .receive(&mut ctx, sender_owner, &envelope)?;
+        let Some(received) = received else {
+            return Ok(());
+        };
+        self.persist_state()?;
+        let sender = public_owner(received.owner_pubkey);
+        let (conversation_owner, payload) = decode_local_sibling_payload(&received.payload)
+            .map(|(owner, payload)| (Some(owner), payload))
+            .unwrap_or((None, received.payload));
+        let content = String::from_utf8(payload).map_err(|e| Error::Decryption(e.to_string()))?;
+        self.event_tx
+            .send(SessionManagerEvent::DecryptedMessage {
+                sender,
+                sender_device: Some(public_device(received.device_pubkey)),
+                conversation_owner,
+                content,
+                event_id,
+            })
+            .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        Ok(())
+    }
+
+    fn prepare_and_publish(
+        &self,
+        recipient_owner: OwnerPubkey,
+        remote_payload: Vec<u8>,
+        local_sibling_payload: Option<Vec<u8>>,
+        inner_event_id: Option<String>,
+    ) -> Result<Vec<String>> {
+        let now = now();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now, &mut rng);
+        let (remote, local) = {
+            let mut state = self.state.lock().unwrap();
+            let remote = state.core.prepare_remote_send(
+                &mut ctx,
+                recipient_owner,
+                remote_payload.clone(),
+            )?;
+            let local = match local_sibling_payload.clone() {
+                Some(payload) => Some(state.core.prepare_local_sibling_send(&mut ctx, payload)?),
+                None => None,
+            };
+            (remote, local)
+        };
+
+        let has_gap = !remote.relay_gaps.is_empty()
+            || local
+                .as_ref()
+                .is_some_and(|prepared| !prepared.relay_gaps.is_empty());
+        if has_gap {
+            let reason = if remote
+                .relay_gaps
+                .iter()
+                .chain(local.as_ref().into_iter().flat_map(|p| p.relay_gaps.iter()))
+                .any(|gap| matches!(gap, RelayGap::MissingRoster { .. }))
+            {
+                QueuedMessageStage::Discovery
+            } else {
+                QueuedMessageStage::Device
+            };
+            self.state
+                .lock()
+                .unwrap()
+                .pending_outbound
+                .push(PendingOutbound {
+                    recipient_owner,
+                    remote_payload,
+                    local_sibling_payload,
+                    inner_event_id,
+                    created_at_ms: current_unix_millis(),
+                    reason,
+                });
+            self.persist_state()?;
+            self.refresh_protocol_subscriptions()?;
+            return Ok(Vec::new());
+        }
+
+        let mut event_ids = Vec::new();
+        self.publish_prepared(&remote, inner_event_id.clone(), &mut event_ids)?;
+        if let Some(local) = local.as_ref() {
+            self.publish_prepared(local, inner_event_id, &mut event_ids)?;
+        }
+        self.persist_state()?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(event_ids)
+    }
+
+    fn publish_prepared(
+        &self,
+        prepared: &crate::PreparedSend,
+        inner_event_id: Option<String>,
+        event_ids: &mut Vec<String>,
+    ) -> Result<()> {
+        for response in &prepared.invite_responses {
+            let event = nostr_codec::invite_response_event(response)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            self.event_tx
+                .send(SessionManagerEvent::PublishSigned(event))
+                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        }
+        for delivery in &prepared.deliveries {
+            let event = nostr_codec::message_event(&delivery.envelope)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            event_ids.push(event.id.to_string());
+            self.event_tx
+                .send(SessionManagerEvent::PublishSignedForInnerEvent {
+                    event,
+                    inner_event_id: inner_event_id.clone(),
+                    target_device_id: Some(public_device(delivery.device_pubkey).to_hex()),
+                })
+                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn retry_pending_outbound(&self) -> Result<()> {
+        let pending = std::mem::take(&mut self.state.lock().unwrap().pending_outbound);
+        let mut still_pending = Vec::new();
+        for pending_send in pending {
+            let result = self.prepare_and_publish(
+                pending_send.recipient_owner,
+                pending_send.remote_payload.clone(),
+                pending_send.local_sibling_payload.clone(),
+                pending_send.inner_event_id.clone(),
+            );
+            if result.is_err() {
+                still_pending.push(pending_send);
+            }
+        }
+        self.state
+            .lock()
+            .unwrap()
+            .pending_outbound
+            .extend(still_pending);
+        self.persist_state()
+    }
+
+    fn send_link_bootstrap(&self, invite_owner: PublicKey) -> Result<()> {
+        let now = now();
+        let expires_at = now.get().saturating_add(60);
+        let event = pairwise_codec::typing_event(
+            self.owner_public_key,
+            pairwise_codec::EncodeOptions::new(now.get(), current_unix_millis())
+                .with_expiration(expires_at),
+        )
+        .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        self.send_event(invite_owner, event).map(|_| ())
+    }
+
+    fn publish_local_invite(&self, invite: &Invite) -> Result<()> {
+        let event = nostr_codec::invite_unsigned_event(invite)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        let keys = Keys::new(nostr::SecretKey::from_slice(&self.our_identity_key)?);
+        let signed = event.sign_with_keys(&keys)?;
+        self.event_tx
+            .send(SessionManagerEvent::PublishSigned(signed))
+            .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        Ok(())
+    }
+
+    fn refresh_protocol_subscriptions(&self) -> Result<()> {
+        let mut filters = Vec::new();
+        let owners = self.protocol_owner_pubkeys();
+        if !owners.is_empty() {
+            filters.push(
+                Filter::new()
+                    .kind(Kind::from(APP_KEYS_EVENT_KIND as u16))
+                    .authors(owners.clone()),
+            );
+        }
+        let invite_authors = self.known_device_identity_pubkeys_for_owners(owners);
+        if !invite_authors.is_empty() {
+            filters.push(
+                Filter::new()
+                    .kind(Kind::from(INVITE_EVENT_KIND as u16))
+                    .authors(invite_authors),
+            );
+        }
+        if let Some(invite_response_pubkey) = self.current_device_invite_response_pubkey() {
+            filters.push(
+                Filter::new()
+                    .kind(Kind::from(INVITE_RESPONSE_KIND as u16))
+                    .pubkey(invite_response_pubkey),
+            );
+        }
+        if filters.is_empty() {
+            self.event_tx
+                .send(SessionManagerEvent::Unsubscribe(PROTOCOL_SUBID.to_string()))
+                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+            return Ok(());
+        }
+        self.event_tx
+            .send(SessionManagerEvent::Subscribe {
+                subid: PROTOCOL_SUBID.to_string(),
+                filter_json: serde_json::to_string(&filters)?,
+            })
+            .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        Ok(())
+    }
+
+    fn protocol_owner_pubkeys(&self) -> Vec<PublicKey> {
+        let mut owners = BTreeSet::new();
+        owners.insert(self.owner_public_key);
+        owners.extend(self.known_peer_owner_pubkeys());
+        owners.extend(
+            self.state
+                .lock()
+                .unwrap()
+                .tracked_owner_pubkeys
+                .iter()
+                .copied(),
+        );
+        let pending_owners = self
+            .state
+            .lock()
+            .unwrap()
+            .pending_outbound
+            .iter()
+            .map(|pending| public_owner(pending.recipient_owner))
+            .collect::<Vec<_>>();
+        owners.extend(pending_owners);
+        owners.into_iter().collect()
+    }
+
+    fn observe_owner_if_absent(&self, owner_pubkey: PublicKey) {
+        self.state
+            .lock()
+            .unwrap()
+            .tracked_owner_pubkeys
+            .insert(owner_pubkey);
+    }
+
+    fn resolve_message_sender_owner(&self, sender: DevicePubkey) -> Option<OwnerPubkey> {
+        let snapshot = self.state.lock().unwrap().core.snapshot();
+        for user in snapshot.users {
+            for record in user.devices {
+                if record
+                    .active_session
+                    .as_ref()
+                    .is_some_and(|state| session_matches_sender(state, sender))
+                    || record
+                        .inactive_sessions
+                        .iter()
+                        .any(|state| session_matches_sender(state, sender))
+                {
+                    return Some(user.owner_pubkey);
+                }
+            }
+        }
+        None
+    }
+
+    fn export_all_session_states(&self) -> Vec<(PublicKey, PublicKey, SessionState)> {
+        self.state
+            .lock()
+            .unwrap()
+            .core
+            .snapshot()
+            .users
+            .into_iter()
+            .flat_map(|user| {
+                user.devices.into_iter().flat_map(move |device_record| {
+                    device_record
+                        .active_session
+                        .into_iter()
+                        .chain(device_record.inactive_sessions)
+                        .map(move |state| {
+                            (
+                                public_owner(user.owner_pubkey),
+                                public_device(device_record.device_pubkey),
+                                state,
+                            )
+                        })
+                })
+            })
+            .collect()
+    }
+
+    fn persist_state(&self) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        let stored = StoredRuntimeState {
+            core: state.core.snapshot(),
+            pending_outbound: state.pending_outbound.clone(),
+            processed_invite_response_ids: state
+                .processed_invite_response_ids
+                .iter()
+                .cloned()
+                .collect(),
+            latest_app_keys_created_at: state
+                .latest_app_keys_created_at
+                .iter()
+                .map(|(k, v)| (k.to_hex(), *v))
+                .collect(),
+            tracked_owner_pubkeys: state.tracked_owner_pubkeys.iter().copied().collect(),
+        };
+        self.storage
+            .put(RUNTIME_STATE_KEY, serde_json::to_string(&stored)?)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use nostr::{Keys, PublicKey};
+impl RuntimeState {
+    fn load(
+        storage: &dyn StorageAdapter,
+        owner_public_key: PublicKey,
+        identity_key: [u8; 32],
+    ) -> Option<Self> {
+        let raw = storage.get(RUNTIME_STATE_KEY).ok().flatten()?;
+        let stored: StoredRuntimeState = serde_json::from_str(&raw).ok()?;
+        let core = SessionManager::from_snapshot(stored.core, identity_key).ok()?;
+        Some(Self {
+            core,
+            pending_outbound: stored.pending_outbound,
+            processed_invite_response_ids: stored
+                .processed_invite_response_ids
+                .into_iter()
+                .collect(),
+            latest_app_keys_created_at: stored
+                .latest_app_keys_created_at
+                .into_iter()
+                .filter_map(|(k, v)| PublicKey::parse(&k).ok().map(|pk| (pk, v)))
+                .collect(),
+            tracked_owner_pubkeys: stored.tracked_owner_pubkeys.into_iter().collect(),
+        })
+        .or_else(|| {
+            Some(Self {
+                core: SessionManager::new(owner(owner_public_key), identity_key),
+                pending_outbound: Vec::new(),
+                processed_invite_response_ids: HashSet::new(),
+                latest_app_keys_created_at: HashMap::new(),
+                tracked_owner_pubkeys: BTreeSet::new(),
+            })
+        })
+    }
+}
 
-    use crate::group::create_group_data;
-    use crate::{
-        AppKeys, DeviceEntry, SerializableKeyPair, SessionManagerEvent, SessionState,
-        CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND,
+fn local_sibling_payload(conversation_owner: PublicKey, payload: &[u8]) -> Result<Vec<u8>> {
+    use base64::Engine;
+    let wrapper = LocalSiblingPayload {
+        protocol: "ndr-local-sibling-copy".to_string(),
+        version: 1,
+        conversation_owner: conversation_owner.to_hex(),
+        payload: base64::engine::general_purpose::STANDARD.encode(payload),
     };
+    Ok(serde_json::to_vec(&wrapper)?)
+}
 
-    use super::NdrRuntime;
-
-    fn session_state_tracking(current: nostr::PublicKey, next: nostr::PublicKey) -> SessionState {
-        let our_next = Keys::generate();
-        SessionState {
-            root_key: [1; 32],
-            their_current_nostr_public_key: Some(current),
-            their_next_nostr_public_key: Some(next),
-            our_current_nostr_key: None,
-            our_next_nostr_key: SerializableKeyPair {
-                public_key: our_next.public_key(),
-                private_key: our_next.secret_key().to_secret_bytes(),
-            },
-            receiving_chain_key: None,
-            sending_chain_key: None,
-            sending_chain_message_number: 0,
-            receiving_chain_message_number: 0,
-            previous_sending_chain_message_count: 0,
-            skipped_keys: Default::default(),
-        }
+fn decode_local_sibling_payload(payload: &[u8]) -> Option<(PublicKey, Vec<u8>)> {
+    use base64::Engine;
+    let wrapper: LocalSiblingPayload = serde_json::from_slice(payload).ok()?;
+    if wrapper.protocol != "ndr-local-sibling-copy" || wrapper.version != 1 {
+        return None;
     }
+    let owner = PublicKey::parse(&wrapper.conversation_owner).ok()?;
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(wrapper.payload)
+        .ok()?;
+    Some((owner, payload))
+}
 
-    fn signed_events(events: Vec<SessionManagerEvent>) -> Vec<nostr::Event> {
-        events
-            .into_iter()
-            .filter_map(|event| match event {
-                SessionManagerEvent::PublishSigned(event) => Some(event),
-                SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => Some(event),
-                _ => None,
-            })
-            .collect()
+fn collect_expected_senders(state: &SessionState, out: &mut BTreeSet<PublicKey>) {
+    if let Some(current) = state.their_current_nostr_public_key {
+        out.insert(public_device(current));
     }
-
-    fn route_runtime_events(runtimes: &[&NdrRuntime]) {
-        for _ in 0..32 {
-            let mut routed = 0usize;
-            for (origin, runtime) in runtimes.iter().enumerate() {
-                for event in signed_events(runtime.drain_events()) {
-                    routed += 1;
-                    for (target, recipient) in runtimes.iter().enumerate() {
-                        if target != origin {
-                            recipient.process_received_event(event.clone());
-                        }
-                    }
-                }
-            }
-
-            if routed == 0 {
-                return;
-            }
-        }
-
-        panic!("runtime event routing did not quiesce");
+    if let Some(next) = state.their_next_nostr_public_key {
+        out.insert(public_device(next));
     }
+    out.extend(state.skipped_keys.keys().copied().map(public_device));
+}
 
-    fn sorted_pubkeys(mut pubkeys: Vec<PublicKey>) -> Vec<PublicKey> {
-        pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
-        pubkeys
-    }
+fn session_matches_sender(state: &SessionState, sender: DevicePubkey) -> bool {
+    state.their_current_nostr_public_key == Some(sender)
+        || state.their_next_nostr_public_key == Some(sender)
+        || state.skipped_keys.contains_key(&sender)
+}
 
-    fn decrypted_chat_messages(
-        runtime: &NdrRuntime,
-        expected_content: &str,
-    ) -> Vec<(PublicKey, Option<PublicKey>, nostr::UnsignedEvent)> {
-        runtime
-            .drain_events()
-            .into_iter()
-            .filter_map(|event| match event {
-                SessionManagerEvent::DecryptedMessage {
-                    sender,
-                    sender_device,
-                    content,
-                    ..
-                } => {
-                    let rumor = serde_json::from_str::<nostr::UnsignedEvent>(&content).ok()?;
-                    (rumor.kind.as_u16() == CHAT_MESSAGE_KIND as u16
-                        && rumor.content == expected_content)
-                        .then_some((sender, sender_device, rumor))
-                }
-                _ => None,
-            })
-            .collect()
-    }
+fn owner(public_key: PublicKey) -> OwnerPubkey {
+    OwnerPubkey::from_bytes(public_key.to_bytes())
+}
 
-    #[test]
-    fn runtime_init_queues_initial_publish_events() {
-        let keys = Keys::generate();
-        let runtime = NdrRuntime::new(
-            keys.public_key(),
-            keys.secret_key().secret_bytes(),
-            keys.public_key().to_hex(),
-            keys.public_key(),
-            None,
-            None,
-        );
+fn device(public_key: PublicKey) -> DevicePubkey {
+    DevicePubkey::from_bytes(public_key.to_bytes())
+}
 
-        runtime.init().unwrap();
+fn public_owner(owner: OwnerPubkey) -> PublicKey {
+    PublicKey::from_slice(&owner.to_bytes()).expect("owner pubkey bytes must be valid")
+}
 
-        assert!(!runtime.drain_events().is_empty());
-    }
+fn public_device(device: DevicePubkey) -> PublicKey {
+    PublicKey::from_slice(&device.to_bytes()).expect("device pubkey bytes must be valid")
+}
 
-    #[test]
-    fn runtime_setup_user_delegates_to_session_manager() {
-        let alice = Keys::generate();
-        let bob = Keys::generate();
-        let runtime = NdrRuntime::new(
-            alice.public_key(),
-            alice.secret_key().secret_bytes(),
-            alice.public_key().to_hex(),
-            alice.public_key(),
-            None,
-            None,
-        );
-
-        runtime.init().unwrap();
-        runtime.setup_user(bob.public_key()).unwrap();
-    }
-
-    #[test]
-    fn runtime_owns_direct_message_subscription_lifecycle() {
-        let alice = Keys::generate();
-        let peer = Keys::generate().public_key();
-        let peer_device = Keys::generate().public_key();
-        let current_sender = Keys::generate().public_key();
-        let next_sender = Keys::generate().public_key();
-        let runtime = NdrRuntime::new(
-            alice.public_key(),
-            alice.secret_key().secret_bytes(),
-            alice.public_key().to_hex(),
-            alice.public_key(),
-            None,
-            None,
-        );
-
-        runtime
-            .import_session_state(
-                peer,
-                Some(peer_device.to_hex()),
-                session_state_tracking(current_sender, next_sender),
-            )
-            .unwrap();
-
-        let events = runtime.drain_events();
-        let (subid, filter_json) = events
-            .iter()
-            .find_map(|event| match event {
-                SessionManagerEvent::Subscribe { subid, filter_json }
-                    if subid.starts_with("ndr-runtime-messages-") =>
-                {
-                    Some((subid.clone(), filter_json.clone()))
-                }
-                _ => None,
-            })
-            .expect("runtime should subscribe for session message authors");
-        let filter = serde_json::from_str::<serde_json::Value>(&filter_json).unwrap();
-        assert_eq!(
-            filter.get("kinds").and_then(serde_json::Value::as_array),
-            Some(&vec![serde_json::json!(MESSAGE_EVENT_KIND)])
-        );
-        let authors = filter
-            .get("authors")
-            .and_then(serde_json::Value::as_array)
+fn now() -> UnixSeconds {
+    UnixSeconds(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap()
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<Vec<_>>();
-        assert!(authors.contains(&current_sender.to_hex().as_str()));
-        assert!(authors.contains(&next_sender.to_hex().as_str()));
+            .as_secs(),
+    )
+}
 
-        runtime.session_manager().delete_chat(peer).unwrap();
-        runtime.sync_direct_message_subscriptions().unwrap();
-        // The first sync set `last_change`, so the immediate follow-up call
-        // is throttled and schedules a trailing-flush worker. Wait long
-        // enough for that worker to fire the unsub.
-        std::thread::sleep(std::time::Duration::from_millis(1700));
-        let events = runtime.drain_events();
-        assert!(events.iter().any(|event| {
-            matches!(event, SessionManagerEvent::Unsubscribe(unsubid) if unsubid == &subid)
-        }));
-    }
-
-    #[test]
-    fn runtime_subscribes_added_direct_message_authors_without_throttle() {
-        let alice = Keys::generate();
-        let peer1 = Keys::generate().public_key();
-        let peer1_device = Keys::generate().public_key();
-        let peer1_current = Keys::generate().public_key();
-        let peer1_next = Keys::generate().public_key();
-        let peer2 = Keys::generate().public_key();
-        let peer2_device = Keys::generate().public_key();
-        let peer2_current = Keys::generate().public_key();
-        let peer2_next = Keys::generate().public_key();
-        let runtime = NdrRuntime::new(
-            alice.public_key(),
-            alice.secret_key().secret_bytes(),
-            alice.public_key().to_hex(),
-            alice.public_key(),
-            None,
-            None,
-        );
-
-        runtime
-            .import_session_state(
-                peer1,
-                Some(peer1_device.to_hex()),
-                session_state_tracking(peer1_current, peer1_next),
-            )
-            .unwrap();
-        let _ = runtime.drain_events();
-
-        runtime
-            .import_session_state(
-                peer2,
-                Some(peer2_device.to_hex()),
-                session_state_tracking(peer2_current, peer2_next),
-            )
-            .unwrap();
-
-        let events = runtime.drain_events();
-        let latest_subscribe = events.iter().rev().find_map(|event| match event {
-            SessionManagerEvent::Subscribe { filter_json, .. } => {
-                Some(serde_json::from_str::<serde_json::Value>(filter_json).unwrap())
-            }
-            _ => None,
-        });
-        let filter = latest_subscribe.expect("new authors should resubscribe immediately");
-        let authors = filter
-            .get("authors")
-            .and_then(serde_json::Value::as_array)
-            .unwrap()
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<Vec<_>>();
-        assert!(authors.contains(&peer1_current.to_hex().as_str()));
-        assert!(authors.contains(&peer1_next.to_hex().as_str()));
-        assert!(authors.contains(&peer2_current.to_hex().as_str()));
-        assert!(authors.contains(&peer2_next.to_hex().as_str()));
-    }
-
-    #[test]
-    fn fresh_same_owner_runtime_send_reaches_peer_and_existing_owner_device() {
-        let alice_owner_keys = Keys::generate();
-        let alice_owner = alice_owner_keys.public_key();
-        let alice_old_device_keys = Keys::generate();
-        let alice_old_device = alice_old_device_keys.public_key();
-        let alice_fresh_device_keys = Keys::generate();
-        let alice_fresh_device = alice_fresh_device_keys.public_key();
-        let bob_keys = Keys::generate();
-        let bob = bob_keys.public_key();
-
-        let alice_old = NdrRuntime::new(
-            alice_old_device,
-            alice_old_device_keys.secret_key().secret_bytes(),
-            alice_old_device.to_hex(),
-            alice_owner,
-            None,
-            None,
-        );
-        let alice_fresh = NdrRuntime::new(
-            alice_fresh_device,
-            alice_fresh_device_keys.secret_key().secret_bytes(),
-            alice_fresh_device.to_hex(),
-            alice_owner,
-            None,
-            None,
-        );
-        let bob_runtime = NdrRuntime::new(
-            bob,
-            bob_keys.secret_key().secret_bytes(),
-            bob.to_hex(),
-            bob,
-            None,
-            None,
-        );
-
-        let alice_app_keys = AppKeys::new(vec![
-            DeviceEntry::new(alice_old_device, 1),
-            DeviceEntry::new(alice_fresh_device, 2),
-        ]);
-        let bob_app_keys = AppKeys::new(vec![DeviceEntry::new(bob, 1)]);
-        for runtime in [&alice_old, &alice_fresh, &bob_runtime] {
-            runtime.ingest_app_keys_snapshot(alice_owner, alice_app_keys.clone(), 10);
-            runtime.ingest_app_keys_snapshot(bob, bob_app_keys.clone(), 10);
-        }
-
-        alice_old.init().unwrap();
-        alice_fresh.init().unwrap();
-        bob_runtime.init().unwrap();
-        route_runtime_events(&[&alice_old, &alice_fresh, &bob_runtime]);
-
-        let expected_alice_devices = sorted_pubkeys(vec![alice_old_device, alice_fresh_device]);
-        assert_eq!(
-            sorted_pubkeys(alice_fresh.known_device_identity_pubkeys_for_owner(alice_owner)),
-            expected_alice_devices
-        );
-        assert_eq!(
-            sorted_pubkeys(bob_runtime.known_device_identity_pubkeys_for_owner(alice_owner)),
-            expected_alice_devices
-        );
-
-        let text = "fresh same-owner message";
-        let (inner_id, published_ids) = alice_fresh
-            .send_text_with_inner_id(bob, text.to_string(), None)
-            .unwrap();
-        assert!(!inner_id.is_empty());
-        assert!(
-            published_ids.len() >= 2,
-            "fresh sender should publish to peer and existing same-owner device"
-        );
-
-        let outbound = alice_fresh.drain_events();
-        let target_device_ids = outbound
-            .iter()
-            .filter_map(|event| match event {
-                SessionManagerEvent::PublishSignedForInnerEvent {
-                    event,
-                    target_device_id,
-                    ..
-                } if event.kind.as_u16() == MESSAGE_EVENT_KIND as u16 => target_device_id.clone(),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(target_device_ids.contains(&bob.to_hex()));
-        assert!(target_device_ids.contains(&alice_old_device.to_hex()));
-        assert!(!target_device_ids.contains(&alice_fresh_device.to_hex()));
-
-        for event in signed_events(outbound) {
-            bob_runtime.process_received_event(event.clone());
-            alice_old.process_received_event(event);
-        }
-
-        let bob_messages = decrypted_chat_messages(&bob_runtime, text);
-        assert!(bob_messages.iter().any(|(sender, sender_device, _)| {
-            *sender == alice_owner && *sender_device == Some(alice_fresh_device)
-        }));
-
-        let old_device_messages = decrypted_chat_messages(&alice_old, text);
-        assert!(
-            old_device_messages
-                .iter()
-                .any(|(sender, sender_device, _)| {
-                    *sender == alice_owner && *sender_device == Some(alice_fresh_device)
-                }),
-            "existing same-owner device should receive the fresh device send as a self message"
-        );
-    }
-
-    #[test]
-    fn runtime_sync_groups_replaces_stale_group_set() {
-        let alice = Keys::generate();
-        let runtime = NdrRuntime::new(
-            alice.public_key(),
-            alice.secret_key().secret_bytes(),
-            alice.public_key().to_hex(),
-            alice.public_key(),
-            None,
-            None,
-        );
-
-        let group_one = create_group_data("One", &alice.public_key().to_hex(), &[]);
-        let group_two = create_group_data("Two", &alice.public_key().to_hex(), &[]);
-
-        runtime
-            .sync_groups(vec![group_one.clone(), group_two.clone()])
-            .unwrap();
-
-        let mut initial_group_ids =
-            runtime.with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
-        initial_group_ids.sort();
-        let mut expected_initial_group_ids = vec![group_one.id.clone(), group_two.id.clone()];
-        expected_initial_group_ids.sort();
-        assert_eq!(initial_group_ids, expected_initial_group_ids);
-
-        runtime.sync_groups(vec![group_two.clone()]).unwrap();
-
-        let updated_group_ids =
-            runtime.with_group_context(|_, group_manager, _| group_manager.managed_group_ids());
-        assert_eq!(updated_group_ids, vec![group_two.id]);
-    }
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }

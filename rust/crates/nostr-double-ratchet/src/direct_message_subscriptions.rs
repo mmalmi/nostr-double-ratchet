@@ -5,6 +5,7 @@ use nostr::{Filter, PublicKey};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+const DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_ID: &str = "ndr-runtime-messages";
 const DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX: &str = "ndr-runtime-messages-";
 
 #[derive(Debug, Default, Clone)]
@@ -119,7 +120,10 @@ pub fn direct_message_subscription_authors(
     filter_json: impl AsRef<str>,
 ) -> Vec<PublicKey> {
     let subid = subid.as_ref().trim();
-    if subid.is_empty() || !subid.starts_with(DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX) {
+    if subid.is_empty()
+        || (subid != DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_ID
+            && !subid.starts_with(DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX))
+    {
         return Vec::new();
     }
 

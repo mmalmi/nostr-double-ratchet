@@ -1,6 +1,7 @@
-use crate::{Error, Result, SessionState};
+use crate::{DevicePubkey, Error, Result, SessionState};
 use hkdf::Hkdf;
 use nostr::PublicKey;
+use rand::{CryptoRng, RngCore};
 use sha2::Sha256;
 
 pub fn kdf(input1: &[u8], input2: &[u8], num_outputs: usize) -> Vec<[u8; 32]> {
@@ -14,6 +15,29 @@ pub fn kdf(input1: &[u8], input2: &[u8], num_outputs: usize) -> Vec<[u8; 32]> {
         outputs.push(okm);
     }
     outputs
+}
+
+pub(crate) fn secret_key_from_bytes(bytes: &[u8; 32]) -> Result<nostr::SecretKey> {
+    nostr::SecretKey::from_slice(bytes).map_err(Into::into)
+}
+
+pub(crate) fn device_pubkey_from_secret_bytes(bytes: &[u8; 32]) -> Result<DevicePubkey> {
+    let secret = secret_key_from_bytes(bytes)?;
+    let public = nostr::Keys::new(secret).public_key();
+    Ok(DevicePubkey::from_nostr(public))
+}
+
+pub(crate) fn random_secret_key_bytes<R>(rng: &mut R) -> Result<[u8; 32]>
+where
+    R: RngCore + CryptoRng,
+{
+    loop {
+        let mut candidate = [0u8; 32];
+        rng.fill_bytes(&mut candidate);
+        if nostr::SecretKey::from_slice(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+    }
 }
 
 pub fn deep_copy_state(state: &SessionState) -> SessionState {

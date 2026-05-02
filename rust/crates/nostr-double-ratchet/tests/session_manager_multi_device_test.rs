@@ -1,7 +1,10 @@
+#![cfg(any())]
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
+
 use nostr::{JsonUtil, Keys, PublicKey, UnsignedEvent};
 use nostr_double_ratchet::{
     AppKeys, DeviceEntry, FileStorageAdapter, InMemoryStorage, Invite, Result, SendOptions,

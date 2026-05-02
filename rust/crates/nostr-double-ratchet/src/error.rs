@@ -1,7 +1,37 @@
 use thiserror::Error;
 
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum DomainError {
+    #[error("session not ready")]
+    SessionNotReady,
+
+    #[error("cannot send yet")]
+    CannotSendYet,
+
+    #[error("unexpected sender")]
+    UnexpectedSender,
+
+    #[error("too many skipped messages")]
+    TooManySkippedMessages,
+
+    #[error("invite already used")]
+    InviteAlreadyUsed,
+
+    #[error("invite exhausted")]
+    InviteExhausted,
+
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+}
+
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error(transparent)]
+    Domain(#[from] DomainError),
+
+    #[error("Parse error: {0}")]
+    Parse(String),
+
     #[error("Encryption error: {0}")]
     Encryption(String),
 

@@ -1,54 +1,96 @@
 use crate::{
-    pubsub::{build_filter, NostrPubSub},
-    Error, Result, Session, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+    owner_pubkey_from_device_pubkey, random_secret_key_bytes, secret_key_from_bytes, DevicePubkey,
+    DeviceRoster, DomainError, OwnerPubkey, ProtocolContext, Result, Session, UnixSeconds,
+    INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
-use nostr::PublicKey;
-use nostr::{Alphabet, SingleLetterTag};
-use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
+use nostr::{Alphabet, Kind, PublicKey, SingleLetterTag};
+use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Invite {
-    pub inviter_ephemeral_public_key: PublicKey,
+    pub inviter_device_pubkey: DevicePubkey,
+    pub inviter_ephemeral_public_key: DevicePubkey,
+    #[serde(with = "serde_bytes_array")]
     pub shared_secret: [u8; 32],
-    pub inviter: PublicKey,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_option_bytes_array"
+    )]
     pub inviter_ephemeral_private_key: Option<[u8; 32]>,
-    pub device_id: Option<String>,
     pub max_uses: Option<usize>,
-    pub used_by: Vec<PublicKey>,
-    pub created_at: u64,
+    pub used_by: Vec<DevicePubkey>,
+    pub created_at: UnixSeconds,
+    pub inviter_owner_pubkey: Option<OwnerPubkey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    pub inviter: PublicKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_public_key: Option<PublicKey>,
 }
 
+#[derive(Debug, Clone)]
 pub struct InviteResponse {
     pub session: Session,
+    pub invitee_device_pubkey: DevicePubkey,
+    pub invitee_owner_pubkey: Option<OwnerPubkey>,
     pub invitee_identity: PublicKey,
     pub device_id: Option<String>,
     pub owner_public_key: Option<PublicKey>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteResponseEnvelope {
+    pub sender: DevicePubkey,
+    pub signer_secret_key: [u8; 32],
+    pub recipient: DevicePubkey,
+    pub created_at: UnixSeconds,
+    pub content: String,
+}
+
 impl InviteResponse {
-    /// Resolve the chat owner identity from the response.
-    /// Falls back to invitee identity when owner is not provided.
     pub fn resolved_owner_pubkey(&self) -> PublicKey {
         self.owner_public_key.unwrap_or(self.invitee_identity)
     }
 
-    /// Validate that the claimed owner can legitimately represent invitee_identity.
-    ///
-    /// Rules:
-    /// - Single-device users are always valid: owner == invitee_identity.
-    /// - Multi-device claims require AppKeys proof listing invitee_identity as a device.
-    pub fn has_verified_owner_claim(&self, app_keys: Option<&crate::AppKeys>) -> bool {
-        let owner = self.resolved_owner_pubkey();
-        if owner == self.invitee_identity {
+    pub fn claimed_owner_pubkey(&self) -> Option<OwnerPubkey> {
+        self.invitee_owner_pubkey
+    }
+
+    pub fn has_verified_owner_claim(&self, verifier: Option<&dyn OwnerClaimVerifier>) -> bool {
+        let owner_pubkey = self
+            .invitee_owner_pubkey
+            .unwrap_or_else(|| owner_pubkey_from_device_pubkey(self.invitee_device_pubkey));
+
+        if owner_pubkey == owner_pubkey_from_device_pubkey(self.invitee_device_pubkey) {
             return true;
         }
-        app_keys
-            .and_then(|keys| keys.get_device(&self.invitee_identity))
-            .is_some()
+
+        verifier.is_some_and(|verifier| {
+            verifier.has_device(self.invitee_device_pubkey, self.invitee_identity)
+        })
+    }
+}
+
+pub trait OwnerClaimVerifier {
+    fn has_device(&self, device_pubkey: DevicePubkey, device_identity: PublicKey) -> bool;
+}
+
+impl OwnerClaimVerifier for DeviceRoster {
+    fn has_device(&self, device_pubkey: DevicePubkey, _device_identity: PublicKey) -> bool {
+        self.get_device(&device_pubkey).is_some()
+    }
+}
+
+impl OwnerClaimVerifier for crate::AppKeys {
+    fn has_device(&self, _device_pubkey: DevicePubkey, device_identity: PublicKey) -> bool {
+        self.get_device(&device_identity).is_some()
     }
 }
 
@@ -58,183 +100,87 @@ impl Invite {
         device_id: Option<String>,
         max_uses: Option<usize>,
     ) -> Result<Self> {
-        let inviter_ephemeral_keys = Keys::generate();
-        let inviter_ephemeral_public_key = inviter_ephemeral_keys.public_key();
-        let inviter_ephemeral_private_key = inviter_ephemeral_keys.secret_key().to_secret_bytes();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(
+            UnixSeconds(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
+            &mut rng,
+        );
+        let mut invite = Self::create_new_with_context(
+            &mut ctx,
+            DevicePubkey::from_bytes(inviter.to_bytes()),
+            None,
+            max_uses,
+        )?;
+        invite.device_id = device_id;
+        Ok(invite)
+    }
 
-        let shared_secret = Keys::generate().secret_key().to_secret_bytes();
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    pub fn create_new_with_context<R>(
+        ctx: &mut ProtocolContext<'_, R>,
+        inviter_device_pubkey: DevicePubkey,
+        inviter_owner_pubkey: Option<OwnerPubkey>,
+        max_uses: Option<usize>,
+    ) -> Result<Self>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let inviter_ephemeral_private_key = random_secret_key_bytes(ctx.rng)?;
+        let inviter_ephemeral_public_key =
+            crate::device_pubkey_from_secret_bytes(&inviter_ephemeral_private_key)?;
+        let shared_secret = random_secret_key_bytes(ctx.rng)?;
 
         Ok(Self {
+            inviter_device_pubkey,
             inviter_ephemeral_public_key,
             shared_secret,
-            inviter,
             inviter_ephemeral_private_key: Some(inviter_ephemeral_private_key),
-            device_id,
             max_uses,
             used_by: Vec::new(),
-            created_at: now,
+            created_at: ctx.now,
+            inviter_owner_pubkey,
             purpose: None,
-            owner_public_key: None,
+            inviter: inviter_device_pubkey.to_nostr()?,
+            device_id: None,
+            owner_public_key: inviter_owner_pubkey
+                .map(|owner| owner.to_nostr())
+                .transpose()?,
         })
+    }
+
+    pub fn serialize(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    pub fn deserialize(json: &str) -> Result<Self> {
+        Ok(serde_json::from_str(json)?)
     }
 
     pub fn get_url(&self, root: &str) -> Result<String> {
-        let mut data = serde_json::Map::new();
-        data.insert(
-            "inviter".to_string(),
-            serde_json::Value::String(hex::encode(self.inviter.to_bytes())),
-        );
-        data.insert(
-            "ephemeralKey".to_string(),
-            serde_json::Value::String(hex::encode(self.inviter_ephemeral_public_key.to_bytes())),
-        );
-        data.insert(
-            "sharedSecret".to_string(),
-            serde_json::Value::String(hex::encode(self.shared_secret)),
-        );
-        if let Some(purpose) = &self.purpose {
-            data.insert(
-                "purpose".to_string(),
-                serde_json::Value::String(purpose.clone()),
-            );
-        }
-        if let Some(owner_pk) = &self.owner_public_key {
-            data.insert(
-                "owner".to_string(),
-                serde_json::Value::String(hex::encode(owner_pk.to_bytes())),
-            );
-        }
-
-        let url = format!(
-            "{}#{}",
-            root,
-            urlencoding::encode(&serde_json::Value::Object(data).to_string())
-        );
-        Ok(url)
+        crate::nostr_codec::invite_url(self, root)
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
     }
 
     pub fn from_url(url: &str) -> Result<Self> {
-        let hash = url
-            .split('#')
-            .nth(1)
-            .ok_or(Error::Invite("No hash in URL".to_string()))?;
-        let decoded = urlencoding::decode(hash).map_err(|e| Error::Invite(e.to_string()))?;
-        let data: serde_json::Value = serde_json::from_str(&decoded)?;
-
-        let inviter = crate::utils::pubkey_from_hex(
-            data["inviter"]
-                .as_str()
-                .ok_or(Error::Invite("Missing inviter".to_string()))?,
-        )?;
-        let ephemeral_key_str = data["ephemeralKey"]
-            .as_str()
-            .or_else(|| data["inviterEphemeralPublicKey"].as_str())
-            .ok_or(Error::Invite("Missing ephemeralKey".to_string()))?;
-        let ephemeral_key = crate::utils::pubkey_from_hex(ephemeral_key_str)?;
-        let shared_secret_hex = data["sharedSecret"]
-            .as_str()
-            .ok_or(Error::Invite("Missing sharedSecret".to_string()))?;
-        let shared_secret_bytes = hex::decode(shared_secret_hex)?;
-        let mut shared_secret = [0u8; 32];
-        shared_secret.copy_from_slice(&shared_secret_bytes);
-
-        let purpose = data["purpose"].as_str().map(|s| s.to_string());
-        let owner_public_key = data["owner"]
-            .as_str()
-            .or_else(|| data["ownerPubkey"].as_str())
-            .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
-
-        Ok(Self {
-            inviter_ephemeral_public_key: ephemeral_key,
-            shared_secret,
-            inviter,
-            inviter_ephemeral_private_key: None,
-            device_id: None,
-            max_uses: None,
-            used_by: Vec::new(),
-            created_at: 0,
-            purpose,
-            owner_public_key,
-        })
+        crate::nostr_codec::parse_invite_url(url)
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
     }
 
-    pub fn get_event(&self) -> Result<UnsignedEvent> {
-        let device_id = self.device_id.as_ref().ok_or(Error::DeviceIdRequired)?;
-
-        let tags = vec![
-            Tag::parse(&[
-                "ephemeralKey".to_string(),
-                hex::encode(self.inviter_ephemeral_public_key.to_bytes()),
-            ])
-            .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-            Tag::parse(&["sharedSecret".to_string(), hex::encode(self.shared_secret)])
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-            Tag::parse(&[
-                "d".to_string(),
-                format!("double-ratchet/invites/{}", device_id),
-            ])
-            .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-            Tag::parse(&["l".to_string(), "double-ratchet/invites".to_string()])
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-        ];
-
-        let event = EventBuilder::new(Kind::from(INVITE_EVENT_KIND as u16), "")
-            .tags(tags)
-            .custom_created_at(Timestamp::from(self.created_at))
-            .build(self.inviter);
-
-        Ok(event)
+    pub fn get_event(&self) -> Result<nostr::UnsignedEvent> {
+        if self.device_id.is_none() {
+            return Err(crate::Error::DeviceIdRequired);
+        }
+        crate::nostr_codec::invite_unsigned_event(self)
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
     }
 
     pub fn from_event(event: &nostr::Event) -> Result<Self> {
-        let inviter = event.pubkey;
-
-        let ephemeral_key = event
-            .tags
-            .iter()
-            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("ephemeralKey"))
-            .and_then(|t| t.as_slice().get(1).map(|s| s.to_string()))
-            .ok_or(Error::Invite("Missing ephemeralKey tag".to_string()))?;
-
-        let shared_secret_hex = event
-            .tags
-            .iter()
-            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("sharedSecret"))
-            .and_then(|t| t.as_slice().get(1).map(|s| s.to_string()))
-            .ok_or(Error::Invite("Missing sharedSecret tag".to_string()))?;
-
-        let device_tag = event
-            .tags
-            .iter()
-            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"))
-            .and_then(|t| t.as_slice().get(1).map(|s| s.to_string()));
-
-        let device_id = device_tag
-            .and_then(|d| d.split('/').nth(2).map(String::from))
-            .filter(|device_id| device_id != "public");
-
-        let inviter_ephemeral_public_key = crate::utils::pubkey_from_hex(&ephemeral_key)?;
-        let shared_secret_bytes = hex::decode(&shared_secret_hex)?;
-        let mut shared_secret = [0u8; 32];
-        shared_secret.copy_from_slice(&shared_secret_bytes);
-
-        Ok(Self {
-            inviter_ephemeral_public_key,
-            shared_secret,
-            inviter,
-            inviter_ephemeral_private_key: None,
-            device_id,
-            max_uses: None,
-            used_by: Vec::new(),
-            created_at: event.created_at.as_secs(),
-            purpose: None,
-            owner_public_key: None,
-        })
+        crate::nostr_codec::parse_invite_event(event)
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
     }
 
     pub fn accept(
@@ -253,176 +199,206 @@ impl Invite {
         device_id: Option<String>,
         owner_public_key: Option<PublicKey>,
     ) -> Result<(Session, nostr::Event)> {
-        let invitee_session_keys = Keys::generate();
-        let invitee_session_key = invitee_session_keys.secret_key().to_secret_bytes();
-        let invitee_session_public_key = invitee_session_keys.public_key();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now_seconds(), &mut rng);
+        let (session, envelope) = self.accept_with_owner_context_and_device(
+            &mut ctx,
+            DevicePubkey::from_bytes(invitee_public_key.to_bytes()),
+            invitee_private_key,
+            owner_public_key.map(|owner| OwnerPubkey::from_bytes(owner.to_bytes())),
+            device_id,
+        )?;
+        let event = crate::nostr_codec::invite_response_event(&envelope)
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
+        Ok((session, event))
+    }
 
-        let session = Session::init(
+    pub fn accept_with_context<R>(
+        &self,
+        ctx: &mut ProtocolContext<'_, R>,
+        invitee_public_key: DevicePubkey,
+        invitee_private_key: [u8; 32],
+    ) -> Result<(Session, InviteResponseEnvelope)>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.accept_with_owner_context(ctx, invitee_public_key, invitee_private_key, None)
+    }
+
+    pub fn accept_with_owner_context<R>(
+        &self,
+        ctx: &mut ProtocolContext<'_, R>,
+        invitee_public_key: DevicePubkey,
+        invitee_private_key: [u8; 32],
+        invitee_owner_pubkey: Option<OwnerPubkey>,
+    ) -> Result<(Session, InviteResponseEnvelope)>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.accept_with_owner_context_and_device(
+            ctx,
+            invitee_public_key,
+            invitee_private_key,
+            invitee_owner_pubkey,
+            None,
+        )
+    }
+
+    fn accept_with_owner_context_and_device<R>(
+        &self,
+        ctx: &mut ProtocolContext<'_, R>,
+        invitee_public_key: DevicePubkey,
+        invitee_private_key: [u8; 32],
+        invitee_owner_pubkey: Option<OwnerPubkey>,
+        device_id: Option<String>,
+    ) -> Result<(Session, InviteResponseEnvelope)>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.ensure_accept_allowed(invitee_public_key)?;
+
+        let invitee_session_key = random_secret_key_bytes(ctx.rng)?;
+        let invitee_session_public_key =
+            crate::device_pubkey_from_secret_bytes(&invitee_session_key)?;
+
+        let session = Session::new_initiator(
+            ctx,
             self.inviter_ephemeral_public_key,
             invitee_session_key,
-            true,
             self.shared_secret,
-            None,
         )?;
 
-        let mut payload = serde_json::Map::new();
-        payload.insert(
-            "sessionKey".to_string(),
-            serde_json::Value::String(hex::encode(invitee_session_public_key.to_bytes())),
-        );
-        if let Some(device_id) = device_id.clone() {
-            payload.insert("deviceId".to_string(), serde_json::Value::String(device_id));
-        }
-        if let Some(owner_pk) = owner_public_key {
-            payload.insert(
-                "ownerPublicKey".to_string(),
-                serde_json::Value::String(hex::encode(owner_pk.to_bytes())),
-            );
-        }
-        let payload = serde_json::Value::Object(payload);
+        let payload = InviteResponsePayload {
+            session_key: invitee_session_public_key,
+            owner_pubkey: invitee_owner_pubkey,
+            device_id,
+        };
 
-        let invitee_sk = nostr::SecretKey::from_slice(&invitee_private_key)?;
-        let dh_encrypted =
-            nip44::encrypt(&invitee_sk, &self.inviter, payload.to_string(), Version::V2)?;
+        let invitee_sk = secret_key_from_bytes(&invitee_private_key)?;
+        let dh_encrypted = nip44::encrypt(
+            &invitee_sk,
+            &self.inviter_device_pubkey.to_nostr()?,
+            serde_json::to_string(&payload)?,
+            Version::V2,
+        )?;
 
         let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
         let encrypted_bytes =
             nip44::v2::encrypt_to_bytes(&conversation_key, dh_encrypted.as_bytes())?;
-        let inner_encrypted = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
+        let inner_event = InviteResponseInnerEvent {
+            pubkey: invitee_public_key,
+            content: base64::engine::general_purpose::STANDARD.encode(encrypted_bytes),
+            created_at: ctx.now,
+        };
 
-        let inner_event = serde_json::json!({
-            "pubkey": hex::encode(invitee_public_key.to_bytes()),
-            "content": inner_encrypted,
-            "created_at": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        });
-
-        let random_sender_keys = Keys::generate();
-        let random_sender_sk = random_sender_keys.secret_key();
-
+        let random_sender_secret = random_secret_key_bytes(ctx.rng)?;
+        let random_sender_pubkey = crate::device_pubkey_from_secret_bytes(&random_sender_secret)?;
         let envelope_content = nip44::encrypt(
-            random_sender_sk,
-            &self.inviter_ephemeral_public_key,
-            inner_event.to_string(),
+            &secret_key_from_bytes(&random_sender_secret)?,
+            &self.inviter_ephemeral_public_key.to_nostr()?,
+            serde_json::to_string(&inner_event)?,
             Version::V2,
         )?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let two_days = 2 * 24 * 60 * 60;
-        let random_now = now - (rand::random::<u64>() % two_days);
-
-        // Build and sign the event with ephemeral keys
-        let unsigned_envelope =
-            EventBuilder::new(Kind::from(INVITE_RESPONSE_KIND as u16), envelope_content)
-                .tag(
-                    Tag::parse(&[
-                        "p".to_string(),
-                        hex::encode(self.inviter_ephemeral_public_key.to_bytes()),
-                    ])
-                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-                )
-                .custom_created_at(Timestamp::from(random_now))
-                .build(random_sender_keys.public_key());
-
-        // Sign with the ephemeral keys before returning
-        let signed_envelope = unsigned_envelope
-            .sign_with_keys(&random_sender_keys)
-            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
-
-        Ok((session, signed_envelope))
-    }
-
-    pub fn serialize(&self) -> Result<String> {
-        let data = serde_json::json!({
-            "inviterEphemeralPublicKey": hex::encode(self.inviter_ephemeral_public_key.to_bytes()),
-            "sharedSecret": hex::encode(self.shared_secret),
-            "inviter": hex::encode(self.inviter.to_bytes()),
-            "inviterEphemeralPrivateKey": self.inviter_ephemeral_private_key.map(hex::encode),
-            "deviceId": self.device_id,
-            "maxUses": self.max_uses,
-            "usedBy": self.used_by.iter().map(|pk| hex::encode(pk.to_bytes())).collect::<Vec<_>>(),
-            "createdAt": self.created_at,
-            "purpose": self.purpose.clone(),
-            "ownerPublicKey": self
-                .owner_public_key
-                .as_ref()
-                .map(|pk| hex::encode(pk.to_bytes())),
-        });
-        Ok(data.to_string())
-    }
-
-    pub fn deserialize(json: &str) -> Result<Self> {
-        let data: serde_json::Value = serde_json::from_str(json)?;
-
-        let inviter_ephemeral_public_key = crate::utils::pubkey_from_hex(
-            data["inviterEphemeralPublicKey"]
-                .as_str()
-                .ok_or(Error::Invite("Missing field".to_string()))?,
-        )?;
-
-        let shared_secret_hex = data["sharedSecret"]
-            .as_str()
-            .ok_or(Error::Invite("Missing sharedSecret".to_string()))?;
-        let shared_secret_bytes = hex::decode(shared_secret_hex)?;
-        let mut shared_secret = [0u8; 32];
-        shared_secret.copy_from_slice(&shared_secret_bytes);
-
-        let inviter = crate::utils::pubkey_from_hex(
-            data["inviter"]
-                .as_str()
-                .ok_or(Error::Invite("Missing inviter".to_string()))?,
-        )?;
-
-        let inviter_ephemeral_private_key =
-            if let Some(hex_str) = data["inviterEphemeralPrivateKey"].as_str() {
-                let bytes = hex::decode(hex_str)?;
-                let mut array = [0u8; 32];
-                array.copy_from_slice(&bytes);
-                Some(array)
-            } else {
-                None
-            };
-
-        let used_by = if let Some(arr) = data["usedBy"].as_array() {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .filter_map(|s| crate::utils::pubkey_from_hex(s).ok())
-                .collect()
+        let jitter = if ctx.now.get() == 0 {
+            0
         } else {
-            Vec::new()
+            ctx.rng.next_u64() % (2 * 24 * 60 * 60)
         };
+        let created_at = UnixSeconds(ctx.now.get().saturating_sub(jitter));
 
-        let purpose = data["purpose"].as_str().map(|s| s.to_string());
-        let owner_public_key = data["ownerPublicKey"]
-            .as_str()
-            .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
+        Ok((
+            session,
+            InviteResponseEnvelope {
+                sender: random_sender_pubkey,
+                signer_secret_key: random_sender_secret,
+                recipient: self.inviter_ephemeral_public_key,
+                created_at,
+                content: envelope_content,
+            },
+        ))
+    }
 
-        Ok(Self {
-            inviter_ephemeral_public_key,
-            shared_secret,
-            inviter,
+    pub fn process_response<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        envelope: &InviteResponseEnvelope,
+        inviter_private_key: [u8; 32],
+    ) -> Result<InviteResponse>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let inviter_ephemeral_private_key = self
+            .inviter_ephemeral_private_key
+            .ok_or_else(|| crate::Error::Parse("ephemeral key not available".to_string()))?;
+
+        let inviter_ephemeral_sk = secret_key_from_bytes(&inviter_ephemeral_private_key)?;
+        let decrypted = nip44::decrypt(
+            &inviter_ephemeral_sk,
+            &envelope.sender.to_nostr()?,
+            &envelope.content,
+        )?;
+        let inner_event: InviteResponseInnerEvent = serde_json::from_str(&decrypted)?;
+
+        let ciphertext_bytes = base64::engine::general_purpose::STANDARD
+            .decode(inner_event.content.as_bytes())
+            .map_err(|e| crate::Error::Decryption(e.to_string()))?;
+        let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
+        let dh_encrypted_ciphertext = String::from_utf8(nip44::v2::decrypt_to_bytes(
+            &conversation_key,
+            &ciphertext_bytes,
+        )?)
+        .map_err(|e| crate::Error::Decryption(e.to_string()))?;
+
+        let inviter_sk = secret_key_from_bytes(&inviter_private_key)?;
+        let dh_decrypted = nip44::decrypt(
+            &inviter_sk,
+            &inner_event.pubkey.to_nostr()?,
+            &dh_encrypted_ciphertext,
+        )?;
+
+        let payload: InviteResponsePayload = serde_json::from_str(&dh_decrypted)?;
+        self.ensure_accept_allowed(inner_event.pubkey)?;
+        let session = Session::new_responder(
+            ctx,
+            payload.session_key,
             inviter_ephemeral_private_key,
-            device_id: data["deviceId"].as_str().map(String::from),
-            max_uses: data["maxUses"].as_u64().map(|u| u as usize),
-            used_by,
-            created_at: data["createdAt"].as_u64().unwrap_or(0),
-            purpose,
-            owner_public_key,
+            self.shared_secret,
+        )?;
+        self.record_use(inner_event.pubkey);
+
+        Ok(InviteResponse {
+            session,
+            invitee_device_pubkey: inner_event.pubkey,
+            invitee_owner_pubkey: payload.owner_pubkey,
+            invitee_identity: inner_event.pubkey.to_nostr()?,
+            device_id: payload.device_id,
+            owner_public_key: payload.owner_pubkey.map(|owner| {
+                PublicKey::from_slice(&owner.to_bytes()).expect("owner pubkey bytes must be valid")
+            }),
         })
     }
 
-    pub fn listen_with_pubsub(&self, pubsub: &dyn NostrPubSub) -> Result<String> {
-        let filter = build_filter()
-            .kinds(vec![INVITE_RESPONSE_KIND as u64])
-            .pubkeys(vec![self.inviter_ephemeral_public_key])
-            .build();
+    pub fn process_invite_response(
+        &self,
+        event: &nostr::Event,
+        inviter_private_key: [u8; 32],
+    ) -> Result<Option<InviteResponse>> {
+        let envelope = crate::nostr_codec::parse_invite_response_event(event)
+            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(UnixSeconds(event.created_at.as_secs()), &mut rng);
+        let mut invite = self.clone();
+        invite
+            .process_response(&mut ctx, &envelope, inviter_private_key)
+            .map(Some)
+    }
 
+    pub fn listen_with_pubsub(&self, pubsub: &dyn crate::NostrPubSub) -> Result<String> {
+        let filter = crate::pubsub::build_filter()
+            .kinds(vec![INVITE_RESPONSE_KIND as u64])
+            .pubkeys(vec![self.inviter_ephemeral_public_key.to_nostr()?])
+            .build();
         let filter_json = serde_json::to_string(&filter)?;
         let subid = format!("invite-response-{}", uuid::Uuid::new_v4());
         pubsub.subscribe(subid.clone(), filter_json)?;
@@ -463,118 +439,101 @@ impl Invite {
         Ok(())
     }
 
-    pub fn process_invite_response(
-        &self,
-        event: &nostr::Event,
-        _inviter_private_key: [u8; 32],
-    ) -> Result<Option<InviteResponse>> {
-        let inviter_ephemeral_private_key = self
-            .inviter_ephemeral_private_key
-            .ok_or(Error::Invite("Ephemeral key not available".to_string()))?;
+    fn ensure_accept_allowed(&self, invitee_public_key: DevicePubkey) -> Result<()> {
+        if self.used_by.contains(&invitee_public_key) {
+            return Err(DomainError::InviteAlreadyUsed.into());
+        }
+        if self
+            .max_uses
+            .is_some_and(|max_uses| self.used_by.len() >= max_uses)
+        {
+            return Err(DomainError::InviteExhausted.into());
+        }
+        Ok(())
+    }
 
-        let inviter_ephemeral_sk = nostr::SecretKey::from_slice(&inviter_ephemeral_private_key)?;
-        let sender_pk = event.pubkey;
-        let decrypted = nip44::decrypt(&inviter_ephemeral_sk, &sender_pk, &event.content)?;
-        let inner_event: serde_json::Value = serde_json::from_str(&decrypted)?;
-
-        let invitee_identity_hex = inner_event["pubkey"]
-            .as_str()
-            .ok_or(Error::Invite("Missing pubkey".to_string()))?;
-        let invitee_identity = crate::utils::pubkey_from_hex(invitee_identity_hex)?;
-
-        let inner_content = inner_event["content"]
-            .as_str()
-            .ok_or(Error::Invite("Missing content".to_string()))?;
-
-        let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
-        let ciphertext_bytes = base64::engine::general_purpose::STANDARD
-            .decode(inner_content)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
-        let dh_encrypted_ciphertext = String::from_utf8(nip44::v2::decrypt_to_bytes(
-            &conversation_key,
-            &ciphertext_bytes,
-        )?)
-        .map_err(|e| Error::Serialization(e.to_string()))?;
-
-        // Decrypt the DH-encrypted layer using inviter's key
-        let inviter_sk = nostr::SecretKey::from_slice(&_inviter_private_key)?;
-        let dh_decrypted =
-            nip44::decrypt(&inviter_sk, &invitee_identity, &dh_encrypted_ciphertext)?;
-
-        let payload: serde_json::Value = match serde_json::from_str(&dh_decrypted) {
-            Ok(p) => p,
-            Err(_) => {
-                // Fallback: treat as raw hex session key
-                let invitee_session_pubkey = crate::utils::pubkey_from_hex(&dh_decrypted)?;
-                let session = Session::init(
-                    invitee_session_pubkey,
-                    inviter_ephemeral_private_key,
-                    false, // Inviter is non-initiator, must receive first message to initialize ratchet
-                    self.shared_secret,
-                    Some(event.id.to_string()),
-                )?;
-                return Ok(Some(InviteResponse {
-                    session,
-                    invitee_identity,
-                    device_id: None,
-                    owner_public_key: None,
-                }));
-            }
-        };
-
-        let invitee_session_key_hex = payload["sessionKey"]
-            .as_str()
-            .ok_or(Error::Invite("Missing sessionKey".to_string()))?;
-        let invitee_session_pubkey = crate::utils::pubkey_from_hex(invitee_session_key_hex)?;
-        let device_id = payload["deviceId"].as_str().map(String::from);
-        let owner_public_key = payload["ownerPublicKey"]
-            .as_str()
-            .and_then(|s| crate::utils::pubkey_from_hex(s).ok());
-
-        let session = Session::init(
-            invitee_session_pubkey,
-            inviter_ephemeral_private_key,
-            false, // Inviter is non-initiator, must receive first message to initialize ratchet
-            self.shared_secret,
-            Some(event.id.to_string()),
-        )?;
-
-        Ok(Some(InviteResponse {
-            session,
-            invitee_identity,
-            device_id,
-            owner_public_key,
-        }))
+    fn record_use(&mut self, invitee_public_key: DevicePubkey) {
+        if self.used_by.contains(&invitee_public_key) {
+            return;
+        }
+        self.used_by.push(invitee_public_key);
+        self.used_by.sort();
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Invite;
-    use nostr::Keys;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InviteResponseInnerEvent {
+    pubkey: DevicePubkey,
+    content: String,
+    created_at: UnixSeconds,
+}
 
-    #[test]
-    fn from_event_preserves_device_scoped_invites() {
-        let keys = Keys::generate();
-        let device_id = keys.public_key().to_hex();
-        let invite = Invite::create_new(keys.public_key(), Some(device_id.clone()), None).unwrap();
-        let event = invite.get_event().unwrap().sign_with_keys(&keys).unwrap();
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InviteResponsePayload {
+    #[serde(rename = "sessionKey")]
+    session_key: DevicePubkey,
+    #[serde(rename = "deviceId", skip_serializing_if = "Option::is_none")]
+    device_id: Option<String>,
+    #[serde(rename = "ownerPublicKey", skip_serializing_if = "Option::is_none")]
+    owner_pubkey: Option<OwnerPubkey>,
+}
 
-        let parsed = Invite::from_event(&event).unwrap();
+fn now_seconds() -> UnixSeconds {
+    UnixSeconds(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+}
 
-        assert_eq!(parsed.device_id, Some(device_id));
+mod serde_bytes_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
     }
 
-    #[test]
-    fn from_event_maps_public_invites_back_to_inviter_device() {
-        let keys = Keys::generate();
-        let invite =
-            Invite::create_new(keys.public_key(), Some("public".to_string()), None).unwrap();
-        let event = invite.get_event().unwrap().sign_with_keys(&keys).unwrap();
-
-        let parsed = Invite::from_event(&event).unwrap();
-
-        assert_eq!(parsed.device_id, None);
-        assert_eq!(parsed.inviter, keys.public_key());
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        super::decode_hex_32(&s).map_err(serde::de::Error::custom)
     }
+}
+
+mod serde_option_bytes_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &Option<[u8; 32]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match bytes {
+            Some(b) => serializer.serialize_str(&hex::encode(b)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => super::decode_hex_32(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+fn decode_hex_32(value: &str) -> std::result::Result<[u8; 32], String> {
+    let bytes = hex::decode(value).map_err(|e| e.to_string())?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| "invalid 32-byte hex".to_string())
 }

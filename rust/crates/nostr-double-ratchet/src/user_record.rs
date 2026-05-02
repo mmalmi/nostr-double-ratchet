@@ -258,8 +258,9 @@ pub struct StoredUserRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SerializableKeyPair;
+    use crate::{DevicePubkey, SerializableKeyPair};
     use nostr::Keys;
+    use std::collections::BTreeMap;
 
     fn make_session(
         can_send: bool,
@@ -275,16 +276,22 @@ mod tests {
         Session::new(
             SessionState {
                 root_key: [1u8; 32],
-                their_current_nostr_public_key: can_receive.then(|| their_current.public_key()),
+                their_current_nostr_public_key: can_receive
+                    .then(|| DevicePubkey::from_bytes(their_current.public_key().to_bytes())),
                 their_next_nostr_public_key: can_send
-                    .then(|| their_next.public_key())
-                    .or_else(|| can_receive.then(|| their_current.public_key())),
+                    .then(|| DevicePubkey::from_bytes(their_next.public_key().to_bytes()))
+                    .or_else(|| {
+                        can_receive.then(|| {
+                            DevicePubkey::from_bytes(their_current.public_key().to_bytes())
+                        })
+                    }),
+                our_previous_nostr_key: None,
                 our_current_nostr_key: can_send.then(|| SerializableKeyPair {
-                    public_key: our_current.public_key(),
+                    public_key: DevicePubkey::from_bytes(our_current.public_key().to_bytes()),
                     private_key: our_current.secret_key().to_secret_bytes(),
                 }),
                 our_next_nostr_key: SerializableKeyPair {
-                    public_key: our_next.public_key(),
+                    public_key: DevicePubkey::from_bytes(our_next.public_key().to_bytes()),
                     private_key: our_next.secret_key().to_secret_bytes(),
                 },
                 receiving_chain_key: can_receive.then_some([2u8; 32]),
@@ -292,7 +299,7 @@ mod tests {
                 sending_chain_message_number,
                 receiving_chain_message_number,
                 previous_sending_chain_message_count: 0,
-                skipped_keys: HashMap::new(),
+                skipped_keys: BTreeMap::new(),
             },
             "test".to_string(),
         )

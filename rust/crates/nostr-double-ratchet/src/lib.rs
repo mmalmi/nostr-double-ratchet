@@ -6,6 +6,7 @@ pub mod error;
 pub mod file_storage;
 pub mod group;
 pub mod group_manager;
+pub mod ids;
 pub mod invite;
 pub mod message_builders;
 pub mod message_origin;
@@ -15,9 +16,14 @@ pub mod multi_device;
 pub mod nearby;
 #[cfg(feature = "nearby-mdns")]
 pub mod nearby_lan;
+pub mod nostr_codec;
 pub mod one_to_many;
+pub mod pairwise_codec;
 pub mod protocol_backfill;
+pub mod protocol_types;
 pub mod pubsub;
+pub mod roster;
+pub mod roster_editor;
 pub mod runtime;
 pub mod sender_key;
 pub mod session;
@@ -35,11 +41,12 @@ pub use direct_message_subscriptions::{
     build_direct_message_backfill_filter, direct_message_subscription_authors,
     DirectMessageSubscriptionTracker,
 };
-pub use error::{Error, Result};
+pub use error::{DomainError, Error, Result};
 pub use file_storage::{DebouncedFileStorage, FileStorageAdapter};
 pub use group::*;
 pub use group_manager::*;
-pub use invite::{Invite, InviteResponse};
+pub use ids::{DevicePubkey, OwnerPubkey, UnixSeconds};
+pub use invite::{Invite, InviteResponse, InviteResponseEnvelope};
 pub use message_builders::*;
 pub use message_origin::{classify_message_origin, MessageOrigin};
 pub use message_queue::{MessageQueue, QueueEntry};
@@ -66,18 +73,38 @@ pub use protocol_backfill::{
     NdrProtocolBackfillOptions, DEFAULT_INVITE_BACKFILL_LOOKBACK_SECS,
     DEFAULT_MESSAGE_BACKFILL_LOOKBACK_SECS,
 };
+pub use protocol_types::{ProtocolContext, MAX_SKIP};
 pub use pubsub::{ChannelPubSub, NostrPubSub, SessionEvent};
+pub use roster::{AuthorizedDevice, DeviceRoster, RosterSnapshotDecision};
+pub use roster_editor::RosterEditor;
 pub use runtime::NdrRuntime;
 pub use sender_key::*;
-pub use session::Session;
+pub use session::{
+    Header, MessageEnvelope, ReceiveOutcome, ReceivePlan, SendOutcome, SendPlan,
+    SerializableKeyPair, Session, SessionState, SkippedKeysEntry,
+};
 pub use session_manager::{
-    AcceptInviteResult, MessagePushSessionStateSnapshot, QueuedMessageDiagnostic,
-    QueuedMessageStage, SessionManager, SessionManagerEvent,
+    Delivery, DeviceRecordSnapshot, PreparedSend, ProcessedInviteResponse, PruneReport,
+    ReceivedMessage, RelayGap, SessionManager, SessionManagerSnapshot, UserRecordSnapshot,
 };
 pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};
-pub use types::*;
+pub use types::{
+    ChatSettingsPayloadV1, EventCallback, SendOptions, Unsubscribe, APP_KEYS_EVENT_KIND,
+    CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, EXPIRATION_TAG, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+    MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND, SHARED_CHANNEL_KIND, TYPING_KIND,
+};
 pub use user_record::{DeviceRecord, StoredDeviceRecord, StoredUserRecord, UserRecord};
+
+pub(crate) use ids::owner_pubkey_from_device_pubkey;
+pub(crate) use utils::{
+    device_pubkey_from_secret_bytes, kdf, random_secret_key_bytes, secret_key_from_bytes,
+};
+
+pub use runtime::{
+    AcceptInviteResult, MessagePushSessionStateSnapshot, QueuedMessageDiagnostic,
+    QueuedMessageStage, SessionManagerEvent,
+};
 
 #[cfg(test)]
 mod architecture_tests {
@@ -90,11 +117,6 @@ mod architecture_tests {
             "crossbeam_channel",
             "subscribe_to_messages",
             "update_subscriptions",
-            "CHAT_MESSAGE_KIND",
-            "REACTION_KIND",
-            "RECEIPT_KIND",
-            "TYPING_KIND",
-            "EXPIRATION_TAG",
             "send_reaction",
             "send_reply",
             "send_receipt",
