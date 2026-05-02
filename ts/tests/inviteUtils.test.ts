@@ -10,6 +10,7 @@ import {
   decryptInviteResponse,
   createSessionFromAccept,
 } from '../src/inviteUtils'
+import { buildTextRumor } from '../src/messageBuilders'
 
 describe('inviteUtils', () => {
   describe('generateEphemeralKeypair', () => {
@@ -335,7 +336,9 @@ describe('inviteUtils', () => {
       })
 
       // Invitee sends a message
-      const { event, innerEvent } = inviteeSession.send('Hello from invitee!')
+      const { event, innerEvent } = inviteeSession.sendEvent(
+        buildTextRumor('Hello from invitee!'),
+      )
       expect(event).toBeDefined()
       expect(innerEvent).toBeDefined()
 

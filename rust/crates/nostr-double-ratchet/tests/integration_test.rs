@@ -1,5 +1,13 @@
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, UnsignedEvent};
-use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet::{build_text_rumor, Result, Session};
+
+fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
+    session.send_event(build_text_rumor(
+        Keys::generate().public_key(),
+        text,
+        vec![],
+    )?)
+}
 
 #[test]
 fn test_alice_bob_conversation() -> Result<()> {
@@ -30,7 +38,7 @@ fn test_alice_bob_conversation() -> Result<()> {
         Some("bob".to_string()),
     )?;
 
-    let message1 = alice.send("Hello Bob!".to_string())?;
+    let message1 = send_text(&mut alice, "Hello Bob!")?;
 
     let received = bob.receive(&message1)?;
     assert!(received.is_some());
@@ -38,7 +46,7 @@ fn test_alice_bob_conversation() -> Result<()> {
     let rumor: serde_json::Value = serde_json::from_str(&received.unwrap())?;
     assert_eq!(rumor["content"].as_str(), Some("Hello Bob!"));
 
-    let message2 = bob.send("Hi Alice!".to_string())?;
+    let message2 = send_text(&mut bob, "Hi Alice!")?;
     let received2 = alice.receive(&message2)?;
     assert!(received2.is_some());
 
@@ -87,13 +95,13 @@ fn test_multiple_messages_back_and_forth() -> Result<()> {
 
     for (sender, text) in messages {
         if sender == "alice" {
-            let event = alice.send(text.to_string())?;
+            let event = send_text(&mut alice, text)?;
             let received = bob.receive(&event)?;
             assert!(received.is_some());
             let rumor: serde_json::Value = serde_json::from_str(&received.unwrap())?;
             assert_eq!(rumor["content"].as_str(), Some(text));
         } else {
-            let event = bob.send(text.to_string())?;
+            let event = send_text(&mut bob, text)?;
             let received = alice.receive(&event)?;
             assert!(received.is_some());
             let rumor: serde_json::Value = serde_json::from_str(&received.unwrap())?;
@@ -134,10 +142,10 @@ fn test_session_persistence() -> Result<()> {
         Some("bob".to_string()),
     )?;
 
-    let msg1 = alice.send("Before save 1".to_string())?;
+    let msg1 = send_text(&mut alice, "Before save 1")?;
     bob.receive(&msg1)?;
 
-    let msg2 = bob.send("Before save 2".to_string())?;
+    let msg2 = send_text(&mut bob, "Before save 2")?;
     alice.receive(&msg2)?;
 
     let alice_state_json = serialize_session_state(&alice.state)?;
@@ -149,7 +157,7 @@ fn test_session_persistence() -> Result<()> {
     let mut alice_restored = Session::new(alice_restored_state, "alice_restored".to_string());
     let mut bob_restored = Session::new(bob_restored_state, "bob_restored".to_string());
 
-    let msg3 = alice_restored.send("After restore".to_string())?;
+    let msg3 = send_text(&mut alice_restored, "After restore")?;
     let received = bob_restored.receive(&msg3)?;
     assert!(received.is_some());
 

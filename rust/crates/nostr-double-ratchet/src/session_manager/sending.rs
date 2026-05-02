@@ -6,46 +6,9 @@ impl SessionManager {
         recipient: PublicKey,
         kind: u32,
         content: String,
-        mut extra_tags: Vec<Tag>,
+        extra_tags: Vec<Tag>,
     ) -> Result<UnsignedEvent> {
-        let recipient_hex = hex::encode(recipient.to_bytes());
-        let has_recipient_p_tag = extra_tags.iter().any(|t| {
-            let v = t.clone().to_vec();
-            v.first().map(|s| s.as_str()) == Some("p")
-                && v.get(1).map(|s| s.as_str()) == Some(recipient_hex.as_str())
-        });
-
-        if !has_recipient_p_tag {
-            extra_tags.insert(
-                0,
-                Tag::parse(&["p".to_string(), recipient_hex])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
-        }
-
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let now_s = now.as_secs();
-        let now_ms = now.as_millis();
-
-        // Include an ms tag so the inner rumor id is stable (and matches what TS expects).
-        if !extra_tags.iter().any(|t| {
-            let v = t.clone().to_vec();
-            v.first().map(|s| s.as_str()) == Some("ms")
-        }) {
-            extra_tags.push(
-                Tag::parse(&["ms".to_string(), now_ms.to_string()])
-                    .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?,
-            );
-        }
-
-        let kind = nostr::Kind::from(kind as u16);
-        let mut event = nostr::EventBuilder::new(kind, &content)
-            .tags(extra_tags)
-            .custom_created_at(nostr::Timestamp::from(now_s))
-            .build(self.owner_public_key);
-
-        event.ensure_id();
-        Ok(event)
+        crate::build_direct_inner_event(self.owner_public_key, recipient, kind, content, extra_tags)
     }
 
     pub(super) fn send_event_internal(

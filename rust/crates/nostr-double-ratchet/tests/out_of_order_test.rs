@@ -1,5 +1,13 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet::{build_text_rumor, Result, Session};
+
+fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
+    session.send_event(build_text_rumor(
+        Keys::generate().public_key(),
+        text,
+        vec![],
+    )?)
+}
 
 #[test]
 fn test_out_of_order_message_delivery() -> Result<()> {
@@ -29,9 +37,9 @@ fn test_out_of_order_message_delivery() -> Result<()> {
         Some("bob".to_string()),
     )?;
 
-    let msg1 = alice.send("Message 1".to_string())?;
-    let msg2 = alice.send("Message 2".to_string())?;
-    let msg3 = alice.send("Message 3".to_string())?;
+    let msg1 = send_text(&mut alice, "Message 1")?;
+    let msg2 = send_text(&mut alice, "Message 2")?;
+    let msg3 = send_text(&mut alice, "Message 3")?;
 
     let received3 = bob.receive(&msg3)?;
     assert!(received3.is_some());
@@ -79,11 +87,11 @@ fn test_consecutive_messages_from_same_sender() -> Result<()> {
         Some("bob".to_string()),
     )?;
 
-    let alice_msg1 = alice.send("Alice 1".to_string())?;
+    let alice_msg1 = send_text(&mut alice, "Alice 1")?;
     bob.receive(&alice_msg1)?;
 
-    let bob_msg1 = bob.send("Bob 1".to_string())?;
-    let bob_msg2 = bob.send("Bob 2".to_string())?;
+    let bob_msg1 = send_text(&mut bob, "Bob 1")?;
+    let bob_msg2 = send_text(&mut bob, "Bob 2")?;
 
     let received1 = alice.receive(&bob_msg1)?;
     let rumor1: serde_json::Value = serde_json::from_str(&received1.unwrap())?;

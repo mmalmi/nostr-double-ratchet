@@ -5,6 +5,7 @@ import { describe, it, expect, beforeAll, vi } from "vitest";
 import { getPublicKey } from "nostr-tools";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
 import { Session } from "../src/Session";
+import { buildTextRumor } from "../src/messageBuilders";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -42,6 +43,10 @@ interface TestVector {
 // Fixed timestamp for deterministic test vectors (2024-01-01 00:00:00 UTC)
 const FIXED_TIMESTAMP = 1704067200000;
 
+function sendText(session: Session, text: string) {
+  return session.sendEvent(buildTextRumor(text));
+}
+
 describe("Interop Test Vector Generation", () => {
   let vectors: TestVector;
 
@@ -72,7 +77,7 @@ describe("Interop Test Vector Generation", () => {
     const messages: TestVector["messages"] = [];
 
     // Message 1: Alice -> Bob
-    const msg1 = alice.send("Hello from TypeScript!");
+    const msg1 = sendText(alice, "Hello from TypeScript!");
     messages.push({
       sender: "alice",
       plaintext: "Hello from TypeScript!",
@@ -91,7 +96,7 @@ describe("Interop Test Vector Generation", () => {
     bob.receiveEvent(msg1.event);
 
     // Message 2: Bob -> Alice
-    const msg2 = bob.send("Hello back from TypeScript Bob!");
+    const msg2 = sendText(bob, "Hello back from TypeScript Bob!");
     messages.push({
       sender: "bob",
       plaintext: "Hello back from TypeScript Bob!",
@@ -110,7 +115,7 @@ describe("Interop Test Vector Generation", () => {
     alice.receiveEvent(msg2.event);
 
     // Message 3: Alice -> Bob (after ratchet)
-    const msg3 = alice.send("Second message from Alice");
+    const msg3 = sendText(alice, "Second message from Alice");
     messages.push({
       sender: "alice",
       plaintext: "Second message from Alice",
@@ -184,12 +189,12 @@ describe("Interop Test Vector Generation", () => {
     });
 
     // Alice sends first message directly (not from vectors)
-    const aliceMsg = alice.send("Hello from Alice!");
+    const aliceMsg = sendText(alice, "Hello from Alice!");
     bob.receiveEvent(aliceMsg.event);
     expect(receivedMessages).toContain("Hello from Alice!");
 
     // Now Bob can send a reply
-    const bobMsg = bob.send("Reply from Bob");
+    const bobMsg = sendText(bob, "Reply from Bob");
 
     // Alice subscribes
     alice.onEvent((event) => {

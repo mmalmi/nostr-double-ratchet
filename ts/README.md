@@ -132,6 +132,9 @@ group transport layer:
 
 `GroupManager` is still available directly when you want to own more of the app wiring yourself.
 
+Plain `Session` only encrypts/decrypts unsigned inner events. Use `messageBuilders` to create text,
+reaction, receipt, typing, reply, and expiring inner rumors before calling `session.sendEvent(...)`.
+
 ## Reference Web Pattern
 
 Reference web integrations do this:

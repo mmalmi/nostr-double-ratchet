@@ -1,8 +1,17 @@
 use nostr::Keys;
 use nostr_double_ratchet::{
+    build_text_rumor,
     utils::{deserialize_session_state, serialize_session_state},
     Result, Session,
 };
+
+fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
+    session.send_event(build_text_rumor(
+        Keys::generate().public_key(),
+        text,
+        vec![],
+    )?)
+}
 
 #[test]
 fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
@@ -36,7 +45,7 @@ fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
     let messages = vec!["Message 1", "Message 2", "Message 3"];
 
     for message in &messages {
-        let event = alice.send(message.to_string())?;
+        let event = send_text(&mut alice, message)?;
         sent_events.push(event.clone());
         let received = bob.receive(&event)?;
         assert!(received.is_some());
@@ -60,7 +69,7 @@ fn test_discard_duplicate_messages_after_restoring() -> Result<()> {
         );
     }
 
-    let fresh_event = alice.send("Fresh message after duplicates".to_string())?;
+    let fresh_event = send_text(&mut alice, "Fresh message after duplicates")?;
     let mut bob_restored_mut = bob_restored;
     let received = bob_restored_mut.receive(&fresh_event)?;
     assert!(received.is_some());
@@ -102,7 +111,7 @@ fn test_session_reinitialization() -> Result<()> {
         Some("bob".to_string()),
     )?;
 
-    let msg1 = alice.send("Message 1".to_string())?;
+    let msg1 = send_text(&mut alice, "Message 1")?;
     let received1 = bob.receive(&msg1)?;
     assert!(received1.is_some());
     let rumor1: serde_json::Value = serde_json::from_str(&received1.unwrap())?;
@@ -115,7 +124,7 @@ fn test_session_reinitialization() -> Result<()> {
         "bob_restored".to_string(),
     );
 
-    let msg2 = alice.send("Message 2".to_string())?;
+    let msg2 = send_text(&mut alice, "Message 2")?;
     let received2 = bob_restored.receive(&msg2)?;
     assert!(received2.is_some());
     let rumor2: serde_json::Value = serde_json::from_str(&received2.unwrap())?;

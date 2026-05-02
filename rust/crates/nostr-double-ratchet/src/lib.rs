@@ -7,6 +7,7 @@ pub mod file_storage;
 pub mod group;
 pub mod group_manager;
 pub mod invite;
+pub mod message_builders;
 pub mod message_origin;
 pub mod message_queue;
 pub mod multi_device;
@@ -39,6 +40,7 @@ pub use file_storage::{DebouncedFileStorage, FileStorageAdapter};
 pub use group::*;
 pub use group_manager::*;
 pub use invite::{Invite, InviteResponse};
+pub use message_builders::*;
 pub use message_origin::{classify_message_origin, MessageOrigin};
 pub use message_queue::{MessageQueue, QueueEntry};
 pub use multi_device::{
@@ -88,10 +90,19 @@ mod architecture_tests {
             "crossbeam_channel",
             "subscribe_to_messages",
             "update_subscriptions",
+            "CHAT_MESSAGE_KIND",
+            "REACTION_KIND",
+            "RECEIPT_KIND",
+            "TYPING_KIND",
+            "EXPIRATION_TAG",
+            "send_reaction",
+            "send_reply",
+            "send_receipt",
+            "send_typing",
         ] {
             assert!(
                 !source.contains(banned),
-                "Session should stay pure ratchet state; found `{banned}`"
+                "Session should stay pure ratchet state/encryption; found `{banned}`"
             );
         }
     }

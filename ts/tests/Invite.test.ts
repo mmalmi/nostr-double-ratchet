@@ -3,8 +3,13 @@ import { Invite } from '../src/Invite'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools'
 import { INVITE_EVENT_KIND, INVITE_RESPONSE_KIND } from '../src/types'
 import { Session } from '../src/Session'
+import { buildTextRumor } from '../src/messageBuilders'
 import { serializeSessionState, deserializeSessionState } from '../src/utils'
 import { MockRelay } from './helpers/mockRelay'
+
+function sendText(session: Session, text: string) {
+  return session.sendEvent(buildTextRumor(text))
+}
 
 describe('Invite', () => {
   it('should create a new invite link', () => {
@@ -108,7 +113,7 @@ describe('Invite', () => {
     expect(aliceSession).toBeDefined()
 
     const sendAndExpect = (sender: Session, receiver: Session, message: string) => {
-      const receivedMessage = receiver.receiveEvent(sender.send(message).event)
+      const receivedMessage = receiver.receiveEvent(sendText(sender, message).event)
       expect(receivedMessage?.content).toBe(message)
     }
 
@@ -235,7 +240,7 @@ describe('Invite', () => {
 
     expect(aliceSession).toBeDefined()
 
-    const firstMessage = aliceSession!.receiveEvent(bobSession.send('Hello Alice!').event)
+    const firstMessage = aliceSession!.receiveEvent(sendText(bobSession, 'Hello Alice!').event)
     expect(firstMessage?.content).toBe('Hello Alice!')
 
     // Alice closes her session and reinitializes with serialized state
@@ -243,7 +248,7 @@ describe('Invite', () => {
     aliceSession!.close()
     aliceSession = new Session(deserializeSessionState(serializedAliceState))
 
-    const secondMessage = aliceSession.receiveEvent(bobSession.send('Can you still hear me?').event)
+    const secondMessage = aliceSession.receiveEvent(sendText(bobSession, 'Can you still hear me?').event)
     expect(secondMessage?.content).toBe('Can you still hear me?')
   })
 
@@ -551,11 +556,11 @@ describe('Invite', () => {
       await aliceSessionPromise
       expect(aliceSession).toBeDefined()
 
-      const bobMessage1 = bobSession.send('Hello Alice from Bob!')
+      const bobMessage1 = sendText(bobSession, 'Hello Alice from Bob!')
       const aliceReceived1 = aliceSession!.receiveEvent(bobMessage1.event)
       expect(aliceReceived1?.content).toBe('Hello Alice from Bob!')
 
-      const aliceMessage1 = aliceSession!.send('Hi Bob from Alice!')
+      const aliceMessage1 = sendText(aliceSession!, 'Hi Bob from Alice!')
       const bobReceived1 = bobSession.receiveEvent(aliceMessage1.event)
       expect(bobReceived1?.content).toBe('Hi Bob from Alice!')
     })

@@ -1,7 +1,7 @@
 //! Interop tests between TypeScript and Rust implementations
 
 use nostr::{Event, JsonUtil, Keys};
-use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet::{build_text_rumor, Result, Session};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -41,6 +41,14 @@ fn hex_to_bytes32(hex: &str) -> [u8; 32] {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     arr
+}
+
+fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
+    session.send_event(build_text_rumor(
+        Keys::generate().public_key(),
+        text,
+        vec![],
+    )?)
 }
 
 #[test]
@@ -145,7 +153,7 @@ fn test_generate_rust_vectors() -> Result<()> {
     let mut messages = Vec::new();
 
     // Message 1: Alice -> Bob
-    let msg1 = alice.send("Hello from Rust!".to_string())?;
+    let msg1 = send_text(&mut alice, "Hello from Rust!")?;
     messages.push(TestMessage {
         sender: "alice".to_string(),
         plaintext: "Hello from Rust!".to_string(),
@@ -156,7 +164,7 @@ fn test_generate_rust_vectors() -> Result<()> {
     let _ = bob.receive(&msg1)?;
 
     // Message 2: Bob -> Alice
-    let msg2 = bob.send("Hello back from Rust Bob!".to_string())?;
+    let msg2 = send_text(&mut bob, "Hello back from Rust Bob!")?;
     messages.push(TestMessage {
         sender: "bob".to_string(),
         plaintext: "Hello back from Rust Bob!".to_string(),
@@ -167,7 +175,7 @@ fn test_generate_rust_vectors() -> Result<()> {
     let _ = alice.receive(&msg2)?;
 
     // Message 3: Alice -> Bob
-    let msg3 = alice.send("Second message from Rust Alice".to_string())?;
+    let msg3 = send_text(&mut alice, "Second message from Rust Alice")?;
     messages.push(TestMessage {
         sender: "alice".to_string(),
         plaintext: "Second message from Rust Alice".to_string(),
@@ -229,14 +237,14 @@ fn test_roundtrip_rust_only() -> Result<()> {
     )?;
 
     // Alice sends to Bob
-    let msg1 = alice.send("Hello Bob!".to_string())?;
+    let msg1 = send_text(&mut alice, "Hello Bob!")?;
     let decrypted1 = bob.receive(&msg1)?;
     assert!(decrypted1.is_some());
     let rumor1: serde_json::Value = serde_json::from_str(&decrypted1.unwrap())?;
     assert_eq!(rumor1["content"].as_str().unwrap(), "Hello Bob!");
 
     // Bob sends to Alice
-    let msg2 = bob.send("Hi Alice!".to_string())?;
+    let msg2 = send_text(&mut bob, "Hi Alice!")?;
     let decrypted2 = alice.receive(&msg2)?;
     assert!(decrypted2.is_some());
     let rumor2: serde_json::Value = serde_json::from_str(&decrypted2.unwrap())?;

@@ -6,13 +6,21 @@ use crossbeam_channel::Receiver;
 use nostr::nips::nip44::{self, Version};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    utils::kdf, Header, InMemoryStorage, Invite, Session, SessionManager, SessionManagerEvent,
-    MESSAGE_EVENT_KIND,
+    build_text_rumor, utils::kdf, Header, InMemoryStorage, Invite, Session, SessionManager,
+    SessionManagerEvent, MESSAGE_EVENT_KIND,
 };
 use sha2::{Digest, Sha256};
 
 fn drain_events(rx: &Receiver<SessionManagerEvent>) {
     while rx.try_recv().is_ok() {}
+}
+
+fn send_text(session: &mut Session, text: &str) -> nostr_double_ratchet::Result<nostr::Event> {
+    session.send_event(build_text_rumor(
+        Keys::generate().public_key(),
+        text,
+        vec![],
+    )?)
 }
 
 fn recv_decrypted_message(rx: &Receiver<SessionManagerEvent>) -> String {
@@ -168,7 +176,7 @@ fn test_session_receive_recomputes_inner_rumor_id_and_stays_in_sync() {
     assert!(alice_session.receive(&outer).is_err());
 
     // Next valid message should still decrypt.
-    let valid_outer = bob_session.send("ok".to_string()).unwrap();
+    let valid_outer = send_text(&mut bob_session, "ok").unwrap();
     let decrypted = alice_session.receive(&valid_outer).unwrap().unwrap();
     assert!(decrypted.contains("\"content\":\"ok\""));
 }

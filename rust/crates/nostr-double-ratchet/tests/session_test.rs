@@ -1,5 +1,22 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet::{build_reaction_rumor, build_text_rumor, Result, Session};
+
+fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
+    session.send_event(build_text_rumor(
+        Keys::generate().public_key(),
+        text,
+        vec![],
+    )?)
+}
+
+fn send_reaction(session: &mut Session, message_id: &str, emoji: &str) -> Result<nostr::Event> {
+    session.send_event(build_reaction_rumor(
+        Keys::generate().public_key(),
+        message_id,
+        emoji,
+        vec![],
+    )?)
+}
 
 #[test]
 fn test_session_init() -> Result<()> {
@@ -71,7 +88,7 @@ fn test_session_send_message() -> Result<()> {
         Some("alice".to_string()),
     )?;
 
-    let event = alice.send("Hello, Bob!".to_string())?;
+    let event = send_text(&mut alice, "Hello, Bob!")?;
 
     assert_eq!(event.kind.as_u16(), 1060);
     assert!(!event.content.is_empty());
@@ -107,19 +124,19 @@ fn test_multiple_messages() -> Result<()> {
 
     let initial_chain_number = alice.state.sending_chain_message_number;
 
-    let _event1 = alice.send("Message 1".to_string())?;
+    let _event1 = send_text(&mut alice, "Message 1")?;
     assert_eq!(
         alice.state.sending_chain_message_number,
         initial_chain_number + 1
     );
 
-    let _event2 = alice.send("Message 2".to_string())?;
+    let _event2 = send_text(&mut alice, "Message 2")?;
     assert_eq!(
         alice.state.sending_chain_message_number,
         initial_chain_number + 2
     );
 
-    let _event3 = alice.send("Message 3".to_string())?;
+    let _event3 = send_text(&mut alice, "Message 3")?;
     assert_eq!(
         alice.state.sending_chain_message_number,
         initial_chain_number + 3
@@ -191,7 +208,7 @@ fn test_send_reaction_format() {
     let message_id = "test-message-id-12345";
     let emoji = "👍";
 
-    let reaction_event = bob_session.send_reaction(message_id, emoji).unwrap();
+    let reaction_event = send_reaction(&mut bob_session, message_id, emoji).unwrap();
 
     // The outer event should be kind 1060 (encrypted wrapper)
     assert_eq!(reaction_event.kind.as_u16(), 1060);
@@ -236,7 +253,7 @@ fn test_reaction_roundtrip() {
         .session;
 
     // Bob sends the first message (he's the ratchet initiator after accept)
-    let msg_event = bob_session.send("Hello Alice!".to_string()).unwrap();
+    let msg_event = send_text(&mut bob_session, "Hello Alice!").unwrap();
     let msg_id = msg_event.id.to_hex();
 
     // Alice receives the message - now Alice can send
@@ -245,7 +262,7 @@ fn test_reaction_roundtrip() {
     assert_eq!(rumor["content"].as_str().unwrap(), "Hello Alice!");
 
     // Now Alice sends a reaction to Bob's message
-    let reaction_event = alice_session.send_reaction(&msg_id, "❤️").unwrap();
+    let reaction_event = send_reaction(&mut alice_session, &msg_id, "❤️").unwrap();
 
     // Bob receives the reaction
     let decrypted_reaction = bob_session.receive(&reaction_event).unwrap().unwrap();

@@ -1,5 +1,6 @@
 import type { VerifiedEvent } from "nostr-tools"
 import type { Session } from "../Session"
+import { buildTypingRumor } from "../messageBuilders"
 
 export const INVITE_BOOTSTRAP_EXPIRATION_SECONDS = 60
 export const INVITE_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1500] as const
@@ -10,7 +11,7 @@ export function planInviteBootstrapEvents(session: Session): VerifiedEvent[] {
     INVITE_BOOTSTRAP_EXPIRATION_SECONDS
 
   return INVITE_BOOTSTRAP_RETRY_DELAYS_MS.map(
-    () => session.sendTyping({ expiresAt }).event
+    () => session.sendEvent(buildTypingRumor({ expiration: { expiresAt } })).event
   )
 }
 

@@ -1,6 +1,7 @@
 import { Invite } from "../Invite"
 import { Session } from "../Session"
 import type { VerifiedEvent } from "nostr-tools"
+import { buildTypingRumor } from "../messageBuilders"
 import { INVITE_EVENT_KIND, type Rumor } from "../types"
 import {
   compareSessionPriority,
@@ -187,9 +188,11 @@ export class DeviceRecordActor implements DeviceRecordShape {
 
   private async publishInviteBootstrap(session: Session): Promise<void> {
     try {
-      const { event } = session.sendTyping({
-        expiresAt: Math.floor(Date.now() / 1000),
-      })
+      const { event } = session.sendEvent(
+        buildTypingRumor({
+          expiration: { expiresAt: Math.floor(Date.now() / 1000) },
+        }),
+      )
       await this.deps.nostr.publish(event)
     } catch {
       // Invite acceptance itself already established the session. If the bootstrap

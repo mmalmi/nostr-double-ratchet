@@ -89,7 +89,12 @@ let mut bob = Session::init(
     Some("bob-chat".to_string()),
 )?;
 
-let outer = alice.send("hello bob".to_string())?;
+let inner = nostr_double_ratchet::build_text_rumor(
+    alice_keys.public_key(),
+    "hello bob",
+    vec![],
+)?;
+let outer = alice.send_event(inner)?;
 let plaintext = bob.receive(&outer)?;
 assert!(plaintext.is_some());
 # Ok::<(), nostr_double_ratchet::Error>(())

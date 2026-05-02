@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { generateSecretKey, getEventHash, getPublicKey } from "nostr-tools"
 import { Session } from "../src/Session"
+import { buildTextRumor } from "../src/messageBuilders"
 import { EXPIRATION_TAG } from "../src/types"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
@@ -13,7 +14,7 @@ describe("Expiration / Disappearing Messages", () => {
     vi.restoreAllMocks()
   })
 
-  it("Session.send should add NIP-40-style expiration tag to the inner rumor", () => {
+  it("message builder should add NIP-40-style expiration tag to the inner rumor", () => {
     vi.spyOn(Date, "now").mockReturnValue(FIXED_TIMESTAMP_MS)
 
     const aliceSecretKey = generateSecretKey()
@@ -30,7 +31,9 @@ describe("Expiration / Disappearing Messages", () => {
     const ttlSeconds = 60
     const expectedExpiresAt = Math.floor(FIXED_TIMESTAMP_MS / 1000) + ttlSeconds
 
-    const { innerEvent } = alice.send("hi", { ttlSeconds })
+    const { innerEvent } = alice.sendEvent(
+      buildTextRumor("hi", { expiration: { ttlSeconds } }),
+    )
 
     expect(innerEvent.tags).toContainEqual([EXPIRATION_TAG, String(expectedExpiresAt)])
     expect(innerEvent.id).toEqual(getEventHash(innerEvent))

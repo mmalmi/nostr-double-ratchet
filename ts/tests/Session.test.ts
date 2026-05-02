@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest"
 import { generateSecretKey, getPublicKey, type VerifiedEvent } from "nostr-tools"
 import { Session } from "../src/Session"
 import {
+  buildReactionRumor,
+  buildReplyRumor,
+  buildTextRumor,
+} from "../src/messageBuilders"
+import {
   CHAT_MESSAGE_KIND,
   MESSAGE_EVENT_KIND,
   REACTION_KIND,
@@ -41,6 +46,10 @@ function deliver(receiver: Session, event: VerifiedEvent) {
   return rumor!
 }
 
+function sendText(session: Session, text: string) {
+  return session.sendEvent(buildTextRumor(text))
+}
+
 describe("Session", () => {
   it("initializes with correct properties", () => {
     const bobSecretKey = generateSecretKey()
@@ -59,7 +68,7 @@ describe("Session", () => {
 
   it("creates an encrypted message event", () => {
     const { alice } = createPair()
-    const { event } = alice.send("Hello, world!")
+    const { event } = sendText(alice, "Hello, world!")
 
     expect(event.kind).toBe(MESSAGE_EVENT_KIND)
     expect(event.tags[0][0]).toEqual("header")
@@ -74,7 +83,7 @@ describe("Session", () => {
     const { alice, bob } = createPair()
     const initialReceivingChainKey = bob.state.receivingChainKey
 
-    const bobFirstMessage = deliver(bob, alice.send("Hello, Bob!").event)
+    const bobFirstMessage = deliver(bob, sendText(alice, "Hello, Bob!").event)
     expect(bobFirstMessage.content).toBe("Hello, Bob!")
     expect(bob.state.receivingChainKey).not.toBe(initialReceivingChainKey)
   })
@@ -90,7 +99,7 @@ describe("Session", () => {
       const initialSendingChainKey = sender.state.sendingChainKey
       const initialReceivingChainKey = receiver.state.receivingChainKey
 
-      const receivedMessage = deliver(receiver, sender.send(message).event)
+      const receivedMessage = deliver(receiver, sendText(sender, message).event)
 
       expect(receivedMessage.content).toBe(message)
       expect(sender.state.sendingChainKey).not.toBe(initialSendingChainKey)
@@ -108,9 +117,9 @@ describe("Session", () => {
   it("handles out-of-order delivery with skipped keys", async () => {
     const { alice, bob } = createPair()
 
-    const message1 = alice.send("Message 1").event
-    const message2 = alice.send("Message 2").event
-    const message3 = alice.send("Message 3").event
+    const message1 = sendText(alice, "Message 1").event
+    const message2 = sendText(alice, "Message 2").event
+    const message3 = sendText(alice, "Message 3").event
 
     expect(deliver(bob, message3).content).toBe("Message 3")
 
@@ -122,7 +131,7 @@ describe("Session", () => {
   it("decrypts same-chain follow-ups from the previously advertised next author", () => {
     const { alice, bob } = createPair()
 
-    const message1 = alice.send("Message 1").event
+    const message1 = sendText(alice, "Message 1").event
     const advertisedNext = alice.state.ourNextNostrKey
     expect(deliver(bob, message1).content).toBe("Message 1")
 
@@ -133,7 +142,7 @@ describe("Session", () => {
       privateKey: nextPrivateKey,
     }
 
-    const message2 = alice.send("Message 2").event
+    const message2 = sendText(alice, "Message 2").event
     expect(message2.pubkey).toBe(advertisedNext.publicKey)
     expect(deliver(bob, message2).content).toBe("Message 2")
   })
@@ -141,26 +150,26 @@ describe("Session", () => {
   it("maintains conversation state through serialization", async () => {
     const { alice, bob } = createPair()
 
-    expect(deliver(bob, alice.send("Hello Bob!").event).content).toBe("Hello Bob!")
+    expect(deliver(bob, sendText(alice, "Hello Bob!").event).content).toBe("Hello Bob!")
 
-    expect(deliver(alice, bob.send("Hi Alice!").event).content).toBe("Hi Alice!")
+    expect(deliver(alice, sendText(bob, "Hi Alice!").event).content).toBe("Hi Alice!")
 
     const aliceRestored = new Session(deserializeSessionState(serializeSessionState(alice.state)))
     const bobRestored = new Session(deserializeSessionState(serializeSessionState(bob.state)))
 
-    expect(deliver(bobRestored, aliceRestored.send("How are you?").event).content)
+    expect(deliver(bobRestored, sendText(aliceRestored, "How are you?").event).content)
       .toBe("How are you?")
 
-    expect(deliver(aliceRestored, bobRestored.send("Doing great!").event).content)
+    expect(deliver(aliceRestored, sendText(bobRestored, "Doing great!").event).content)
       .toBe("Doing great!")
   })
 
   it("discards duplicate messages after restoring", () => {
     const { alice, bob } = createPair()
     const sentEvents = [
-      alice.send("Message 1").event,
-      alice.send("Message 2").event,
-      alice.send("Message 3").event,
+      sendText(alice, "Message 1").event,
+      sendText(alice, "Message 2").event,
+      sendText(alice, "Message 3").event,
     ]
 
     for (const event of sentEvents) {
@@ -180,11 +189,11 @@ describe("Session", () => {
   it("sends and receives reactions", async () => {
     const { alice, bob } = createPair()
 
-    const { event: messageEvent, innerEvent: messageInner } = alice.send("Hello Bob!")
+    const { event: messageEvent, innerEvent: messageInner } = sendText(alice, "Hello Bob!")
     expect(deliver(bob, messageEvent).content).toBe("Hello Bob!")
 
     const { event: reactionEvent, innerEvent: reactionInner } =
-      bob.sendReaction(messageInner.id, "👍")
+      bob.sendEvent(buildReactionRumor(messageInner.id, "👍"))
 
     expect(reactionInner.kind).toBe(REACTION_KIND)
     expect(reactionInner.tags).toContainEqual(["e", messageInner.id])
@@ -211,11 +220,11 @@ describe("Session", () => {
   it("sends and receives replies", async () => {
     const { alice, bob } = createPair()
 
-    const { event: messageEvent, innerEvent: messageInner } = alice.send("Hello Bob!")
+    const { event: messageEvent, innerEvent: messageInner } = sendText(alice, "Hello Bob!")
     deliver(bob, messageEvent)
 
     const { event: replyEvent, innerEvent: replyInner } =
-      bob.sendReply("Hey Alice, great to hear from you!", messageInner.id)
+      bob.sendEvent(buildReplyRumor("Hey Alice, great to hear from you!", messageInner.id))
 
     expect(replyInner.kind).toBe(CHAT_MESSAGE_KIND)
     expect(replyInner.tags).toContainEqual(["e", messageInner.id])

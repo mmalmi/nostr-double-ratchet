@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.134 - 2026-05-02
+
+- Move chat inner-event construction into neutral Rust/TypeScript message builder helpers.
+- Keep `Session` focused on ratchet encryption/decryption of unsigned inner events; update tests, FFI, and docs to build text/reaction/typing/receipt rumors outside `Session`.
+- Route `SessionManager` message creation through the shared builders while preserving direct-message, expiration, reaction, receipt, and typing behavior.
+
 ## 0.0.133 - 2026-05-02
 
 - Include stored device-record identities in the Rust known-device roster helper, matching the TypeScript runtime surface when AppKeys are not cached.

@@ -4,7 +4,6 @@
 //! library for use in iOS and Android applications via UniFFI.
 
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use nostr_double_ratchet::{
     AppKeys, CreateGroupOptions, DeviceEntry, FileStorageAdapter, GroupData, GroupDecryptedEvent,
@@ -561,12 +560,13 @@ impl SessionHandle {
     /// Send a text message.
     pub fn send_text(&self, text: String) -> Result<SendResult, NdrError> {
         let mut session = self.inner.lock().unwrap();
-        let outer_event = session.send(text.clone())?;
-
-        // Create inner event representation
-        let inner_event = nostr::EventBuilder::text_note(text);
-        let inner_event_json =
-            serde_json::to_string(&inner_event.build(nostr::Keys::generate().public_key()))?;
+        let inner_event = nostr_double_ratchet::build_text_rumor(
+            nostr::Keys::generate().public_key(),
+            text,
+            vec![],
+        )?;
+        let outer_event = session.send_event(inner_event.clone())?;
+        let inner_event_json = serde_json::to_string(&inner_event)?;
 
         Ok(SendResult {
             outer_event_json: serde_json::to_string(&outer_event)?,
@@ -812,43 +812,23 @@ impl SessionManagerHandle {
             }
         }
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let now_s = now.as_secs();
-        let now_ms = now.as_millis() as u64;
-
-        let created_at_s = created_at_seconds
-            .or_else(|| ms_value.map(|ms| ms / 1000))
-            .unwrap_or(now_s);
-
         let mut tags: Vec<nostr::Tag> = Vec::with_capacity(tags_vec.len() + 1);
-        let mut has_ms = false;
-
         for t in tags_vec {
-            if t.first().map(|s| s.as_str()) == Some("ms") {
-                has_ms = true;
-            }
             tags.push(nostr::Tag::parse(&t).map_err(|e| NdrError::InvalidEvent(e.to_string()))?);
         }
 
-        if !has_ms {
-            tags.push(
-                nostr::Tag::parse(&["ms".to_string(), now_ms.to_string()])
-                    .map_err(|e| NdrError::InvalidEvent(e.to_string()))?,
-            );
-        }
-
-        let kind_u16: u16 = kind
-            .try_into()
-            .map_err(|_| NdrError::InvalidEvent("kind out of range".into()))?;
-
         let owner_pubkey = self.runtime.get_owner_pubkey();
-
-        let mut event = nostr::EventBuilder::new(nostr::Kind::from(kind_u16), &content)
-            .tags(tags)
-            .custom_created_at(nostr::Timestamp::from(created_at_s))
-            .build(owner_pubkey);
-
-        event.ensure_id();
+        let event = nostr_double_ratchet::build_inner_event(
+            owner_pubkey,
+            kind,
+            content,
+            tags,
+            nostr_double_ratchet::InnerEventBuildOptions {
+                created_at_seconds,
+                ms: ms_value,
+                ensure_ms_tag: true,
+            },
+        )?;
         let inner_id = event
             .id
             .as_ref()

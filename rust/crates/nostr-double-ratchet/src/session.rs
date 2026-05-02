@@ -1,12 +1,12 @@
 use crate::{
     utils::{kdf, pubkey_from_hex},
-    Error, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry, CHAT_MESSAGE_KIND,
-    MAX_SKIP, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND, TYPING_KIND,
+    Error, Header, Result, SerializableKeyPair, SessionState, SkippedKeysEntry, MAX_SKIP,
+    MESSAGE_EVENT_KIND,
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
 use nostr::PublicKey;
-use nostr::{EventBuilder, Keys, Tag, Timestamp, UnsignedEvent};
+use nostr::{Keys, Tag, Timestamp, UnsignedEvent};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -94,92 +94,6 @@ impl Session {
             && self.state.our_current_nostr_key.is_some()
     }
 
-    pub fn send(&mut self, text: String) -> Result<nostr::Event> {
-        let dummy_keys = Keys::generate();
-        self.send_event(EventBuilder::text_note(text).build(dummy_keys.public_key()))
-    }
-
-    /// Send a reaction to a message through the encrypted session.
-    ///
-    /// # Arguments
-    /// * `message_id` - The ID of the message being reacted to
-    /// * `emoji` - The emoji or reaction content (e.g., "👍", "❤️", "+1")
-    ///
-    /// # Returns
-    /// A signed Nostr event containing the encrypted reaction.
-    pub fn send_reaction(&mut self, message_id: &str, emoji: &str) -> Result<nostr::Event> {
-        let dummy_keys = Keys::generate();
-
-        let event = EventBuilder::new(nostr::Kind::from(REACTION_KIND as u16), emoji)
-            .tag(
-                Tag::parse(&["e".to_string(), message_id.to_string()])
-                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-            )
-            .build(dummy_keys.public_key());
-
-        self.send_event(event)
-    }
-
-    /// Send a reply to a specific message through the encrypted session.
-    ///
-    /// # Arguments
-    /// * `text` - The reply text content
-    /// * `reply_to` - The ID of the message being replied to
-    ///
-    /// # Returns
-    /// A signed Nostr event containing the encrypted reply.
-    pub fn send_reply(&mut self, text: String, reply_to: &str) -> Result<nostr::Event> {
-        let dummy_keys = Keys::generate();
-
-        let event = EventBuilder::new(nostr::Kind::from(CHAT_MESSAGE_KIND as u16), &text)
-            .tag(
-                Tag::parse(&["e".to_string(), reply_to.to_string()])
-                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-            )
-            .build(dummy_keys.public_key());
-
-        self.send_event(event)
-    }
-
-    /// Send a delivery/read receipt for messages through the encrypted session.
-    ///
-    /// # Arguments
-    /// * `receipt_type` - Either "delivered" or "seen"
-    /// * `message_ids` - The IDs of the messages being acknowledged
-    ///
-    /// # Returns
-    /// A signed Nostr event containing the encrypted receipt.
-    pub fn send_receipt(
-        &mut self,
-        receipt_type: &str,
-        message_ids: &[&str],
-    ) -> Result<nostr::Event> {
-        let dummy_keys = Keys::generate();
-
-        let mut builder = EventBuilder::new(nostr::Kind::from(RECEIPT_KIND as u16), receipt_type);
-        for id in message_ids {
-            builder = builder.tag(
-                Tag::parse(&["e".to_string(), id.to_string()])
-                    .map_err(|e| Error::InvalidEvent(e.to_string()))?,
-            );
-        }
-
-        self.send_event(builder.build(dummy_keys.public_key()))
-    }
-
-    /// Send a typing indicator through the encrypted session.
-    ///
-    /// # Returns
-    /// A signed Nostr event containing the encrypted typing indicator.
-    pub fn send_typing(&mut self) -> Result<nostr::Event> {
-        let dummy_keys = Keys::generate();
-
-        let event = EventBuilder::new(nostr::Kind::from(TYPING_KIND as u16), "typing")
-            .build(dummy_keys.public_key());
-
-        self.send_event(event)
-    }
-
     pub fn send_event(&mut self, mut event: UnsignedEvent) -> Result<nostr::Event> {
         if !self.can_send() {
             return Err(Error::NotInitiator);
@@ -189,25 +103,6 @@ impl Session {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
         let now_s = now.as_secs();
-        let now_ms = now.as_millis();
-
-        let ms_tag = Tag::parse(&["ms".to_string(), now_ms.to_string()])
-            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
-        let has_ms_tag = event.tags.iter().any(|t| {
-            let v = t.clone().to_vec();
-            v.first().map(|s| s.as_str()) == Some("ms")
-        });
-
-        if !has_ms_tag {
-            let mut builder = EventBuilder::new(event.kind, &event.content);
-            for tag in event.tags.iter() {
-                builder = builder.tag(tag.clone());
-            }
-            builder = builder.tag(ms_tag);
-            event = builder
-                .custom_created_at(event.created_at)
-                .build(event.pubkey);
-        }
 
         // Event fields were mutated; ensure id matches the final content.
         event.id = None;

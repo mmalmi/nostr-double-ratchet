@@ -2280,7 +2280,7 @@ fn test_auto_adopt_chat_settings_sender_copy_uses_p_tag_peer() {
 
 #[test]
 fn message_policy_builds_expiration_tag_and_rejects_conflicting_options() {
-    let tag = SessionManager::expiration_tag_for_options(
+    let tag = crate::expiration_tag_for_options(
         &crate::SendOptions {
             expires_at: None,
             ttl_seconds: Some(30),
@@ -2297,7 +2297,7 @@ fn message_policy_builds_expiration_tag_and_rejects_conflicting_options() {
     );
     assert_eq!(values.get(1).map(|s| s.as_str()), Some("1700000030"));
 
-    let conflict = SessionManager::expiration_tag_for_options(
+    let conflict = crate::expiration_tag_for_options(
         &crate::SendOptions {
             expires_at: Some(1_700_000_100),
             ttl_seconds: Some(30),

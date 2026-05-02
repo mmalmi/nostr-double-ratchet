@@ -307,7 +307,7 @@ impl SessionManager {
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
         let mut tags: Vec<Tag> = Vec::new();
-        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
+        crate::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event = self.build_message_event(recipient, crate::CHAT_MESSAGE_KIND, text, tags)?;
 
@@ -372,7 +372,7 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
+        crate::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event = self.build_message_event(
             recipient,
@@ -392,7 +392,7 @@ impl SessionManager {
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
         let mut tags: Vec<Tag> = Vec::new();
-        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
+        crate::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event =
             self.build_message_event(recipient, crate::TYPING_KIND, "typing".to_string(), tags)?;
@@ -423,7 +423,7 @@ impl SessionManager {
 
         let owner = self.resolve_to_owner(&recipient);
         let options = self.effective_send_options(owner, None, options);
-        Self::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
+        crate::append_expiration_tag(&mut tags, &options, Self::current_unix_seconds())?;
 
         let event = self.build_message_event(recipient, crate::REACTION_KIND, emoji, tags)?;
 

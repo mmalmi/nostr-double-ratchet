@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { generateSecretKey, getPublicKey, type VerifiedEvent } from "nostr-tools"
 import { Session } from "../src/Session"
+import { buildTextRumor } from "../src/messageBuilders"
 import { decryptSessionEventPreview } from "../src/notificationPreview"
 import { deserializeSessionState, serializeSessionState } from "../src/utils"
 
@@ -31,7 +32,7 @@ function createPair() {
 describe("decryptSessionEventPreview", () => {
   it("decrypts with the matching candidate without mutating durable state", () => {
     const { alice, bob } = createPair()
-    const outerEvent = alice.send("push preview").event as VerifiedEvent
+    const outerEvent = alice.sendEvent(buildTextRumor("push preview")).event as VerifiedEvent
     const originalSerializedState = serializeSessionState(bob.state)
 
     const preview = decryptSessionEventPreview(outerEvent, [
@@ -48,7 +49,7 @@ describe("decryptSessionEventPreview", () => {
   it("skips non-matching candidates and leaves object states untouched", () => {
     const { alice, bob } = createPair()
     const otherPair = createPair()
-    const outerEvent = alice.send("for bob").event as VerifiedEvent
+    const outerEvent = alice.sendEvent(buildTextRumor("for bob")).event as VerifiedEvent
     const bobStateBefore = serializeSessionState(bob.state)
     const otherStateBefore = serializeSessionState(otherPair.bob.state)
 

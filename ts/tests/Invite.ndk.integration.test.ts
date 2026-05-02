@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { Invite } from '../src/Invite'
 import { Session } from '../src/Session'
+import { buildTextRumor } from '../src/messageBuilders'
 import { createEventStream } from '../src/utils'
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import NDK, { NDKEvent, NDKFilter } from '@nostr-dev-kit/ndk'
 import { VerifiedEvent } from 'nostr-tools'
 import ws from 'ws'
+
+function sendText(session: Session, text: string) {
+  return session.sendEvent(buildTextRumor(text))
+}
 
 if (typeof global.WebSocket === 'undefined') {
   global.WebSocket = ws
@@ -196,7 +201,7 @@ describe('Invite NDK Integration', () => {
 
     // Bob sends first message
     console.log('Bob sending first message...')
-    const bobMessage1 = bobSession.send('Hello Alice from Bob!')
+    const bobMessage1 = sendText(bobSession, 'Hello Alice from Bob!')
     const bobEvent1 = new NDKEvent(bobNdk, bobMessage1.event)
     try {
       await bobEvent1.publish()
@@ -216,7 +221,7 @@ describe('Invite NDK Integration', () => {
 
     // Alice sends reply
     console.log('Alice sending reply...')
-    const aliceMessage1 = aliceSession!.send('Hi Bob from Alice!')
+    const aliceMessage1 = sendText(aliceSession!, 'Hi Bob from Alice!')
     const aliceEvent1 = new NDKEvent(aliceNdk, aliceMessage1.event)
     try {
       await aliceEvent1.publish()
@@ -238,7 +243,7 @@ describe('Invite NDK Integration', () => {
     console.log('Testing second round of messages...')
 
     // Bob sends second message
-    const bobMessage2 = bobSession.send('How are you doing?')
+    const bobMessage2 = sendText(bobSession, 'How are you doing?')
     const bobEvent2 = new NDKEvent(bobNdk, bobMessage2.event)
     try {
       await bobEvent2.publish()
@@ -255,7 +260,7 @@ describe('Invite NDK Integration', () => {
     console.log('✓ Alice received Bob\'s second message')
 
     // Alice sends second reply
-    const aliceMessage2 = aliceSession!.send('I\'m doing great, thanks!')
+    const aliceMessage2 = sendText(aliceSession!, 'I\'m doing great, thanks!')
     const aliceEvent2 = new NDKEvent(aliceNdk, aliceMessage2.event)
     try {
       await aliceEvent2.publish()
@@ -317,7 +322,7 @@ describe('Invite NDK Integration', () => {
     const bobMessages = createEventStream(bobSession)
 
     // Bob sends message
-    const bobMessage = bobSession.send('Message before reconnection')
+    const bobMessage = sendText(bobSession, 'Message before reconnection')
     const bobEvent = new NDKEvent(bobNdk, bobMessage.event)
     try {
       await bobEvent.publish()
@@ -338,7 +343,7 @@ describe('Invite NDK Integration', () => {
     const newAliceMessages = createEventStream(newAliceSession)
 
     // Bob sends another message
-    const bobMessage2 = bobSession.send('Message after Alice reconnection')
+    const bobMessage2 = sendText(bobSession, 'Message after Alice reconnection')
     const bobEvent2 = new NDKEvent(bobNdk, bobMessage2.event)
     try {
       await bobEvent2.publish()

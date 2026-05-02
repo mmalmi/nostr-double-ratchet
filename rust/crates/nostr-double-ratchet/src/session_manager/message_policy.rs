@@ -14,31 +14,6 @@ impl SessionManager {
             .as_secs()
     }
 
-    pub(super) fn expiration_tag_for_options(
-        options: &crate::SendOptions,
-        now_seconds: u64,
-    ) -> Result<Option<Tag>> {
-        let Some(expires_at) = crate::utils::resolve_expiration_seconds(options, now_seconds)?
-        else {
-            return Ok(None);
-        };
-
-        Tag::parse(&[crate::EXPIRATION_TAG.to_string(), expires_at.to_string()])
-            .map(Some)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
-    }
-
-    pub(super) fn append_expiration_tag(
-        tags: &mut Vec<Tag>,
-        options: &crate::SendOptions,
-        now_seconds: u64,
-    ) -> Result<()> {
-        if let Some(tag) = Self::expiration_tag_for_options(options, now_seconds)? {
-            tags.push(tag);
-        }
-        Ok(())
-    }
-
     pub(super) fn chat_settings_payload(message_ttl_seconds: u64) -> crate::ChatSettingsPayloadV1 {
         crate::ChatSettingsPayloadV1 {
             typ: "chat-settings".to_string(),

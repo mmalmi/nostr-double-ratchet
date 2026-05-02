@@ -57,6 +57,8 @@ multi-device routing, device authorization, or session persistence yourself.
 
 Use plain `Session` when you want the smallest possible surface for 1:1 messaging and you do not
 need owner/device fanout, AppKeys-driven authorization, or runtime-managed group transport.
+Build inner rumors with `messageBuilders` first; `Session` only encrypts/decrypts unsigned inner
+events and does not own chat features such as reactions, typing, receipts, or expiration policy.
 
 ## Security Guarantees And Properties
 

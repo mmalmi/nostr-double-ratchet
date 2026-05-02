@@ -22,7 +22,12 @@ import { Invite } from "./Invite"
 import { Session } from "./Session"
 import { resolveInviteOwnerRouting } from "./multiDevice"
 import { decryptInviteResponse, createSessionFromAccept } from "./inviteUtils"
-import { getEventHash, type VerifiedEvent } from "nostr-tools"
+import { type VerifiedEvent } from "nostr-tools"
+import {
+  buildRumorEvent,
+  ensureMsTag,
+  ensureRecipientTag,
+} from "./messageBuilders"
 import {
   classifyMessageOrigin,
   isCrossDeviceSelfOrigin,
@@ -1257,28 +1262,17 @@ export class SessionManager {
   ): Promise<Rumor> {
     const { kind = CHAT_MESSAGE_KIND, tags = [] } = options
 
-    // Build message exactly as library does (Session.ts sendEvent)
     const now = Date.now()
-    const builtTags = this.buildMessageTags(recipientPublicKey, tags)
-
-    const rumor: Rumor = {
-      content,
-      kind,
-      created_at: Math.floor(now / 1000),
-      tags: builtTags,
-      pubkey: this.ourPublicKey,
-      id: "", // Will compute next
-    }
-
-    if (!rumor.tags.some(([k]) => k === "ms")) {
-      rumor.tags.push(["ms", String(now)])
-    }
+    const builtTags = ensureMsTag(
+      ensureRecipientTag(tags, recipientPublicKey),
+      now,
+    )
 
     const groupId = builtTags.find(t => t[0] === "l")?.[1]
     applyExpirationPolicy({
       kind,
       nowSeconds: Math.floor(now / 1000),
-      tags: rumor.tags,
+      tags: builtTags,
       expirationOverride: expirationOverrideFromSendOptions(options),
       defaultExpiration: this.expirationSettings.default,
       peerExpiration: this.expirationSettings.peer(recipientPublicKey),
@@ -1287,7 +1281,14 @@ export class SessionManager {
       hasGroupExpiration: groupId ? this.expirationSettings.hasGroup(groupId) : false,
     })
 
-    rumor.id = getEventHash(rumor)
+    const rumor = buildRumorEvent({
+      kind,
+      content,
+      tags: builtTags,
+      pubkey: this.ourPublicKey,
+      nowMs: now,
+      ensureMsTag: false,
+    })
 
     // Use sendEvent for actual sending (includes queueing).
     // Note: sendEvent is not awaited to maintain backward compatibility.
@@ -1367,19 +1368,6 @@ export class SessionManager {
     if (!adoption) return
 
     this.setExpirationForPeer(adoption.peerPubkey, adoption.options).catch(() => {})
-  }
-
-  private buildMessageTags(
-    recipientPublicKey: string,
-    extraTags: string[][]
-  ): string[][] {
-    const hasRecipientPTag = extraTags.some(
-      (tag) => tag[0] === "p" && tag[1] === recipientPublicKey
-    )
-    const tags = hasRecipientPTag
-      ? [...extraTags]
-      : [["p", recipientPublicKey], ...extraTags]
-    return tags
   }
 
   private storeUserRecord(publicKey: string) {

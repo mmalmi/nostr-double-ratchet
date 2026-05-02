@@ -3,6 +3,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey, type UnsignedEvent, typ
 import { Invite } from "../src/Invite"
 import { MessageQueue } from "../src/MessageQueue"
 import { Session } from "../src/Session"
+import { buildTextRumor, buildTypingRumor } from "../src/messageBuilders"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
 import { DeviceRecordActor } from "../src/session-manager/DeviceRecordActor"
 import { createSessionFromAccept, decryptInviteResponse } from "../src/inviteUtils"
@@ -233,9 +234,11 @@ describe("DeviceRecordActor", () => {
 
     const receivedQueuedMessage = waitForSessionMessage(activeSession, queuedText)
 
-    const { event: bootstrapEvent } = activeSession.sendTyping({
-      expiresAt: Math.floor(Date.now() / 1000),
-    })
+    const { event: bootstrapEvent } = activeSession.sendEvent(
+      buildTypingRumor({
+        expiration: { expiresAt: Math.floor(Date.now() / 1000) },
+      }),
+    )
     actor.processReceivedEvent(bootstrapEvent)
 
     await receivedQueuedMessage
@@ -384,7 +387,7 @@ describe("DeviceRecordActor", () => {
     expect(actor.inactiveSessions).toContain(decryptingInactiveSession)
 
     const text = `inactive-session-forward-${Date.now()}`
-    const { event } = senderSession.send(text)
+    const { event } = senderSession.sendEvent(buildTextRumor(text))
     actor.processReceivedEvent(event)
 
     await waitForSpyCall(() => {
