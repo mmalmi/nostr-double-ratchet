@@ -659,6 +659,25 @@ export class SessionManager {
     return collectMessagePushAuthorPubkeys(userRecord)
   }
 
+  getKnownDeviceIdentityPubkeysForOwner(ownerPubkey: string): string[] {
+    const owner = this.resolveToOwner(ownerPubkey)
+    const userRecord = this.userRecords.get(owner)
+    if (!userRecord) {
+      return []
+    }
+
+    const devices = new Set<string>()
+    for (const device of userRecord.appKeys?.getAllDevices() ?? []) {
+      if (device.identityPubkey) {
+        devices.add(device.identityPubkey)
+      }
+    }
+    for (const deviceId of userRecord.devices.keys()) {
+      devices.add(deviceId)
+    }
+    return [...devices].sort()
+  }
+
   getAllMessagePushAuthorPubkeys(): string[] {
     return collectAllMessagePushAuthorPubkeys(this.userRecords.values())
   }

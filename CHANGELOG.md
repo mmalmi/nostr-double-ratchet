@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.132 - 2026-05-02
+
+- Expose known device identity rosters through `SessionManager` and `NdrRuntime` in Rust and TypeScript.
+- Add Rust runtime coverage for a fresh same-owner device sending to an existing peer chat while the old same-owner device receives the sender copy as a self message.
+- Assert the same roster helper in the TypeScript fresh same-nsec runtime regression.
+
 ## 0.0.131 - 2026-05-02
 
 - Add runtime coverage for a fresh same-owner client with existing AppKeys sending into an existing peer chat and syncing the sender copy to the old device.

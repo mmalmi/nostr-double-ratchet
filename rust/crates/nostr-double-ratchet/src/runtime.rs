@@ -271,6 +271,14 @@ impl NdrRuntime {
         self.session_manager.known_peer_owner_pubkeys()
     }
 
+    pub fn known_device_identity_pubkeys_for_owner(
+        &self,
+        owner_pubkey: PublicKey,
+    ) -> Vec<PublicKey> {
+        self.session_manager
+            .known_device_identity_pubkeys_for_owner(owner_pubkey)
+    }
+
     pub fn get_total_sessions(&self) -> usize {
         self.session_manager.get_total_sessions()
     }
@@ -548,10 +556,13 @@ impl NdrRuntime {
 
 #[cfg(test)]
 mod tests {
-    use nostr::Keys;
+    use nostr::{Keys, PublicKey};
 
     use crate::group::create_group_data;
-    use crate::{SerializableKeyPair, SessionManagerEvent, SessionState, MESSAGE_EVENT_KIND};
+    use crate::{
+        AppKeys, DeviceEntry, SerializableKeyPair, SessionManagerEvent, SessionState,
+        CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND,
+    };
 
     use super::NdrRuntime;
 
@@ -573,6 +584,68 @@ mod tests {
             previous_sending_chain_message_count: 0,
             skipped_keys: Default::default(),
         }
+    }
+
+    fn signed_events(events: Vec<SessionManagerEvent>) -> Vec<nostr::Event> {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionManagerEvent::PublishSigned(event) => Some(event),
+                SessionManagerEvent::PublishSignedForInnerEvent { event, .. } => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn route_runtime_events(runtimes: &[&NdrRuntime]) {
+        for _ in 0..32 {
+            let mut routed = 0usize;
+            for (origin, runtime) in runtimes.iter().enumerate() {
+                for event in signed_events(runtime.drain_events()) {
+                    routed += 1;
+                    for (target, recipient) in runtimes.iter().enumerate() {
+                        if target != origin {
+                            recipient.process_received_event(event.clone());
+                        }
+                    }
+                }
+            }
+
+            if routed == 0 {
+                return;
+            }
+        }
+
+        panic!("runtime event routing did not quiesce");
+    }
+
+    fn sorted_pubkeys(mut pubkeys: Vec<PublicKey>) -> Vec<PublicKey> {
+        pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
+        pubkeys
+    }
+
+    fn decrypted_chat_messages(
+        runtime: &NdrRuntime,
+        expected_content: &str,
+    ) -> Vec<(PublicKey, Option<PublicKey>, nostr::UnsignedEvent)> {
+        runtime
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionManagerEvent::DecryptedMessage {
+                    sender,
+                    sender_device,
+                    content,
+                    ..
+                } => {
+                    let rumor = serde_json::from_str::<nostr::UnsignedEvent>(&content).ok()?;
+                    (rumor.kind.as_u16() == CHAT_MESSAGE_KIND as u16
+                        && rumor.content == expected_content)
+                        .then_some((sender, sender_device, rumor))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -670,6 +743,114 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(event, SessionManagerEvent::Unsubscribe(unsubid) if unsubid == &subid)
         }));
+    }
+
+    #[test]
+    fn fresh_same_owner_runtime_send_reaches_peer_and_existing_owner_device() {
+        let alice_owner_keys = Keys::generate();
+        let alice_owner = alice_owner_keys.public_key();
+        let alice_old_device_keys = Keys::generate();
+        let alice_old_device = alice_old_device_keys.public_key();
+        let alice_fresh_device_keys = Keys::generate();
+        let alice_fresh_device = alice_fresh_device_keys.public_key();
+        let bob_keys = Keys::generate();
+        let bob = bob_keys.public_key();
+
+        let alice_old = NdrRuntime::new(
+            alice_old_device,
+            alice_old_device_keys.secret_key().secret_bytes(),
+            alice_old_device.to_hex(),
+            alice_owner,
+            None,
+            None,
+        );
+        let alice_fresh = NdrRuntime::new(
+            alice_fresh_device,
+            alice_fresh_device_keys.secret_key().secret_bytes(),
+            alice_fresh_device.to_hex(),
+            alice_owner,
+            None,
+            None,
+        );
+        let bob_runtime = NdrRuntime::new(
+            bob,
+            bob_keys.secret_key().secret_bytes(),
+            bob.to_hex(),
+            bob,
+            None,
+            None,
+        );
+
+        let alice_app_keys = AppKeys::new(vec![
+            DeviceEntry::new(alice_old_device, 1),
+            DeviceEntry::new(alice_fresh_device, 2),
+        ]);
+        let bob_app_keys = AppKeys::new(vec![DeviceEntry::new(bob, 1)]);
+        for runtime in [&alice_old, &alice_fresh, &bob_runtime] {
+            runtime.ingest_app_keys_snapshot(alice_owner, alice_app_keys.clone(), 10);
+            runtime.ingest_app_keys_snapshot(bob, bob_app_keys.clone(), 10);
+        }
+
+        alice_old.init().unwrap();
+        alice_fresh.init().unwrap();
+        bob_runtime.init().unwrap();
+        route_runtime_events(&[&alice_old, &alice_fresh, &bob_runtime]);
+
+        let expected_alice_devices = sorted_pubkeys(vec![alice_old_device, alice_fresh_device]);
+        assert_eq!(
+            sorted_pubkeys(alice_fresh.known_device_identity_pubkeys_for_owner(alice_owner)),
+            expected_alice_devices
+        );
+        assert_eq!(
+            sorted_pubkeys(bob_runtime.known_device_identity_pubkeys_for_owner(alice_owner)),
+            expected_alice_devices
+        );
+
+        let text = "fresh same-owner message";
+        let (inner_id, published_ids) = alice_fresh
+            .send_text_with_inner_id(bob, text.to_string(), None)
+            .unwrap();
+        assert!(!inner_id.is_empty());
+        assert!(
+            published_ids.len() >= 2,
+            "fresh sender should publish to peer and existing same-owner device"
+        );
+
+        let outbound = alice_fresh.drain_events();
+        let target_device_ids = outbound
+            .iter()
+            .filter_map(|event| match event {
+                SessionManagerEvent::PublishSignedForInnerEvent {
+                    event,
+                    target_device_id,
+                    ..
+                } if event.kind.as_u16() == MESSAGE_EVENT_KIND as u16 => target_device_id.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(target_device_ids.contains(&bob.to_hex()));
+        assert!(target_device_ids.contains(&alice_old_device.to_hex()));
+        assert!(!target_device_ids.contains(&alice_fresh_device.to_hex()));
+
+        for event in signed_events(outbound) {
+            bob_runtime.process_received_event(event.clone());
+            alice_old.process_received_event(event);
+        }
+
+        let bob_messages = decrypted_chat_messages(&bob_runtime, text);
+        assert!(bob_messages.iter().any(|(sender, sender_device, _)| {
+            *sender == alice_owner && *sender_device == Some(alice_fresh_device)
+        }));
+
+        let old_device_messages = decrypted_chat_messages(&alice_old, text);
+        assert!(
+            old_device_messages
+                .iter()
+                .any(|(sender, sender_device, _)| {
+                    *sender == alice_owner && *sender_device == Some(alice_fresh_device)
+                }),
+            "existing same-owner device should receive the fresh device send as a self message"
+        );
     }
 
     #[test]

@@ -260,6 +260,10 @@ export class NdrRuntime {
     return this.sessionManager?.getMessagePushAuthorPubkeys(peerPubkey) ?? [];
   }
 
+  getKnownDeviceIdentityPubkeysForOwner(ownerPubkey: string): string[] {
+    return this.sessionManager?.getKnownDeviceIdentityPubkeysForOwner(ownerPubkey) ?? [];
+  }
+
   feedEvent(event: VerifiedEvent): boolean {
     return this.processReceivedEvent(event);
   }

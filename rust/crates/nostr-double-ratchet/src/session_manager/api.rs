@@ -524,6 +524,13 @@ impl SessionManager {
         devices
     }
 
+    pub fn known_device_identity_pubkeys_for_owner(
+        &self,
+        owner_pubkey: PublicKey,
+    ) -> Vec<PublicKey> {
+        self.known_device_identity_pubkeys_for_owners([owner_pubkey])
+    }
+
     pub fn get_stored_user_record_json(
         &self,
         peer_owner_pubkey: PublicKey,

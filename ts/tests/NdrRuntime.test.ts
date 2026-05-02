@@ -569,6 +569,20 @@ describe("NdrRuntime", () => {
     if (!freshAliceDevicePubkey) {
       throw new Error("fresh alice device pubkey missing")
     }
+    const oldAliceDevicePubkey = aliceRuntime.getState().currentDevicePubkey
+    if (!oldAliceDevicePubkey) {
+      throw new Error("old alice device pubkey missing")
+    }
+    const expectedAliceDevices = [
+      oldAliceDevicePubkey,
+      freshAliceDevicePubkey,
+    ].sort()
+    expect(
+      freshAliceRuntime.getKnownDeviceIdentityPubkeysForOwner(aliceOwnerPubkey),
+    ).toEqual(expectedAliceDevices)
+    expect(
+      bobRuntime.getKnownDeviceIdentityPubkeysForOwner(aliceOwnerPubkey),
+    ).toEqual(expectedAliceDevices)
 
     const message = "fresh same nsec existing chat send"
     const bobReceivedFreshSend = new Promise<void>((resolve, reject) => {
