@@ -1,1644 +1,1942 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, SecretKey, Tag, Timestamp, UnsignedEvent};
-use rand::random;
-
 use crate::{
-    group::{
-        build_group_metadata_content, create_group_data, GroupData, GROUP_METADATA_KIND,
-        GROUP_SENDER_KEY_DISTRIBUTION_KIND,
-    },
-    message_origin::{classify_message_origin, MessageOrigin},
-    one_to_many::OneToManyChannel,
-    sender_key::{SenderKeyDistribution, SenderKeyState},
-    Error, InMemoryStorage, Result, StorageAdapter, CHAT_MESSAGE_KIND,
+    device_pubkey_from_secret_bytes, random_secret_key_bytes, DevicePubkey, DomainError,
+    GroupCreateResult, GroupIncomingEvent, GroupManagerSnapshot, GroupPreparedPublish,
+    GroupPreparedSend, GroupProtocol, GroupReceivedMessage, GroupSenderKeyHandleResult,
+    GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, GroupSenderKeyRecordSnapshot,
+    GroupSnapshot, OwnerPubkey, ProtocolContext, Result, SenderEventPubkey, SenderKeyDistribution,
+    SenderKeyMessageContent, SenderKeyState, SessionManager, UnixSeconds,
 };
-
-pub struct GroupManagerOptions {
-    pub our_owner_pubkey: PublicKey,
-    pub our_device_pubkey: PublicKey,
-    pub storage: Option<Arc<dyn StorageAdapter>>,
-    pub one_to_many: Option<OneToManyChannel>,
-}
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
-pub struct GroupSendEvent {
-    pub kind: u32,
-    pub content: String,
-    pub tags: Vec<Vec<String>>,
-}
-
-impl GroupSendEvent {
-    pub fn message(message: impl Into<String>) -> Self {
-        Self {
-            kind: CHAT_MESSAGE_KIND,
-            content: message.into(),
-            tags: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GroupSendResult {
-    pub outer: Event,
-    pub inner: UnsignedEvent,
-}
-
-#[derive(Debug, Clone)]
-pub struct GroupDecryptedEvent {
-    pub group_id: String,
-    pub sender_event_pubkey: PublicKey,
-    pub sender_device_pubkey: PublicKey,
-    pub sender_owner_pubkey: Option<PublicKey>,
-    pub outer_event_id: String,
-    pub outer_created_at: u64,
-    pub key_id: u32,
-    pub message_number: u32,
-    pub inner: UnsignedEvent,
-}
-
-#[derive(Debug, Clone)]
-pub struct GroupOuterSubscriptionPlan {
-    pub authors: Vec<PublicKey>,
-    pub added_authors: Vec<PublicKey>,
-}
-
-type SendPairwise<'a> = &'a mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>;
-
-pub struct CreateGroupOptions<'a> {
-    pub send_pairwise: Option<SendPairwise<'a>>,
-    pub fanout_metadata: bool,
-    pub now_ms: Option<u64>,
-}
-
-impl<'a> Default for CreateGroupOptions<'a> {
-    fn default() -> Self {
-        Self {
-            send_pairwise: None,
-            fanout_metadata: true,
-            now_ms: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GroupMetadataFanoutResult {
-    pub enabled: bool,
-    pub attempted: usize,
-    pub succeeded: Vec<String>,
-    pub failed: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateGroupResult {
-    pub group: GroupData,
-    pub metadata_rumor: Option<UnsignedEvent>,
-    pub fanout: GroupMetadataFanoutResult,
-}
-
-pub struct FanoutGroupMetadataOptions<'a> {
-    pub send_pairwise: SendPairwise<'a>,
-    pub exclude_secret_for: Option<&'a str>,
-    pub now_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FanoutGroupMetadataResult {
-    pub group: GroupData,
-    pub metadata_rumor: UnsignedEvent,
-    pub redacted_metadata_rumor: Option<UnsignedEvent>,
-    pub fanout: GroupMetadataFanoutResult,
-}
-
 pub struct GroupManager {
-    our_owner_pubkey: PublicKey,
-    our_device_pubkey: PublicKey,
-    storage: Arc<dyn StorageAdapter>,
-    one_to_many: OneToManyChannel,
+    local_owner_pubkey: OwnerPubkey,
+    groups: BTreeMap<String, GroupRecord>,
+    sender_keys: BTreeMap<SenderKeyRecordId, SenderKeyRecord>,
+    sender_event_index: BTreeMap<SenderEventPubkey, SenderKeyRecordId>,
+}
 
-    groups: HashMap<String, GroupChannel>,
-    sender_event_to_group: HashMap<PublicKey, String>,
-    group_to_sender_events: HashMap<String, HashSet<PublicKey>>,
-    pending_outer_by_sender_event: HashMap<PublicKey, Vec<Event>>,
-    subscribed_sender_events: HashSet<PublicKey>,
-    max_pending_per_sender_event: usize,
-    suppress_local_device_echo: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupRecord {
+    group_id: String,
+    protocol: GroupProtocol,
+    name: String,
+    created_by: OwnerPubkey,
+    members: BTreeSet<OwnerPubkey>,
+    admins: BTreeSet<OwnerPubkey>,
+    revision: u64,
+    created_at: UnixSeconds,
+    updated_at: UnixSeconds,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SenderKeyRecordId {
+    group_id: String,
+    sender_owner: OwnerPubkey,
+    sender_device: DevicePubkey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SenderKeyRecord {
+    group_id: String,
+    sender_owner: OwnerPubkey,
+    sender_device: DevicePubkey,
+    sender_event_pubkey: SenderEventPubkey,
+    sender_event_secret_key: Option<[u8; 32]>,
+    latest_key_id: Option<u32>,
+    states: BTreeMap<u32, SenderKeyState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupWireEnvelopeV1 {
+    wire_format_version: u8,
+    payload: GroupPairwisePayloadV1,
+}
+
+const GROUP_WIRE_FORMAT_VERSION_V1: u8 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum GroupPairwisePayloadV1 {
+    CreateGroup {
+        group_id: String,
+        protocol: GroupProtocol,
+        base_revision: u64,
+        new_revision: u64,
+        name: String,
+        created_by: OwnerPubkey,
+        members: Vec<OwnerPubkey>,
+        admins: Vec<OwnerPubkey>,
+        created_at: UnixSeconds,
+        updated_at: UnixSeconds,
+    },
+    SyncGroup {
+        group_id: String,
+        protocol: GroupProtocol,
+        revision: u64,
+        name: String,
+        created_by: OwnerPubkey,
+        members: Vec<OwnerPubkey>,
+        admins: Vec<OwnerPubkey>,
+        created_at: UnixSeconds,
+        updated_at: UnixSeconds,
+    },
+    RenameGroup {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        name: String,
+    },
+    AddMembers {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        members: Vec<OwnerPubkey>,
+    },
+    RemoveMembers {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        members: Vec<OwnerPubkey>,
+    },
+    AddAdmins {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        admins: Vec<OwnerPubkey>,
+    },
+    RemoveAdmins {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        admins: Vec<OwnerPubkey>,
+    },
+    GroupMessage {
+        group_id: String,
+        revision: u64,
+        body: Vec<u8>,
+    },
+    SenderKeyDistribution {
+        distribution: SenderKeyDistribution,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupSenderKeyPlaintextV1 {
+    wire_format_version: u8,
+    group_id: String,
+    revision: u64,
+    body: Vec<u8>,
 }
 
 impl GroupManager {
-    pub fn new(opts: GroupManagerOptions) -> Self {
+    pub fn new(local_owner_pubkey: OwnerPubkey) -> Self {
         Self {
-            our_owner_pubkey: opts.our_owner_pubkey,
-            our_device_pubkey: opts.our_device_pubkey,
-            storage: opts
-                .storage
-                .unwrap_or_else(|| Arc::new(InMemoryStorage::new())),
-            one_to_many: opts.one_to_many.unwrap_or_default(),
-            groups: HashMap::new(),
-            sender_event_to_group: HashMap::new(),
-            group_to_sender_events: HashMap::new(),
-            pending_outer_by_sender_event: HashMap::new(),
-            subscribed_sender_events: HashSet::new(),
-            max_pending_per_sender_event: 128,
-            suppress_local_device_echo: true,
+            local_owner_pubkey,
+            groups: BTreeMap::new(),
+            sender_keys: BTreeMap::new(),
+            sender_event_index: BTreeMap::new(),
         }
     }
 
-    pub fn upsert_group(&mut self, data: GroupData) -> Result<()> {
-        let group_id = data.id.clone();
+    pub fn from_snapshot(snapshot: GroupManagerSnapshot) -> Result<Self> {
+        let mut groups = BTreeMap::new();
+        for group in snapshot.groups {
+            let record = GroupRecord::from_snapshot(group)?;
+            if groups.insert(record.group_id.clone(), record).is_some() {
+                return Err(group_error("duplicate group id in snapshot"));
+            }
+        }
+        let mut sender_keys = BTreeMap::new();
+        let mut sender_event_index = BTreeMap::new();
+        for snapshot in snapshot.sender_keys {
+            let record = SenderKeyRecord::from_snapshot(snapshot)?;
+            let id = record.id();
+            if sender_keys.insert(id.clone(), record.clone()).is_some() {
+                return Err(group_error("duplicate sender-key record in snapshot"));
+            }
+            if sender_event_index
+                .insert(record.sender_event_pubkey, id)
+                .is_some()
+            {
+                return Err(group_error("duplicate sender-event pubkey in snapshot"));
+            }
+        }
+        Ok(Self {
+            local_owner_pubkey: snapshot.local_owner_pubkey,
+            groups,
+            sender_keys,
+            sender_event_index,
+        })
+    }
 
-        if let Some(group) = self.groups.get_mut(&group_id) {
-            group.set_data(data);
+    pub fn snapshot(&self) -> GroupManagerSnapshot {
+        GroupManagerSnapshot {
+            local_owner_pubkey: self.local_owner_pubkey,
+            groups: self.groups.values().map(GroupRecord::snapshot).collect(),
+            sender_keys: self
+                .sender_keys
+                .values()
+                .map(SenderKeyRecord::snapshot)
+                .collect(),
+        }
+    }
+
+    pub fn group(&self, group_id: &str) -> Option<GroupSnapshot> {
+        self.groups.get(group_id).map(GroupRecord::snapshot)
+    }
+
+    pub fn groups(&self) -> Vec<GroupSnapshot> {
+        self.groups.values().map(GroupRecord::snapshot).collect()
+    }
+
+    pub fn known_sender_event_pubkeys(&self) -> Vec<SenderEventPubkey> {
+        self.sender_event_index.keys().copied().collect()
+    }
+
+    pub fn create_group<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        name: String,
+        initial_members: Vec<OwnerPubkey>,
+    ) -> Result<GroupCreateResult>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.create_group_with_protocol(
+            session_manager,
+            ctx,
+            name,
+            initial_members,
+            GroupProtocol::pairwise_fanout_v1(),
+        )
+    }
+
+    pub fn create_group_with_protocol<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        name: String,
+        initial_members: Vec<OwnerPubkey>,
+        protocol: GroupProtocol,
+    ) -> Result<GroupCreateResult>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let member_set = validate_unique_owners(&initial_members, "initial members")?;
+        if member_set.contains(&self.local_owner_pubkey) {
+            return Err(group_error("local owner is added automatically"));
+        }
+        validate_supported_protocol(protocol)?;
+
+        let group_id = random_group_id(ctx);
+        let mut members = member_set;
+        members.insert(self.local_owner_pubkey);
+
+        let mut admins = BTreeSet::new();
+        admins.insert(self.local_owner_pubkey);
+
+        let record = GroupRecord {
+            group_id: group_id.clone(),
+            protocol,
+            name,
+            created_by: self.local_owner_pubkey,
+            members,
+            admins,
+            revision: 1,
+            created_at: ctx.now,
+            updated_at: ctx.now,
+        };
+        let payload = record.create_payload();
+        let recipients = record.remote_members(self.local_owner_pubkey);
+        let prepared = GroupPreparedSend {
+            group_id: group_id.clone(),
+            remote: self.fanout_payload(session_manager, ctx, &group_id, recipients, &payload)?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &record)?,
+        };
+        let prepared = if protocol.is_sender_key_v1() {
+            self.prepare_sender_key_bootstrap(session_manager, ctx, &record, prepared)?
         } else {
-            let group = GroupChannel::new(
-                data,
-                self.our_owner_pubkey,
-                self.our_device_pubkey,
-                self.storage.clone(),
-                self.one_to_many.clone(),
-            );
-            self.groups.insert(group_id.clone(), group);
+            prepared
+        };
+        let snapshot = record.snapshot();
+
+        self.groups.insert(group_id, record);
+
+        Ok(GroupCreateResult {
+            group: snapshot,
+            prepared,
+        })
+    }
+
+    pub fn retry_create_group<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        recipients: Vec<OwnerPubkey>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let record = self.group_record(group_id)?.clone();
+        record.ensure_admin(self.local_owner_pubkey)?;
+
+        let recipients = validate_unique_owners(&recipients, "recipients")?
+            .into_iter()
+            .filter(|owner| *owner != self.local_owner_pubkey)
+            .collect::<Vec<_>>();
+        for recipient in &recipients {
+            record.ensure_member(*recipient)?;
         }
 
-        self.refresh_group_sender_mappings(&group_id);
+        let prepared = GroupPreparedSend {
+            group_id: record.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &record.group_id,
+                recipients,
+                &record.create_payload(),
+            )?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &record)?,
+        };
+        if record.protocol.is_sender_key_v1() {
+            self.prepare_sender_key_bootstrap(session_manager, ctx, &record, prepared)
+        } else {
+            Ok(prepared)
+        }
+    }
+
+    pub fn send_message<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        body: Vec<u8>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let record = self.group_record(group_id)?.clone();
+        record.ensure_member(self.local_owner_pubkey)?;
+        if record.protocol.is_sender_key_v1() {
+            return self.send_sender_key_message(session_manager, ctx, &record, body);
+        }
+        let payload = GroupPairwisePayloadV1::GroupMessage {
+            group_id: record.group_id.clone(),
+            revision: record.revision,
+            body,
+        };
+
+        let mut local_sibling = self.local_sibling_sync(session_manager, ctx, &record)?;
+        let sibling_message =
+            self.local_sibling_payload(session_manager, ctx, &record.group_id, &payload)?;
+        merge_group_prepared_publish(&mut local_sibling, sibling_message);
+
+        Ok(GroupPreparedSend {
+            group_id: record.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &record.group_id,
+                record.remote_members(self.local_owner_pubkey),
+                &payload,
+            )?,
+            local_sibling,
+        })
+    }
+
+    pub fn update_name<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        name: String,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let current = self.group_record(group_id)?.clone();
+        let mut next = current.clone();
+        next.apply_rename(
+            self.local_owner_pubkey,
+            name.clone(),
+            current.revision,
+            current.revision + 1,
+            ctx.now,
+        )?;
+
+        let payload = GroupPairwisePayloadV1::RenameGroup {
+            group_id: current.group_id.clone(),
+            base_revision: current.revision,
+            new_revision: next.revision,
+            name,
+        };
+
+        let prepared = GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &current.group_id,
+                next.remote_members(self.local_owner_pubkey),
+                &payload,
+            )?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &next)?,
+        };
+        self.groups.insert(current.group_id.clone(), next);
+        Ok(prepared)
+    }
+
+    pub fn retry_update_name<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let current = self.group_record(group_id)?.clone();
+        current.ensure_admin(self.local_owner_pubkey)?;
+        let (base_revision, new_revision) = current.retry_delta_revisions("rename")?;
+
+        let payload = GroupPairwisePayloadV1::RenameGroup {
+            group_id: current.group_id.clone(),
+            base_revision,
+            new_revision,
+            name: current.name.clone(),
+        };
+
+        Ok(GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &current.group_id,
+                current.remote_members(self.local_owner_pubkey),
+                &payload,
+            )?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &current)?,
+        })
+    }
+
+    pub fn add_members<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        members: Vec<OwnerPubkey>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let additions = validate_unique_owners(&members, "members")?;
+        let current = self.group_record(group_id)?.clone();
+        let mut next = current.clone();
+        next.apply_add_members(
+            self.local_owner_pubkey,
+            &additions,
+            current.revision,
+            current.revision + 1,
+            ctx.now,
+        )?;
+
+        let delta_payload = GroupPairwisePayloadV1::AddMembers {
+            group_id: current.group_id.clone(),
+            base_revision: current.revision,
+            new_revision: next.revision,
+            members: additions.iter().copied().collect(),
+        };
+        let bootstrap_payload = next.create_payload();
+
+        let existing_recipients: Vec<_> = current
+            .remote_members(self.local_owner_pubkey)
+            .into_iter()
+            .filter(|owner| !additions.contains(owner))
+            .collect();
+        let new_recipients: Vec<_> = additions
+            .iter()
+            .copied()
+            .filter(|owner| *owner != self.local_owner_pubkey)
+            .collect();
+
+        let mut remote = self.fanout_payload(
+            session_manager,
+            ctx,
+            &current.group_id,
+            existing_recipients,
+            &delta_payload,
+        )?;
+        let bootstrapped = self.fanout_payload(
+            session_manager,
+            ctx,
+            &current.group_id,
+            new_recipients,
+            &bootstrap_payload,
+        )?;
+        merge_group_prepared_publish(&mut remote, bootstrapped);
+
+        let mut prepared = GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &next)?,
+        };
+        if next.protocol.is_sender_key_v1() {
+            prepared = self.prepare_sender_key_bootstrap(session_manager, ctx, &next, prepared)?;
+        }
+        self.groups.insert(current.group_id.clone(), next);
+        Ok(prepared)
+    }
+
+    pub fn retry_add_members<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        members: Vec<OwnerPubkey>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let additions = validate_unique_owners(&members, "members")?;
+        let current = self.group_record(group_id)?.clone();
+        current.ensure_admin(self.local_owner_pubkey)?;
+        let (base_revision, new_revision) = current.retry_delta_revisions("add members")?;
+        for owner in &additions {
+            current.ensure_member(*owner)?;
+        }
+
+        let delta_payload = GroupPairwisePayloadV1::AddMembers {
+            group_id: current.group_id.clone(),
+            base_revision,
+            new_revision,
+            members: additions.iter().copied().collect(),
+        };
+        let bootstrap_payload = current.create_payload();
+
+        let existing_recipients: Vec<_> = current
+            .remote_members(self.local_owner_pubkey)
+            .into_iter()
+            .filter(|owner| !additions.contains(owner))
+            .collect();
+        let new_recipients: Vec<_> = additions
+            .iter()
+            .copied()
+            .filter(|owner| *owner != self.local_owner_pubkey)
+            .collect();
+
+        let mut remote = self.fanout_payload(
+            session_manager,
+            ctx,
+            &current.group_id,
+            existing_recipients,
+            &delta_payload,
+        )?;
+        let bootstrapped = self.fanout_payload(
+            session_manager,
+            ctx,
+            &current.group_id,
+            new_recipients,
+            &bootstrap_payload,
+        )?;
+        merge_group_prepared_publish(&mut remote, bootstrapped);
+        let prepared = GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &current)?,
+        };
+        if current.protocol.is_sender_key_v1() {
+            self.prepare_sender_key_bootstrap(session_manager, ctx, &current, prepared)
+        } else {
+            Ok(prepared)
+        }
+    }
+
+    pub fn remove_members<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        members: Vec<OwnerPubkey>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let removals = validate_unique_owners(&members, "members")?;
+        let current = self.group_record(group_id)?.clone();
+        let mut next = current.clone();
+        next.apply_remove_members(
+            self.local_owner_pubkey,
+            &removals,
+            current.revision,
+            current.revision + 1,
+            ctx.now,
+        )?;
+
+        let payload = GroupPairwisePayloadV1::RemoveMembers {
+            group_id: current.group_id.clone(),
+            base_revision: current.revision,
+            new_revision: next.revision,
+            members: removals.iter().copied().collect(),
+        };
+
+        let mut prepared = GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &current.group_id,
+                current.remote_members(self.local_owner_pubkey),
+                &payload,
+            )?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &next)?,
+        };
+        if next.protocol.is_sender_key_v1() {
+            prepared = self.prepare_sender_key_rotation(session_manager, ctx, &next, prepared)?;
+        }
+        self.groups.insert(current.group_id.clone(), next);
+        Ok(prepared)
+    }
+
+    pub fn retry_remove_members<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        members: Vec<OwnerPubkey>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let removals = validate_unique_owners(&members, "members")?;
+        let current = self.group_record(group_id)?.clone();
+        current.ensure_admin(self.local_owner_pubkey)?;
+        let (base_revision, new_revision) = current.retry_delta_revisions("remove members")?;
+        for owner in &removals {
+            if current.members.contains(owner) {
+                return Err(group_error(format!(
+                    "owner {owner} should already be removed before retrying removal"
+                )));
+            }
+        }
+
+        let payload = GroupPairwisePayloadV1::RemoveMembers {
+            group_id: current.group_id.clone(),
+            base_revision,
+            new_revision,
+            members: removals.iter().copied().collect(),
+        };
+
+        let mut recipients = current
+            .remote_members(self.local_owner_pubkey)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        recipients.extend(
+            removals
+                .iter()
+                .copied()
+                .filter(|owner| *owner != self.local_owner_pubkey),
+        );
+
+        let prepared = GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &current.group_id,
+                recipients.into_iter().collect(),
+                &payload,
+            )?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &current)?,
+        };
+        if current.protocol.is_sender_key_v1() {
+            self.prepare_sender_key_bootstrap(session_manager, ctx, &current, prepared)
+        } else {
+            Ok(prepared)
+        }
+    }
+
+    pub fn add_admins<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        admins: Vec<OwnerPubkey>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let additions = validate_unique_owners(&admins, "admins")?;
+        let current = self.group_record(group_id)?.clone();
+        let mut next = current.clone();
+        next.apply_add_admins(
+            self.local_owner_pubkey,
+            &additions,
+            current.revision,
+            current.revision + 1,
+            ctx.now,
+        )?;
+
+        let payload = GroupPairwisePayloadV1::AddAdmins {
+            group_id: current.group_id.clone(),
+            base_revision: current.revision,
+            new_revision: next.revision,
+            admins: additions.iter().copied().collect(),
+        };
+
+        let prepared = GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &current.group_id,
+                next.remote_members(self.local_owner_pubkey),
+                &payload,
+            )?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &next)?,
+        };
+        self.groups.insert(current.group_id.clone(), next);
+        Ok(prepared)
+    }
+
+    pub fn remove_admins<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        admins: Vec<OwnerPubkey>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let removals = validate_unique_owners(&admins, "admins")?;
+        let current = self.group_record(group_id)?.clone();
+        let mut next = current.clone();
+        next.apply_remove_admins(
+            self.local_owner_pubkey,
+            &removals,
+            current.revision,
+            current.revision + 1,
+            ctx.now,
+        )?;
+
+        let payload = GroupPairwisePayloadV1::RemoveAdmins {
+            group_id: current.group_id.clone(),
+            base_revision: current.revision,
+            new_revision: next.revision,
+            admins: removals.iter().copied().collect(),
+        };
+
+        let prepared = GroupPreparedSend {
+            group_id: current.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &current.group_id,
+                next.remote_members(self.local_owner_pubkey),
+                &payload,
+            )?,
+            local_sibling: self.local_sibling_sync(session_manager, ctx, &next)?,
+        };
+        self.groups.insert(current.group_id.clone(), next);
+        Ok(prepared)
+    }
+
+    pub fn handle_incoming(
+        &mut self,
+        sender_owner: OwnerPubkey,
+        payload: &[u8],
+    ) -> Result<Option<GroupIncomingEvent>> {
+        self.handle_pairwise_payload_inner(sender_owner, None, payload)
+    }
+
+    pub fn handle_pairwise_payload(
+        &mut self,
+        sender_owner: OwnerPubkey,
+        sender_device: DevicePubkey,
+        payload: &[u8],
+    ) -> Result<Option<GroupIncomingEvent>> {
+        self.handle_pairwise_payload_inner(sender_owner, Some(sender_device), payload)
+    }
+
+    fn handle_pairwise_payload_inner(
+        &mut self,
+        sender_owner: OwnerPubkey,
+        sender_device: Option<DevicePubkey>,
+        payload: &[u8],
+    ) -> Result<Option<GroupIncomingEvent>> {
+        let Ok(envelope) = serde_json::from_slice::<GroupWireEnvelopeV1>(payload) else {
+            return Ok(None);
+        };
+        if envelope.wire_format_version != GROUP_WIRE_FORMAT_VERSION_V1 {
+            return Ok(None);
+        }
+
+        let event = match envelope.payload {
+            GroupPairwisePayloadV1::CreateGroup {
+                group_id,
+                protocol,
+                base_revision,
+                new_revision,
+                name,
+                created_by,
+                members,
+                admins,
+                created_at,
+                updated_at,
+            } => {
+                if validate_supported_protocol(protocol).is_err() {
+                    return Ok(None);
+                }
+                let record = GroupRecord::from_create_payload(
+                    group_id,
+                    protocol,
+                    name,
+                    created_by,
+                    members,
+                    admins,
+                    new_revision,
+                    created_at,
+                    updated_at,
+                    sender_owner,
+                )?;
+                if let Some(existing) = self.groups.get(&record.group_id) {
+                    if existing.protocol != record.protocol {
+                        return Err(group_error(format!(
+                            "group `{}` protocol mismatch: expected {:?}, got {:?}",
+                            record.group_id, existing.protocol, record.protocol
+                        )));
+                    }
+                    if existing == &record {
+                        GroupIncomingEvent::MetadataUpdated(existing.snapshot())
+                    } else {
+                        return Err(group_error(format!(
+                            "group `{}` already exists",
+                            record.group_id
+                        )));
+                    }
+                } else {
+                    if base_revision != 0 {
+                        return Err(group_error("create group base revision must be 0"));
+                    }
+                    let snapshot = record.snapshot();
+                    self.groups.insert(record.group_id.clone(), record);
+                    GroupIncomingEvent::MetadataUpdated(snapshot)
+                }
+            }
+            GroupPairwisePayloadV1::SyncGroup {
+                group_id,
+                protocol,
+                revision,
+                name,
+                created_by,
+                members,
+                admins,
+                created_at,
+                updated_at,
+            } => {
+                if validate_supported_protocol(protocol).is_err() {
+                    return Ok(None);
+                }
+                let record = GroupRecord::from_sync_payload(
+                    group_id,
+                    protocol,
+                    name,
+                    created_by,
+                    members,
+                    admins,
+                    revision,
+                    created_at,
+                    updated_at,
+                    sender_owner,
+                    self.local_owner_pubkey,
+                )?;
+                if let Some(existing) = self.groups.get(&record.group_id) {
+                    if existing.protocol != record.protocol {
+                        return Err(group_error(format!(
+                            "group `{}` protocol mismatch: expected {:?}, got {:?}",
+                            record.group_id, existing.protocol, record.protocol
+                        )));
+                    }
+                    if existing == &record || existing.revision > record.revision {
+                        GroupIncomingEvent::MetadataUpdated(existing.snapshot())
+                    } else {
+                        let snapshot = record.snapshot();
+                        self.groups.insert(record.group_id.clone(), record);
+                        GroupIncomingEvent::MetadataUpdated(snapshot)
+                    }
+                } else {
+                    let snapshot = record.snapshot();
+                    self.groups.insert(record.group_id.clone(), record);
+                    GroupIncomingEvent::MetadataUpdated(snapshot)
+                }
+            }
+            GroupPairwisePayloadV1::RenameGroup {
+                group_id,
+                base_revision,
+                new_revision,
+                name,
+            } => {
+                let group = self.group_record_mut(&group_id)?;
+                if group.reflects_rename(&name, new_revision) {
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else {
+                    group.apply_rename(
+                        sender_owner,
+                        name,
+                        base_revision,
+                        new_revision,
+                        group.updated_at,
+                    )?;
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                }
+            }
+            GroupPairwisePayloadV1::AddMembers {
+                group_id,
+                base_revision,
+                new_revision,
+                members,
+            } => {
+                let additions = validate_unique_owners(&members, "members")?;
+                let group = self.group_record_mut(&group_id)?;
+                if group.reflects_added_members(&additions, new_revision) {
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else {
+                    group.apply_add_members(
+                        sender_owner,
+                        &additions,
+                        base_revision,
+                        new_revision,
+                        group.updated_at,
+                    )?;
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                }
+            }
+            GroupPairwisePayloadV1::RemoveMembers {
+                group_id,
+                base_revision,
+                new_revision,
+                members,
+            } => {
+                let removals = validate_unique_owners(&members, "members")?;
+                let group = self.group_record_mut(&group_id)?;
+                if group.reflects_removed_members(&removals, new_revision) {
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else {
+                    group.apply_remove_members(
+                        sender_owner,
+                        &removals,
+                        base_revision,
+                        new_revision,
+                        group.updated_at,
+                    )?;
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                }
+            }
+            GroupPairwisePayloadV1::AddAdmins {
+                group_id,
+                base_revision,
+                new_revision,
+                admins,
+            } => {
+                let additions = validate_unique_owners(&admins, "admins")?;
+                let group = self.group_record_mut(&group_id)?;
+                if group.reflects_added_admins(&additions, new_revision) {
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else {
+                    group.apply_add_admins(
+                        sender_owner,
+                        &additions,
+                        base_revision,
+                        new_revision,
+                        group.updated_at,
+                    )?;
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                }
+            }
+            GroupPairwisePayloadV1::RemoveAdmins {
+                group_id,
+                base_revision,
+                new_revision,
+                admins,
+            } => {
+                let removals = validate_unique_owners(&admins, "admins")?;
+                let group = self.group_record_mut(&group_id)?;
+                if group.reflects_removed_admins(&removals, new_revision) {
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else {
+                    group.apply_remove_admins(
+                        sender_owner,
+                        &removals,
+                        base_revision,
+                        new_revision,
+                        group.updated_at,
+                    )?;
+                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                }
+            }
+            GroupPairwisePayloadV1::GroupMessage {
+                group_id,
+                revision,
+                body,
+            } => {
+                let group = self.group_record(&group_id)?;
+                group.ensure_member(sender_owner)?;
+                if revision != group.revision {
+                    return Err(group_error(format!(
+                        "group message revision mismatch for `{group_id}`: expected {}, got {}",
+                        group.revision, revision
+                    )));
+                }
+                GroupIncomingEvent::Message(GroupReceivedMessage {
+                    group_id,
+                    sender_owner,
+                    sender_device,
+                    body,
+                    revision,
+                })
+            }
+            GroupPairwisePayloadV1::SenderKeyDistribution { distribution } => {
+                let Some(sender_device) = sender_device else {
+                    return Err(group_error(
+                        "sender-key distribution requires authenticated sender device",
+                    ));
+                };
+                let group_id = distribution.group_id.clone();
+                self.observe_sender_key_distribution(sender_owner, sender_device, distribution)?;
+                let snapshot = self.group_record(&group_id)?.snapshot();
+                GroupIncomingEvent::MetadataUpdated(snapshot)
+            }
+        };
+
+        Ok(Some(event))
+    }
+
+    pub fn handle_sender_key_message(
+        &mut self,
+        message: GroupSenderKeyMessage,
+    ) -> Result<GroupSenderKeyHandleResult> {
+        let content = SenderKeyMessageContent {
+            key_id: message.key_id,
+            message_number: message.message_number,
+            ciphertext: message.ciphertext,
+        };
+        let Some(id) = self
+            .sender_event_index
+            .get(&message.sender_event_pubkey)
+            .cloned()
+        else {
+            return Ok(GroupSenderKeyHandleResult::PendingDistribution {
+                group_id: message.group_id,
+                sender_event_pubkey: message.sender_event_pubkey,
+                key_id: message.key_id,
+            });
+        };
+        if id.group_id != message.group_id {
+            return Ok(GroupSenderKeyHandleResult::Ignored);
+        }
+
+        let group = self.group_record(&id.group_id)?.clone();
+        if !group.protocol.is_sender_key_v1() || !group.members.contains(&id.sender_owner) {
+            return Ok(GroupSenderKeyHandleResult::Ignored);
+        }
+
+        let record = self
+            .sender_keys
+            .get_mut(&id)
+            .ok_or_else(|| group_error("sender-key index points to missing state"))?;
+        let Some(state) = record.states.get_mut(&message.key_id) else {
+            return Ok(GroupSenderKeyHandleResult::PendingDistribution {
+                group_id: message.group_id,
+                sender_event_pubkey: message.sender_event_pubkey,
+                key_id: message.key_id,
+            });
+        };
+        let plan = state.plan_decrypt(&content)?;
+        let plaintext = plan.plaintext.clone();
+
+        let plaintext: GroupSenderKeyPlaintextV1 = serde_json::from_slice(&plaintext)?;
+        if plaintext.wire_format_version != GROUP_WIRE_FORMAT_VERSION_V1 {
+            return Ok(GroupSenderKeyHandleResult::Ignored);
+        }
+        if plaintext.group_id != group.group_id || plaintext.revision != group.revision {
+            return Err(group_error(format!(
+                "group sender-key message revision mismatch for `{}`: expected {}, got {}",
+                group.group_id, group.revision, plaintext.revision
+            )));
+        }
+
+        state.apply_decrypt(plan);
+
+        Ok(GroupSenderKeyHandleResult::Event(
+            GroupIncomingEvent::Message(GroupReceivedMessage {
+                group_id: plaintext.group_id,
+                sender_owner: id.sender_owner,
+                sender_device: Some(id.sender_device),
+                body: plaintext.body,
+                revision: plaintext.revision,
+            }),
+        ))
+    }
+
+    fn local_sibling_sync<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        record: &GroupRecord,
+    ) -> Result<GroupPreparedPublish>
+    where
+        R: RngCore + CryptoRng,
+    {
+        if !session_manager.has_authorized_local_siblings() {
+            return Ok(GroupPreparedPublish::empty());
+        }
+        let payload = serde_json::to_vec(&GroupWireEnvelopeV1 {
+            wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
+            payload: record.sync_payload(),
+        })?;
+        self.local_sibling_payload_bytes(session_manager, ctx, payload)
+    }
+
+    fn local_sibling_payload<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        _group_id: &str,
+        payload: &GroupPairwisePayloadV1,
+    ) -> Result<GroupPreparedPublish>
+    where
+        R: RngCore + CryptoRng,
+    {
+        if !session_manager.has_authorized_local_siblings() {
+            return Ok(GroupPreparedPublish::empty());
+        }
+        self.local_sibling_payload_bytes(
+            session_manager,
+            ctx,
+            serde_json::to_vec(&GroupWireEnvelopeV1 {
+                wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
+                payload: payload.clone(),
+            })?,
+        )
+    }
+
+    fn local_sibling_payload_bytes<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        payload: Vec<u8>,
+    ) -> Result<GroupPreparedPublish>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let prepared = session_manager.prepare_local_sibling_send_reusing_sessions(ctx, payload)?;
+        Ok(GroupPreparedPublish {
+            deliveries: prepared.deliveries,
+            invite_responses: prepared.invite_responses,
+            sender_key_messages: Vec::new(),
+            relay_gaps: prepared.relay_gaps,
+        })
+    }
+
+    fn fanout_payload<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        _group_id: &str,
+        recipients: Vec<OwnerPubkey>,
+        payload: &GroupPairwisePayloadV1,
+    ) -> Result<GroupPreparedPublish>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mut prepared = GroupPreparedPublish::empty();
+        let payload_bytes = serde_json::to_vec(&GroupWireEnvelopeV1 {
+            wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
+            payload: payload.clone(),
+        })?;
+
+        for recipient in recipients {
+            let next =
+                session_manager.prepare_remote_send(ctx, recipient, payload_bytes.clone())?;
+            prepared.deliveries.extend(next.deliveries);
+            prepared.invite_responses.extend(next.invite_responses);
+            prepared.relay_gaps.extend(next.relay_gaps);
+        }
+
+        prepared.relay_gaps.sort();
+        prepared.relay_gaps.dedup();
+        Ok(prepared)
+    }
+
+    fn send_sender_key_message<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        record: &GroupRecord,
+        body: Vec<u8>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mut remote = GroupPreparedPublish::empty();
+        let mut local_sibling = self.local_sibling_sync(session_manager, ctx, record)?;
+        let local_device = session_manager.local_device_pubkey();
+        let (distribution, created) =
+            self.ensure_local_sender_key_record(ctx, record, local_device, false)?;
+
+        if created {
+            remote = self.fanout_sender_key_distribution(
+                session_manager,
+                ctx,
+                record.remote_members(self.local_owner_pubkey),
+                &distribution,
+            )?;
+        }
+        let sibling_distribution =
+            self.local_sibling_sender_key_distribution(session_manager, ctx, &distribution)?;
+        merge_group_prepared_publish(&mut local_sibling, sibling_distribution);
+
+        let id = SenderKeyRecordId::new(
+            record.group_id.clone(),
+            self.local_owner_pubkey,
+            local_device,
+        );
+        let sender_record = self
+            .sender_keys
+            .get_mut(&id)
+            .ok_or_else(|| group_error("missing local sender-key record"))?;
+        let key_id = sender_record
+            .latest_key_id
+            .ok_or_else(|| group_error("missing local sender-key id"))?;
+        let state = sender_record
+            .states
+            .get_mut(&key_id)
+            .ok_or_else(|| group_error("missing local sender-key state"))?;
+        let plaintext = serde_json::to_vec(&GroupSenderKeyPlaintextV1 {
+            wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
+            group_id: record.group_id.clone(),
+            revision: record.revision,
+            body,
+        })?;
+        let plan = state.plan_encrypt(&plaintext)?;
+        let message_number = plan.message_number;
+        let ciphertext = plan.ciphertext.clone();
+        state.apply_encrypt(plan);
+        let signer_secret_key = sender_record
+            .sender_event_secret_key
+            .ok_or_else(|| group_error("missing local sender-event secret key"))?;
+
+        remote
+            .sender_key_messages
+            .push(GroupSenderKeyMessageEnvelope {
+                group_id: record.group_id.clone(),
+                sender_event_pubkey: sender_record.sender_event_pubkey,
+                signer_secret_key,
+                key_id,
+                message_number,
+                created_at: ctx.now,
+                ciphertext,
+            });
+
+        Ok(GroupPreparedSend {
+            group_id: record.group_id.clone(),
+            remote,
+            local_sibling,
+        })
+    }
+
+    fn prepare_sender_key_bootstrap<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        record: &GroupRecord,
+        mut prepared: GroupPreparedSend,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let local_device = session_manager.local_device_pubkey();
+        let (distribution, _) =
+            self.ensure_local_sender_key_record(ctx, record, local_device, false)?;
+        let remote = self.fanout_sender_key_distribution(
+            session_manager,
+            ctx,
+            record.remote_members(self.local_owner_pubkey),
+            &distribution,
+        )?;
+        merge_group_prepared_publish(&mut prepared.remote, remote);
+        let local =
+            self.local_sibling_sender_key_distribution(session_manager, ctx, &distribution)?;
+        merge_group_prepared_publish(&mut prepared.local_sibling, local);
+        Ok(prepared)
+    }
+
+    fn prepare_sender_key_rotation<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        record: &GroupRecord,
+        mut prepared: GroupPreparedSend,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let local_device = session_manager.local_device_pubkey();
+        let (distribution, _) =
+            self.ensure_local_sender_key_record(ctx, record, local_device, true)?;
+        let remote = self.fanout_sender_key_distribution(
+            session_manager,
+            ctx,
+            record.remote_members(self.local_owner_pubkey),
+            &distribution,
+        )?;
+        merge_group_prepared_publish(&mut prepared.remote, remote);
+        let local =
+            self.local_sibling_sender_key_distribution(session_manager, ctx, &distribution)?;
+        merge_group_prepared_publish(&mut prepared.local_sibling, local);
+        Ok(prepared)
+    }
+
+    fn ensure_local_sender_key_record<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        record: &GroupRecord,
+        local_device: DevicePubkey,
+        force_rotate: bool,
+    ) -> Result<(SenderKeyDistribution, bool)>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let id = SenderKeyRecordId::new(
+            record.group_id.clone(),
+            self.local_owner_pubkey,
+            local_device,
+        );
+        let mut created_or_rotated = force_rotate;
+        if !self.sender_keys.contains_key(&id) {
+            let sender_event_secret_key = random_secret_key_bytes(ctx.rng)?;
+            let sender_event_pubkey = device_pubkey_from_secret_bytes(&sender_event_secret_key)?;
+            let sender_record = SenderKeyRecord {
+                group_id: record.group_id.clone(),
+                sender_owner: self.local_owner_pubkey,
+                sender_device: local_device,
+                sender_event_pubkey,
+                sender_event_secret_key: Some(sender_event_secret_key),
+                latest_key_id: None,
+                states: BTreeMap::new(),
+            };
+            self.sender_event_index
+                .insert(sender_event_pubkey, sender_record.id());
+            self.sender_keys.insert(id.clone(), sender_record);
+            created_or_rotated = true;
+        }
+
+        let sender_record = self
+            .sender_keys
+            .get_mut(&id)
+            .ok_or_else(|| group_error("missing local sender-key record"))?;
+        if force_rotate || sender_record.latest_key_id.is_none() {
+            let key_id = random_key_id(ctx);
+            let mut chain_key = [0u8; 32];
+            ctx.rng.fill_bytes(&mut chain_key);
+            sender_record
+                .states
+                .insert(key_id, SenderKeyState::new(key_id, chain_key, 0));
+            sender_record.latest_key_id = Some(key_id);
+            created_or_rotated = true;
+        }
+
+        let key_id = sender_record
+            .latest_key_id
+            .ok_or_else(|| group_error("missing local sender-key id"))?;
+        let state = sender_record
+            .states
+            .get(&key_id)
+            .ok_or_else(|| group_error("missing local sender-key state"))?;
+        Ok((
+            SenderKeyDistribution {
+                group_id: record.group_id.clone(),
+                key_id,
+                sender_event_pubkey: sender_record.sender_event_pubkey,
+                chain_key: state.chain_key(),
+                iteration: state.iteration(),
+                created_at: ctx.now,
+            },
+            created_or_rotated,
+        ))
+    }
+
+    fn fanout_sender_key_distribution<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        recipients: Vec<OwnerPubkey>,
+        distribution: &SenderKeyDistribution,
+    ) -> Result<GroupPreparedPublish>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.fanout_payload(
+            session_manager,
+            ctx,
+            &distribution.group_id,
+            recipients,
+            &GroupPairwisePayloadV1::SenderKeyDistribution {
+                distribution: distribution.clone(),
+            },
+        )
+    }
+
+    fn local_sibling_sender_key_distribution<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        distribution: &SenderKeyDistribution,
+    ) -> Result<GroupPreparedPublish>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.local_sibling_payload(
+            session_manager,
+            ctx,
+            &distribution.group_id,
+            &GroupPairwisePayloadV1::SenderKeyDistribution {
+                distribution: distribution.clone(),
+            },
+        )
+    }
+
+    fn observe_sender_key_distribution(
+        &mut self,
+        sender_owner: OwnerPubkey,
+        sender_device: DevicePubkey,
+        distribution: SenderKeyDistribution,
+    ) -> Result<()> {
+        let group = self.group_record(&distribution.group_id)?.clone();
+        if !group.protocol.is_sender_key_v1() {
+            return Ok(());
+        }
+        group.ensure_member(sender_owner)?;
+
+        let id = SenderKeyRecordId::new(distribution.group_id.clone(), sender_owner, sender_device);
+        let record = self
+            .sender_keys
+            .entry(id.clone())
+            .or_insert_with(|| SenderKeyRecord {
+                group_id: distribution.group_id.clone(),
+                sender_owner,
+                sender_device,
+                sender_event_pubkey: distribution.sender_event_pubkey,
+                sender_event_secret_key: None,
+                latest_key_id: None,
+                states: BTreeMap::new(),
+            });
+        if record.sender_event_pubkey != distribution.sender_event_pubkey {
+            self.sender_event_index.remove(&record.sender_event_pubkey);
+            record.sender_event_pubkey = distribution.sender_event_pubkey;
+        }
+        self.sender_event_index
+            .insert(distribution.sender_event_pubkey, id);
+        record.latest_key_id = Some(distribution.key_id);
+        record.states.entry(distribution.key_id).or_insert_with(|| {
+            SenderKeyState::new(
+                distribution.key_id,
+                distribution.chain_key,
+                distribution.iteration,
+            )
+        });
         Ok(())
     }
 
-    pub fn remove_group(&mut self, group_id: &str) {
-        self.groups.remove(group_id);
-
-        if let Some(sender_events) = self.group_to_sender_events.get(group_id) {
-            for sender_event_pubkey in sender_events {
-                if self
-                    .sender_event_to_group
-                    .get(sender_event_pubkey)
-                    .is_some_and(|mapped| mapped == group_id)
-                {
-                    self.sender_event_to_group.remove(sender_event_pubkey);
-                }
-                self.pending_outer_by_sender_event
-                    .remove(sender_event_pubkey);
-            }
-        }
-        self.group_to_sender_events.remove(group_id);
+    fn group_record(&self, group_id: &str) -> Result<&GroupRecord> {
+        self.groups
+            .get(group_id)
+            .ok_or_else(|| group_error(format!("unknown group `{group_id}`")))
     }
 
-    pub fn managed_group_ids(&self) -> Vec<String> {
-        let mut group_ids: Vec<String> = self.groups.keys().cloned().collect();
-        group_ids.sort();
-        group_ids
+    fn group_record_mut(&mut self, group_id: &str) -> Result<&mut GroupRecord> {
+        self.groups
+            .get_mut(group_id)
+            .ok_or_else(|| group_error(format!("unknown group `{group_id}`")))
+    }
+}
+
+impl GroupRecord {
+    fn from_snapshot(snapshot: GroupSnapshot) -> Result<Self> {
+        let members = validate_unique_owners(&snapshot.members, "members")?;
+        let admins = validate_unique_owners(&snapshot.admins, "admins")?;
+        validate_supported_protocol(snapshot.protocol)?;
+        validate_group_invariants(&members, &admins)?;
+
+        Ok(Self {
+            group_id: snapshot.group_id,
+            protocol: snapshot.protocol,
+            name: snapshot.name,
+            created_by: snapshot.created_by,
+            members,
+            admins,
+            revision: snapshot.revision,
+            created_at: snapshot.created_at,
+            updated_at: snapshot.updated_at,
+        })
     }
 
-    /// Return all sender-event pubkeys currently known across managed groups.
-    ///
-    /// This includes mappings learned from local sends and from incoming sender-key
-    /// distribution rumors. The returned list is de-duplicated and sorted.
-    pub fn known_sender_event_pubkeys(&mut self) -> Vec<PublicKey> {
-        let group_ids: Vec<String> = self.groups.keys().cloned().collect();
-        for group_id in group_ids {
-            self.refresh_group_sender_mappings(&group_id);
+    #[allow(clippy::too_many_arguments)]
+    fn from_create_payload(
+        group_id: String,
+        protocol: GroupProtocol,
+        name: String,
+        created_by: OwnerPubkey,
+        members: Vec<OwnerPubkey>,
+        admins: Vec<OwnerPubkey>,
+        new_revision: u64,
+        created_at: UnixSeconds,
+        updated_at: UnixSeconds,
+        sender_owner: OwnerPubkey,
+    ) -> Result<Self> {
+        let member_set = validate_unique_owners(&members, "members")?;
+        let admin_set = validate_unique_owners(&admins, "admins")?;
+        validate_supported_protocol(protocol)?;
+        if created_by != sender_owner {
+            return Err(group_error("create group sender must match created_by"));
         }
-
-        let mut local_sender_events = HashSet::new();
-        for group in self.groups.values_mut() {
-            if let Ok(Some(sender_event_pubkey)) =
-                group.sender_event_pubkey_for_device(self.our_device_pubkey)
-            {
-                local_sender_events.insert(sender_event_pubkey);
-            }
+        if new_revision == 0 {
+            return Err(group_error("create group revision must be at least 1"));
         }
+        if !admin_set.contains(&sender_owner) {
+            return Err(group_error("create group sender must be an admin"));
+        }
+        validate_group_invariants(&member_set, &admin_set)?;
 
-        let mut values: Vec<PublicKey> = self
-            .sender_event_to_group
-            .keys()
-            .copied()
-            .filter(|pubkey| !local_sender_events.contains(pubkey))
-            .collect();
-        values.sort_by_key(|pk| pk.to_hex());
-        values.dedup();
-        values
+        Ok(Self {
+            group_id,
+            protocol,
+            name,
+            created_by,
+            members: member_set,
+            admins: admin_set,
+            revision: new_revision,
+            created_at,
+            updated_at,
+        })
     }
 
-    pub fn outer_subscription_plan(&mut self) -> GroupOuterSubscriptionPlan {
-        let authors = self.known_sender_event_pubkeys();
-        let next: HashSet<PublicKey> = authors.iter().copied().collect();
-        let mut added_authors: Vec<PublicKey> = authors
+    #[allow(clippy::too_many_arguments)]
+    fn from_sync_payload(
+        group_id: String,
+        protocol: GroupProtocol,
+        name: String,
+        created_by: OwnerPubkey,
+        members: Vec<OwnerPubkey>,
+        admins: Vec<OwnerPubkey>,
+        revision: u64,
+        created_at: UnixSeconds,
+        updated_at: UnixSeconds,
+        sender_owner: OwnerPubkey,
+        local_owner: OwnerPubkey,
+    ) -> Result<Self> {
+        let member_set = validate_unique_owners(&members, "members")?;
+        let admin_set = validate_unique_owners(&admins, "admins")?;
+        validate_supported_protocol(protocol)?;
+        if sender_owner != local_owner {
+            return Err(group_error("sync group sender must match local owner"));
+        }
+        if !member_set.contains(&sender_owner) {
+            return Err(group_error("sync group sender must be a member"));
+        }
+        if revision == 0 {
+            return Err(group_error("sync group revision must be at least 1"));
+        }
+        validate_group_invariants(&member_set, &admin_set)?;
+
+        Ok(Self {
+            group_id,
+            protocol,
+            name,
+            created_by,
+            members: member_set,
+            admins: admin_set,
+            revision,
+            created_at,
+            updated_at,
+        })
+    }
+
+    fn snapshot(&self) -> GroupSnapshot {
+        GroupSnapshot {
+            group_id: self.group_id.clone(),
+            protocol: self.protocol,
+            name: self.name.clone(),
+            created_by: self.created_by,
+            members: self.members.iter().copied().collect(),
+            admins: self.admins.iter().copied().collect(),
+            revision: self.revision,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+
+    fn create_payload(&self) -> GroupPairwisePayloadV1 {
+        GroupPairwisePayloadV1::CreateGroup {
+            group_id: self.group_id.clone(),
+            protocol: self.protocol,
+            base_revision: 0,
+            new_revision: self.revision,
+            name: self.name.clone(),
+            created_by: self.created_by,
+            members: self.members.iter().copied().collect(),
+            admins: self.admins.iter().copied().collect(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+
+    fn sync_payload(&self) -> GroupPairwisePayloadV1 {
+        GroupPairwisePayloadV1::SyncGroup {
+            group_id: self.group_id.clone(),
+            protocol: self.protocol,
+            revision: self.revision,
+            name: self.name.clone(),
+            created_by: self.created_by,
+            members: self.members.iter().copied().collect(),
+            admins: self.admins.iter().copied().collect(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+
+    fn remote_members(&self, local_owner_pubkey: OwnerPubkey) -> Vec<OwnerPubkey> {
+        self.members
             .iter()
             .copied()
-            .filter(|pubkey| !self.subscribed_sender_events.contains(pubkey))
-            .collect();
-        added_authors.sort_by_key(|pubkey| pubkey.to_hex());
-        added_authors.dedup();
-        self.subscribed_sender_events = next;
-
-        GroupOuterSubscriptionPlan {
-            authors,
-            added_authors,
-        }
-    }
-
-    /// High-level helper:
-    /// - creates local group state
-    /// - and (by default) fans out metadata rumors to members over pairwise sessions.
-    ///
-    /// `create_group_data` stays pure/local-only; this method adds app-level delivery behavior.
-    pub fn create_group(
-        &mut self,
-        name: &str,
-        member_owner_pubkeys: &[&str],
-        mut opts: CreateGroupOptions<'_>,
-    ) -> Result<CreateGroupResult> {
-        let our_owner_hex = pubkey_to_hex(&self.our_owner_pubkey);
-        let group = create_group_data(name, &our_owner_hex, member_owner_pubkeys);
-
-        if !opts.fanout_metadata {
-            self.upsert_group(group.clone())?;
-            return Ok(CreateGroupResult {
-                group,
-                metadata_rumor: None,
-                fanout: GroupMetadataFanoutResult {
-                    enabled: false,
-                    attempted: 0,
-                    succeeded: Vec::new(),
-                    failed: Vec::new(),
-                },
-            });
-        }
-
-        let Some(send_pairwise) = opts.send_pairwise.as_mut() else {
-            return Err(Error::InvalidEvent(
-                "send_pairwise is required when fanout_metadata is enabled".to_string(),
-            ));
-        };
-
-        let result = self.fan_out_group_metadata(
-            group.clone(),
-            FanoutGroupMetadataOptions {
-                send_pairwise,
-                exclude_secret_for: None,
-                now_ms: opts.now_ms,
-            },
-        )?;
-
-        Ok(CreateGroupResult {
-            group,
-            metadata_rumor: Some(result.metadata_rumor),
-            fanout: result.fanout,
-        })
-    }
-
-    pub fn fan_out_group_metadata(
-        &mut self,
-        group: GroupData,
-        opts: FanoutGroupMetadataOptions<'_>,
-    ) -> Result<FanoutGroupMetadataResult> {
-        self.upsert_group(group.clone())?;
-
-        let now_ms = opts.now_ms.unwrap_or_else(now_millis);
-        let metadata_rumor = self.build_group_metadata_rumor(&group, false, now_ms)?;
-        let redacted_metadata_rumor = opts
-            .exclude_secret_for
-            .map(|_| self.build_group_metadata_rumor(&group, true, now_ms))
-            .transpose()?;
-        let fanout = self.deliver_group_metadata(
-            &group,
-            &metadata_rumor,
-            redacted_metadata_rumor.as_ref(),
-            opts.exclude_secret_for,
-            opts.send_pairwise,
-        );
-
-        Ok(FanoutGroupMetadataResult {
-            group,
-            metadata_rumor,
-            redacted_metadata_rumor,
-            fanout,
-        })
-    }
-
-    pub fn send_message<F, G>(
-        &mut self,
-        group_id: &str,
-        message: &str,
-        send_pairwise: &mut F,
-        publish_outer: &mut G,
-        now_ms: Option<u64>,
-    ) -> Result<GroupSendResult>
-    where
-        F: FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
-        G: FnMut(&Event) -> Result<()>,
-    {
-        self.send_event(
-            group_id,
-            GroupSendEvent::message(message),
-            send_pairwise,
-            publish_outer,
-            now_ms,
-        )
-    }
-
-    pub fn send_event<F, G>(
-        &mut self,
-        group_id: &str,
-        event: GroupSendEvent,
-        send_pairwise: &mut F,
-        publish_outer: &mut G,
-        now_ms: Option<u64>,
-    ) -> Result<GroupSendResult>
-    where
-        F: FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
-        G: FnMut(&Event) -> Result<()>,
-    {
-        let Some(group) = self.groups.get_mut(group_id) else {
-            return Err(Error::InvalidEvent(format!("Unknown group: {group_id}")));
-        };
-
-        let result = group.send_event(event, send_pairwise, publish_outer, now_ms)?;
-        self.refresh_group_sender_mappings(group_id);
-        Ok(result)
-    }
-
-    pub fn rotate_sender_key<F>(
-        &mut self,
-        group_id: &str,
-        send_pairwise: &mut F,
-        now_ms: Option<u64>,
-    ) -> Result<SenderKeyDistribution>
-    where
-        F: FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
-    {
-        let Some(group) = self.groups.get_mut(group_id) else {
-            return Err(Error::InvalidEvent(format!("Unknown group: {group_id}")));
-        };
-
-        let result = group.rotate_sender_key(send_pairwise, now_ms)?;
-        self.refresh_group_sender_mappings(group_id);
-        Ok(result)
-    }
-
-    pub fn handle_incoming_session_event(
-        &mut self,
-        event: &UnsignedEvent,
-        from_owner_pubkey: PublicKey,
-        from_sender_device_pubkey: Option<PublicKey>,
-    ) -> Vec<GroupDecryptedEvent> {
-        let mut group_id = first_tag_value(&event.tags, "l");
-        let mut dist: Option<SenderKeyDistribution> = None;
-
-        if event.kind == Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16) {
-            dist = parse_sender_key_distribution(&event.content);
-            if let Some(parsed) = dist.as_ref() {
-                group_id = Some(parsed.group_id.clone());
-            }
-        }
-
-        let Some(group_id) = group_id else {
-            return Vec::new();
-        };
-        let Some(group) = self.groups.get_mut(&group_id) else {
-            return Vec::new();
-        };
-
-        let mut drained = group.handle_incoming_session_event(
-            event,
-            from_owner_pubkey,
-            from_sender_device_pubkey,
-        );
-
-        if let Some(sender_event_pubkey) = dist
-            .as_ref()
-            .and_then(|d| d.sender_event_pubkey.as_deref())
-            .and_then(parse_pubkey_hex)
-        {
-            self.bind_sender_event_to_group(&group_id, sender_event_pubkey);
-
-            if let Some(group) = self.groups.get_mut(&group_id) {
-                let mut drained_from_manager = Self::drain_pending_outer_for_sender_event(
-                    &mut self.pending_outer_by_sender_event,
-                    &self.one_to_many,
-                    sender_event_pubkey,
-                    group,
-                );
-                drained.append(&mut drained_from_manager);
-            }
-        }
-
-        self.refresh_group_sender_mappings(&group_id);
-        self.route_group_events(drained)
-    }
-
-    pub fn handle_outer_event(&mut self, outer: &Event) -> Option<GroupDecryptedEvent> {
-        if outer.kind != Kind::Custom(self.one_to_many.outer_kind() as u16) {
-            return None;
-        }
-
-        let sender_event_pubkey = outer.pubkey;
-        let Some(group_id) = self
-            .sender_event_to_group
-            .get(&sender_event_pubkey)
-            .cloned()
-        else {
-            self.queue_pending_outer(sender_event_pubkey, outer.clone());
-            return None;
-        };
-
-        let Some(group) = self.groups.get_mut(&group_id) else {
-            self.queue_pending_outer(sender_event_pubkey, outer.clone());
-            return None;
-        };
-
-        let decrypted = group.handle_outer_event(outer)?;
-        if self.should_drop_local_echo(&decrypted) {
-            return None;
-        }
-        Some(decrypted)
-    }
-
-    fn bind_sender_event_to_group(&mut self, group_id: &str, sender_event_pubkey: PublicKey) {
-        self.sender_event_to_group
-            .insert(sender_event_pubkey, group_id.to_string());
-        self.group_to_sender_events
-            .entry(group_id.to_string())
-            .or_default()
-            .insert(sender_event_pubkey);
-    }
-
-    fn build_group_metadata_rumor(
-        &self,
-        group: &GroupData,
-        exclude_secret: bool,
-        now_ms: u64,
-    ) -> Result<UnsignedEvent> {
-        let now_seconds = now_ms / 1000;
-        let metadata_content = build_group_metadata_content(group, exclude_secret);
-        let tags = vec![
-            parse_tag(&["l".to_string(), group.id.clone()])?,
-            parse_tag(&["ms".to_string(), now_ms.to_string()])?,
-        ];
-
-        Ok(
-            EventBuilder::new(Kind::Custom(GROUP_METADATA_KIND as u16), metadata_content)
-                .tags(tags)
-                .custom_created_at(Timestamp::from(now_seconds))
-                .build(self.our_device_pubkey),
-        )
-    }
-
-    fn deliver_group_metadata(
-        &self,
-        group: &GroupData,
-        metadata_rumor: &UnsignedEvent,
-        redacted_metadata_rumor: Option<&UnsignedEvent>,
-        exclude_secret_for: Option<&str>,
-        send_pairwise: &mut dyn FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
-    ) -> GroupMetadataFanoutResult {
-        let mut delivered = HashSet::new();
-        let mut succeeded = Vec::new();
-        let mut failed = Vec::new();
-
-        for member_owner_hex in &group.members {
-            if !delivered.insert(member_owner_hex.clone()) {
-                continue;
-            }
-
-            let rumor = if exclude_secret_for == Some(member_owner_hex.as_str()) {
-                redacted_metadata_rumor.unwrap_or(metadata_rumor)
-            } else {
-                metadata_rumor
-            };
-
-            match parse_pubkey_hex(member_owner_hex) {
-                Some(member_owner_pubkey) if send_pairwise(member_owner_pubkey, rumor).is_ok() => {
-                    succeeded.push(member_owner_hex.clone());
-                }
-                Some(_) | None => failed.push(member_owner_hex.clone()),
-            }
-        }
-
-        if let Some(excluded_member_hex) = exclude_secret_for {
-            if delivered.insert(excluded_member_hex.to_string()) {
-                match (
-                    parse_pubkey_hex(excluded_member_hex),
-                    redacted_metadata_rumor,
-                ) {
-                    (Some(member_owner_pubkey), Some(rumor))
-                        if send_pairwise(member_owner_pubkey, rumor).is_ok() =>
-                    {
-                        succeeded.push(excluded_member_hex.to_string());
-                    }
-                    _ => failed.push(excluded_member_hex.to_string()),
-                }
-            }
-        }
-
-        let attempted = succeeded.len() + failed.len();
-        GroupMetadataFanoutResult {
-            enabled: true,
-            attempted,
-            succeeded,
-            failed,
-        }
-    }
-
-    fn refresh_group_sender_mappings(&mut self, group_id: &str) {
-        let Some(group) = self.groups.get_mut(group_id) else {
-            return;
-        };
-        let Ok(next_sender_events) = group.list_sender_event_pubkeys() else {
-            return;
-        };
-
-        let next: HashSet<PublicKey> = next_sender_events.into_iter().collect();
-        let prev = self
-            .group_to_sender_events
-            .get(group_id)
-            .cloned()
-            .unwrap_or_default();
-
-        for sender_event_pubkey in &prev {
-            if next.contains(sender_event_pubkey) {
-                continue;
-            }
-            if self
-                .sender_event_to_group
-                .get(sender_event_pubkey)
-                .is_some_and(|mapped| mapped == group_id)
-            {
-                self.sender_event_to_group.remove(sender_event_pubkey);
-            }
-            self.pending_outer_by_sender_event
-                .remove(sender_event_pubkey);
-        }
-
-        for sender_event_pubkey in &next {
-            self.sender_event_to_group
-                .insert(*sender_event_pubkey, group_id.to_string());
-        }
-
-        self.group_to_sender_events
-            .insert(group_id.to_string(), next);
-    }
-
-    fn queue_pending_outer(&mut self, sender_event_pubkey: PublicKey, outer: Event) {
-        let pending = self
-            .pending_outer_by_sender_event
-            .entry(sender_event_pubkey)
-            .or_default();
-        if pending.len() >= self.max_pending_per_sender_event {
-            pending.remove(0);
-        }
-        pending.push(outer);
-    }
-
-    fn drain_pending_outer_for_sender_event(
-        pending_outer_by_sender_event: &mut HashMap<PublicKey, Vec<Event>>,
-        one_to_many: &OneToManyChannel,
-        sender_event_pubkey: PublicKey,
-        group: &mut GroupChannel,
-    ) -> Vec<GroupDecryptedEvent> {
-        let Some(pending) = pending_outer_by_sender_event.remove(&sender_event_pubkey) else {
-            return Vec::new();
-        };
-        if pending.is_empty() {
-            return Vec::new();
-        }
-
-        let mut with_message_number: Vec<(Event, u32)> = pending
-            .into_iter()
-            .map(|outer| {
-                let message_number = one_to_many
-                    .parse_outer_content(&outer.content)
-                    .map(|parsed| parsed.message_number)
-                    .unwrap_or(0);
-                (outer, message_number)
-            })
-            .collect();
-        with_message_number.sort_by_key(|(_, message_number)| *message_number);
-
-        let mut decrypted = Vec::new();
-        for (outer, _) in with_message_number {
-            if let Some(event) = group.handle_outer_event(&outer) {
-                decrypted.push(event);
-            }
-        }
-        decrypted
-    }
-
-    fn route_group_events(&self, events: Vec<GroupDecryptedEvent>) -> Vec<GroupDecryptedEvent> {
-        if !self.suppress_local_device_echo {
-            return events;
-        }
-
-        events
-            .into_iter()
-            .filter(|event| !self.should_drop_local_echo(event))
+            .filter(|owner| *owner != local_owner_pubkey)
             .collect()
     }
 
-    fn should_drop_local_echo(&self, event: &GroupDecryptedEvent) -> bool {
-        if !self.suppress_local_device_echo {
-            return false;
+    fn ensure_admin(&self, owner: OwnerPubkey) -> Result<()> {
+        if !self.admins.contains(&owner) {
+            return Err(group_error(format!(
+                "owner {owner} is not an admin of group `{}`",
+                self.group_id
+            )));
         }
+        Ok(())
+    }
 
-        let origin = classify_message_origin(
-            self.our_owner_pubkey,
-            Some(self.our_device_pubkey),
-            event.sender_owner_pubkey,
-            Some(event.sender_device_pubkey),
-        );
-        origin == MessageOrigin::LocalDevice
+    fn ensure_member(&self, owner: OwnerPubkey) -> Result<()> {
+        if !self.members.contains(&owner) {
+            return Err(group_error(format!(
+                "owner {owner} is not a member of group `{}`",
+                self.group_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_revision(&self, base_revision: u64, new_revision: u64) -> Result<()> {
+        if base_revision != self.revision {
+            return Err(group_error(format!(
+                "stale group revision for `{}`: expected {}, got {}",
+                self.group_id, self.revision, base_revision
+            )));
+        }
+        if new_revision != base_revision + 1 {
+            return Err(group_error(format!(
+                "invalid next revision for `{}`: expected {}, got {}",
+                self.group_id,
+                base_revision + 1,
+                new_revision
+            )));
+        }
+        Ok(())
+    }
+
+    fn retry_delta_revisions(&self, action: &str) -> Result<(u64, u64)> {
+        if self.revision < 2 {
+            return Err(group_error(format!(
+                "{action} retry requires an already-applied revision"
+            )));
+        }
+        Ok((self.revision - 1, self.revision))
+    }
+
+    fn reflects_rename(&self, name: &str, new_revision: u64) -> bool {
+        self.revision >= new_revision && self.name == name
+    }
+
+    fn reflects_added_members(&self, additions: &BTreeSet<OwnerPubkey>, new_revision: u64) -> bool {
+        self.revision >= new_revision && additions.iter().all(|owner| self.members.contains(owner))
+    }
+
+    fn reflects_removed_members(
+        &self,
+        removals: &BTreeSet<OwnerPubkey>,
+        new_revision: u64,
+    ) -> bool {
+        self.revision >= new_revision && removals.iter().all(|owner| !self.members.contains(owner))
+    }
+
+    fn reflects_added_admins(&self, additions: &BTreeSet<OwnerPubkey>, new_revision: u64) -> bool {
+        self.revision >= new_revision && additions.iter().all(|owner| self.admins.contains(owner))
+    }
+
+    fn reflects_removed_admins(&self, removals: &BTreeSet<OwnerPubkey>, new_revision: u64) -> bool {
+        self.revision >= new_revision && removals.iter().all(|owner| !self.admins.contains(owner))
+    }
+
+    fn apply_rename(
+        &mut self,
+        actor: OwnerPubkey,
+        name: String,
+        base_revision: u64,
+        new_revision: u64,
+        updated_at: UnixSeconds,
+    ) -> Result<()> {
+        self.ensure_admin(actor)?;
+        self.ensure_revision(base_revision, new_revision)?;
+        self.name = name;
+        self.revision = new_revision;
+        self.updated_at = updated_at;
+        Ok(())
+    }
+
+    fn apply_add_members(
+        &mut self,
+        actor: OwnerPubkey,
+        additions: &BTreeSet<OwnerPubkey>,
+        base_revision: u64,
+        new_revision: u64,
+        updated_at: UnixSeconds,
+    ) -> Result<()> {
+        self.ensure_admin(actor)?;
+        self.ensure_revision(base_revision, new_revision)?;
+        if additions.is_empty() {
+            return Err(group_error("members list must not be empty"));
+        }
+        for owner in additions {
+            if self.members.contains(owner) {
+                return Err(group_error(format!("owner {owner} is already a member")));
+            }
+        }
+        self.members.extend(additions.iter().copied());
+        self.revision = new_revision;
+        self.updated_at = updated_at;
+        Ok(())
+    }
+
+    fn apply_remove_members(
+        &mut self,
+        actor: OwnerPubkey,
+        removals: &BTreeSet<OwnerPubkey>,
+        base_revision: u64,
+        new_revision: u64,
+        updated_at: UnixSeconds,
+    ) -> Result<()> {
+        self.ensure_admin(actor)?;
+        self.ensure_revision(base_revision, new_revision)?;
+        if removals.is_empty() {
+            return Err(group_error("members list must not be empty"));
+        }
+        if removals.contains(&actor) {
+            return Err(group_error("self-removal is not allowed"));
+        }
+        for owner in removals {
+            if !self.members.contains(owner) {
+                return Err(group_error(format!("owner {owner} is not a member")));
+            }
+        }
+        for owner in removals {
+            self.members.remove(owner);
+            self.admins.remove(owner);
+        }
+        validate_group_invariants(&self.members, &self.admins)?;
+        self.revision = new_revision;
+        self.updated_at = updated_at;
+        Ok(())
+    }
+
+    fn apply_add_admins(
+        &mut self,
+        actor: OwnerPubkey,
+        additions: &BTreeSet<OwnerPubkey>,
+        base_revision: u64,
+        new_revision: u64,
+        updated_at: UnixSeconds,
+    ) -> Result<()> {
+        self.ensure_admin(actor)?;
+        self.ensure_revision(base_revision, new_revision)?;
+        if additions.is_empty() {
+            return Err(group_error("admins list must not be empty"));
+        }
+        for owner in additions {
+            if !self.members.contains(owner) {
+                return Err(group_error(format!(
+                    "owner {owner} must be a member before promotion"
+                )));
+            }
+            if self.admins.contains(owner) {
+                return Err(group_error(format!("owner {owner} is already an admin")));
+            }
+        }
+        self.admins.extend(additions.iter().copied());
+        self.revision = new_revision;
+        self.updated_at = updated_at;
+        Ok(())
+    }
+
+    fn apply_remove_admins(
+        &mut self,
+        actor: OwnerPubkey,
+        removals: &BTreeSet<OwnerPubkey>,
+        base_revision: u64,
+        new_revision: u64,
+        updated_at: UnixSeconds,
+    ) -> Result<()> {
+        self.ensure_admin(actor)?;
+        self.ensure_revision(base_revision, new_revision)?;
+        if removals.is_empty() {
+            return Err(group_error("admins list must not be empty"));
+        }
+        for owner in removals {
+            if !self.admins.contains(owner) {
+                return Err(group_error(format!("owner {owner} is not an admin")));
+            }
+        }
+        if self.admins.len() == removals.len() {
+            return Err(group_error("cannot remove the last admin"));
+        }
+        for owner in removals {
+            self.admins.remove(owner);
+        }
+        validate_group_invariants(&self.members, &self.admins)?;
+        self.revision = new_revision;
+        self.updated_at = updated_at;
+        Ok(())
     }
 }
 
-struct GroupChannel {
-    data: GroupData,
-    our_owner_pubkey: PublicKey,
-    our_device_pubkey: PublicKey,
-    member_owner_pubkeys: Vec<PublicKey>,
-    storage: Arc<dyn StorageAdapter>,
-    one_to_many: OneToManyChannel,
-
-    initialized: bool,
-    sender_device_to_event: HashMap<PublicKey, PublicKey>,
-    sender_event_to_device: HashMap<PublicKey, PublicKey>,
-    sender_device_to_owner: HashMap<PublicKey, PublicKey>,
-    pending_outer: HashMap<(PublicKey, u32), Vec<Event>>,
-}
-
-impl GroupChannel {
-    fn new(
-        data: GroupData,
-        our_owner_pubkey: PublicKey,
-        our_device_pubkey: PublicKey,
-        storage: Arc<dyn StorageAdapter>,
-        one_to_many: OneToManyChannel,
-    ) -> Self {
-        let member_owner_pubkeys = data
-            .members
-            .iter()
-            .filter_map(|hex| parse_pubkey_hex(hex))
-            .collect();
-
+impl SenderKeyRecordId {
+    fn new(group_id: String, sender_owner: OwnerPubkey, sender_device: DevicePubkey) -> Self {
         Self {
-            data,
-            our_owner_pubkey,
-            our_device_pubkey,
-            member_owner_pubkeys,
-            storage,
-            one_to_many,
-            initialized: false,
-            sender_device_to_event: HashMap::new(),
-            sender_event_to_device: HashMap::new(),
-            sender_device_to_owner: HashMap::new(),
-            pending_outer: HashMap::new(),
+            group_id,
+            sender_owner,
+            sender_device,
         }
     }
+}
 
-    fn group_id(&self) -> &str {
-        &self.data.id
+impl SenderKeyRecord {
+    fn id(&self) -> SenderKeyRecordId {
+        SenderKeyRecordId::new(self.group_id.clone(), self.sender_owner, self.sender_device)
     }
 
-    fn set_data(&mut self, data: GroupData) {
-        self.member_owner_pubkeys = data
-            .members
-            .iter()
-            .filter_map(|hex| parse_pubkey_hex(hex))
-            .collect();
-        self.data = data;
-        self.cleanup_inactive_senders();
-    }
-
-    fn list_sender_event_pubkeys(&mut self) -> Result<Vec<PublicKey>> {
-        self.init()?;
-        self.cleanup_inactive_senders();
-        let mut seen = HashSet::new();
-        let mut values = Vec::new();
-        for value in self.sender_device_to_event.values() {
-            if seen.insert(*value) {
-                values.push(*value);
+    fn from_snapshot(snapshot: GroupSenderKeyRecordSnapshot) -> Result<Self> {
+        let mut states = BTreeMap::new();
+        for state in snapshot.states {
+            if states.insert(state.key_id(), state).is_some() {
+                return Err(group_error("duplicate sender-key state in snapshot"));
             }
         }
-        Ok(values)
-    }
-
-    fn sender_event_pubkey_for_device(
-        &mut self,
-        sender_device_pubkey: PublicKey,
-    ) -> Result<Option<PublicKey>> {
-        self.init()?;
-        self.cleanup_inactive_senders();
-        Ok(self
-            .sender_device_to_event
-            .get(&sender_device_pubkey)
-            .copied())
-    }
-
-    fn rotate_sender_key<F>(
-        &mut self,
-        send_pairwise: &mut F,
-        now_ms: Option<u64>,
-    ) -> Result<SenderKeyDistribution>
-    where
-        F: FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
-    {
-        self.init()?;
-
-        let now_ms = now_ms.unwrap_or_else(now_millis);
-        let now_seconds = now_ms / 1000;
-
-        let (_, sender_event_pubkey, _) = self.ensure_our_sender_event_keys()?;
-        let (sender_key_state, _) = self.ensure_our_sender_key_state(true)?;
-
-        let distribution =
-            self.build_distribution(now_seconds, sender_event_pubkey, &sender_key_state);
-        let rumor = self.build_distribution_rumor(now_seconds, now_ms, &distribution)?;
-
-        for member_owner in &self.member_owner_pubkeys {
-            send_pairwise(*member_owner, &rumor)?;
-        }
-
-        Ok(distribution)
-    }
-
-    fn send_event<F, G>(
-        &mut self,
-        event: GroupSendEvent,
-        send_pairwise: &mut F,
-        publish_outer: &mut G,
-        now_ms: Option<u64>,
-    ) -> Result<GroupSendResult>
-    where
-        F: FnMut(PublicKey, &UnsignedEvent) -> Result<()>,
-        G: FnMut(&Event) -> Result<()>,
-    {
-        self.init()?;
-
-        let now_ms = now_ms.unwrap_or_else(now_millis);
-        let now_seconds = now_ms / 1000;
-
-        let (sender_event_keys, sender_event_pubkey, sender_event_key_changed) =
-            self.ensure_our_sender_event_keys()?;
-        let (mut sender_key_state, sender_key_created) = self.ensure_our_sender_key_state(false)?;
-
-        if sender_key_created || sender_event_key_changed {
-            let distribution =
-                self.build_distribution(now_seconds, sender_event_pubkey, &sender_key_state);
-            let rumor = self.build_distribution_rumor(now_seconds, now_ms, &distribution)?;
-            for member_owner in &self.member_owner_pubkeys {
-                send_pairwise(*member_owner, &rumor)?;
+        if let Some(latest_key_id) = snapshot.latest_key_id {
+            if !states.contains_key(&latest_key_id) {
+                return Err(group_error("sender-key latest key id missing from states"));
             }
         }
-
-        let inner = self.build_group_inner_rumor(now_seconds, now_ms, event)?;
-        let inner_json = serde_json::to_string(&inner)?;
-        let outer = self.one_to_many.encrypt_to_outer_event(
-            &sender_event_keys,
-            &mut sender_key_state,
-            &inner_json,
-            Timestamp::from(now_seconds),
-        )?;
-
-        self.save_sender_key_state(self.our_device_pubkey, &sender_key_state)?;
-        publish_outer(&outer)?;
-
-        Ok(GroupSendResult { outer, inner })
-    }
-
-    fn handle_incoming_session_event(
-        &mut self,
-        event: &UnsignedEvent,
-        from_owner_pubkey: PublicKey,
-        from_sender_device_pubkey: Option<PublicKey>,
-    ) -> Vec<GroupDecryptedEvent> {
-        if self.init().is_err() {
-            return Vec::new();
-        }
-
-        if !self.member_owner_pubkeys.contains(&from_owner_pubkey) {
-            return Vec::new();
-        }
-
-        let tagged_group_id = first_tag_value(&event.tags, "l");
-        if tagged_group_id.as_deref() != Some(self.group_id()) {
-            return Vec::new();
-        }
-
-        if event.kind != Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16) {
-            return Vec::new();
-        }
-
-        let Some(dist) = parse_sender_key_distribution(&event.content) else {
-            return Vec::new();
-        };
-        if dist.group_id != self.group_id() {
-            return Vec::new();
-        }
-
-        let Some(sender_device_pubkey) = from_sender_device_pubkey else {
-            return Vec::new();
-        };
-        if event.pubkey != sender_device_pubkey {
-            return Vec::new();
-        }
-
-        self.sender_device_to_owner
-            .insert(sender_device_pubkey, from_owner_pubkey);
-        let _ = self.storage.put(
-            &self.sender_owner_pubkey_key(sender_device_pubkey),
-            pubkey_to_hex(&from_owner_pubkey),
-        );
-
-        let mut sender_event_pubkey = None;
-        if let Some(parsed_sender_event) = dist
-            .sender_event_pubkey
-            .as_deref()
-            .and_then(parse_pubkey_hex)
-        {
-            self.set_sender_event_mapping(sender_device_pubkey, parsed_sender_event);
-            let _ = self.storage.put(
-                &self.sender_event_pubkey_key(sender_device_pubkey),
-                pubkey_to_hex(&parsed_sender_event),
-            );
-            sender_event_pubkey = Some(parsed_sender_event);
-        }
-
-        if self
-            .load_sender_key_state(sender_device_pubkey, dist.key_id)
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            let state = SenderKeyState::new(dist.key_id, dist.chain_key, dist.iteration);
-            let _ = self.save_sender_key_state(sender_device_pubkey, &state);
-        }
-
-        if let Some(sender_event_pubkey) = sender_event_pubkey {
-            return self
-                .drain_pending(sender_event_pubkey, dist.key_id)
-                .unwrap_or_default();
-        }
-
-        Vec::new()
-    }
-
-    fn handle_outer_event(&mut self, outer: &Event) -> Option<GroupDecryptedEvent> {
-        if self.init().is_err() {
-            return None;
-        }
-        self.cleanup_inactive_senders();
-        if outer.kind != Kind::Custom(self.one_to_many.outer_kind() as u16) {
-            return None;
-        }
-        if outer.verify().is_err() {
-            return None;
-        }
-
-        let parsed = self.one_to_many.parse_outer_content(&outer.content).ok()?;
-        let sender_event_pubkey = outer.pubkey;
-
-        let sender_device_pubkey = self
-            .sender_event_to_device
-            .get(&sender_event_pubkey)
-            .copied()
-            .or_else(|| {
-                self.load_sender_device_from_storage(sender_event_pubkey)
-                    .ok()
-                    .flatten()
-            });
-
-        let Some(sender_device_pubkey) = sender_device_pubkey else {
-            self.queue_pending(sender_event_pubkey, parsed.key_id, outer.clone());
-            return None;
-        };
-        if !self.is_sender_device_active(sender_device_pubkey) {
-            self.cleanup_inactive_senders();
-            return None;
-        }
-
-        let mut state = self
-            .load_sender_key_state(sender_device_pubkey, parsed.key_id)
-            .ok()
-            .flatten();
-        let Some(mut state) = state.take() else {
-            self.queue_pending(sender_event_pubkey, parsed.key_id, outer.clone());
-            return None;
-        };
-
-        let plaintext = parsed.decrypt(&mut state).ok()?;
-        let _ = self.save_sender_key_state(sender_device_pubkey, &state);
-
-        let inner = self.parse_inner_rumor(&plaintext, sender_device_pubkey, outer.created_at);
-        if let Some(inner_group_id) = first_tag_value(&inner.tags, "l") {
-            if inner_group_id != self.group_id() {
-                return None;
-            }
-        }
-
-        let sender_owner_pubkey = self
-            .sender_device_to_owner
-            .get(&sender_device_pubkey)
-            .copied()
-            .or_else(|| {
-                self.storage
-                    .get(&self.sender_owner_pubkey_key(sender_device_pubkey))
-                    .ok()
-                    .flatten()
-                    .and_then(|hex| parse_pubkey_hex(&hex))
-            });
-
-        Some(GroupDecryptedEvent {
-            group_id: self.group_id().to_string(),
-            sender_event_pubkey,
-            sender_device_pubkey,
-            sender_owner_pubkey,
-            outer_event_id: outer.id.to_string(),
-            outer_created_at: outer.created_at.as_secs(),
-            key_id: parsed.key_id,
-            message_number: parsed.message_number,
-            inner,
+        Ok(Self {
+            group_id: snapshot.group_id,
+            sender_owner: snapshot.sender_owner,
+            sender_device: snapshot.sender_device,
+            sender_event_pubkey: snapshot.sender_event_pubkey,
+            sender_event_secret_key: snapshot.sender_event_secret_key,
+            latest_key_id: snapshot.latest_key_id,
+            states,
         })
     }
 
-    fn init(&mut self) -> Result<()> {
-        if self.initialized {
-            return Ok(());
+    fn snapshot(&self) -> GroupSenderKeyRecordSnapshot {
+        GroupSenderKeyRecordSnapshot {
+            group_id: self.group_id.clone(),
+            sender_owner: self.sender_owner,
+            sender_device: self.sender_device,
+            sender_event_pubkey: self.sender_event_pubkey,
+            sender_event_secret_key: self.sender_event_secret_key,
+            latest_key_id: self.latest_key_id,
+            states: self.states.values().cloned().collect(),
         }
-        self.initialized = true;
+    }
+}
 
-        let group_prefix = format!(
-            "{}/group/{}/sender/",
-            self.version_prefix(),
-            self.group_id()
-        );
-        let keys = self.storage.list(&group_prefix)?;
+fn random_group_id<R>(ctx: &mut ProtocolContext<'_, R>) -> String
+where
+    R: RngCore + CryptoRng,
+{
+    let mut bytes = [0u8; 16];
+    ctx.rng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
 
-        for key in keys {
-            let Some(rest) = key.strip_prefix(&group_prefix) else {
-                continue;
-            };
-            let Some((sender_device_hex, suffix)) = rest.split_once('/') else {
-                continue;
-            };
-            let Some(sender_device_pubkey) = parse_pubkey_hex(sender_device_hex) else {
-                continue;
-            };
-
-            if suffix == "sender-event-pubkey" {
-                let Some(value) = self.storage.get(&key)? else {
-                    continue;
-                };
-                if let Some(sender_event_pubkey) = parse_pubkey_hex(&value) {
-                    self.set_sender_event_mapping(sender_device_pubkey, sender_event_pubkey);
-                }
-                continue;
-            }
-
-            if suffix == "sender-owner-pubkey" {
-                let Some(value) = self.storage.get(&key)? else {
-                    continue;
-                };
-                if let Some(sender_owner_pubkey) = parse_pubkey_hex(&value) {
-                    self.sender_device_to_owner
-                        .insert(sender_device_pubkey, sender_owner_pubkey);
-                }
-            }
+fn random_key_id<R>(ctx: &mut ProtocolContext<'_, R>) -> u32
+where
+    R: RngCore + CryptoRng,
+{
+    loop {
+        let id = ctx.rng.next_u32();
+        if id != 0 {
+            return id;
         }
+    }
+}
 
+fn validate_supported_protocol(protocol: GroupProtocol) -> Result<()> {
+    if protocol.is_pairwise_fanout_v1() || protocol.is_sender_key_v1() {
         Ok(())
-    }
-
-    fn version_prefix(&self) -> &'static str {
-        "v1/broadcast-channel"
-    }
-
-    fn group_sender_prefix(&self, sender_device_pubkey: PublicKey) -> String {
-        format!(
-            "{}/group/{}/sender/{}",
-            self.version_prefix(),
-            self.group_id(),
-            pubkey_to_hex(&sender_device_pubkey)
-        )
-    }
-
-    fn sender_event_secret_key_key(&self, sender_device_pubkey: PublicKey) -> String {
-        format!(
-            "{}/sender-event-secret-key",
-            self.group_sender_prefix(sender_device_pubkey)
-        )
-    }
-
-    fn sender_event_pubkey_key(&self, sender_device_pubkey: PublicKey) -> String {
-        format!(
-            "{}/sender-event-pubkey",
-            self.group_sender_prefix(sender_device_pubkey)
-        )
-    }
-
-    fn sender_owner_pubkey_key(&self, sender_device_pubkey: PublicKey) -> String {
-        format!(
-            "{}/sender-owner-pubkey",
-            self.group_sender_prefix(sender_device_pubkey)
-        )
-    }
-
-    fn latest_key_id_key(&self, sender_device_pubkey: PublicKey) -> String {
-        format!(
-            "{}/latest-key-id",
-            self.group_sender_prefix(sender_device_pubkey)
-        )
-    }
-
-    fn sender_key_state_key(&self, sender_device_pubkey: PublicKey, key_id: u32) -> String {
-        format!(
-            "{}/key/{}",
-            self.group_sender_prefix(sender_device_pubkey),
-            key_id
-        )
-    }
-
-    fn set_sender_event_mapping(
-        &mut self,
-        sender_device_pubkey: PublicKey,
-        sender_event_pubkey: PublicKey,
-    ) {
-        if let Some(prev_sender_event_pubkey) = self
-            .sender_device_to_event
-            .insert(sender_device_pubkey, sender_event_pubkey)
-        {
-            if prev_sender_event_pubkey != sender_event_pubkey {
-                self.sender_event_to_device
-                    .remove(&prev_sender_event_pubkey);
-            }
-        }
-        self.sender_event_to_device
-            .insert(sender_event_pubkey, sender_device_pubkey);
-    }
-
-    fn is_member_owner(&self, owner_pubkey: PublicKey) -> bool {
-        self.member_owner_pubkeys.contains(&owner_pubkey)
-    }
-
-    fn is_sender_device_active(&self, sender_device_pubkey: PublicKey) -> bool {
-        if sender_device_pubkey == self.our_device_pubkey {
-            return self.is_member_owner(self.our_owner_pubkey);
-        }
-
-        self.sender_device_to_owner
-            .get(&sender_device_pubkey)
-            .is_some_and(|owner_pubkey| self.is_member_owner(*owner_pubkey))
-    }
-
-    fn cleanup_inactive_senders(&mut self) {
-        let mut candidates: HashSet<PublicKey> =
-            self.sender_device_to_event.keys().copied().collect();
-        candidates.extend(self.sender_device_to_owner.keys().copied());
-        candidates.extend(self.sender_event_to_device.values().copied());
-
-        let inactive_devices: Vec<PublicKey> = candidates
-            .into_iter()
-            .filter(|sender_device_pubkey| !self.is_sender_device_active(*sender_device_pubkey))
-            .collect();
-
-        for sender_device_pubkey in inactive_devices {
-            if let Some(sender_event_pubkey) =
-                self.sender_device_to_event.remove(&sender_device_pubkey)
-            {
-                self.sender_event_to_device.remove(&sender_event_pubkey);
-                self.pending_outer
-                    .retain(|(pending_sender_event_pubkey, _), _| {
-                        *pending_sender_event_pubkey != sender_event_pubkey
-                    });
-            }
-
-            let sender_events_for_device: Vec<PublicKey> = self
-                .sender_event_to_device
-                .iter()
-                .filter_map(|(sender_event_pubkey, mapped_device_pubkey)| {
-                    if *mapped_device_pubkey == sender_device_pubkey {
-                        Some(*sender_event_pubkey)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for sender_event_pubkey in sender_events_for_device {
-                self.sender_event_to_device.remove(&sender_event_pubkey);
-                self.pending_outer
-                    .retain(|(pending_sender_event_pubkey, _), _| {
-                        *pending_sender_event_pubkey != sender_event_pubkey
-                    });
-            }
-
-            self.sender_device_to_owner.remove(&sender_device_pubkey);
-
-            let sender_prefix = self.group_sender_prefix(sender_device_pubkey);
-            if let Ok(keys) = self.storage.list(&sender_prefix) {
-                for key in keys {
-                    let _ = self.storage.del(&key);
-                }
-            }
-        }
-    }
-
-    fn queue_pending(&mut self, sender_event_pubkey: PublicKey, key_id: u32, outer: Event) {
-        self.pending_outer
-            .entry((sender_event_pubkey, key_id))
-            .or_default()
-            .push(outer);
-    }
-
-    fn drain_pending(
-        &mut self,
-        sender_event_pubkey: PublicKey,
-        key_id: u32,
-    ) -> Result<Vec<GroupDecryptedEvent>> {
-        let Some(pending) = self.pending_outer.remove(&(sender_event_pubkey, key_id)) else {
-            return Ok(Vec::new());
-        };
-        if pending.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut with_message_number: Vec<(Event, u32)> = pending
-            .into_iter()
-            .map(|outer| {
-                let message_number = self
-                    .one_to_many
-                    .parse_outer_content(&outer.content)
-                    .map(|parsed| parsed.message_number)
-                    .unwrap_or(0);
-                (outer, message_number)
-            })
-            .collect();
-        with_message_number.sort_by_key(|(_, message_number)| *message_number);
-
-        let mut results = Vec::new();
-        for (outer, _) in with_message_number {
-            if let Some(decrypted) = self.handle_outer_event(&outer) {
-                results.push(decrypted);
-            }
-        }
-        Ok(results)
-    }
-
-    fn ensure_our_sender_event_keys(&mut self) -> Result<(Keys, PublicKey, bool)> {
-        self.init()?;
-
-        if let Some(stored_secret_hex) = self
-            .storage
-            .get(&self.sender_event_secret_key_key(self.our_device_pubkey))?
-        {
-            if let Ok(secret_bytes) = hex::decode(stored_secret_hex) {
-                if secret_bytes.len() == 32 {
-                    if let Ok(secret_key) = SecretKey::from_slice(&secret_bytes) {
-                        let keys = Keys::new(secret_key);
-                        let sender_event_pubkey = keys.public_key();
-                        self.set_sender_event_mapping(self.our_device_pubkey, sender_event_pubkey);
-                        self.storage.put(
-                            &self.sender_event_pubkey_key(self.our_device_pubkey),
-                            pubkey_to_hex(&sender_event_pubkey),
-                        )?;
-                        return Ok((keys, sender_event_pubkey, false));
-                    }
-                }
-            }
-        }
-
-        let keys = Keys::generate();
-        let sender_event_pubkey = keys.public_key();
-        self.storage.put(
-            &self.sender_event_secret_key_key(self.our_device_pubkey),
-            hex::encode(keys.secret_key().to_secret_bytes()),
-        )?;
-        self.storage.put(
-            &self.sender_event_pubkey_key(self.our_device_pubkey),
-            pubkey_to_hex(&sender_event_pubkey),
-        )?;
-        self.set_sender_event_mapping(self.our_device_pubkey, sender_event_pubkey);
-
-        Ok((keys, sender_event_pubkey, true))
-    }
-
-    fn load_sender_key_state(
-        &self,
-        sender_device_pubkey: PublicKey,
-        key_id: u32,
-    ) -> Result<Option<SenderKeyState>> {
-        let Some(data) = self
-            .storage
-            .get(&self.sender_key_state_key(sender_device_pubkey, key_id))?
-        else {
-            return Ok(None);
-        };
-        let state: SenderKeyState = serde_json::from_str(&data)?;
-        Ok(Some(state))
-    }
-
-    fn save_sender_key_state(
-        &self,
-        sender_device_pubkey: PublicKey,
-        state: &SenderKeyState,
-    ) -> Result<()> {
-        let serialized = serde_json::to_string(state)?;
-        self.storage.put(
-            &self.sender_key_state_key(sender_device_pubkey, state.key_id),
-            serialized,
-        )?;
-        Ok(())
-    }
-
-    fn ensure_our_sender_key_state(
-        &mut self,
-        force_rotate: bool,
-    ) -> Result<(SenderKeyState, bool)> {
-        self.init()?;
-
-        if force_rotate {
-            let key_id = random::<u32>();
-            let chain_key = random::<[u8; 32]>();
-            let state = SenderKeyState::new(key_id, chain_key, 0);
-            self.save_sender_key_state(self.our_device_pubkey, &state)?;
-            self.storage.put(
-                &self.latest_key_id_key(self.our_device_pubkey),
-                key_id.to_string(),
-            )?;
-            return Ok((state, true));
-        }
-
-        if let Some(latest_key_id) = self
-            .storage
-            .get(&self.latest_key_id_key(self.our_device_pubkey))?
-            .and_then(|v| v.parse::<u32>().ok())
-        {
-            if let Some(existing) =
-                self.load_sender_key_state(self.our_device_pubkey, latest_key_id)?
-            {
-                return Ok((existing, false));
-            }
-        }
-
-        let key_id = random::<u32>();
-        let chain_key = random::<[u8; 32]>();
-        let state = SenderKeyState::new(key_id, chain_key, 0);
-        self.save_sender_key_state(self.our_device_pubkey, &state)?;
-        self.storage.put(
-            &self.latest_key_id_key(self.our_device_pubkey),
-            key_id.to_string(),
-        )?;
-        Ok((state, true))
-    }
-
-    fn build_distribution(
-        &self,
-        now_seconds: u64,
-        sender_event_pubkey: PublicKey,
-        sender_key: &SenderKeyState,
-    ) -> SenderKeyDistribution {
-        SenderKeyDistribution {
-            group_id: self.group_id().to_string(),
-            key_id: sender_key.key_id,
-            chain_key: sender_key.chain_key(),
-            iteration: sender_key.iteration(),
-            created_at: now_seconds,
-            sender_event_pubkey: Some(pubkey_to_hex(&sender_event_pubkey)),
-        }
-    }
-
-    fn build_distribution_rumor(
-        &self,
-        now_seconds: u64,
-        now_ms: u64,
-        dist: &SenderKeyDistribution,
-    ) -> Result<UnsignedEvent> {
-        let tags = vec![
-            parse_tag(&["l".to_string(), self.group_id().to_string()])?,
-            parse_tag(&["key".to_string(), dist.key_id.to_string()])?,
-            parse_tag(&["ms".to_string(), now_ms.to_string()])?,
-        ];
-
-        Ok(EventBuilder::new(
-            Kind::Custom(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
-            serde_json::to_string(dist)?,
-        )
-        .tags(tags)
-        .custom_created_at(Timestamp::from(now_seconds))
-        .build(self.our_device_pubkey))
-    }
-
-    fn build_group_inner_rumor(
-        &self,
-        now_seconds: u64,
-        now_ms: u64,
-        event: GroupSendEvent,
-    ) -> Result<UnsignedEvent> {
-        let mut has_group_tag = false;
-        let mut has_ms_tag = false;
-        let mut tags: Vec<Tag> = event
-            .tags
-            .iter()
-            .filter_map(|parts| {
-                if parts.first().map(|v| v.as_str()) == Some("l")
-                    && parts.get(1).map(|v| v.as_str()) == Some(self.group_id())
-                {
-                    has_group_tag = true;
-                }
-                if parts.first().map(|v| v.as_str()) == Some("ms") {
-                    has_ms_tag = true;
-                }
-                Tag::parse(parts).ok()
-            })
-            .collect();
-
-        if !has_group_tag {
-            tags.insert(
-                0,
-                parse_tag(&["l".to_string(), self.group_id().to_string()])?,
-            );
-        }
-        if !has_ms_tag {
-            tags.push(parse_tag(&["ms".to_string(), now_ms.to_string()])?);
-        }
-
-        Ok(
-            EventBuilder::new(Kind::Custom(event.kind as u16), event.content)
-                .tags(tags)
-                .custom_created_at(Timestamp::from(now_seconds))
-                .build(self.our_device_pubkey),
-        )
-    }
-
-    fn parse_inner_rumor(
-        &self,
-        plaintext: &str,
-        sender_device_pubkey: PublicKey,
-        fallback_created_at: Timestamp,
-    ) -> UnsignedEvent {
-        if let Ok(inner) = serde_json::from_str::<UnsignedEvent>(plaintext) {
-            return inner;
-        }
-
-        if let Some(minimal) =
-            self.parse_minimal_rumor_json(plaintext, sender_device_pubkey, fallback_created_at)
-        {
-            return minimal;
-        }
-
-        EventBuilder::new(Kind::Custom(CHAT_MESSAGE_KIND as u16), plaintext)
-            .tags(vec![Tag::parse(&[
-                "l".to_string(),
-                self.group_id().to_string(),
-            ])
-            .expect("group tag should be valid")])
-            .custom_created_at(fallback_created_at)
-            .build(sender_device_pubkey)
-    }
-
-    fn parse_minimal_rumor_json(
-        &self,
-        plaintext: &str,
-        sender_device_pubkey: PublicKey,
-        fallback_created_at: Timestamp,
-    ) -> Option<UnsignedEvent> {
-        let value: serde_json::Value = serde_json::from_str(plaintext).ok()?;
-        let obj = value.as_object()?;
-
-        let kind_u64 = obj.get("kind")?.as_u64()?;
-        if kind_u64 > u16::MAX as u64 {
-            return None;
-        }
-        let kind = Kind::Custom(kind_u64 as u16);
-        let content = obj.get("content")?.as_str()?.to_string();
-
-        let mut tags: Vec<Tag> = obj
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| {
-                let arr = v.as_array()?;
-                let parts: Vec<String> = arr
-                    .iter()
-                    .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                    .collect();
-                if parts.len() != arr.len() {
-                    return None;
-                }
-                Tag::parse(&parts).ok()
-            })
-            .collect();
-
-        if !tags.iter().any(|tag| {
-            let parts = tag.clone().to_vec();
-            parts.first().map(|s| s.as_str()) == Some("l")
-        }) {
-            tags.push(
-                Tag::parse(&["l".to_string(), self.group_id().to_string()])
-                    .expect("group tag should be valid"),
-            );
-        }
-
-        let created_at = obj
-            .get("created_at")
-            .and_then(|v| v.as_u64())
-            .map(Timestamp::from)
-            .unwrap_or(fallback_created_at);
-
-        let pubkey = obj
-            .get("pubkey")
-            .and_then(|v| v.as_str())
-            .and_then(parse_pubkey_hex)
-            .unwrap_or(sender_device_pubkey);
-
-        Some(
-            EventBuilder::new(kind, content)
-                .tags(tags)
-                .custom_created_at(created_at)
-                .build(pubkey),
-        )
-    }
-
-    fn load_sender_device_from_storage(
-        &mut self,
-        sender_event_pubkey: PublicKey,
-    ) -> Result<Option<PublicKey>> {
-        let group_prefix = format!(
-            "{}/group/{}/sender/",
-            self.version_prefix(),
-            self.group_id()
-        );
-        let keys = self.storage.list(&group_prefix)?;
-
-        for key in keys {
-            let Some(rest) = key.strip_prefix(&group_prefix) else {
-                continue;
-            };
-            let Some((sender_device_hex, suffix)) = rest.split_once('/') else {
-                continue;
-            };
-            if suffix != "sender-event-pubkey" {
-                continue;
-            }
-            let Some(stored_sender_event_hex) = self.storage.get(&key)? else {
-                continue;
-            };
-            let Some(stored_sender_event_pubkey) = parse_pubkey_hex(&stored_sender_event_hex)
-            else {
-                continue;
-            };
-            if stored_sender_event_pubkey != sender_event_pubkey {
-                continue;
-            }
-            let Some(sender_device_pubkey) = parse_pubkey_hex(sender_device_hex) else {
-                continue;
-            };
-            self.set_sender_event_mapping(sender_device_pubkey, sender_event_pubkey);
-            return Ok(Some(sender_device_pubkey));
-        }
-
-        Ok(None)
+    } else {
+        Err(group_error(format!(
+            "unsupported group protocol {:?}/{}",
+            protocol.strategy, protocol.version
+        )))
     }
 }
 
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn parse_sender_key_distribution(content: &str) -> Option<SenderKeyDistribution> {
-    let dist: SenderKeyDistribution = serde_json::from_str(content).ok()?;
-    if dist.group_id.is_empty() {
-        return None;
+fn validate_unique_owners(values: &[OwnerPubkey], label: &str) -> Result<BTreeSet<OwnerPubkey>> {
+    let set: BTreeSet<_> = values.iter().copied().collect();
+    if set.len() != values.len() {
+        return Err(group_error(format!("duplicate {label} are not allowed")));
     }
-    if dist
-        .sender_event_pubkey
-        .as_deref()
-        .is_some_and(|hex| parse_pubkey_hex(hex).is_none())
-    {
-        return None;
+    Ok(set)
+}
+
+fn validate_group_invariants(
+    members: &BTreeSet<OwnerPubkey>,
+    admins: &BTreeSet<OwnerPubkey>,
+) -> Result<()> {
+    if members.is_empty() {
+        return Err(group_error("group must have at least one member"));
     }
-    Some(dist)
-}
-
-fn parse_pubkey_hex(hex: &str) -> Option<PublicKey> {
-    crate::utils::pubkey_from_hex(hex).ok()
-}
-
-fn pubkey_to_hex(pubkey: &PublicKey) -> String {
-    hex::encode(pubkey.to_bytes())
-}
-
-fn first_tag_value(tags: &nostr::Tags, key: &str) -> Option<String> {
-    tags.iter().find_map(|tag| {
-        let parts = tag.clone().to_vec();
-        if parts.first().map(|s| s.as_str()) == Some(key) {
-            parts.get(1).cloned()
-        } else {
-            None
-        }
-    })
-}
-
-fn parse_tag(parts: &[String]) -> Result<Tag> {
-    Tag::parse(parts).map_err(|e| Error::InvalidEvent(e.to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use nostr::Keys;
-
-    use super::*;
-
-    fn make_group(group_id: &str, members: Vec<String>, admins: Vec<String>) -> GroupData {
-        GroupData {
-            id: group_id.to_string(),
-            name: "test".to_string(),
-            description: None,
-            picture: None,
-            members,
-            admins,
-            created_at: 1_700_000_000_000,
-            secret: None,
-            accepted: Some(true),
-        }
+    if admins.is_empty() {
+        return Err(group_error("group must have at least one admin"));
     }
-
-    #[test]
-    fn outer_subscription_plan_tracks_new_sender_event_pubkeys() {
-        let group_id = "group-outer-plan";
-
-        let alice_owner = Keys::generate();
-        let bob_owner = Keys::generate();
-        let alice_device = Keys::generate();
-        let bob_device = Keys::generate();
-
-        let mut sender = GroupManager::new(GroupManagerOptions {
-            our_owner_pubkey: alice_owner.public_key(),
-            our_device_pubkey: alice_device.public_key(),
-            storage: Some(Arc::new(InMemoryStorage::new())),
-            one_to_many: None,
-        });
-        sender
-            .upsert_group(make_group(
-                group_id,
-                vec![
-                    alice_owner.public_key().to_hex(),
-                    bob_owner.public_key().to_hex(),
-                ],
-                vec![alice_owner.public_key().to_hex()],
-            ))
-            .unwrap();
-
-        let mut receiver = GroupManager::new(GroupManagerOptions {
-            our_owner_pubkey: bob_owner.public_key(),
-            our_device_pubkey: bob_device.public_key(),
-            storage: Some(Arc::new(InMemoryStorage::new())),
-            one_to_many: None,
-        });
-        receiver
-            .upsert_group(make_group(
-                group_id,
-                vec![
-                    alice_owner.public_key().to_hex(),
-                    bob_owner.public_key().to_hex(),
-                ],
-                vec![alice_owner.public_key().to_hex()],
-            ))
-            .unwrap();
-
-        let mut distribution: Option<UnsignedEvent> = None;
-        let mut publish_outer = |_event: &Event| Ok(());
-        sender
-            .send_message(
-                group_id,
-                "hello",
-                &mut |_recipient, rumor| {
-                    distribution = Some(rumor.clone());
-                    Ok(())
-                },
-                &mut publish_outer,
-                Some(1_700_000_000_000),
-            )
-            .unwrap();
-
-        let empty_plan = receiver.outer_subscription_plan();
-        assert!(empty_plan.authors.is_empty());
-        assert!(empty_plan.added_authors.is_empty());
-
-        receiver.handle_incoming_session_event(
-            &distribution.expect("distribution rumor"),
-            alice_owner.public_key(),
-            Some(alice_device.public_key()),
-        );
-
-        let first_plan = receiver.outer_subscription_plan();
-        assert_eq!(first_plan.authors.len(), 1);
-        assert_eq!(first_plan.added_authors, first_plan.authors);
-
-        let second_plan = receiver.outer_subscription_plan();
-        assert_eq!(second_plan.authors, first_plan.authors);
-        assert!(second_plan.added_authors.is_empty());
+    if !admins.is_subset(members) {
+        return Err(group_error("all admins must also be members"));
     }
+    Ok(())
+}
+
+fn merge_group_prepared_publish(into: &mut GroupPreparedPublish, next: GroupPreparedPublish) {
+    into.deliveries.extend(next.deliveries);
+    into.invite_responses.extend(next.invite_responses);
+    into.sender_key_messages.extend(next.sender_key_messages);
+    into.relay_gaps.extend(next.relay_gaps);
+    into.relay_gaps.sort();
+    into.relay_gaps.dedup();
+}
+
+fn group_error(message: impl Into<String>) -> crate::Error {
+    DomainError::InvalidGroupOperation(message.into()).into()
 }

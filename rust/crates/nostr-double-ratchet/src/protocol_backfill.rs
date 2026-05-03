@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use nostr::{Alphabet, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
 
 use crate::{
-    NdrRuntime, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
+    NdrRuntime, APP_KEYS_EVENT_KIND, GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND,
+    INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
 };
 
 pub const DEFAULT_INVITE_BACKFILL_LOOKBACK_SECS: u64 = 30 * 24 * 60 * 60;
@@ -43,12 +44,14 @@ impl NdrRuntime {
             .collect::<Vec<_>>();
         let message_authors =
             self.protocol_backfill_message_authors(options.message_author_pubkeys);
+        let group_sender_key_authors = self.group_known_sender_event_pubkeys();
 
         build_protocol_backfill_filters(ProtocolBackfillFilterInputs {
             owner_pubkeys: owners,
             invite_author_pubkeys: invite_authors,
             invite_response_pubkeys,
             message_author_pubkeys: message_authors,
+            group_sender_key_author_pubkeys: group_sender_key_authors,
             now_seconds: options.now_seconds,
             invite_lookback_seconds: options.invite_lookback_seconds,
             message_lookback_seconds: options.message_lookback_seconds,
@@ -90,8 +93,7 @@ impl NdrRuntime {
         dedupe_pubkeys(
             extra_message_author_pubkeys
                 .into_iter()
-                .chain(self.get_all_message_push_author_pubkeys())
-                .chain(self.group_known_sender_event_pubkeys()),
+                .chain(self.get_all_message_push_author_pubkeys()),
         )
     }
 }
@@ -101,6 +103,7 @@ struct ProtocolBackfillFilterInputs {
     invite_author_pubkeys: Vec<PublicKey>,
     invite_response_pubkeys: Vec<PublicKey>,
     message_author_pubkeys: Vec<PublicKey>,
+    group_sender_key_author_pubkeys: Vec<PublicKey>,
     now_seconds: u64,
     invite_lookback_seconds: u64,
     message_lookback_seconds: u64,
@@ -152,6 +155,19 @@ fn build_protocol_backfill_filters(inputs: ProtocolBackfillFilterInputs) -> Vec<
             Filter::new()
                 .kind(Kind::from(MESSAGE_EVENT_KIND as u16))
                 .authors(inputs.message_author_pubkeys)
+                .since(Timestamp::from(
+                    inputs
+                        .now_seconds
+                        .saturating_sub(inputs.message_lookback_seconds),
+                )),
+        );
+    }
+
+    if !inputs.group_sender_key_author_pubkeys.is_empty() {
+        filters.push(
+            Filter::new()
+                .kind(Kind::from(GROUP_SENDER_KEY_MESSAGE_KIND as u16))
+                .authors(inputs.group_sender_key_author_pubkeys)
                 .since(Timestamp::from(
                     inputs
                         .now_seconds

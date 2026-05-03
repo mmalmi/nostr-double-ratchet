@@ -1,4 +1,4 @@
-use nostr_double_ratchet::sender_key::SenderKeyState;
+use nostr_double_ratchet::{sender_key::SenderKeyState, DomainError, Error};
 
 #[test]
 fn sender_key_roundtrip_single_message() {
@@ -7,11 +7,11 @@ fn sender_key_roundtrip_single_message() {
     let mut sender = SenderKeyState::new(1, chain_key, 0);
     let mut receiver = SenderKeyState::new(1, chain_key, 0);
 
-    let (iteration, ciphertext) = sender.encrypt("hello").unwrap();
+    let (iteration, ciphertext) = sender.encrypt(b"hello").unwrap();
     assert_eq!(iteration, 0);
 
     let plaintext = receiver.decrypt(iteration, &ciphertext).unwrap();
-    assert_eq!(plaintext, "hello");
+    assert_eq!(plaintext, b"hello");
 
     // Both sides should advance in lockstep after decrypting the same message.
     assert_eq!(sender.iteration(), receiver.iteration());
@@ -25,15 +25,15 @@ fn sender_key_decrypt_out_of_order() {
     let mut sender = SenderKeyState::new(1, chain_key, 0);
     let mut receiver = SenderKeyState::new(1, chain_key, 0);
 
-    let (n0, c0) = sender.encrypt("m0").unwrap();
-    let (n1, c1) = sender.encrypt("m1").unwrap();
+    let (n0, c0) = sender.encrypt(b"m0").unwrap();
+    let (n1, c1) = sender.encrypt(b"m1").unwrap();
     assert_eq!(n0, 0);
     assert_eq!(n1, 1);
 
     // Deliver second message first.
-    assert_eq!(receiver.decrypt(n1, &c1).unwrap(), "m1");
+    assert_eq!(receiver.decrypt(n1, &c1).unwrap(), b"m1");
     // Then deliver the first message; it should still decrypt via stored skipped keys.
-    assert_eq!(receiver.decrypt(n0, &c0).unwrap(), "m0");
+    assert_eq!(receiver.decrypt(n0, &c0).unwrap(), b"m0");
 }
 
 #[test]
@@ -43,9 +43,8 @@ fn sender_key_rejects_too_many_skipped_messages() {
 
     // If the message number is far ahead, we should fail fast.
     let err = receiver.decrypt(100_000, "AA").unwrap_err();
-    let msg = err.to_string();
     assert!(
-        msg.contains("Too many skipped messages"),
-        "expected TooManySkippedMessages, got: {msg}"
+        matches!(err, Error::Domain(DomainError::TooManySkippedMessages)),
+        "expected TooManySkippedMessages, got: {err}"
     );
 }

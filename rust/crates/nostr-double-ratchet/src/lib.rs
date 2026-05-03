@@ -91,8 +91,9 @@ pub use shared_channel::SharedChannel;
 pub use storage::{InMemoryStorage, StorageAdapter};
 pub use types::{
     ChatSettingsPayloadV1, EventCallback, SendOptions, Unsubscribe, APP_KEYS_EVENT_KIND,
-    CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, EXPIRATION_TAG, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
-    MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND, SHARED_CHANNEL_KIND, TYPING_KIND,
+    CHAT_MESSAGE_KIND, CHAT_SETTINGS_KIND, EXPIRATION_TAG, GROUP_SENDER_KEY_MESSAGE_KIND,
+    INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND, REACTION_KIND, RECEIPT_KIND,
+    SHARED_CHANNEL_KIND, TYPING_KIND,
 };
 pub use user_record::{DeviceRecord, StoredDeviceRecord, StoredUserRecord, UserRecord};
 
@@ -102,8 +103,8 @@ pub(crate) use utils::{
 };
 
 pub use runtime::{
-    AcceptInviteResult, MessagePushSessionStateSnapshot, QueuedMessageDiagnostic,
-    QueuedMessageStage, SessionManagerEvent,
+    AcceptInviteResult, GroupOuterSubscriptionPlan, MessagePushSessionStateSnapshot,
+    QueuedMessageDiagnostic, QueuedMessageStage, SessionManagerEvent,
 };
 
 #[cfg(test)]

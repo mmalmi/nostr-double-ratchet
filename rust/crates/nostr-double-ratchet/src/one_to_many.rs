@@ -30,7 +30,8 @@ pub struct OneToManyMessage {
 
 impl OneToManyMessage {
     pub fn decrypt(&self, state: &mut SenderKeyState) -> Result<String> {
-        state.decrypt_from_bytes(self.message_number, &self.ciphertext)
+        let plaintext = state.decrypt_from_bytes(self.message_number, &self.ciphertext)?;
+        String::from_utf8(plaintext).map_err(|e| Error::Decryption(e.to_string()))
     }
 }
 
@@ -89,7 +90,7 @@ impl OneToManyChannel {
         inner_plaintext: &str,
         created_at: nostr::Timestamp,
     ) -> Result<nostr::Event> {
-        let (n, ciphertext_bytes) = sender_key.encrypt_to_bytes(inner_plaintext)?;
+        let (n, ciphertext_bytes) = sender_key.encrypt_to_bytes(inner_plaintext.as_bytes())?;
         let content = self.build_outer_content(sender_key.key_id, n, ciphertext_bytes.as_slice());
 
         let unsigned =

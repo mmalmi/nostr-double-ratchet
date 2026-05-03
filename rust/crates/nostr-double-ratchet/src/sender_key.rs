@@ -1,67 +1,57 @@
+use crate::{DomainError, Result};
 use base64::Engine;
 use nostr::nips::nip44;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use crate::{Error, Result};
-
-/// Maximum number of message keys we will derive-and-cache to support out-of-order delivery.
-///
-/// This is separate from the 1:1 Double Ratchet MAX_SKIP, because group chats can legitimately
-/// have higher volume and different delivery patterns.
 pub const SENDER_KEY_MAX_SKIP: usize = 10_000;
-
-/// Bound the amount of cached skipped message keys to limit memory/CPU DoS.
 pub const SENDER_KEY_MAX_STORED_SKIPPED_KEYS: usize = 2_000;
 
 const SENDER_KEY_KDF_SALT: &[u8] = b"ndr-sender-key-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SenderKeyDistribution {
-    pub group_id: String,
-    pub key_id: u32,
-    #[serde(with = "serde_bytes_array")]
-    pub chain_key: [u8; 32],
-    pub iteration: u32,
-    pub created_at: u64,
-    /// The per-sender outer Nostr pubkey used to publish group messages.
-    ///
-    /// This is intentionally optional for backwards compatibility with older distributions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sender_event_pubkey: Option<String>,
-}
-
-impl SenderKeyDistribution {
-    pub fn new(group_id: String, key_id: u32, chain_key: [u8; 32], iteration: u32) -> Self {
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            group_id,
-            key_id,
-            chain_key,
-            iteration,
-            created_at,
-            sender_event_pubkey: None,
-        }
-    }
-
-    pub fn new_random(group_id: String, key_id: u32) -> Self {
-        Self::new(group_id, key_id, rand::random::<[u8; 32]>(), 0)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct SenderKeyState {
     pub key_id: u32,
     #[serde(with = "serde_bytes_array")]
     chain_key: [u8; 32],
     iteration: u32,
-    #[serde(with = "serde_hashmap_u32_bytes", default)]
-    skipped_message_keys: HashMap<u32, [u8; 32]>,
+    #[serde(default, with = "serde_btreemap_u32_bytes")]
+    skipped_message_keys: BTreeMap<u32, [u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderKeyMessageContent {
+    pub key_id: u32,
+    pub message_number: u32,
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderKeyEncryptPlan {
+    pub next_state: SenderKeyState,
+    pub key_id: u32,
+    pub message_number: u32,
+    pub ciphertext: Vec<u8>,
+    pub plaintext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderKeyEncryptOutcome {
+    pub key_id: u32,
+    pub message_number: u32,
+    pub ciphertext: Vec<u8>,
+    pub plaintext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderKeyDecryptPlan {
+    pub next_state: SenderKeyState,
+    pub plaintext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderKeyDecryptOutcome {
+    pub plaintext: Vec<u8>,
 }
 
 impl SenderKeyState {
@@ -70,8 +60,12 @@ impl SenderKeyState {
             key_id,
             chain_key,
             iteration,
-            skipped_message_keys: HashMap::new(),
+            skipped_message_keys: BTreeMap::new(),
         }
+    }
+
+    pub fn key_id(&self) -> u32 {
+        self.key_id
     }
 
     pub fn chain_key(&self) -> [u8; 32] {
@@ -86,110 +80,158 @@ impl SenderKeyState {
         self.skipped_message_keys.len()
     }
 
-    pub fn encrypt_to_bytes(&mut self, plaintext: &str) -> Result<(u32, Vec<u8>)> {
-        let message_number = self.iteration;
-        let (next_chain_key, message_key) = derive_message_key(&self.chain_key);
-
-        self.chain_key = next_chain_key;
-        self.iteration = self.iteration.saturating_add(1);
+    pub fn plan_encrypt(&self, plaintext: &[u8]) -> Result<SenderKeyEncryptPlan> {
+        let mut next_state = self.clone();
+        let message_number = next_state.iteration;
+        let (next_chain_key, message_key) = derive_message_key(&next_state.chain_key);
+        next_state.chain_key = next_chain_key;
+        next_state.iteration = next_state
+            .iteration
+            .checked_add(1)
+            .ok_or_else(|| crate::Error::Encryption("sender-key iteration overflow".to_string()))?;
 
         let conversation_key = nip44::v2::ConversationKey::new(message_key);
-        let encrypted_bytes = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext.as_bytes())?;
-        Ok((message_number, encrypted_bytes))
+        let ciphertext = nip44::v2::encrypt_to_bytes(&conversation_key, plaintext)?;
+
+        Ok(SenderKeyEncryptPlan {
+            next_state,
+            key_id: self.key_id,
+            message_number,
+            ciphertext,
+            plaintext: plaintext.to_vec(),
+        })
     }
 
-    pub fn encrypt(&mut self, plaintext: &str) -> Result<(u32, String)> {
-        let (n, bytes) = self.encrypt_to_bytes(plaintext)?;
-        let ciphertext = base64::engine::general_purpose::STANDARD.encode(bytes);
-        Ok((n, ciphertext))
+    pub fn apply_encrypt(&mut self, plan: SenderKeyEncryptPlan) -> SenderKeyEncryptOutcome {
+        self.clone_from(&plan.next_state);
+        SenderKeyEncryptOutcome {
+            key_id: plan.key_id,
+            message_number: plan.message_number,
+            ciphertext: plan.ciphertext,
+            plaintext: plan.plaintext,
+        }
+    }
+
+    pub fn plan_decrypt(&self, message: &SenderKeyMessageContent) -> Result<SenderKeyDecryptPlan> {
+        if message.key_id != self.key_id {
+            return Err(crate::Error::Decryption(format!(
+                "sender-key id mismatch: expected {}, got {}",
+                self.key_id, message.key_id
+            )));
+        }
+
+        let mut next_state = self.clone();
+        let plaintext = next_state.decrypt_in_place(message.message_number, &message.ciphertext)?;
+
+        Ok(SenderKeyDecryptPlan {
+            next_state,
+            plaintext,
+        })
+    }
+
+    pub fn apply_decrypt(&mut self, plan: SenderKeyDecryptPlan) -> SenderKeyDecryptOutcome {
+        self.clone_from(&plan.next_state);
+        SenderKeyDecryptOutcome {
+            plaintext: plan.plaintext,
+        }
+    }
+
+    pub fn encrypt_to_bytes(&mut self, plaintext: &[u8]) -> Result<(u32, Vec<u8>)> {
+        let plan = self.plan_encrypt(plaintext)?;
+        let outcome = self.apply_encrypt(plan);
+        Ok((outcome.message_number, outcome.ciphertext))
+    }
+
+    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(u32, String)> {
+        let (message_number, ciphertext) = self.encrypt_to_bytes(plaintext)?;
+        Ok((
+            message_number,
+            base64::engine::general_purpose::STANDARD.encode(ciphertext),
+        ))
     }
 
     pub fn decrypt_from_bytes(
         &mut self,
         message_number: u32,
-        ciphertext_bytes: &[u8],
-    ) -> Result<String> {
-        // Old message: try cached skipped key.
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>> {
+        let message = SenderKeyMessageContent {
+            key_id: self.key_id,
+            message_number,
+            ciphertext: ciphertext.to_vec(),
+        };
+        let plan = self.plan_decrypt(&message)?;
+        Ok(self.apply_decrypt(plan).plaintext)
+    }
+
+    pub fn decrypt(&mut self, message_number: u32, ciphertext: &str) -> Result<Vec<u8>> {
+        if message_number >= self.iteration {
+            let delta = (message_number - self.iteration) as usize;
+            if delta > SENDER_KEY_MAX_SKIP {
+                return Err(DomainError::TooManySkippedMessages.into());
+            }
+        }
+
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(ciphertext)
+            .map_err(|e| crate::Error::Decryption(e.to_string()))?;
+        self.decrypt_from_bytes(message_number, &ciphertext)
+    }
+
+    fn decrypt_in_place(&mut self, message_number: u32, ciphertext: &[u8]) -> Result<Vec<u8>> {
         if message_number < self.iteration {
             let message_key = self
                 .skipped_message_keys
                 .remove(&message_number)
                 .ok_or_else(|| {
-                    Error::Decryption("Missing skipped sender key message".to_string())
+                    crate::Error::Decryption("duplicate or missing sender-key message".to_string())
                 })?;
-
-            return decrypt_with_message_key_bytes(&message_key, ciphertext_bytes);
+            return decrypt_with_message_key(&message_key, ciphertext);
         }
 
-        // Fast-fail if the sender is too far ahead.
         let delta = (message_number - self.iteration) as usize;
         if delta > SENDER_KEY_MAX_SKIP {
-            return Err(Error::TooManySkippedMessages);
+            return Err(DomainError::TooManySkippedMessages.into());
         }
 
-        // Derive and cache keys for skipped messages so we can decrypt out-of-order later.
         while self.iteration < message_number {
             let (next_chain_key, message_key) = derive_message_key(&self.chain_key);
             self.chain_key = next_chain_key;
             self.skipped_message_keys
                 .insert(self.iteration, message_key);
-            self.iteration = self.iteration.saturating_add(1);
+            self.iteration = self.iteration.checked_add(1).ok_or_else(|| {
+                crate::Error::Decryption("sender-key iteration overflow".to_string())
+            })?;
         }
 
-        // Now decrypt the current message using the next derived key.
         let (next_chain_key, message_key) = derive_message_key(&self.chain_key);
         self.chain_key = next_chain_key;
-        self.iteration = self.iteration.saturating_add(1);
-
-        // Prune skipped cache if it grows unbounded.
+        self.iteration = self
+            .iteration
+            .checked_add(1)
+            .ok_or_else(|| crate::Error::Decryption("sender-key iteration overflow".to_string()))?;
         prune_skipped(&mut self.skipped_message_keys);
 
-        decrypt_with_message_key_bytes(&message_key, ciphertext_bytes)
+        decrypt_with_message_key(&message_key, ciphertext)
     }
-
-    pub fn decrypt(&mut self, message_number: u32, ciphertext: &str) -> Result<String> {
-        // Preserve historical behavior: reject far-ahead message numbers without requiring a
-        // well-formed ciphertext. This avoids turning a skip-limit error into a base64 error.
-        if message_number >= self.iteration {
-            let delta = (message_number - self.iteration) as usize;
-            if delta > SENDER_KEY_MAX_SKIP {
-                return Err(Error::TooManySkippedMessages);
-            }
-        }
-
-        let ciphertext_bytes = base64::engine::general_purpose::STANDARD
-            .decode(ciphertext)
-            .map_err(|e| Error::Decryption(e.to_string()))?;
-
-        self.decrypt_from_bytes(message_number, &ciphertext_bytes)
-    }
-}
-
-fn decrypt_with_message_key_bytes(
-    message_key: &[u8; 32],
-    ciphertext_bytes: &[u8],
-) -> Result<String> {
-    let conversation_key = nip44::v2::ConversationKey::new(*message_key);
-    let plaintext_bytes = nip44::v2::decrypt_to_bytes(&conversation_key, ciphertext_bytes)?;
-    String::from_utf8(plaintext_bytes).map_err(|e| Error::Decryption(e.to_string()))
 }
 
 fn derive_message_key(chain_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let outputs = crate::utils::kdf(chain_key, SENDER_KEY_KDF_SALT, 2);
+    let outputs = crate::kdf(chain_key, SENDER_KEY_KDF_SALT, 2);
     (outputs[0], outputs[1])
 }
 
-fn prune_skipped(map: &mut HashMap<u32, [u8; 32]>) {
-    if map.len() <= SENDER_KEY_MAX_STORED_SKIPPED_KEYS {
-        return;
-    }
+fn decrypt_with_message_key(message_key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let conversation_key = nip44::v2::ConversationKey::new(*message_key);
+    nip44::v2::decrypt_to_bytes(&conversation_key, ciphertext).map_err(Into::into)
+}
 
-    // Remove oldest first (smallest message number).
-    let mut keys: Vec<u32> = map.keys().cloned().collect();
-    keys.sort_unstable();
-    let to_remove = map.len().saturating_sub(SENDER_KEY_MAX_STORED_SKIPPED_KEYS);
-    for k in keys.into_iter().take(to_remove) {
-        map.remove(&k);
+fn prune_skipped(map: &mut BTreeMap<u32, [u8; 32]>) {
+    while map.len() > SENDER_KEY_MAX_STORED_SKIPPED_KEYS {
+        let Some(first) = map.keys().next().copied() else {
+            break;
+        };
+        map.remove(&first);
     }
 }
 
@@ -207,48 +249,221 @@ mod serde_bytes_array {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        if bytes.len() != 32 {
-            return Err(serde::de::Error::custom("Invalid 32-byte hex"));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Ok(arr)
+        let value = String::deserialize(deserializer)?;
+        let bytes = hex::decode(value).map_err(serde::de::Error::custom)?;
+        <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| serde::de::Error::custom("expected 32-byte hex"))
     }
 }
 
-mod serde_hashmap_u32_bytes {
+mod serde_btreemap_u32_bytes {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
-    pub fn serialize<S>(map: &HashMap<u32, [u8; 32]>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(map: &BTreeMap<u32, [u8; 32]>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let string_map: HashMap<String, String> = map
+        let values: BTreeMap<String, String> = map
             .iter()
-            .map(|(k, v)| (k.to_string(), hex::encode(v)))
+            .map(|(key, value)| (key.to_string(), hex::encode(value)))
             .collect();
-        string_map.serialize(serializer)
+        values.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<u32, [u8; 32]>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<u32, [u8; 32]>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let string_map: HashMap<String, String> = HashMap::deserialize(deserializer)?;
-        let mut out = HashMap::new();
-        for (k, v) in string_map {
-            let idx: u32 = k.parse().map_err(serde::de::Error::custom)?;
-            let bytes = hex::decode(&v).map_err(serde::de::Error::custom)?;
-            if bytes.len() != 32 {
-                return Err(serde::de::Error::custom("Invalid 32-byte hex"));
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            out.insert(idx, arr);
+        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
+        let mut out = BTreeMap::new();
+        for (key, value) in values {
+            let key = key.parse::<u32>().map_err(serde::de::Error::custom)?;
+            let bytes = hex::decode(value).map_err(serde::de::Error::custom)?;
+            let value = <[u8; 32]>::try_from(bytes.as_slice())
+                .map_err(|_| serde::de::Error::custom("expected 32-byte hex"))?;
+            out.insert(key, value);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sender_key_roundtrip_single_message() {
+        let chain_key = [7u8; 32];
+        let mut sender = SenderKeyState::new(1, chain_key, 0);
+        let mut receiver = SenderKeyState::new(1, chain_key, 0);
+
+        let (message_number, ciphertext) = sender.encrypt_to_bytes(b"hello").unwrap();
+        assert_eq!(message_number, 0);
+
+        let plaintext = receiver
+            .decrypt_from_bytes(message_number, &ciphertext)
+            .unwrap();
+        assert_eq!(plaintext, b"hello");
+        assert_eq!(sender.iteration(), receiver.iteration());
+        assert_eq!(sender.chain_key(), receiver.chain_key());
+    }
+
+    #[test]
+    fn sender_key_decrypt_out_of_order() {
+        let chain_key = [9u8; 32];
+        let mut sender = SenderKeyState::new(1, chain_key, 0);
+        let mut receiver = SenderKeyState::new(1, chain_key, 0);
+
+        let (n0, c0) = sender.encrypt_to_bytes(b"m0").unwrap();
+        let (n1, c1) = sender.encrypt_to_bytes(b"m1").unwrap();
+
+        assert_eq!(receiver.decrypt_from_bytes(n1, &c1).unwrap(), b"m1");
+        assert_eq!(receiver.decrypt_from_bytes(n0, &c0).unwrap(), b"m0");
+    }
+
+    #[test]
+    fn sender_key_rejects_duplicate_message() {
+        let chain_key = [11u8; 32];
+        let mut sender = SenderKeyState::new(1, chain_key, 0);
+        let mut receiver = SenderKeyState::new(1, chain_key, 0);
+        let (n, c) = sender.encrypt_to_bytes(b"once").unwrap();
+
+        assert_eq!(receiver.decrypt_from_bytes(n, &c).unwrap(), b"once");
+        assert!(receiver.decrypt_from_bytes(n, &c).is_err());
+    }
+
+    #[test]
+    fn sender_key_rejects_too_many_skipped_messages() {
+        let chain_key = [3u8; 32];
+        let mut receiver = SenderKeyState::new(1, chain_key, 0);
+        let before = receiver.clone();
+
+        let err = receiver.decrypt(100_000, "AA").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Domain(DomainError::TooManySkippedMessages)
+        ));
+        assert_eq!(receiver, before);
+    }
+
+    #[test]
+    fn sender_key_plan_encrypt_is_pure_until_apply() {
+        let chain_key = [4u8; 32];
+        let mut sender = SenderKeyState::new(7, chain_key, 0);
+        let before = sender.clone();
+
+        let plan = sender.plan_encrypt(b"deferred").unwrap();
+
+        assert_eq!(sender, before);
+        assert_eq!(plan.key_id, 7);
+        assert_eq!(plan.message_number, 0);
+
+        let outcome = sender.apply_encrypt(plan);
+        assert_eq!(outcome.plaintext, b"deferred");
+        assert_eq!(sender.iteration(), 1);
+        assert_ne!(sender, before);
+    }
+
+    #[test]
+    fn sender_key_plan_decrypt_is_pure_until_apply() {
+        let chain_key = [5u8; 32];
+        let mut sender = SenderKeyState::new(9, chain_key, 0);
+        let mut receiver = SenderKeyState::new(9, chain_key, 0);
+        let (message_number, ciphertext) = sender.encrypt_to_bytes(b"planned").unwrap();
+        let before = receiver.clone();
+
+        let plan = receiver
+            .plan_decrypt(&SenderKeyMessageContent {
+                key_id: 9,
+                message_number,
+                ciphertext,
+            })
+            .unwrap();
+
+        assert_eq!(receiver, before);
+        assert_eq!(plan.plaintext, b"planned");
+
+        let outcome = receiver.apply_decrypt(plan);
+        assert_eq!(outcome.plaintext, b"planned");
+        assert_eq!(receiver.iteration(), 1);
+        assert_ne!(receiver, before);
+    }
+
+    #[test]
+    fn sender_key_wrong_key_id_does_not_mutate_receiver() {
+        let chain_key = [13u8; 32];
+        let mut sender = SenderKeyState::new(1, chain_key, 0);
+        let receiver = SenderKeyState::new(1, chain_key, 0);
+        let (message_number, ciphertext) = sender.encrypt_to_bytes(b"wrong id").unwrap();
+        let before = receiver.clone();
+
+        let err = receiver
+            .plan_decrypt(&SenderKeyMessageContent {
+                key_id: 2,
+                message_number,
+                ciphertext,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, crate::Error::Decryption(_)));
+        assert_eq!(receiver, before);
+    }
+
+    #[test]
+    fn sender_key_corrupted_ciphertext_does_not_mutate_receiver() {
+        let chain_key = [15u8; 32];
+        let mut sender = SenderKeyState::new(1, chain_key, 0);
+        let mut receiver = SenderKeyState::new(1, chain_key, 0);
+        let (message_number, ciphertext) =
+            sender.encrypt_to_bytes(b"valid after corruption").unwrap();
+        let mut corrupted = ciphertext.clone();
+        let last = corrupted.last_mut().expect("ciphertext must not be empty");
+        *last ^= 0x55;
+        let before = receiver.clone();
+
+        assert!(receiver
+            .decrypt_from_bytes(message_number, &corrupted)
+            .is_err());
+        assert_eq!(receiver, before);
+        assert_eq!(
+            receiver
+                .decrypt_from_bytes(message_number, &ciphertext)
+                .unwrap(),
+            b"valid after corruption"
+        );
+    }
+
+    #[test]
+    fn sender_key_encrypt_iteration_overflow_does_not_mutate_sender() {
+        let sender = SenderKeyState::new(1, [17u8; 32], u32::MAX);
+        let before = sender.clone();
+
+        let err = sender.plan_encrypt(b"overflow").unwrap_err();
+
+        assert!(matches!(err, crate::Error::Encryption(_)));
+        assert_eq!(sender, before);
+    }
+
+    #[test]
+    fn sender_key_snapshot_roundtrip_preserves_skipped_keys_and_future_decrypt() {
+        let chain_key = [19u8; 32];
+        let mut sender = SenderKeyState::new(1, chain_key, 0);
+        let mut receiver = SenderKeyState::new(1, chain_key, 0);
+        let (n0, c0) = sender.encrypt_to_bytes(b"m0").unwrap();
+        let (n1, c1) = sender.encrypt_to_bytes(b"m1").unwrap();
+        let (n2, c2) = sender.encrypt_to_bytes(b"m2").unwrap();
+
+        assert_eq!(receiver.decrypt_from_bytes(n2, &c2).unwrap(), b"m2");
+        assert_eq!(receiver.skipped_len(), 2);
+
+        let json = serde_json::to_string(&receiver).unwrap();
+        let mut restored: SenderKeyState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.decrypt_from_bytes(n0, &c0).unwrap(), b"m0");
+        assert_eq!(restored.decrypt_from_bytes(n1, &c1).unwrap(), b"m1");
+
+        let (n3, c3) = sender.encrypt_to_bytes(b"m3").unwrap();
+        assert_eq!(restored.decrypt_from_bytes(n3, &c3).unwrap(), b"m3");
     }
 }

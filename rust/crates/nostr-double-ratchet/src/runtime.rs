@@ -8,11 +8,12 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    group::GroupData, nostr_codec, pairwise_codec, AppKeys, AuthorizedDevice, DevicePubkey,
-    DeviceRoster, Error, GroupDecryptedEvent, GroupManager, GroupManagerOptions,
-    GroupOuterSubscriptionPlan, InMemoryStorage, Invite, OwnerPubkey, ProtocolContext, RelayGap,
-    Result, SendOptions, SessionManager, SessionManagerSnapshot, SessionState, StorageAdapter,
-    UnixSeconds, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
+    nostr_codec, pairwise_codec, AppKeys, AuthorizedDevice, DevicePubkey, DeviceRoster, Error,
+    GroupCreateResult, GroupIncomingEvent, GroupManager, GroupManagerSnapshot,
+    GroupPreparedPublish, GroupPreparedSend, GroupProtocol, GroupSenderKeyHandleResult,
+    GroupSenderKeyMessage, InMemoryStorage, Invite, OwnerPubkey, ProtocolContext, RelayGap, Result,
+    SendOptions, SessionManager, SessionManagerSnapshot, SessionState, StorageAdapter, UnixSeconds,
+    APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
 };
 
 const RUNTIME_STATE_KEY: &str = "v2/runtime-state";
@@ -73,9 +74,19 @@ pub struct MessagePushSessionStateSnapshot {
     pub has_receiving_capability: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GroupOuterSubscriptionPlan {
+    pub authors: Vec<PublicKey>,
+    pub added_authors: Vec<PublicKey>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredRuntimeState {
     core: SessionManagerSnapshot,
+    #[serde(default)]
+    group_manager: Option<GroupManagerSnapshot>,
+    #[serde(default)]
+    pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
     pending_outbound: Vec<PendingOutbound>,
     processed_invite_response_ids: Vec<String>,
     latest_app_keys_created_at: HashMap<String, u64>,
@@ -104,6 +115,8 @@ struct LocalSiblingPayload {
 
 struct RuntimeState {
     core: SessionManager,
+    group_manager: GroupManager,
+    pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
     pending_outbound: Vec<PendingOutbound>,
     processed_invite_response_ids: HashSet<String>,
     latest_app_keys_created_at: HashMap<PublicKey, u64>,
@@ -116,7 +129,6 @@ struct DirectMessageSubscription {
 
 pub struct NdrRuntime {
     state: Mutex<RuntimeState>,
-    group_manager: Mutex<GroupManager>,
     event_rx: Mutex<Receiver<SessionManagerEvent>>,
     event_tx: Sender<SessionManagerEvent>,
     storage: Arc<dyn StorageAdapter>,
@@ -157,11 +169,13 @@ impl NdrRuntime {
         invite: Option<Invite>,
     ) -> Self {
         let storage = session_storage.unwrap_or_else(|| Arc::new(InMemoryStorage::new()));
-        let group_storage = group_storage.unwrap_or_else(|| Arc::clone(&storage));
+        let _group_storage = group_storage.unwrap_or_else(|| Arc::clone(&storage));
         let (event_tx, event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
         let mut state = RuntimeState::load(storage.as_ref(), owner_public_key, our_identity_key)
             .unwrap_or_else(|| RuntimeState {
                 core: SessionManager::new(owner(owner_public_key), our_identity_key),
+                group_manager: GroupManager::new(owner(owner_public_key)),
+                pending_group_sender_key_messages: Vec::new(),
                 pending_outbound: Vec::new(),
                 processed_invite_response_ids: HashSet::new(),
                 latest_app_keys_created_at: HashMap::new(),
@@ -172,16 +186,8 @@ impl NdrRuntime {
             state.core.replace_local_invite(invite);
         }
 
-        let group_manager = GroupManager::new(GroupManagerOptions {
-            our_owner_pubkey: owner_public_key,
-            our_device_pubkey: our_public_key,
-            storage: Some(group_storage),
-            one_to_many: None,
-        });
-
         Self {
             state: Mutex::new(state),
-            group_manager: Mutex::new(group_manager),
             event_rx: Mutex::new(event_rx),
             event_tx,
             storage,
@@ -739,57 +745,270 @@ impl NdrRuntime {
 
     pub fn with_group_context<R>(
         &self,
-        f: impl FnOnce(&SessionManager, &mut GroupManager, &Sender<SessionManagerEvent>) -> R,
+        f: impl FnOnce(&mut SessionManager, &mut GroupManager, &Sender<SessionManagerEvent>) -> R,
     ) -> R {
-        let core_snapshot = self.state.lock().unwrap().core.clone();
-        let mut group_manager = self.group_manager.lock().unwrap();
-        f(&core_snapshot, &mut group_manager, &self.event_tx)
+        let mut state = self.state.lock().unwrap();
+        let (core, group_manager) = state.core_and_group_mut();
+        f(core, group_manager, &self.event_tx)
     }
 
-    pub fn sync_groups(&self, groups: Vec<GroupData>) -> Result<()> {
-        self.with_group_context(|_, group_manager, _| {
-            let next_group_ids: HashSet<String> =
-                groups.iter().map(|group| group.id.clone()).collect();
-            let stale_group_ids: Vec<String> = group_manager
-                .managed_group_ids()
-                .into_iter()
-                .filter(|group_id| !next_group_ids.contains(group_id))
-                .collect();
-            for group in groups {
-                group_manager.upsert_group(group)?;
-            }
-            for group_id in stale_group_ids {
-                group_manager.remove_group(&group_id);
-            }
-            Ok(())
-        })
+    pub fn sync_groups(&self, _groups: Vec<crate::GroupSnapshot>) -> Result<()> {
+        // Experimental group state is owned by GroupManagerSnapshot in runtime state.
+        Ok(())
     }
 
     pub fn group_known_sender_event_pubkeys(&self) -> Vec<PublicKey> {
-        self.with_group_context(|_, group_manager, _| group_manager.known_sender_event_pubkeys())
+        self.state
+            .lock()
+            .unwrap()
+            .group_manager
+            .known_sender_event_pubkeys()
+            .into_iter()
+            .map(public_device)
+            .collect()
     }
 
     pub fn group_outer_subscription_plan(&self) -> GroupOuterSubscriptionPlan {
-        self.with_group_context(|_, group_manager, _| group_manager.outer_subscription_plan())
+        let authors = self.group_known_sender_event_pubkeys();
+        GroupOuterSubscriptionPlan {
+            added_authors: authors.clone(),
+            authors,
+        }
     }
 
-    pub fn group_handle_incoming_session_event(
+    pub fn group_snapshots(&self) -> Vec<crate::GroupSnapshot> {
+        self.state.lock().unwrap().group_manager.groups()
+    }
+
+    pub fn create_group(
         &self,
-        event: &UnsignedEvent,
+        name: String,
+        member_owners: Vec<PublicKey>,
+    ) -> Result<GroupCreateResult> {
+        let now = now();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now, &mut rng);
+        let result = {
+            let mut state = self.state.lock().unwrap();
+            let (core, group_manager) = state.core_and_group_mut();
+            group_manager.create_group_with_protocol(
+                core,
+                &mut ctx,
+                name,
+                member_owners.into_iter().map(owner).collect(),
+                GroupProtocol::sender_key_v1(),
+            )?
+        };
+        self.publish_group_prepared_send(&result.prepared, None)?;
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(result)
+    }
+
+    pub fn update_group_name(&self, group_id: &str, name: String) -> Result<crate::GroupSnapshot> {
+        let now = now();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now, &mut rng);
+        let (snapshot, prepared) = {
+            let mut state = self.state.lock().unwrap();
+            let (core, group_manager) = state.core_and_group_mut();
+            let prepared = group_manager.update_name(core, &mut ctx, group_id, name)?;
+            let snapshot = group_manager
+                .group(group_id)
+                .ok_or_else(|| crate::DomainError::InvalidState("unknown group".to_string()))?;
+            (snapshot, prepared)
+        };
+        self.publish_group_prepared_send(&prepared, None)?;
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+        Ok(snapshot)
+    }
+
+    pub fn add_group_members(
+        &self,
+        group_id: &str,
+        members: Vec<PublicKey>,
+    ) -> Result<crate::GroupSnapshot> {
+        let now = now();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now, &mut rng);
+        let (snapshot, prepared) = {
+            let mut state = self.state.lock().unwrap();
+            let (core, group_manager) = state.core_and_group_mut();
+            let prepared = group_manager.add_members(
+                core,
+                &mut ctx,
+                group_id,
+                members.into_iter().map(owner).collect(),
+            )?;
+            let snapshot = group_manager
+                .group(group_id)
+                .ok_or_else(|| crate::DomainError::InvalidState("unknown group".to_string()))?;
+            (snapshot, prepared)
+        };
+        self.publish_group_prepared_send(&prepared, None)?;
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(snapshot)
+    }
+
+    pub fn remove_group_member(
+        &self,
+        group_id: &str,
+        member: PublicKey,
+    ) -> Result<crate::GroupSnapshot> {
+        let now = now();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now, &mut rng);
+        let (snapshot, prepared) = {
+            let mut state = self.state.lock().unwrap();
+            let (core, group_manager) = state.core_and_group_mut();
+            let prepared =
+                group_manager.remove_members(core, &mut ctx, group_id, vec![owner(member)])?;
+            let snapshot = group_manager
+                .group(group_id)
+                .ok_or_else(|| crate::DomainError::InvalidState("unknown group".to_string()))?;
+            (snapshot, prepared)
+        };
+        self.publish_group_prepared_send(&prepared, None)?;
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+        Ok(snapshot)
+    }
+
+    pub fn set_group_admin(
+        &self,
+        group_id: &str,
+        member: PublicKey,
+        is_admin: bool,
+    ) -> Result<crate::GroupSnapshot> {
+        let now = now();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now, &mut rng);
+        let (snapshot, prepared) = {
+            let mut state = self.state.lock().unwrap();
+            let (core, group_manager) = state.core_and_group_mut();
+            let prepared = if is_admin {
+                group_manager.add_admins(core, &mut ctx, group_id, vec![owner(member)])?
+            } else {
+                group_manager.remove_admins(core, &mut ctx, group_id, vec![owner(member)])?
+            };
+            let snapshot = group_manager
+                .group(group_id)
+                .ok_or_else(|| crate::DomainError::InvalidState("unknown group".to_string()))?;
+            (snapshot, prepared)
+        };
+        self.publish_group_prepared_send(&prepared, None)?;
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+        Ok(snapshot)
+    }
+
+    pub fn send_group_message(
+        &self,
+        group_id: &str,
+        payload: Vec<u8>,
+        inner_event_id: Option<String>,
+    ) -> Result<Vec<String>> {
+        let now = now();
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now, &mut rng);
+        let prepared = {
+            let mut state = self.state.lock().unwrap();
+            let (core, group_manager) = state.core_and_group_mut();
+            group_manager.send_message(core, &mut ctx, group_id, payload)?
+        };
+        let ids = self.publish_group_prepared_send(&prepared, inner_event_id)?;
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+        self.sync_direct_message_subscriptions()?;
+        Ok(ids)
+    }
+
+    pub fn group_handle_incoming_payload(
+        &self,
+        payload: &[u8],
         from_owner_pubkey: PublicKey,
         from_sender_device_pubkey: Option<PublicKey>,
-    ) -> Vec<GroupDecryptedEvent> {
-        self.with_group_context(|_, group_manager, _| {
-            group_manager.handle_incoming_session_event(
-                event,
-                from_owner_pubkey,
-                from_sender_device_pubkey,
-            )
-        })
+    ) -> Vec<GroupIncomingEvent> {
+        let mut events = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            let result = match from_sender_device_pubkey {
+                Some(device_pubkey) => state.group_manager.handle_pairwise_payload(
+                    owner(from_owner_pubkey),
+                    device(device_pubkey),
+                    payload,
+                ),
+                None => state
+                    .group_manager
+                    .handle_incoming(owner(from_owner_pubkey), payload),
+            };
+            if let Ok(Some(event)) = result {
+                events.push(event);
+            }
+        }
+        events.extend(self.retry_pending_group_sender_key_messages());
+        if !events.is_empty() {
+            let _ = self.persist_state();
+            let _ = self.refresh_protocol_subscriptions();
+        }
+        events
     }
 
-    pub fn group_handle_outer_event(&self, outer: &Event) -> Option<GroupDecryptedEvent> {
-        self.with_group_context(|_, group_manager, _| group_manager.handle_outer_event(outer))
+    pub fn group_handle_outer_event(&self, outer: &Event) -> Vec<GroupIncomingEvent> {
+        let Ok(message) = nostr_codec::parse_group_sender_key_message_event(outer) else {
+            return Vec::new();
+        };
+        let mut state = self.state.lock().unwrap();
+        match state
+            .group_manager
+            .handle_sender_key_message(message.clone())
+        {
+            Ok(GroupSenderKeyHandleResult::Event(event)) => {
+                drop(state);
+                let _ = self.persist_state();
+                let _ = self.refresh_protocol_subscriptions();
+                vec![event]
+            }
+            Ok(GroupSenderKeyHandleResult::PendingDistribution { .. }) => {
+                state.pending_group_sender_key_messages.push(message);
+                drop(state);
+                let _ = self.persist_state();
+                Vec::new()
+            }
+            Ok(GroupSenderKeyHandleResult::Ignored) | Err(_) => Vec::new(),
+        }
+    }
+
+    fn retry_pending_group_sender_key_messages(&self) -> Vec<GroupIncomingEvent> {
+        let pending =
+            std::mem::take(&mut self.state.lock().unwrap().pending_group_sender_key_messages);
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        let mut still_pending = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            for message in pending {
+                match state
+                    .group_manager
+                    .handle_sender_key_message(message.clone())
+                {
+                    Ok(GroupSenderKeyHandleResult::Event(event)) => events.push(event),
+                    Ok(GroupSenderKeyHandleResult::PendingDistribution { .. }) => {
+                        still_pending.push(message)
+                    }
+                    Ok(GroupSenderKeyHandleResult::Ignored) => {}
+                    Err(_) => {}
+                }
+            }
+            state.pending_group_sender_key_messages = still_pending;
+        }
+        events
     }
 
     pub fn drain_events(&self) -> Vec<SessionManagerEvent> {
@@ -1001,6 +1220,53 @@ impl NdrRuntime {
         Ok(())
     }
 
+    fn publish_group_prepared_send(
+        &self,
+        prepared: &GroupPreparedSend,
+        inner_event_id: Option<String>,
+    ) -> Result<Vec<String>> {
+        let mut event_ids = Vec::new();
+        self.publish_group_prepared(&prepared.remote, inner_event_id.clone(), &mut event_ids)?;
+        self.publish_group_prepared(&prepared.local_sibling, inner_event_id, &mut event_ids)?;
+        Ok(event_ids)
+    }
+
+    fn publish_group_prepared(
+        &self,
+        prepared: &GroupPreparedPublish,
+        inner_event_id: Option<String>,
+        event_ids: &mut Vec<String>,
+    ) -> Result<()> {
+        for response in &prepared.invite_responses {
+            let event = nostr_codec::invite_response_event(response)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            self.event_tx
+                .send(SessionManagerEvent::PublishSigned(event))
+                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        }
+        for delivery in &prepared.deliveries {
+            let event = nostr_codec::message_event(&delivery.envelope)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            event_ids.push(event.id.to_string());
+            self.event_tx
+                .send(SessionManagerEvent::PublishSignedForInnerEvent {
+                    event,
+                    inner_event_id: inner_event_id.clone(),
+                    target_device_id: Some(public_device(delivery.device_pubkey).to_hex()),
+                })
+                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        }
+        for sender_key_message in &prepared.sender_key_messages {
+            let event = nostr_codec::group_sender_key_message_event(sender_key_message)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            event_ids.push(event.id.to_string());
+            self.event_tx
+                .send(SessionManagerEvent::PublishSigned(event))
+                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        }
+        Ok(())
+    }
+
     fn retry_pending_outbound(&self) -> Result<()> {
         let pending = std::mem::take(&mut self.state.lock().unwrap().pending_outbound);
         let mut still_pending = Vec::new();
@@ -1168,6 +1434,8 @@ impl NdrRuntime {
         let state = self.state.lock().unwrap();
         let stored = StoredRuntimeState {
             core: state.core.snapshot(),
+            group_manager: Some(state.group_manager.snapshot()),
+            pending_group_sender_key_messages: state.pending_group_sender_key_messages.clone(),
             pending_outbound: state.pending_outbound.clone(),
             processed_invite_response_ids: state
                 .processed_invite_response_ids
@@ -1187,6 +1455,10 @@ impl NdrRuntime {
 }
 
 impl RuntimeState {
+    fn core_and_group_mut(&mut self) -> (&mut SessionManager, &mut GroupManager) {
+        (&mut self.core, &mut self.group_manager)
+    }
+
     fn load(
         storage: &dyn StorageAdapter,
         owner_public_key: PublicKey,
@@ -1195,8 +1467,17 @@ impl RuntimeState {
         let raw = storage.get(RUNTIME_STATE_KEY).ok().flatten()?;
         let stored: StoredRuntimeState = serde_json::from_str(&raw).ok()?;
         let core = SessionManager::from_snapshot(stored.core, identity_key).ok()?;
+        let group_manager = stored
+            .group_manager
+            .map(GroupManager::from_snapshot)
+            .transpose()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| GroupManager::new(owner(owner_public_key)));
         Some(Self {
             core,
+            group_manager,
+            pending_group_sender_key_messages: stored.pending_group_sender_key_messages,
             pending_outbound: stored.pending_outbound,
             processed_invite_response_ids: stored
                 .processed_invite_response_ids
@@ -1212,6 +1493,8 @@ impl RuntimeState {
         .or_else(|| {
             Some(Self {
                 core: SessionManager::new(owner(owner_public_key), identity_key),
+                group_manager: GroupManager::new(owner(owner_public_key)),
+                pending_group_sender_key_messages: Vec::new(),
                 pending_outbound: Vec::new(),
                 processed_invite_response_ids: HashSet::new(),
                 latest_app_keys_created_at: HashMap::new(),

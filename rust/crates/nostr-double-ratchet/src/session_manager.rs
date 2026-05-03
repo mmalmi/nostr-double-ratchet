@@ -178,6 +178,10 @@ impl SessionManager {
         }
     }
 
+    pub fn local_device_pubkey(&self) -> DevicePubkey {
+        self.local_device_pubkey
+    }
+
     pub fn replace_local_invite(&mut self, invite: Invite) {
         self.local_invite = Some(invite);
     }
@@ -323,6 +327,29 @@ impl SessionManager {
     where
         R: RngCore + CryptoRng,
     {
+        self.prepare_local_sibling_send_inner(ctx, payload, true)
+    }
+
+    pub(crate) fn prepare_local_sibling_send_reusing_sessions<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        payload: Vec<u8>,
+    ) -> Result<PreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.prepare_local_sibling_send_inner(ctx, payload, false)
+    }
+
+    fn prepare_local_sibling_send_inner<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        payload: Vec<u8>,
+        prefer_public_invite: bool,
+    ) -> Result<PreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
         let mut targets = BTreeSet::new();
         self.collect_local_sibling_targets(&mut targets);
 
@@ -336,7 +363,7 @@ impl SessionManager {
                 target.owner_pubkey,
                 target.device_pubkey,
                 &payload,
-                true,
+                prefer_public_invite,
             )? {
                 Some((delivery, maybe_response)) => {
                     deliveries.push(delivery);
@@ -362,6 +389,18 @@ impl SessionManager {
             invite_responses,
             relay_gaps,
         })
+    }
+
+    pub(crate) fn has_authorized_local_siblings(&self) -> bool {
+        let Some(user) = self.users.get(&self.local_owner_pubkey) else {
+            return false;
+        };
+        if user.roster.is_none() {
+            return false;
+        }
+        user.authorized_non_stale_devices()
+            .into_iter()
+            .any(|device_pubkey| device_pubkey != self.local_device_pubkey)
     }
 
     pub fn receive<R>(
