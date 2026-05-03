@@ -1,5 +1,8 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Invite, Result, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND};
+use nostr_double_ratchet::{Invite, Result};
+use nostr_double_ratchet_nostr::{
+    invite_response_event, InviteNostrExt, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+};
 
 #[test]
 fn test_create_new_invite() -> Result<()> {
@@ -178,7 +181,8 @@ fn test_invite_accept_creates_session() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (session, event) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let (session, envelope) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let event = invite_response_event(&envelope)?;
 
     assert!(session.state.sending_chain_key.is_some());
     assert_eq!(event.kind.as_u16(), INVITE_RESPONSE_KIND as u16);
@@ -228,7 +232,8 @@ fn test_accept_with_device_id() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (session, event) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let (session, envelope) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let event = invite_response_event(&envelope)?;
 
     assert!(session.state.sending_chain_key.is_some());
     assert_eq!(event.kind.as_u16(), INVITE_RESPONSE_KIND as u16);

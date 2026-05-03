@@ -365,38 +365,6 @@ impl Session {
         }
     }
 
-    pub fn send_event(&mut self, mut event: nostr::UnsignedEvent) -> Result<nostr::Event> {
-        event.ensure_id();
-        let payload = serde_json::to_vec(&event)?;
-        let plan = self.plan_send(
-            &payload,
-            UnixSeconds(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            ),
-        )?;
-        let envelope = self.apply_send(plan).envelope;
-        crate::nostr_codec::message_event(&envelope)
-            .map_err(|error| crate::Error::InvalidEvent(error.to_string()))
-    }
-
-    pub fn receive(&mut self, event: &nostr::Event) -> Result<Option<String>> {
-        let envelope = crate::nostr_codec::parse_message_event(event)
-            .map_err(|error| crate::Error::InvalidEvent(error.to_string()))?;
-        if !self.matches_sender(envelope.sender) {
-            return Ok(None);
-        }
-        let mut rng = OsRng;
-        let mut ctx = ProtocolContext::new(UnixSeconds(event.created_at.as_secs()), &mut rng);
-        let plan = self.plan_receive(&mut ctx, &envelope)?;
-        let outcome = self.apply_receive(plan);
-        let plaintext = String::from_utf8(outcome.payload)
-            .map_err(|error| crate::Error::Decryption(error.to_string()))?;
-        Ok(Some(plaintext))
-    }
-
     pub fn close(&self) {}
 }
 

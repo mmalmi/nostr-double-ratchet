@@ -1,11 +1,10 @@
 use crate::{
     owner_pubkey_from_device_pubkey, random_secret_key_bytes, secret_key_from_bytes, DevicePubkey,
     DeviceRoster, DomainError, OwnerPubkey, ProtocolContext, Result, Session, UnixSeconds,
-    INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
-use nostr::{Alphabet, Kind, PublicKey, SingleLetterTag};
+use nostr::PublicKey;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -88,12 +87,6 @@ impl OwnerClaimVerifier for DeviceRoster {
     }
 }
 
-impl OwnerClaimVerifier for crate::AppKeys {
-    fn has_device(&self, _device_pubkey: DevicePubkey, device_identity: PublicKey) -> bool {
-        self.get_device(&device_identity).is_some()
-    }
-}
-
 impl Invite {
     pub fn create_new(
         inviter: PublicKey,
@@ -160,35 +153,12 @@ impl Invite {
         Ok(serde_json::from_str(json)?)
     }
 
-    pub fn get_url(&self, root: &str) -> Result<String> {
-        crate::nostr_codec::invite_url(self, root)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
-    }
-
-    pub fn from_url(url: &str) -> Result<Self> {
-        crate::nostr_codec::parse_invite_url(url)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
-    }
-
-    pub fn get_event(&self) -> Result<nostr::UnsignedEvent> {
-        if self.device_id.is_none() {
-            return Err(crate::Error::DeviceIdRequired);
-        }
-        crate::nostr_codec::invite_unsigned_event(self)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
-    }
-
-    pub fn from_event(event: &nostr::Event) -> Result<Self> {
-        crate::nostr_codec::parse_invite_event(event)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))
-    }
-
     pub fn accept(
         &self,
         invitee_public_key: PublicKey,
         invitee_private_key: [u8; 32],
         device_id: Option<String>,
-    ) -> Result<(Session, nostr::Event)> {
+    ) -> Result<(Session, InviteResponseEnvelope)> {
         self.accept_with_owner(invitee_public_key, invitee_private_key, device_id, None)
     }
 
@@ -198,19 +168,16 @@ impl Invite {
         invitee_private_key: [u8; 32],
         device_id: Option<String>,
         owner_public_key: Option<PublicKey>,
-    ) -> Result<(Session, nostr::Event)> {
+    ) -> Result<(Session, InviteResponseEnvelope)> {
         let mut rng = OsRng;
         let mut ctx = ProtocolContext::new(now_seconds(), &mut rng);
-        let (session, envelope) = self.accept_with_owner_context_and_device(
+        self.accept_with_owner_context_and_device(
             &mut ctx,
             DevicePubkey::from_bytes(invitee_public_key.to_bytes()),
             invitee_private_key,
             owner_public_key.map(|owner| OwnerPubkey::from_bytes(owner.to_bytes())),
             device_id,
-        )?;
-        let event = crate::nostr_codec::invite_response_event(&envelope)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
-        Ok((session, event))
+        )
     }
 
     pub fn accept_with_context<R>(
@@ -377,66 +344,6 @@ impl Invite {
                 PublicKey::from_slice(&owner.to_bytes()).expect("owner pubkey bytes must be valid")
             }),
         })
-    }
-
-    pub fn process_invite_response(
-        &self,
-        event: &nostr::Event,
-        inviter_private_key: [u8; 32],
-    ) -> Result<Option<InviteResponse>> {
-        let envelope = crate::nostr_codec::parse_invite_response_event(event)
-            .map_err(|e| crate::Error::InvalidEvent(e.to_string()))?;
-        let mut rng = OsRng;
-        let mut ctx = ProtocolContext::new(UnixSeconds(event.created_at.as_secs()), &mut rng);
-        let mut invite = self.clone();
-        invite
-            .process_response(&mut ctx, &envelope, inviter_private_key)
-            .map(Some)
-    }
-
-    pub fn listen_with_pubsub(&self, pubsub: &dyn crate::NostrPubSub) -> Result<String> {
-        let filter = crate::pubsub::build_filter()
-            .kinds(vec![INVITE_RESPONSE_KIND as u64])
-            .pubkeys(vec![self.inviter_ephemeral_public_key.to_nostr()?])
-            .build();
-        let filter_json = serde_json::to_string(&filter)?;
-        let subid = format!("invite-response-{}", uuid::Uuid::new_v4());
-        pubsub.subscribe(subid.clone(), filter_json)?;
-        Ok(subid)
-    }
-
-    pub fn listen(
-        &self,
-        event_tx: &crossbeam_channel::Sender<crate::SessionManagerEvent>,
-    ) -> Result<()> {
-        let _ = self.listen_with_pubsub(event_tx)?;
-        Ok(())
-    }
-
-    pub fn from_user_with_pubsub(
-        user_pubkey: PublicKey,
-        pubsub: &dyn crate::NostrPubSub,
-    ) -> Result<String> {
-        let filter = nostr::Filter::new()
-            .kind(Kind::from(INVITE_EVENT_KIND as u16))
-            .authors(vec![user_pubkey])
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                "double-ratchet/invites",
-            );
-
-        let filter_json = serde_json::to_string(&filter)?;
-        let subid = format!("invite-user-{}", uuid::Uuid::new_v4());
-        pubsub.subscribe(subid.clone(), filter_json)?;
-        Ok(subid)
-    }
-
-    pub fn from_user(
-        user_pubkey: PublicKey,
-        event_tx: &crossbeam_channel::Sender<crate::SessionManagerEvent>,
-    ) -> Result<()> {
-        let _ = Self::from_user_with_pubsub(user_pubkey, event_tx)?;
-        Ok(())
     }
 
     fn ensure_accept_allowed(&self, invitee_public_key: DevicePubkey) -> Result<()> {

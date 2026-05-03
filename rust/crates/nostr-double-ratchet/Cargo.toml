@@ -9,12 +9,9 @@ repository.workspace = true
 
 [features]
 default = []
-nearby = ["dep:flate2"]
-nearby-mdns = ["nearby", "dep:mdns-sd", "dep:tokio"]
 
 [dependencies]
 nostr.workspace = true
-tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hkdf.workspace = true
@@ -22,16 +19,15 @@ sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 base64.workspace = true
-urlencoding.workspace = true
 rand.workspace = true
-crossbeam-channel.workspace = true
-uuid.workspace = true
-flate2 = { workspace = true, optional = true }
-mdns-sd = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
+nostr-double-ratchet-nostr.workspace = true
+nostr-double-ratchet-pairwise-codec.workspace = true
+nostr-double-ratchet-runtime = { workspace = true, features = ["nearby"] }
 tokio.workspace = true
+crossbeam-channel.workspace = true
+urlencoding.workspace = true
 tempfile = "3"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

@@ -1,5 +1,5 @@
 use nostr::Keys;
-use nostr_double_ratchet::{
+use nostr_double_ratchet_runtime::{
     build_direct_message_backfill_filter, direct_message_subscription_authors,
     DirectMessageSubscriptionTracker, SessionManagerEvent, MESSAGE_EVENT_KIND,
 };

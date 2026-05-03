@@ -1,0 +1,15 @@
+[package]
+name = "nostr-double-ratchet-pairwise-codec"
+description = "Optional Iris-compatible pairwise plaintext codec for nostr-double-ratchet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nostr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

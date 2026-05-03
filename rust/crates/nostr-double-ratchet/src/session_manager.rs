@@ -330,7 +330,7 @@ impl SessionManager {
         self.prepare_local_sibling_send_inner(ctx, payload, true)
     }
 
-    pub(crate) fn prepare_local_sibling_send_reusing_sessions<R>(
+    pub fn prepare_local_sibling_send_reusing_sessions<R>(
         &mut self,
         ctx: &mut ProtocolContext<'_, R>,
         payload: Vec<u8>,

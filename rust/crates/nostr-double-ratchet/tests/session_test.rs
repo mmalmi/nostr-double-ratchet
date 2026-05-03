@@ -1,5 +1,8 @@
 use nostr::Keys;
-use nostr_double_ratchet::{build_reaction_rumor, build_text_rumor, Result, Session};
+use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet_nostr::{
+    build_reaction_rumor, build_text_rumor, invite_response_event, InviteNostrExt, SessionNostrExt,
+};
 
 fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
     session.send_event(build_text_rumor(
@@ -237,13 +240,14 @@ fn test_reaction_roundtrip() {
         nostr_double_ratchet::Invite::create_new(alice_keys.public_key(), None, None).unwrap();
 
     // Bob accepts the invite - after accept, BOB can send first!
-    let (mut bob_session, response) = invite
+    let (mut bob_session, response_envelope) = invite
         .accept(
             bob_keys.public_key(),
             bob_keys.secret_key().to_secret_bytes(),
             None,
         )
         .unwrap();
+    let response = invite_response_event(&response_envelope).unwrap();
 
     // Alice processes the response - Alice needs to receive first
     let mut alice_session = invite

@@ -1,9 +1,9 @@
 mod support;
 
-use nostr_double_ratchet::nostr_codec as codec;
 use nostr_double_ratchet::{
     AuthorizedDevice, DeviceRoster, DomainError, Error, Invite, Result, UnixSeconds, MAX_SKIP,
 };
+use nostr_double_ratchet_nostr::nostr_codec as codec;
 use support::{
     actor, context, corrupt_invite_response_layer, header_tag, invite_response_fixture,
     mutate_text, receive_event, receive_message, send_text, signed_event, snapshot,

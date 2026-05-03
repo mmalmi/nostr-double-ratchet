@@ -1,6 +1,5 @@
-use crate::{DevicePubkey, Error, Result, SessionState};
+use crate::{DevicePubkey, Result, SessionState};
 use hkdf::Hkdf;
-use nostr::PublicKey;
 use rand::{CryptoRng, RngCore};
 use sha2::Sha256;
 
@@ -50,38 +49,4 @@ pub fn serialize_session_state(state: &SessionState) -> Result<String> {
 
 pub fn deserialize_session_state(data: &str) -> Result<SessionState> {
     serde_json::from_str(data).map_err(|e| crate::Error::Serialization(e.to_string()))
-}
-
-pub fn pubkey_from_hex(hex_str: &str) -> Result<PublicKey> {
-    let bytes = hex::decode(hex_str)?;
-    if bytes.len() != 32 {
-        return Err(Error::InvalidEvent("Invalid pubkey length".to_string()));
-    }
-    PublicKey::from_slice(&bytes).map_err(|e| Error::InvalidEvent(e.to_string()))
-}
-
-pub fn resolve_expiration_seconds(
-    options: &crate::SendOptions,
-    now_seconds: u64,
-) -> Result<Option<u64>> {
-    let has_expires_at = options.expires_at.is_some();
-    let has_ttl = options.ttl_seconds.is_some();
-    if has_expires_at && has_ttl {
-        return Err(Error::InvalidEvent(
-            "Provide either expires_at or ttl_seconds, not both".to_string(),
-        ));
-    }
-
-    if let Some(expires_at) = options.expires_at {
-        return Ok(Some(expires_at));
-    }
-
-    if let Some(ttl) = options.ttl_seconds {
-        return now_seconds
-            .checked_add(ttl)
-            .ok_or_else(|| Error::InvalidEvent("ttl_seconds overflow".to_string()))
-            .map(Some);
-    }
-
-    Ok(None)
 }

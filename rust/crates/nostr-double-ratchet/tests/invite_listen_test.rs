@@ -1,5 +1,7 @@
 use nostr::Keys;
-use nostr_double_ratchet::{AppKeys, DeviceEntry, Invite, Result, SessionManagerEvent};
+use nostr_double_ratchet::{Invite, Result};
+use nostr_double_ratchet_nostr::{invite_response_event, InviteNostrExt};
+use nostr_double_ratchet_runtime::{AppKeys, DeviceEntry, InviteRuntimeExt, SessionManagerEvent};
 
 #[test]
 fn test_invite_listen_and_accept() -> Result<()> {
@@ -15,12 +17,13 @@ fn test_invite_listen_and_accept() -> Result<()> {
 
     let owner_keys = Keys::generate();
     let owner_pk = owner_keys.public_key();
-    let (_bob_session, acceptance_event) = invite.accept_with_owner(
+    let (_bob_session, acceptance_envelope) = invite.accept_with_owner(
         bob_pk,
         bob_sk,
         Some("bob-device".to_string()),
         Some(owner_pk),
     )?;
+    let acceptance_event = invite_response_event(&acceptance_envelope)?;
 
     // Create event channel for listen()
     let (event_tx, _event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
@@ -86,7 +89,9 @@ fn test_listen_without_device_id() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (_bob_session, acceptance_event) = invite.accept_with_owner(bob_pk, bob_sk, None, None)?;
+    let (_bob_session, acceptance_envelope) =
+        invite.accept_with_owner(bob_pk, bob_sk, None, None)?;
+    let acceptance_event = invite_response_event(&acceptance_envelope)?;
 
     // Create event channel for listen()
     let (event_tx, _event_rx) = crossbeam_channel::unbounded::<SessionManagerEvent>();
@@ -119,12 +124,13 @@ fn test_owner_claim_verification_requires_app_keys_for_multi_device() -> Result<
     let owner_keys = Keys::generate();
     let owner_pk = owner_keys.public_key();
 
-    let (_session, response_event) = invite.accept_with_owner(
+    let (_session, response_envelope) = invite.accept_with_owner(
         device_pk,
         device_sk,
         Some("device-1".to_string()),
         Some(owner_pk),
     )?;
+    let response_event = invite_response_event(&response_envelope)?;
     let response = invite
         .process_invite_response(&response_event, alice_sk)?
         .expect("expected invite response");
@@ -152,8 +158,9 @@ fn test_owner_claim_verification_allows_single_device_without_app_keys() -> Resu
     let device_pk = device_keys.public_key();
     let device_sk = device_keys.secret_key().to_secret_bytes();
 
-    let (_session, response_event) =
+    let (_session, response_envelope) =
         invite.accept_with_owner(device_pk, device_sk, None, Some(device_pk))?;
+    let response_event = invite_response_event(&response_envelope)?;
     let response = invite
         .process_invite_response(&response_event, alice_sk)?
         .expect("expected invite response");

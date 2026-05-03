@@ -139,6 +139,99 @@ pub struct GroupCreateResult {
     pub prepared: GroupPreparedSend,
 }
 
+pub trait GroupPayloadCodec: Clone {
+    fn is_pairwise_payload(&self, payload: &[u8]) -> bool;
+
+    fn encode_pairwise_command(&self, command: &GroupPairwiseCommand) -> crate::Result<Vec<u8>>;
+
+    fn decode_pairwise_command(
+        &self,
+        payload: &[u8],
+    ) -> crate::Result<Option<GroupPairwiseCommand>>;
+
+    fn encode_sender_key_plaintext(
+        &self,
+        plaintext: &GroupSenderKeyPlaintext,
+    ) -> crate::Result<Vec<u8>>;
+
+    fn decode_sender_key_plaintext(
+        &self,
+        payload: &[u8],
+    ) -> crate::Result<Option<GroupSenderKeyPlaintext>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupPairwiseCommand {
+    CreateGroup {
+        group_id: String,
+        protocol: GroupProtocol,
+        base_revision: u64,
+        new_revision: u64,
+        name: String,
+        created_by: OwnerPubkey,
+        members: Vec<OwnerPubkey>,
+        admins: Vec<OwnerPubkey>,
+        created_at: UnixSeconds,
+        updated_at: UnixSeconds,
+    },
+    SyncGroup {
+        group_id: String,
+        protocol: GroupProtocol,
+        revision: u64,
+        name: String,
+        created_by: OwnerPubkey,
+        members: Vec<OwnerPubkey>,
+        admins: Vec<OwnerPubkey>,
+        created_at: UnixSeconds,
+        updated_at: UnixSeconds,
+    },
+    RenameGroup {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        name: String,
+    },
+    AddMembers {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        members: Vec<OwnerPubkey>,
+    },
+    RemoveMembers {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        members: Vec<OwnerPubkey>,
+    },
+    AddAdmins {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        admins: Vec<OwnerPubkey>,
+    },
+    RemoveAdmins {
+        group_id: String,
+        base_revision: u64,
+        new_revision: u64,
+        admins: Vec<OwnerPubkey>,
+    },
+    GroupMessage {
+        group_id: String,
+        revision: u64,
+        body: Vec<u8>,
+    },
+    SenderKeyDistribution {
+        distribution: SenderKeyDistribution,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSenderKeyPlaintext {
+    pub group_id: String,
+    pub revision: u64,
+    pub body: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupReceivedMessage {
     pub group_id: String,

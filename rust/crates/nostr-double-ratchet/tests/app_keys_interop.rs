@@ -1,6 +1,7 @@
 use nostr::JsonUtil;
 use nostr::{Keys, SecretKey};
-use nostr_double_ratchet::{AppKeys, DeviceEntry, Result};
+use nostr_double_ratchet::Result;
+use nostr_double_ratchet_nostr::{utils::pubkey_from_hex, AppKeys, DeviceEntry};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -157,13 +158,13 @@ fn test_parse_typescript_app_keys_vectors() -> Result<()> {
     let parsed_public = AppKeys::from_event(&event)?;
     assert_eq!(parsed_public.get_all_devices().len(), vectors.devices.len());
     for label in &vectors.expected_labels {
-        let pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&label.identity_pubkey).unwrap();
+        let pubkey = pubkey_from_hex(&label.identity_pubkey).unwrap();
         assert!(parsed_public.get_device_labels(&pubkey).is_none());
     }
 
     let parsed_with_labels = AppKeys::from_event_with_labels(&event, &owner_keys)?;
     for label in &vectors.expected_labels {
-        let pubkey = nostr_double_ratchet::utils::pubkey_from_hex(&label.identity_pubkey).unwrap();
+        let pubkey = pubkey_from_hex(&label.identity_pubkey).unwrap();
         let parsed = parsed_with_labels
             .get_device_labels(&pubkey)
             .expect("missing device labels");

@@ -1,7 +1,7 @@
 mod support;
 
-use nostr_double_ratchet::nostr_codec as codec;
 use nostr_double_ratchet::{AuthorizedDevice, DeviceRoster, Invite, Result, UnixSeconds, MAX_SKIP};
+use nostr_double_ratchet_nostr::nostr_codec as codec;
 use support::{
     actor, assert_payload_eq, bootstrap_via_invite_event, bootstrap_via_invite_url, context,
     direct_session_pair, payload_text, receive_event, restore_session, send_bytes, send_text,

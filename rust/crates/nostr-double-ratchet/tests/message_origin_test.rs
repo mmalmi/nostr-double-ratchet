@@ -1,5 +1,5 @@
 use nostr::Keys;
-use nostr_double_ratchet::{classify_message_origin, MessageOrigin};
+use nostr_double_ratchet_nostr::{classify_message_origin, MessageOrigin};
 
 #[test]
 fn classifies_local_device_origin() {

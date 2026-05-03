@@ -1,18 +1,18 @@
 use crate::{
     device_pubkey_from_secret_bytes, random_secret_key_bytes, DevicePubkey, DomainError,
-    GroupCreateResult, GroupIncomingEvent, GroupManagerSnapshot, GroupPendingFanout,
-    GroupPreparedPublish, GroupPreparedSend, GroupProtocol, GroupReceivedMessage,
-    GroupSenderKeyHandleResult, GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope,
-    GroupSenderKeyRecordSnapshot, GroupSnapshot, OwnerPubkey, ProtocolContext, Result,
-    SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent, SenderKeyState,
-    SessionManager, UnixSeconds,
+    GroupCreateResult, GroupIncomingEvent, GroupManagerSnapshot, GroupPairwiseCommand,
+    GroupPayloadCodec, GroupPendingFanout, GroupPreparedPublish, GroupPreparedSend, GroupProtocol,
+    GroupReceivedMessage, GroupSenderKeyHandleResult, GroupSenderKeyMessage,
+    GroupSenderKeyMessageEnvelope, GroupSenderKeyPlaintext, GroupSenderKeyRecordSnapshot,
+    GroupSnapshot, OwnerPubkey, ProtocolContext, Result, SenderEventPubkey, SenderKeyDistribution,
+    SenderKeyMessageContent, SenderKeyState, SessionManager, UnixSeconds,
 };
 use rand::{CryptoRng, RngCore};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
-pub struct GroupManager {
+pub struct GroupManager<C> {
+    payload_codec: C,
     local_owner_pubkey: OwnerPubkey,
     groups: BTreeMap<String, GroupRecord>,
     sender_keys: BTreeMap<SenderKeyRecordId, SenderKeyRecord>,
@@ -50,91 +50,13 @@ struct SenderKeyRecord {
     states: BTreeMap<u32, SenderKeyState>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GroupWireEnvelopeV1 {
-    wire_format_version: u8,
-    payload: GroupPairwisePayloadV1,
-}
-
-const GROUP_WIRE_FORMAT_VERSION_V1: u8 = 1;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum GroupPairwisePayloadV1 {
-    CreateGroup {
-        group_id: String,
-        protocol: GroupProtocol,
-        base_revision: u64,
-        new_revision: u64,
-        name: String,
-        created_by: OwnerPubkey,
-        members: Vec<OwnerPubkey>,
-        admins: Vec<OwnerPubkey>,
-        created_at: UnixSeconds,
-        updated_at: UnixSeconds,
-    },
-    SyncGroup {
-        group_id: String,
-        protocol: GroupProtocol,
-        revision: u64,
-        name: String,
-        created_by: OwnerPubkey,
-        members: Vec<OwnerPubkey>,
-        admins: Vec<OwnerPubkey>,
-        created_at: UnixSeconds,
-        updated_at: UnixSeconds,
-    },
-    RenameGroup {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        name: String,
-    },
-    AddMembers {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        members: Vec<OwnerPubkey>,
-    },
-    RemoveMembers {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        members: Vec<OwnerPubkey>,
-    },
-    AddAdmins {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        admins: Vec<OwnerPubkey>,
-    },
-    RemoveAdmins {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        admins: Vec<OwnerPubkey>,
-    },
-    GroupMessage {
-        group_id: String,
-        revision: u64,
-        body: Vec<u8>,
-    },
-    SenderKeyDistribution {
-        distribution: SenderKeyDistribution,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GroupSenderKeyPlaintextV1 {
-    wire_format_version: u8,
-    group_id: String,
-    revision: u64,
-    body: Vec<u8>,
-}
-
-impl GroupManager {
-    pub fn new(local_owner_pubkey: OwnerPubkey) -> Self {
+impl<C> GroupManager<C>
+where
+    C: GroupPayloadCodec,
+{
+    pub fn new_with_payload_codec(local_owner_pubkey: OwnerPubkey, payload_codec: C) -> Self {
         Self {
+            payload_codec,
             local_owner_pubkey,
             groups: BTreeMap::new(),
             sender_keys: BTreeMap::new(),
@@ -142,13 +64,14 @@ impl GroupManager {
         }
     }
 
-    pub fn is_pairwise_payload(payload: &[u8]) -> bool {
-        serde_json::from_slice::<GroupWireEnvelopeV1>(payload)
-            .map(|envelope| envelope.wire_format_version == GROUP_WIRE_FORMAT_VERSION_V1)
-            .unwrap_or(false)
+    pub fn is_pairwise_payload(&self, payload: &[u8]) -> bool {
+        self.payload_codec.is_pairwise_payload(payload)
     }
 
-    pub fn from_snapshot(snapshot: GroupManagerSnapshot) -> Result<Self> {
+    pub fn from_snapshot_with_payload_codec(
+        snapshot: GroupManagerSnapshot,
+        payload_codec: C,
+    ) -> Result<Self> {
         let mut groups = BTreeMap::new();
         for group in snapshot.groups {
             let record = GroupRecord::from_snapshot(group)?;
@@ -172,6 +95,7 @@ impl GroupManager {
             }
         }
         Ok(Self {
+            payload_codec,
             local_owner_pubkey: snapshot.local_owner_pubkey,
             groups,
             sender_keys,
@@ -333,7 +257,7 @@ impl GroupManager {
         if record.protocol.is_sender_key_v1() {
             return self.send_sender_key_message(session_manager, ctx, &record, body);
         }
-        let payload = GroupPairwisePayloadV1::GroupMessage {
+        let payload = GroupPairwiseCommand::GroupMessage {
             group_id: record.group_id.clone(),
             revision: record.revision,
             body,
@@ -377,7 +301,7 @@ impl GroupManager {
             ctx.now,
         )?;
 
-        let payload = GroupPairwisePayloadV1::RenameGroup {
+        let payload = GroupPairwiseCommand::RenameGroup {
             group_id: current.group_id.clone(),
             base_revision: current.revision,
             new_revision: next.revision,
@@ -412,7 +336,7 @@ impl GroupManager {
         current.ensure_admin(self.local_owner_pubkey)?;
         let (base_revision, new_revision) = current.retry_delta_revisions("rename")?;
 
-        let payload = GroupPairwisePayloadV1::RenameGroup {
+        let payload = GroupPairwiseCommand::RenameGroup {
             group_id: current.group_id.clone(),
             base_revision,
             new_revision,
@@ -453,7 +377,7 @@ impl GroupManager {
             ctx.now,
         )?;
 
-        let delta_payload = GroupPairwisePayloadV1::AddMembers {
+        let delta_payload = GroupPairwiseCommand::AddMembers {
             group_id: current.group_id.clone(),
             base_revision: current.revision,
             new_revision: next.revision,
@@ -518,7 +442,7 @@ impl GroupManager {
             current.ensure_member(*owner)?;
         }
 
-        let delta_payload = GroupPairwisePayloadV1::AddMembers {
+        let delta_payload = GroupPairwiseCommand::AddMembers {
             group_id: current.group_id.clone(),
             base_revision,
             new_revision,
@@ -585,7 +509,7 @@ impl GroupManager {
             ctx.now,
         )?;
 
-        let payload = GroupPairwisePayloadV1::RemoveMembers {
+        let payload = GroupPairwiseCommand::RemoveMembers {
             group_id: current.group_id.clone(),
             base_revision: current.revision,
             new_revision: next.revision,
@@ -632,7 +556,7 @@ impl GroupManager {
             }
         }
 
-        let payload = GroupPairwisePayloadV1::RemoveMembers {
+        let payload = GroupPairwiseCommand::RemoveMembers {
             group_id: current.group_id.clone(),
             base_revision,
             new_revision,
@@ -689,7 +613,7 @@ impl GroupManager {
             ctx.now,
         )?;
 
-        let payload = GroupPairwisePayloadV1::AddAdmins {
+        let payload = GroupPairwiseCommand::AddAdmins {
             group_id: current.group_id.clone(),
             base_revision: current.revision,
             new_revision: next.revision,
@@ -732,7 +656,7 @@ impl GroupManager {
             ctx.now,
         )?;
 
-        let payload = GroupPairwisePayloadV1::RemoveAdmins {
+        let payload = GroupPairwiseCommand::RemoveAdmins {
             group_id: current.group_id.clone(),
             base_revision: current.revision,
             new_revision: next.revision,
@@ -777,15 +701,12 @@ impl GroupManager {
         sender_device: Option<DevicePubkey>,
         payload: &[u8],
     ) -> Result<Option<GroupIncomingEvent>> {
-        let Ok(envelope) = serde_json::from_slice::<GroupWireEnvelopeV1>(payload) else {
+        let Some(command) = self.payload_codec.decode_pairwise_command(payload)? else {
             return Ok(None);
         };
-        if envelope.wire_format_version != GROUP_WIRE_FORMAT_VERSION_V1 {
-            return Ok(None);
-        }
 
-        let event = match envelope.payload {
-            GroupPairwisePayloadV1::CreateGroup {
+        let event = match command {
+            GroupPairwiseCommand::CreateGroup {
                 group_id,
                 protocol,
                 base_revision,
@@ -836,7 +757,7 @@ impl GroupManager {
                     GroupIncomingEvent::MetadataUpdated(snapshot)
                 }
             }
-            GroupPairwisePayloadV1::SyncGroup {
+            GroupPairwiseCommand::SyncGroup {
                 group_id,
                 protocol,
                 revision,
@@ -883,7 +804,7 @@ impl GroupManager {
                     GroupIncomingEvent::MetadataUpdated(snapshot)
                 }
             }
-            GroupPairwisePayloadV1::RenameGroup {
+            GroupPairwiseCommand::RenameGroup {
                 group_id,
                 base_revision,
                 new_revision,
@@ -905,7 +826,7 @@ impl GroupManager {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
                 }
             }
-            GroupPairwisePayloadV1::AddMembers {
+            GroupPairwiseCommand::AddMembers {
                 group_id,
                 base_revision,
                 new_revision,
@@ -928,7 +849,7 @@ impl GroupManager {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
                 }
             }
-            GroupPairwisePayloadV1::RemoveMembers {
+            GroupPairwiseCommand::RemoveMembers {
                 group_id,
                 base_revision,
                 new_revision,
@@ -951,7 +872,7 @@ impl GroupManager {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
                 }
             }
-            GroupPairwisePayloadV1::AddAdmins {
+            GroupPairwiseCommand::AddAdmins {
                 group_id,
                 base_revision,
                 new_revision,
@@ -974,7 +895,7 @@ impl GroupManager {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
                 }
             }
-            GroupPairwisePayloadV1::RemoveAdmins {
+            GroupPairwiseCommand::RemoveAdmins {
                 group_id,
                 base_revision,
                 new_revision,
@@ -997,7 +918,7 @@ impl GroupManager {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
                 }
             }
-            GroupPairwisePayloadV1::GroupMessage {
+            GroupPairwiseCommand::GroupMessage {
                 group_id,
                 revision,
                 body,
@@ -1022,7 +943,7 @@ impl GroupManager {
                     revision,
                 })
             }
-            GroupPairwisePayloadV1::SenderKeyDistribution { distribution } => {
+            GroupPairwiseCommand::SenderKeyDistribution { distribution } => {
                 let Some(sender_device) = sender_device else {
                     return Err(group_error(
                         "sender-key distribution requires authenticated sender device",
@@ -1081,10 +1002,9 @@ impl GroupManager {
         let plan = state.plan_decrypt(&content)?;
         let plaintext = plan.plaintext.clone();
 
-        let plaintext: GroupSenderKeyPlaintextV1 = serde_json::from_slice(&plaintext)?;
-        if plaintext.wire_format_version != GROUP_WIRE_FORMAT_VERSION_V1 {
+        let Some(plaintext) = self.payload_codec.decode_sender_key_plaintext(&plaintext)? else {
             return Ok(GroupSenderKeyHandleResult::Ignored);
-        }
+        };
         if plaintext.group_id != group.group_id {
             return Ok(GroupSenderKeyHandleResult::Ignored);
         }
@@ -1124,10 +1044,9 @@ impl GroupManager {
         if !session_manager.has_authorized_local_siblings() {
             return Ok(GroupPreparedPublish::empty());
         }
-        let payload = serde_json::to_vec(&GroupWireEnvelopeV1 {
-            wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
-            payload: record.sync_payload(),
-        })?;
+        let payload = self
+            .payload_codec
+            .encode_pairwise_command(&record.sync_payload())?;
         self.local_sibling_payload_bytes(session_manager, ctx, payload)
     }
 
@@ -1136,7 +1055,7 @@ impl GroupManager {
         session_manager: &mut SessionManager,
         ctx: &mut ProtocolContext<'_, R>,
         _group_id: &str,
-        payload: &GroupPairwisePayloadV1,
+        payload: &GroupPairwiseCommand,
     ) -> Result<GroupPreparedPublish>
     where
         R: RngCore + CryptoRng,
@@ -1147,10 +1066,7 @@ impl GroupManager {
         self.local_sibling_payload_bytes(
             session_manager,
             ctx,
-            serde_json::to_vec(&GroupWireEnvelopeV1 {
-                wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
-                payload: payload.clone(),
-            })?,
+            self.payload_codec.encode_pairwise_command(payload)?,
         )
     }
 
@@ -1185,16 +1101,13 @@ impl GroupManager {
         ctx: &mut ProtocolContext<'_, R>,
         _group_id: &str,
         recipients: Vec<OwnerPubkey>,
-        payload: &GroupPairwisePayloadV1,
+        payload: &GroupPairwiseCommand,
     ) -> Result<GroupPreparedPublish>
     where
         R: RngCore + CryptoRng,
     {
         let mut prepared = GroupPreparedPublish::empty();
-        let payload_bytes = serde_json::to_vec(&GroupWireEnvelopeV1 {
-            wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
-            payload: payload.clone(),
-        })?;
+        let payload_bytes = self.payload_codec.encode_pairwise_command(payload)?;
 
         for recipient in recipients {
             let next =
@@ -1259,12 +1172,13 @@ impl GroupManager {
             .states
             .get_mut(&key_id)
             .ok_or_else(|| group_error("missing local sender-key state"))?;
-        let plaintext = serde_json::to_vec(&GroupSenderKeyPlaintextV1 {
-            wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
-            group_id: record.group_id.clone(),
-            revision: record.revision,
-            body,
-        })?;
+        let plaintext =
+            self.payload_codec
+                .encode_sender_key_plaintext(&GroupSenderKeyPlaintext {
+                    group_id: record.group_id.clone(),
+                    revision: record.revision,
+                    body,
+                })?;
         let plan = state.plan_encrypt(&plaintext)?;
         let message_number = plan.message_number;
         let ciphertext = plan.ciphertext.clone();
@@ -1428,7 +1342,7 @@ impl GroupManager {
             ctx,
             &distribution.group_id,
             recipients,
-            &GroupPairwisePayloadV1::SenderKeyDistribution {
+            &GroupPairwiseCommand::SenderKeyDistribution {
                 distribution: distribution.clone(),
             },
         )
@@ -1447,7 +1361,7 @@ impl GroupManager {
             session_manager,
             ctx,
             &distribution.group_id,
-            &GroupPairwisePayloadV1::SenderKeyDistribution {
+            &GroupPairwiseCommand::SenderKeyDistribution {
                 distribution: distribution.clone(),
             },
         )
@@ -1505,6 +1419,19 @@ impl GroupManager {
         self.groups
             .get_mut(group_id)
             .ok_or_else(|| group_error(format!("unknown group `{group_id}`")))
+    }
+}
+
+impl<C> GroupManager<C>
+where
+    C: GroupPayloadCodec + Default,
+{
+    pub fn new(local_owner_pubkey: OwnerPubkey) -> Self {
+        Self::new_with_payload_codec(local_owner_pubkey, C::default())
+    }
+
+    pub fn from_snapshot(snapshot: GroupManagerSnapshot) -> Result<Self> {
+        Self::from_snapshot_with_payload_codec(snapshot, C::default())
     }
 }
 
@@ -1623,8 +1550,8 @@ impl GroupRecord {
         }
     }
 
-    fn create_payload(&self) -> GroupPairwisePayloadV1 {
-        GroupPairwisePayloadV1::CreateGroup {
+    fn create_payload(&self) -> GroupPairwiseCommand {
+        GroupPairwiseCommand::CreateGroup {
             group_id: self.group_id.clone(),
             protocol: self.protocol,
             base_revision: 0,
@@ -1638,8 +1565,8 @@ impl GroupRecord {
         }
     }
 
-    fn sync_payload(&self) -> GroupPairwisePayloadV1 {
-        GroupPairwisePayloadV1::SyncGroup {
+    fn sync_payload(&self) -> GroupPairwiseCommand {
+        GroupPairwiseCommand::SyncGroup {
             group_id: self.group_id.clone(),
             protocol: self.protocol,
             revision: self.revision,

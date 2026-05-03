@@ -1,9 +1,9 @@
 use nostr::Keys;
 use nostr_double_ratchet::{
-    build_text_rumor,
     utils::{deserialize_session_state, serialize_session_state},
     Result, Session,
 };
+use nostr_double_ratchet_nostr::{build_text_rumor, SessionNostrExt};
 
 fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
     session.send_event(build_text_rumor(

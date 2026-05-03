@@ -1,9 +1,9 @@
 mod support;
 
 use nostr_double_ratchet::{
-    GroupIncomingEvent, GroupManager, GroupManagerSnapshot, GroupPreparedSend, GroupProtocol,
-    OwnerPubkey, Result,
+    GroupIncomingEvent, GroupManagerSnapshot, GroupPreparedSend, GroupProtocol, OwnerPubkey, Result,
 };
+use nostr_double_ratchet_nostr::NostrGroupManager as GroupManager;
 use support::{
     context, manager_device, manager_observe_invite_response, manager_public_device_invite,
     manager_receive_delivery, roster_for, session_manager, snapshot,

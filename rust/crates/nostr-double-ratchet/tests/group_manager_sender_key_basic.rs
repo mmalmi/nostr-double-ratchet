@@ -1,10 +1,10 @@
 mod support;
 
 use nostr_double_ratchet::{
-    GroupIncomingEvent, GroupManager, GroupManagerSnapshot, GroupProtocol,
-    GroupSenderKeyHandleResult, GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, Result,
-    SessionManager, UnixSeconds,
+    GroupIncomingEvent, GroupManagerSnapshot, GroupProtocol, GroupSenderKeyHandleResult,
+    GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, Result, SessionManager, UnixSeconds,
 };
+use nostr_double_ratchet_nostr::NostrGroupManager as GroupManager;
 use serde_json::json;
 use support::{
     context, manager_device, manager_observe_invite_response, manager_public_device_invite,

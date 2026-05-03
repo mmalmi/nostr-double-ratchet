@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     nostr_codec, pairwise_codec, AppKeys, AuthorizedDevice, DevicePubkey, DeviceRoster,
-    DomainError, Error, GroupCreateResult, GroupIncomingEvent, GroupManager, GroupManagerSnapshot,
+    DomainError, Error, GroupCreateResult, GroupIncomingEvent, GroupManagerSnapshot,
     GroupPendingFanout, GroupPreparedPublish, GroupPreparedSend, GroupProtocol,
-    GroupSenderKeyHandleResult, GroupSenderKeyMessage, InMemoryStorage, Invite, OwnerPubkey,
-    ProtocolContext, RelayGap, Result, SendOptions, SessionManager, SessionManagerSnapshot,
-    SessionState, StorageAdapter, UnixSeconds, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND,
-    INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
+    GroupSenderKeyHandleResult, GroupSenderKeyMessage, InMemoryStorage, Invite,
+    NostrGroupManager as GroupManager, OwnerPubkey, ProtocolContext, RelayGap, Result, SendOptions,
+    SessionManager, SessionManagerSnapshot, SessionState, StorageAdapter, UnixSeconds,
+    APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
 };
 
 const RUNTIME_STATE_KEY: &str = "v2/runtime-state";
@@ -1006,7 +1006,12 @@ impl NdrRuntime {
         from_owner_pubkey: PublicKey,
         from_sender_device_pubkey: Option<PublicKey>,
     ) -> GroupPairwiseHandleOutcome {
-        let is_group_payload = GroupManager::is_pairwise_payload(payload);
+        let is_group_payload = self
+            .state
+            .lock()
+            .unwrap()
+            .group_manager
+            .is_pairwise_payload(payload);
         let sender_owner = owner(from_owner_pubkey);
         let sender_device = from_sender_device_pubkey.map(device);
         let mut events = Vec::new();

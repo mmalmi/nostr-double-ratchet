@@ -88,7 +88,7 @@ impl DelegateManager {
         self.invite = Some(invite.clone());
 
         // Publish signed invite event
-        if let Ok(unsigned) = invite.get_event() {
+        if let Ok(unsigned) = crate::nostr_codec::invite_unsigned_event(&invite) {
             let keys = Keys::new(nostr::SecretKey::from_slice(&self.device_private_key)?);
             let signed = unsigned
                 .sign_with_keys(&keys)
@@ -128,8 +128,7 @@ impl DelegateManager {
         self.invite = Some(invite.clone());
 
         let keys = Keys::new(nostr::SecretKey::from_slice(&self.device_private_key)?);
-        let signed = invite
-            .get_event()?
+        let signed = crate::nostr_codec::invite_unsigned_event(&invite)?
             .sign_with_keys(&keys)
             .map_err(|e| Error::InvalidEvent(e.to_string()))?;
         let _ = self.pubsub.publish_signed(signed);

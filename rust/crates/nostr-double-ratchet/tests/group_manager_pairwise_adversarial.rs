@@ -1,8 +1,7 @@
 mod support;
 
-use nostr_double_ratchet::{
-    DomainError, Error, GroupIncomingEvent, GroupManager, GroupProtocol, Result,
-};
+use nostr_double_ratchet::{DomainError, Error, GroupIncomingEvent, GroupProtocol, Result};
+use nostr_double_ratchet_nostr::NostrGroupManager as GroupManager;
 use support::{context, manager_device, roster_for, session_manager};
 
 fn create_remote_owned_group(

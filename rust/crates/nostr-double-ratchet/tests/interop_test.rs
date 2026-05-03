@@ -1,7 +1,8 @@
 //! Interop tests between TypeScript and Rust implementations
 
 use nostr::{Event, JsonUtil, Keys};
-use nostr_double_ratchet::{build_text_rumor, Result, Session};
+use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet_nostr::{build_text_rumor, SessionNostrExt};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;

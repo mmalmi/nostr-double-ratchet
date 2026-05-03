@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use nostr_double_ratchet::{
+use nostr_double_ratchet_runtime::{
     decode_nearby_frame_json, encode_nearby_frame_json, nearby_frame_body_len_from_header,
     read_nearby_frame,
 };

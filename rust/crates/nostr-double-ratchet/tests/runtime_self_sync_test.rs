@@ -1,7 +1,8 @@
 use nostr::{Event, Keys};
-use nostr_double_ratchet::{
-    AppKeys, DeviceEntry, GroupIncomingEvent, InMemoryStorage, NdrRuntime, SessionManagerEvent,
-    StorageAdapter, GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND, MESSAGE_EVENT_KIND,
+use nostr_double_ratchet::GroupIncomingEvent;
+use nostr_double_ratchet_runtime::{
+    AppKeys, DeviceEntry, InMemoryStorage, NdrRuntime, SessionManagerEvent, StorageAdapter,
+    GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND, MESSAGE_EVENT_KIND,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

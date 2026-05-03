@@ -1,5 +1,6 @@
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, UnsignedEvent};
-use nostr_double_ratchet::{build_text_rumor, Result, Session};
+use nostr_double_ratchet::{Result, Session};
+use nostr_double_ratchet_nostr::{build_text_rumor, SessionNostrExt};
 
 fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
     session.send_event(build_text_rumor(

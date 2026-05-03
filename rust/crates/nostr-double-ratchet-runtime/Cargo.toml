@@ -1,0 +1,36 @@
+[package]
+name = "nostr-double-ratchet-runtime"
+description = "Runtime, storage, subscriptions, and queue management for nostr-double-ratchet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+nearby = ["dep:flate2"]
+nearby-mdns = ["nearby", "dep:mdns-sd", "dep:tokio"]
+
+[dependencies]
+nostr-double-ratchet.workspace = true
+nostr-double-ratchet-nostr.workspace = true
+nostr-double-ratchet-pairwise-codec.workspace = true
+nostr.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+urlencoding.workspace = true
+rand.workspace = true
+crossbeam-channel.workspace = true
+uuid.workspace = true
+flate2 = { workspace = true, optional = true }
+mdns-sd = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
