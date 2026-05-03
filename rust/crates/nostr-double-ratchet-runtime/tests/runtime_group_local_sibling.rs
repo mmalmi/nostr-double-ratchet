@@ -183,6 +183,28 @@ fn sender_key_group_create_syncs_to_linked_runtime_device() {
             .map(PublicKey::to_hex)
             .collect::<Vec<_>>()
     );
+    let linked_session_count = alice_primary.with_group_context(|core, _, _| {
+        core.snapshot()
+            .users
+            .into_iter()
+            .find(|user| user.owner_pubkey == owner(alice_owner.public_key()))
+            .and_then(|user| {
+                user.devices
+                    .into_iter()
+                    .find(|record| {
+                        record.device_pubkey == device(alice_linked_device.public_key())
+                    })
+                    .map(|record| {
+                        usize::from(record.active_session.is_some())
+                            + record.inactive_sessions.len()
+                    })
+            })
+            .unwrap_or_default()
+    });
+    assert_eq!(
+        linked_session_count, 1,
+        "direct sender-copy fanout should reuse the linked-device session instead of creating duplicate invite sessions"
+    );
 
     let created = alice_primary
         .create_group(

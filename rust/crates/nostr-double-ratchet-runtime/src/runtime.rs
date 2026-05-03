@@ -1318,7 +1318,11 @@ impl NdrRuntime {
                 remote_payload.clone(),
             )?;
             let local = match local_sibling_payload.clone() {
-                Some(payload) => Some(state.core.prepare_local_sibling_send(&mut ctx, payload)?),
+                Some(payload) => Some(
+                    state
+                        .core
+                        .prepare_local_sibling_send_reusing_sessions(&mut ctx, payload)?,
+                ),
                 None => None,
             };
             (remote, local)
