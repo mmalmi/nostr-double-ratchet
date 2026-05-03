@@ -1,10 +1,11 @@
 use crate::{
     device_pubkey_from_secret_bytes, random_secret_key_bytes, DevicePubkey, DomainError,
-    GroupCreateResult, GroupIncomingEvent, GroupManagerSnapshot, GroupPreparedPublish,
-    GroupPreparedSend, GroupProtocol, GroupReceivedMessage, GroupSenderKeyHandleResult,
-    GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, GroupSenderKeyRecordSnapshot,
-    GroupSnapshot, OwnerPubkey, ProtocolContext, Result, SenderEventPubkey, SenderKeyDistribution,
-    SenderKeyMessageContent, SenderKeyState, SessionManager, UnixSeconds,
+    GroupCreateResult, GroupIncomingEvent, GroupManagerSnapshot, GroupPendingFanout,
+    GroupPreparedPublish, GroupPreparedSend, GroupProtocol, GroupReceivedMessage,
+    GroupSenderKeyHandleResult, GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope,
+    GroupSenderKeyRecordSnapshot, GroupSnapshot, OwnerPubkey, ProtocolContext, Result,
+    SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent, SenderKeyState,
+    SessionManager, UnixSeconds,
 };
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -891,6 +892,8 @@ impl GroupManager {
                 let group = self.group_record_mut(&group_id)?;
                 if group.reflects_rename(&name, new_revision) {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else if !group.should_apply_delta_revision(base_revision)? {
+                    return Ok(None);
                 } else {
                     group.apply_rename(
                         sender_owner,
@@ -912,6 +915,8 @@ impl GroupManager {
                 let group = self.group_record_mut(&group_id)?;
                 if group.reflects_added_members(&additions, new_revision) {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else if !group.should_apply_delta_revision(base_revision)? {
+                    return Ok(None);
                 } else {
                     group.apply_add_members(
                         sender_owner,
@@ -933,6 +938,8 @@ impl GroupManager {
                 let group = self.group_record_mut(&group_id)?;
                 if group.reflects_removed_members(&removals, new_revision) {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else if !group.should_apply_delta_revision(base_revision)? {
+                    return Ok(None);
                 } else {
                     group.apply_remove_members(
                         sender_owner,
@@ -954,6 +961,8 @@ impl GroupManager {
                 let group = self.group_record_mut(&group_id)?;
                 if group.reflects_added_admins(&additions, new_revision) {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else if !group.should_apply_delta_revision(base_revision)? {
+                    return Ok(None);
                 } else {
                     group.apply_add_admins(
                         sender_owner,
@@ -975,6 +984,8 @@ impl GroupManager {
                 let group = self.group_record_mut(&group_id)?;
                 if group.reflects_removed_admins(&removals, new_revision) {
                     GroupIncomingEvent::MetadataUpdated(group.snapshot())
+                } else if !group.should_apply_delta_revision(base_revision)? {
+                    return Ok(None);
                 } else {
                     group.apply_remove_admins(
                         sender_owner,
@@ -993,11 +1004,15 @@ impl GroupManager {
             } => {
                 let group = self.group_record(&group_id)?;
                 group.ensure_member(sender_owner)?;
-                if revision != group.revision {
-                    return Err(group_error(format!(
-                        "group message revision mismatch for `{group_id}`: expected {}, got {}",
-                        group.revision, revision
-                    )));
+                if revision > group.revision {
+                    return Err(pending_group_revision_error(
+                        group_id,
+                        group.revision,
+                        revision,
+                    ));
+                }
+                if revision < group.revision {
+                    return Ok(None);
                 }
                 GroupIncomingEvent::Message(GroupReceivedMessage {
                     group_id,
@@ -1070,11 +1085,18 @@ impl GroupManager {
         if plaintext.wire_format_version != GROUP_WIRE_FORMAT_VERSION_V1 {
             return Ok(GroupSenderKeyHandleResult::Ignored);
         }
-        if plaintext.group_id != group.group_id || plaintext.revision != group.revision {
-            return Err(group_error(format!(
-                "group sender-key message revision mismatch for `{}`: expected {}, got {}",
-                group.group_id, group.revision, plaintext.revision
-            )));
+        if plaintext.group_id != group.group_id {
+            return Ok(GroupSenderKeyHandleResult::Ignored);
+        }
+        if plaintext.revision > group.revision {
+            return Ok(GroupSenderKeyHandleResult::PendingRevision {
+                group_id: group.group_id,
+                current_revision: group.revision,
+                required_revision: plaintext.revision,
+            });
+        }
+        if plaintext.revision < group.revision {
+            return Ok(GroupSenderKeyHandleResult::Ignored);
         }
 
         state.apply_decrypt(plan);
@@ -1141,12 +1163,19 @@ impl GroupManager {
     where
         R: RngCore + CryptoRng,
     {
-        let prepared = session_manager.prepare_local_sibling_send_reusing_sessions(ctx, payload)?;
+        let prepared =
+            session_manager.prepare_local_sibling_send_reusing_sessions(ctx, payload.clone())?;
+        let pending_fanouts = if prepared.relay_gaps.is_empty() {
+            Vec::new()
+        } else {
+            vec![GroupPendingFanout::LocalSiblings { payload }]
+        };
         Ok(GroupPreparedPublish {
             deliveries: prepared.deliveries,
             invite_responses: prepared.invite_responses,
             sender_key_messages: Vec::new(),
             relay_gaps: prepared.relay_gaps,
+            pending_fanouts,
         })
     }
 
@@ -1172,6 +1201,12 @@ impl GroupManager {
                 session_manager.prepare_remote_send(ctx, recipient, payload_bytes.clone())?;
             prepared.deliveries.extend(next.deliveries);
             prepared.invite_responses.extend(next.invite_responses);
+            if !next.relay_gaps.is_empty() {
+                prepared.pending_fanouts.push(GroupPendingFanout::Remote {
+                    recipient_owner: recipient,
+                    payload: payload_bytes.clone(),
+                });
+            }
             prepared.relay_gaps.extend(next.relay_gaps);
         }
 
@@ -1696,6 +1731,17 @@ impl GroupRecord {
         self.revision >= new_revision && removals.iter().all(|owner| !self.admins.contains(owner))
     }
 
+    fn should_apply_delta_revision(&self, base_revision: u64) -> Result<bool> {
+        if base_revision > self.revision {
+            return Err(pending_group_revision_error(
+                self.group_id.clone(),
+                self.revision,
+                base_revision,
+            ));
+        }
+        Ok(base_revision == self.revision)
+    }
+
     fn apply_rename(
         &mut self,
         actor: OwnerPubkey,
@@ -1941,8 +1987,26 @@ fn merge_group_prepared_publish(into: &mut GroupPreparedPublish, next: GroupPrep
     into.relay_gaps.extend(next.relay_gaps);
     into.relay_gaps.sort();
     into.relay_gaps.dedup();
+    for fanout in next.pending_fanouts {
+        if !into.pending_fanouts.contains(&fanout) {
+            into.pending_fanouts.push(fanout);
+        }
+    }
 }
 
 fn group_error(message: impl Into<String>) -> crate::Error {
     DomainError::InvalidGroupOperation(message.into()).into()
+}
+
+fn pending_group_revision_error(
+    group_id: impl Into<String>,
+    current_revision: u64,
+    required_revision: u64,
+) -> crate::Error {
+    DomainError::PendingGroupRevision {
+        group_id: group_id.into(),
+        current_revision,
+        required_revision,
+    }
+    .into()
 }

@@ -179,8 +179,10 @@ fn incoming_control_from_non_admin_and_wrong_revision_message_are_rejected() -> 
     let message = groups.handle_incoming(bob.owner_pubkey, &wrong_revision_message);
     assert!(matches!(
         message,
-        Err(Error::Domain(DomainError::InvalidGroupOperation(message)))
-            if message.contains("revision")
+        Err(Error::Domain(DomainError::PendingGroupRevision {
+            required_revision: 9,
+            ..
+        }))
     ));
     Ok(())
 }

@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     nostr_codec, pairwise_codec, AppKeys, AuthorizedDevice, DevicePubkey, DeviceRoster,
     DomainError, Error, GroupCreateResult, GroupIncomingEvent, GroupManager, GroupManagerSnapshot,
-    GroupPreparedPublish, GroupPreparedSend, GroupProtocol, GroupSenderKeyHandleResult,
-    GroupSenderKeyMessage, InMemoryStorage, Invite, OwnerPubkey, ProtocolContext, RelayGap, Result,
-    SendOptions, SessionManager, SessionManagerSnapshot, SessionState, StorageAdapter, UnixSeconds,
-    APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
+    GroupPendingFanout, GroupPreparedPublish, GroupPreparedSend, GroupProtocol,
+    GroupSenderKeyHandleResult, GroupSenderKeyMessage, InMemoryStorage, Invite, OwnerPubkey,
+    ProtocolContext, RelayGap, Result, SendOptions, SessionManager, SessionManagerSnapshot,
+    SessionState, StorageAdapter, UnixSeconds, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND,
+    INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
 };
 
 const RUNTIME_STATE_KEY: &str = "v2/runtime-state";
@@ -92,9 +93,13 @@ struct StoredRuntimeState {
     #[serde(default)]
     group_manager: Option<GroupManagerSnapshot>,
     #[serde(default)]
+    pending_prepared_publishes: Vec<PendingPreparedPublish>,
+    #[serde(default)]
     pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
     #[serde(default)]
     pending_group_pairwise_payloads: Vec<PendingGroupPairwisePayload>,
+    #[serde(default)]
+    pending_group_fanouts: Vec<PendingGroupFanout>,
     pending_outbound: Vec<PendingOutbound>,
     processed_invite_response_ids: Vec<String>,
     latest_app_keys_created_at: HashMap<String, u64>,
@@ -112,11 +117,26 @@ struct PendingOutbound {
     reason: QueuedMessageStage,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingPreparedPublish {
+    event: Event,
+    inner_event_id: Option<String>,
+    target_device_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingGroupPairwisePayload {
     sender_owner: OwnerPubkey,
     sender_device: Option<DevicePubkey>,
     payload: Vec<u8>,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingGroupFanout {
+    group_id: String,
+    fanout: GroupPendingFanout,
+    inner_event_id: Option<String>,
     created_at_ms: u64,
 }
 
@@ -132,8 +152,10 @@ struct LocalSiblingPayload {
 struct RuntimeState {
     core: SessionManager,
     group_manager: GroupManager,
+    pending_prepared_publishes: Vec<PendingPreparedPublish>,
     pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
     pending_group_pairwise_payloads: Vec<PendingGroupPairwisePayload>,
+    pending_group_fanouts: Vec<PendingGroupFanout>,
     pending_outbound: Vec<PendingOutbound>,
     processed_invite_response_ids: HashSet<String>,
     latest_app_keys_created_at: HashMap<PublicKey, u64>,
@@ -192,8 +214,10 @@ impl NdrRuntime {
             .unwrap_or_else(|| RuntimeState {
                 core: SessionManager::new(owner(owner_public_key), our_identity_key),
                 group_manager: GroupManager::new(owner(owner_public_key)),
+                pending_prepared_publishes: Vec::new(),
                 pending_group_sender_key_messages: Vec::new(),
                 pending_group_pairwise_payloads: Vec::new(),
+                pending_group_fanouts: Vec::new(),
                 pending_outbound: Vec::new(),
                 processed_invite_response_ids: HashSet::new(),
                 latest_app_keys_created_at: HashMap::new(),
@@ -233,6 +257,7 @@ impl NdrRuntime {
             self.publish_local_invite(&invite)?;
         }
         self.persist_state()?;
+        self.replay_pending_prepared_publishes()?;
         self.refresh_protocol_subscriptions()?;
         self.sync_direct_message_subscriptions()
     }
@@ -251,8 +276,23 @@ impl NdrRuntime {
         ) {
             *self.state.lock().unwrap() = loaded;
         }
+        self.replay_pending_prepared_publishes()?;
         self.refresh_protocol_subscriptions()?;
         self.sync_direct_message_subscriptions()
+    }
+
+    pub fn ack_prepared_publish(&self, event_id: &str) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let before = state.pending_prepared_publishes.len();
+        state
+            .pending_prepared_publishes
+            .retain(|pending| pending.event.id.to_string() != event_id);
+        let changed = state.pending_prepared_publishes.len() != before;
+        drop(state);
+        if changed {
+            self.persist_state()?;
+        }
+        Ok(())
     }
 
     pub fn delete_chat(&self, user_pubkey: PublicKey) -> Result<()> {
@@ -670,6 +710,7 @@ impl NdrRuntime {
         drop(state);
         let _ = self.persist_state();
         let _ = self.retry_pending_outbound();
+        let _ = self.retry_pending_group_fanouts();
         let _ = self.refresh_protocol_subscriptions();
         let _ = self.sync_direct_message_subscriptions();
     }
@@ -1034,7 +1075,17 @@ impl NdrRuntime {
                 vec![event]
             }
             Ok(GroupSenderKeyHandleResult::PendingDistribution { .. }) => {
-                state.pending_group_sender_key_messages.push(message);
+                if !state.pending_group_sender_key_messages.contains(&message) {
+                    state.pending_group_sender_key_messages.push(message);
+                }
+                drop(state);
+                let _ = self.persist_state();
+                Vec::new()
+            }
+            Ok(GroupSenderKeyHandleResult::PendingRevision { .. }) => {
+                if !state.pending_group_sender_key_messages.contains(&message) {
+                    state.pending_group_sender_key_messages.push(message);
+                }
                 drop(state);
                 let _ = self.persist_state();
                 Vec::new()
@@ -1097,6 +1148,9 @@ impl NdrRuntime {
                     Ok(GroupSenderKeyHandleResult::PendingDistribution { .. }) => {
                         still_pending.push(message)
                     }
+                    Ok(GroupSenderKeyHandleResult::PendingRevision { .. }) => {
+                        still_pending.push(message)
+                    }
                     Ok(GroupSenderKeyHandleResult::Ignored) => {}
                     Err(_) => {}
                 }
@@ -1149,7 +1203,8 @@ impl NdrRuntime {
             .core
             .observe_device_invite(owner(invite_owner), invite)?;
         self.persist_state()?;
-        self.retry_pending_outbound()
+        self.retry_pending_outbound()?;
+        self.retry_pending_group_fanouts()
     }
 
     fn process_invite_response_event(&self, event: &Event) -> Result<()> {
@@ -1180,6 +1235,7 @@ impl NdrRuntime {
                 .insert(event.id.to_string());
             self.persist_state()?;
             self.retry_pending_outbound()?;
+            self.retry_pending_group_fanouts()?;
             self.refresh_protocol_subscriptions()?;
             self.sync_direct_message_subscriptions()?;
         }
@@ -1278,41 +1334,48 @@ impl NdrRuntime {
         }
 
         let mut event_ids = Vec::new();
-        self.publish_prepared(&remote, inner_event_id.clone(), &mut event_ids)?;
+        let mut pending =
+            self.prepared_publishes_from_prepared(&remote, inner_event_id.clone(), &mut event_ids)?;
         if let Some(local) = local.as_ref() {
-            self.publish_prepared(local, inner_event_id, &mut event_ids)?;
+            pending.extend(self.prepared_publishes_from_prepared(
+                local,
+                inner_event_id,
+                &mut event_ids,
+            )?);
         }
+        self.stage_prepared_publishes(pending)?;
         self.persist_state()?;
         self.sync_direct_message_subscriptions()?;
         Ok(event_ids)
     }
 
-    fn publish_prepared(
+    fn prepared_publishes_from_prepared(
         &self,
         prepared: &crate::PreparedSend,
         inner_event_id: Option<String>,
         event_ids: &mut Vec<String>,
-    ) -> Result<()> {
+    ) -> Result<Vec<PendingPreparedPublish>> {
+        let mut pending = Vec::new();
         for response in &prepared.invite_responses {
             let event = nostr_codec::invite_response_event(response)
                 .map_err(|e| Error::InvalidEvent(e.to_string()))?;
-            self.event_tx
-                .send(SessionManagerEvent::PublishSigned(event))
-                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+            pending.push(PendingPreparedPublish {
+                event,
+                inner_event_id: None,
+                target_device_id: None,
+            });
         }
         for delivery in &prepared.deliveries {
             let event = nostr_codec::message_event(&delivery.envelope)
                 .map_err(|e| Error::InvalidEvent(e.to_string()))?;
             event_ids.push(event.id.to_string());
-            self.event_tx
-                .send(SessionManagerEvent::PublishSignedForInnerEvent {
-                    event,
-                    inner_event_id: inner_event_id.clone(),
-                    target_device_id: Some(public_device(delivery.device_pubkey).to_hex()),
-                })
-                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+            pending.push(PendingPreparedPublish {
+                event,
+                inner_event_id: inner_event_id.clone(),
+                target_device_id: Some(public_device(delivery.device_pubkey).to_hex()),
+            });
         }
-        Ok(())
+        Ok(pending)
     }
 
     fn publish_group_prepared_send(
@@ -1321,9 +1384,96 @@ impl NdrRuntime {
         inner_event_id: Option<String>,
     ) -> Result<Vec<String>> {
         let mut event_ids = Vec::new();
-        self.publish_group_prepared(&prepared.remote, inner_event_id.clone(), &mut event_ids)?;
-        self.publish_group_prepared(&prepared.local_sibling, inner_event_id, &mut event_ids)?;
+        let queued_remote = self.queue_group_pending_fanouts(
+            &prepared.group_id,
+            &prepared.remote,
+            inner_event_id.clone(),
+        );
+        let queued_local = self.queue_group_pending_fanouts(
+            &prepared.group_id,
+            &prepared.local_sibling,
+            inner_event_id.clone(),
+        );
+        if queued_remote || queued_local {
+            self.persist_state()?;
+        }
+        let mut pending = self.group_prepared_publishes_from_prepared(
+            &prepared.remote,
+            inner_event_id.clone(),
+            &mut event_ids,
+        )?;
+        pending.extend(self.group_prepared_publishes_from_prepared(
+            &prepared.local_sibling,
+            inner_event_id,
+            &mut event_ids,
+        )?);
+        self.stage_prepared_publishes(pending)?;
         Ok(event_ids)
+    }
+
+    fn queue_group_pending_fanouts(
+        &self,
+        group_id: &str,
+        prepared: &GroupPreparedPublish,
+        inner_event_id: Option<String>,
+    ) -> bool {
+        if prepared.pending_fanouts.is_empty() {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap();
+        let mut changed = false;
+        for fanout in &prepared.pending_fanouts {
+            let pending = PendingGroupFanout {
+                group_id: group_id.to_string(),
+                fanout: fanout.clone(),
+                inner_event_id: inner_event_id.clone(),
+                created_at_ms: current_unix_millis(),
+            };
+            if !state.pending_group_fanouts.contains(&pending) {
+                state.pending_group_fanouts.push(pending);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn group_prepared_publishes_from_prepared(
+        &self,
+        prepared: &GroupPreparedPublish,
+        inner_event_id: Option<String>,
+        event_ids: &mut Vec<String>,
+    ) -> Result<Vec<PendingPreparedPublish>> {
+        let mut pending = Vec::new();
+        for response in &prepared.invite_responses {
+            let event = nostr_codec::invite_response_event(response)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            pending.push(PendingPreparedPublish {
+                event,
+                inner_event_id: None,
+                target_device_id: None,
+            });
+        }
+        for delivery in &prepared.deliveries {
+            let event = nostr_codec::message_event(&delivery.envelope)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            event_ids.push(event.id.to_string());
+            pending.push(PendingPreparedPublish {
+                event,
+                inner_event_id: inner_event_id.clone(),
+                target_device_id: Some(public_device(delivery.device_pubkey).to_hex()),
+            });
+        }
+        for sender_key_message in &prepared.sender_key_messages {
+            let event = nostr_codec::group_sender_key_message_event(sender_key_message)
+                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+            event_ids.push(event.id.to_string());
+            pending.push(PendingPreparedPublish {
+                event,
+                inner_event_id: None,
+                target_device_id: None,
+            });
+        }
+        Ok(pending)
     }
 
     fn publish_group_prepared(
@@ -1332,31 +1482,60 @@ impl NdrRuntime {
         inner_event_id: Option<String>,
         event_ids: &mut Vec<String>,
     ) -> Result<()> {
-        for response in &prepared.invite_responses {
-            let event = nostr_codec::invite_response_event(response)
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
-            self.event_tx
-                .send(SessionManagerEvent::PublishSigned(event))
-                .map_err(|_| Error::Storage("event queue closed".to_string()))?;
+        let pending =
+            self.group_prepared_publishes_from_prepared(prepared, inner_event_id, event_ids)?;
+        self.stage_prepared_publishes(pending)
+    }
+
+    fn stage_prepared_publishes(&self, pending: Vec<PendingPreparedPublish>) -> Result<()> {
+        if pending.is_empty() {
+            return Ok(());
         }
-        for delivery in &prepared.deliveries {
-            let event = nostr_codec::message_event(&delivery.envelope)
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
-            event_ids.push(event.id.to_string());
+        {
+            let mut state = self.state.lock().unwrap();
+            for next in &pending {
+                let event_id = next.event.id.to_string();
+                if !state
+                    .pending_prepared_publishes
+                    .iter()
+                    .any(|existing| existing.event.id.to_string() == event_id)
+                {
+                    state.pending_prepared_publishes.push(next.clone());
+                }
+            }
+        }
+        self.persist_state()?;
+        for next in pending {
+            self.emit_prepared_publish(&next)?;
+        }
+        Ok(())
+    }
+
+    fn replay_pending_prepared_publishes(&self) -> Result<()> {
+        let pending = self
+            .state
+            .lock()
+            .unwrap()
+            .pending_prepared_publishes
+            .clone();
+        for pending in pending {
+            self.emit_prepared_publish(&pending)?;
+        }
+        Ok(())
+    }
+
+    fn emit_prepared_publish(&self, pending: &PendingPreparedPublish) -> Result<()> {
+        if pending.inner_event_id.is_some() || pending.target_device_id.is_some() {
             self.event_tx
                 .send(SessionManagerEvent::PublishSignedForInnerEvent {
-                    event,
-                    inner_event_id: inner_event_id.clone(),
-                    target_device_id: Some(public_device(delivery.device_pubkey).to_hex()),
+                    event: pending.event.clone(),
+                    inner_event_id: pending.inner_event_id.clone(),
+                    target_device_id: pending.target_device_id.clone(),
                 })
                 .map_err(|_| Error::Storage("event queue closed".to_string()))?;
-        }
-        for sender_key_message in &prepared.sender_key_messages {
-            let event = nostr_codec::group_sender_key_message_event(sender_key_message)
-                .map_err(|e| Error::InvalidEvent(e.to_string()))?;
-            event_ids.push(event.id.to_string());
+        } else {
             self.event_tx
-                .send(SessionManagerEvent::PublishSigned(event))
+                .send(SessionManagerEvent::PublishSigned(pending.event.clone()))
                 .map_err(|_| Error::Storage("event queue closed".to_string()))?;
         }
         Ok(())
@@ -1382,6 +1561,66 @@ impl NdrRuntime {
             .pending_outbound
             .extend(still_pending);
         self.persist_state()
+    }
+
+    fn retry_pending_group_fanouts(&self) -> Result<()> {
+        let pending = std::mem::take(&mut self.state.lock().unwrap().pending_group_fanouts);
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut still_pending = Vec::new();
+        for pending_fanout in pending {
+            let now = now();
+            let mut rng = OsRng;
+            let mut ctx = ProtocolContext::new(now, &mut rng);
+            let result = {
+                let mut state = self.state.lock().unwrap();
+                match &pending_fanout.fanout {
+                    GroupPendingFanout::Remote {
+                        recipient_owner,
+                        payload,
+                    } => {
+                        state
+                            .core
+                            .prepare_remote_send(&mut ctx, *recipient_owner, payload.clone())
+                    }
+                    GroupPendingFanout::LocalSiblings { payload } => state
+                        .core
+                        .prepare_local_sibling_send_reusing_sessions(&mut ctx, payload.clone()),
+                }
+            };
+
+            let prepared = match result {
+                Ok(prepared) => {
+                    group_publish_from_prepared_send(prepared, pending_fanout.fanout.clone())
+                }
+                Err(_) => {
+                    still_pending.push(pending_fanout);
+                    continue;
+                }
+            };
+
+            let still_has_gap = !prepared.relay_gaps.is_empty();
+            let mut event_ids = Vec::new();
+            self.publish_group_prepared(
+                &prepared,
+                pending_fanout.inner_event_id.clone(),
+                &mut event_ids,
+            )?;
+            if still_has_gap {
+                still_pending.push(pending_fanout);
+            }
+        }
+
+        self.state
+            .lock()
+            .unwrap()
+            .pending_group_fanouts
+            .extend(still_pending);
+        self.persist_state()?;
+        self.refresh_protocol_subscriptions()?;
+        self.sync_direct_message_subscriptions()
     }
 
     fn send_link_bootstrap(&self, invite_owner: PublicKey) -> Result<()> {
@@ -1468,6 +1707,20 @@ impl NdrRuntime {
             .map(|pending| public_owner(pending.recipient_owner))
             .collect::<Vec<_>>();
         owners.extend(pending_owners);
+        let pending_group_owners = self
+            .state
+            .lock()
+            .unwrap()
+            .pending_group_fanouts
+            .iter()
+            .filter_map(|pending| match &pending.fanout {
+                GroupPendingFanout::Remote {
+                    recipient_owner, ..
+                } => Some(public_owner(*recipient_owner)),
+                GroupPendingFanout::LocalSiblings { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        owners.extend(pending_group_owners);
         owners.into_iter().collect()
     }
 
@@ -1530,8 +1783,10 @@ impl NdrRuntime {
         let stored = StoredRuntimeState {
             core: state.core.snapshot(),
             group_manager: Some(state.group_manager.snapshot()),
+            pending_prepared_publishes: state.pending_prepared_publishes.clone(),
             pending_group_sender_key_messages: state.pending_group_sender_key_messages.clone(),
             pending_group_pairwise_payloads: state.pending_group_pairwise_payloads.clone(),
+            pending_group_fanouts: state.pending_group_fanouts.clone(),
             pending_outbound: state.pending_outbound.clone(),
             processed_invite_response_ids: state
                 .processed_invite_response_ids
@@ -1573,8 +1828,10 @@ impl RuntimeState {
         Some(Self {
             core,
             group_manager,
+            pending_prepared_publishes: stored.pending_prepared_publishes,
             pending_group_sender_key_messages: stored.pending_group_sender_key_messages,
             pending_group_pairwise_payloads: stored.pending_group_pairwise_payloads,
+            pending_group_fanouts: stored.pending_group_fanouts,
             pending_outbound: stored.pending_outbound,
             processed_invite_response_ids: stored
                 .processed_invite_response_ids
@@ -1591,14 +1848,34 @@ impl RuntimeState {
             Some(Self {
                 core: SessionManager::new(owner(owner_public_key), identity_key),
                 group_manager: GroupManager::new(owner(owner_public_key)),
+                pending_prepared_publishes: Vec::new(),
                 pending_group_sender_key_messages: Vec::new(),
                 pending_group_pairwise_payloads: Vec::new(),
+                pending_group_fanouts: Vec::new(),
                 pending_outbound: Vec::new(),
                 processed_invite_response_ids: HashSet::new(),
                 latest_app_keys_created_at: HashMap::new(),
                 tracked_owner_pubkeys: BTreeSet::new(),
             })
         })
+    }
+}
+
+fn group_publish_from_prepared_send(
+    prepared: crate::PreparedSend,
+    fanout: GroupPendingFanout,
+) -> GroupPreparedPublish {
+    let pending_fanouts = if prepared.relay_gaps.is_empty() {
+        Vec::new()
+    } else {
+        vec![fanout]
+    };
+    GroupPreparedPublish {
+        deliveries: prepared.deliveries,
+        invite_responses: prepared.invite_responses,
+        sender_key_messages: Vec::new(),
+        relay_gaps: prepared.relay_gaps,
+        pending_fanouts,
     }
 }
 
@@ -1659,11 +1936,13 @@ fn public_device(device: DevicePubkey) -> PublicKey {
 }
 
 fn should_queue_group_pairwise_payload(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::Domain(DomainError::InvalidGroupOperation(message))
-            if message.starts_with("unknown group `")
-    )
+    match error {
+        Error::Domain(DomainError::PendingGroupRevision { .. }) => true,
+        Error::Domain(DomainError::InvalidGroupOperation(message)) => {
+            message.starts_with("unknown group `")
+        }
+        _ => false,
+    }
 }
 
 fn now() -> UnixSeconds {

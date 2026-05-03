@@ -23,6 +23,15 @@ pub enum DomainError {
     #[error("invalid group operation: {0}")]
     InvalidGroupOperation(String),
 
+    #[error(
+        "pending group revision for `{group_id}`: current {current_revision}, required {required_revision}"
+    )]
+    PendingGroupRevision {
+        group_id: String,
+        current_revision: u64,
+        required_revision: u64,
+    },
+
     #[error("invalid state: {0}")]
     InvalidState(String),
 }

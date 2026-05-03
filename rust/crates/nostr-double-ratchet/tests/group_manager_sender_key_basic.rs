@@ -528,12 +528,18 @@ fn sender_key_valid_ciphertext_with_invalid_group_plaintext_does_not_burn_messag
     };
     let before = snapshot(&fixture.bob_groups.snapshot());
 
-    let err = fixture
+    let result = fixture
         .bob_groups
         .handle_sender_key_message(forged)
-        .unwrap_err();
+        .expect("future revision should be queued, not rejected");
 
-    assert!(err.to_string().contains("revision mismatch"));
+    assert!(matches!(
+        result,
+        GroupSenderKeyHandleResult::PendingRevision {
+            required_revision: 999,
+            ..
+        }
+    ));
     assert_eq!(snapshot(&fixture.bob_groups.snapshot()), before);
 
     let legitimate = fixture.alice_groups.send_message(

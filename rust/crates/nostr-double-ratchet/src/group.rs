@@ -100,6 +100,7 @@ pub struct GroupPreparedPublish {
     pub invite_responses: Vec<InviteResponseEnvelope>,
     pub sender_key_messages: Vec<GroupSenderKeyMessageEnvelope>,
     pub relay_gaps: Vec<RelayGap>,
+    pub pending_fanouts: Vec<GroupPendingFanout>,
 }
 
 impl GroupPreparedPublish {
@@ -109,8 +110,20 @@ impl GroupPreparedPublish {
             invite_responses: Vec::new(),
             sender_key_messages: Vec::new(),
             relay_gaps: Vec::new(),
+            pending_fanouts: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GroupPendingFanout {
+    Remote {
+        recipient_owner: OwnerPubkey,
+        payload: Vec<u8>,
+    },
+    LocalSiblings {
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +206,11 @@ pub enum GroupSenderKeyHandleResult {
         group_id: String,
         sender_event_pubkey: SenderEventPubkey,
         key_id: u32,
+    },
+    PendingRevision {
+        group_id: String,
+        current_revision: u64,
+        required_revision: u64,
     },
     Ignored,
 }
