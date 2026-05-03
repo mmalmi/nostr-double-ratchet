@@ -141,6 +141,12 @@ impl GroupManager {
         }
     }
 
+    pub fn is_pairwise_payload(payload: &[u8]) -> bool {
+        serde_json::from_slice::<GroupWireEnvelopeV1>(payload)
+            .map(|envelope| envelope.wire_format_version == GROUP_WIRE_FORMAT_VERSION_V1)
+            .unwrap_or(false)
+    }
+
     pub fn from_snapshot(snapshot: GroupManagerSnapshot) -> Result<Self> {
         let mut groups = BTreeMap::new();
         for group in snapshot.groups {

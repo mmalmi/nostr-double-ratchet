@@ -8,8 +8,8 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    nostr_codec, pairwise_codec, AppKeys, AuthorizedDevice, DevicePubkey, DeviceRoster, Error,
-    GroupCreateResult, GroupIncomingEvent, GroupManager, GroupManagerSnapshot,
+    nostr_codec, pairwise_codec, AppKeys, AuthorizedDevice, DevicePubkey, DeviceRoster,
+    DomainError, Error, GroupCreateResult, GroupIncomingEvent, GroupManager, GroupManagerSnapshot,
     GroupPreparedPublish, GroupPreparedSend, GroupProtocol, GroupSenderKeyHandleResult,
     GroupSenderKeyMessage, InMemoryStorage, Invite, OwnerPubkey, ProtocolContext, RelayGap, Result,
     SendOptions, SessionManager, SessionManagerSnapshot, SessionState, StorageAdapter, UnixSeconds,
@@ -80,6 +80,12 @@ pub struct GroupOuterSubscriptionPlan {
     pub added_authors: Vec<PublicKey>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GroupPairwiseHandleOutcome {
+    pub events: Vec<GroupIncomingEvent>,
+    pub consumed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredRuntimeState {
     core: SessionManagerSnapshot,
@@ -87,6 +93,8 @@ struct StoredRuntimeState {
     group_manager: Option<GroupManagerSnapshot>,
     #[serde(default)]
     pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
+    #[serde(default)]
+    pending_group_pairwise_payloads: Vec<PendingGroupPairwisePayload>,
     pending_outbound: Vec<PendingOutbound>,
     processed_invite_response_ids: Vec<String>,
     latest_app_keys_created_at: HashMap<String, u64>,
@@ -104,6 +112,14 @@ struct PendingOutbound {
     reason: QueuedMessageStage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingGroupPairwisePayload {
+    sender_owner: OwnerPubkey,
+    sender_device: Option<DevicePubkey>,
+    payload: Vec<u8>,
+    created_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalSiblingPayload {
@@ -117,6 +133,7 @@ struct RuntimeState {
     core: SessionManager,
     group_manager: GroupManager,
     pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
+    pending_group_pairwise_payloads: Vec<PendingGroupPairwisePayload>,
     pending_outbound: Vec<PendingOutbound>,
     processed_invite_response_ids: HashSet<String>,
     latest_app_keys_created_at: HashMap<PublicKey, u64>,
@@ -176,6 +193,7 @@ impl NdrRuntime {
                 core: SessionManager::new(owner(owner_public_key), our_identity_key),
                 group_manager: GroupManager::new(owner(owner_public_key)),
                 pending_group_sender_key_messages: Vec::new(),
+                pending_group_pairwise_payloads: Vec::new(),
                 pending_outbound: Vec::new(),
                 processed_invite_response_ids: HashSet::new(),
                 latest_app_keys_created_at: HashMap::new(),
@@ -933,29 +951,71 @@ impl NdrRuntime {
         from_owner_pubkey: PublicKey,
         from_sender_device_pubkey: Option<PublicKey>,
     ) -> Vec<GroupIncomingEvent> {
+        self.group_handle_incoming_payload_outcome(
+            payload,
+            from_owner_pubkey,
+            from_sender_device_pubkey,
+        )
+        .events
+    }
+
+    pub fn group_handle_incoming_payload_outcome(
+        &self,
+        payload: &[u8],
+        from_owner_pubkey: PublicKey,
+        from_sender_device_pubkey: Option<PublicKey>,
+    ) -> GroupPairwiseHandleOutcome {
+        let is_group_payload = GroupManager::is_pairwise_payload(payload);
+        let sender_owner = owner(from_owner_pubkey);
+        let sender_device = from_sender_device_pubkey.map(device);
         let mut events = Vec::new();
+        let mut persist = false;
         {
             let mut state = self.state.lock().unwrap();
-            let result = match from_sender_device_pubkey {
+            let result = match sender_device {
                 Some(device_pubkey) => state.group_manager.handle_pairwise_payload(
-                    owner(from_owner_pubkey),
-                    device(device_pubkey),
+                    sender_owner,
+                    device_pubkey,
                     payload,
                 ),
-                None => state
-                    .group_manager
-                    .handle_incoming(owner(from_owner_pubkey), payload),
+                None => state.group_manager.handle_incoming(sender_owner, payload),
             };
-            if let Ok(Some(event)) = result {
-                events.push(event);
+            match result {
+                Ok(Some(event)) => {
+                    events.push(event);
+                    persist = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if is_group_payload && should_queue_group_pairwise_payload(&error) {
+                        let pending = PendingGroupPairwisePayload {
+                            sender_owner,
+                            sender_device,
+                            payload: payload.to_vec(),
+                            created_at_ms: current_unix_millis(),
+                        };
+                        if !state.pending_group_pairwise_payloads.contains(&pending) {
+                            state.pending_group_pairwise_payloads.push(pending);
+                            persist = true;
+                        }
+                    }
+                }
             }
         }
-        events.extend(self.retry_pending_group_sender_key_messages());
         if !events.is_empty() {
+            events.extend(self.retry_pending_group_pairwise_payloads());
+            events.extend(self.retry_pending_group_sender_key_messages());
+        }
+        if persist || !events.is_empty() {
             let _ = self.persist_state();
+        }
+        if !events.is_empty() {
             let _ = self.refresh_protocol_subscriptions();
         }
-        events
+        GroupPairwiseHandleOutcome {
+            events,
+            consumed: is_group_payload,
+        }
     }
 
     pub fn group_handle_outer_event(&self, outer: &Event) -> Vec<GroupIncomingEvent> {
@@ -981,6 +1041,41 @@ impl NdrRuntime {
             }
             Ok(GroupSenderKeyHandleResult::Ignored) | Err(_) => Vec::new(),
         }
+    }
+
+    fn retry_pending_group_pairwise_payloads(&self) -> Vec<GroupIncomingEvent> {
+        let pending =
+            std::mem::take(&mut self.state.lock().unwrap().pending_group_pairwise_payloads);
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        let mut still_pending = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            for pending_payload in pending {
+                let result = match pending_payload.sender_device {
+                    Some(sender_device) => state.group_manager.handle_pairwise_payload(
+                        pending_payload.sender_owner,
+                        sender_device,
+                        &pending_payload.payload,
+                    ),
+                    None => state
+                        .group_manager
+                        .handle_incoming(pending_payload.sender_owner, &pending_payload.payload),
+                };
+                match result {
+                    Ok(Some(event)) => events.push(event),
+                    Ok(None) => {}
+                    Err(error) if should_queue_group_pairwise_payload(&error) => {
+                        still_pending.push(pending_payload)
+                    }
+                    Err(_) => {}
+                }
+            }
+            state.pending_group_pairwise_payloads = still_pending;
+        }
+        events
     }
 
     fn retry_pending_group_sender_key_messages(&self) -> Vec<GroupIncomingEvent> {
@@ -1436,6 +1531,7 @@ impl NdrRuntime {
             core: state.core.snapshot(),
             group_manager: Some(state.group_manager.snapshot()),
             pending_group_sender_key_messages: state.pending_group_sender_key_messages.clone(),
+            pending_group_pairwise_payloads: state.pending_group_pairwise_payloads.clone(),
             pending_outbound: state.pending_outbound.clone(),
             processed_invite_response_ids: state
                 .processed_invite_response_ids
@@ -1478,6 +1574,7 @@ impl RuntimeState {
             core,
             group_manager,
             pending_group_sender_key_messages: stored.pending_group_sender_key_messages,
+            pending_group_pairwise_payloads: stored.pending_group_pairwise_payloads,
             pending_outbound: stored.pending_outbound,
             processed_invite_response_ids: stored
                 .processed_invite_response_ids
@@ -1495,6 +1592,7 @@ impl RuntimeState {
                 core: SessionManager::new(owner(owner_public_key), identity_key),
                 group_manager: GroupManager::new(owner(owner_public_key)),
                 pending_group_sender_key_messages: Vec::new(),
+                pending_group_pairwise_payloads: Vec::new(),
                 pending_outbound: Vec::new(),
                 processed_invite_response_ids: HashSet::new(),
                 latest_app_keys_created_at: HashMap::new(),
@@ -1558,6 +1656,14 @@ fn public_owner(owner: OwnerPubkey) -> PublicKey {
 
 fn public_device(device: DevicePubkey) -> PublicKey {
     PublicKey::from_slice(&device.to_bytes()).expect("device pubkey bytes must be valid")
+}
+
+fn should_queue_group_pairwise_payload(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Domain(DomainError::InvalidGroupOperation(message))
+            if message.starts_with("unknown group `")
+    )
 }
 
 fn now() -> UnixSeconds {
