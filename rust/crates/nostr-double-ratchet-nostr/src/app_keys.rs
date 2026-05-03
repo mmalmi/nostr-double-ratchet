@@ -123,7 +123,12 @@ impl AppKeys {
             .collect()
     }
 
-    fn build_unsigned_event(&self, owner_pubkey: PublicKey, content: String) -> UnsignedEvent {
+    fn build_unsigned_event_at(
+        &self,
+        owner_pubkey: PublicKey,
+        content: String,
+        created_at_secs: u64,
+    ) -> UnsignedEvent {
         let mut tags = Vec::new();
         let d_tag =
             Tag::parse(&["d".to_string(), APP_KEYS_D_TAG.to_string()]).unwrap_or_else(|_| {
@@ -148,17 +153,33 @@ impl AppKeys {
 
         EventBuilder::new(Kind::from(APP_KEYS_EVENT_KIND as u16), content)
             .tags(tags)
-            .custom_created_at(Timestamp::from(current_unix_timestamp()))
+            .custom_created_at(Timestamp::from(created_at_secs))
             .build(owner_pubkey)
+    }
+
+    fn build_unsigned_event(&self, owner_pubkey: PublicKey, content: String) -> UnsignedEvent {
+        self.build_unsigned_event_at(owner_pubkey, content, current_unix_timestamp())
     }
 
     pub fn get_event(&self, owner_pubkey: PublicKey) -> UnsignedEvent {
         self.build_unsigned_event(owner_pubkey, String::new())
     }
 
+    pub fn get_event_at(&self, owner_pubkey: PublicKey, created_at_secs: u64) -> UnsignedEvent {
+        self.build_unsigned_event_at(owner_pubkey, String::new(), created_at_secs)
+    }
+
     pub fn get_encrypted_event(&self, owner_keys: &Keys) -> Result<UnsignedEvent> {
+        self.get_encrypted_event_at(owner_keys, current_unix_timestamp())
+    }
+
+    pub fn get_encrypted_event_at(
+        &self,
+        owner_keys: &Keys,
+        created_at_secs: u64,
+    ) -> Result<UnsignedEvent> {
         if self.device_labels.is_empty() {
-            return Ok(self.get_event(owner_keys.public_key()));
+            return Ok(self.get_event_at(owner_keys.public_key(), created_at_secs));
         }
 
         let conversation_key =
@@ -184,7 +205,7 @@ impl AppKeys {
             nip44::v2::encrypt_to_bytes(&conversation_key, payload_json.as_bytes())?;
         let content = base64::engine::general_purpose::STANDARD.encode(&encrypted_bytes);
 
-        Ok(self.build_unsigned_event(owner_keys.public_key(), content))
+        Ok(self.build_unsigned_event_at(owner_keys.public_key(), content, created_at_secs))
     }
 
     pub fn from_event(event: &Event) -> Result<Self> {

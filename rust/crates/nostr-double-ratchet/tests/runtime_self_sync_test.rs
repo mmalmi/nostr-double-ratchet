@@ -272,8 +272,14 @@ fn runtime_init_preserves_restored_multi_device_local_roster() {
     linked.ingest_app_keys_snapshot(
         alice_owner.public_key(),
         AppKeys::new(vec![
-            DeviceEntry::new(alice_primary.public_key(), roster_created_at.saturating_sub(10)),
-            DeviceEntry::new(alice_linked.public_key(), roster_created_at.saturating_sub(5)),
+            DeviceEntry::new(
+                alice_primary.public_key(),
+                roster_created_at.saturating_sub(10),
+            ),
+            DeviceEntry::new(
+                alice_linked.public_key(),
+                roster_created_at.saturating_sub(5),
+            ),
         ]),
         roster_created_at,
     );
