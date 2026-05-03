@@ -235,6 +235,87 @@ fn sender_key_group_create_distributes_key_and_shared_message_decrypts() -> Resu
 }
 
 #[test]
+fn sender_key_group_create_syncs_to_local_sibling() -> Result<()> {
+    let alice1 = manager_device(30, 31);
+    let alice2 = manager_device(30, 32);
+    let bob = manager_device(33, 34);
+    let mut alice1_manager = session_manager(&alice1);
+    let mut alice2_manager = session_manager(&alice2);
+    let mut bob_manager = session_manager(&bob);
+    let mut alice1_groups = GroupManager::new(alice1.owner_pubkey);
+    let mut alice2_groups = GroupManager::new(alice2.owner_pubkey);
+
+    alice1_manager.apply_local_roster(roster_for(&[&alice1, &alice2], 40));
+    alice2_manager.apply_local_roster(roster_for(&[&alice1, &alice2], 40));
+    alice1_manager.observe_device_invite(
+        alice1.owner_pubkey,
+        manager_public_device_invite(&mut alice2_manager, &alice2, 41, 1_900_030_100)?,
+    )?;
+    alice1_manager.observe_peer_roster(bob.owner_pubkey, roster_for(&[&bob], 42));
+    alice1_manager.observe_device_invite(
+        bob.owner_pubkey,
+        manager_public_device_invite(&mut bob_manager, &bob, 43, 1_900_030_101)?,
+    )?;
+
+    let created = alice1_groups.create_group_with_protocol(
+        &mut alice1_manager,
+        &mut context(44, 1_900_030_102),
+        "Sender-key siblings".to_string(),
+        vec![bob.owner_pubkey],
+        GroupProtocol::sender_key_v1(),
+    )?;
+
+    observe_matching_invite_responses(
+        &mut alice2_manager,
+        &created.prepared.local_sibling.invite_responses,
+        45,
+        1_900_030_103,
+    )?;
+
+    let mut ctx = context(46, 1_900_030_104);
+    let mut events = Vec::new();
+    for delivery in created
+        .prepared
+        .local_sibling
+        .deliveries
+        .iter()
+        .filter(|delivery| delivery.device_pubkey == alice2.device_pubkey)
+    {
+        if let Some(received) =
+            manager_receive_delivery(&mut alice2_manager, &mut ctx, alice1.owner_pubkey, delivery)?
+        {
+            if let Some(event) = alice2_groups.handle_pairwise_payload(
+                received.owner_pubkey,
+                received.device_pubkey,
+                &received.payload,
+            )? {
+                events.push(event);
+            }
+        }
+    }
+
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            GroupIncomingEvent::MetadataUpdated(snapshot),
+            GroupIncomingEvent::MetadataUpdated(_)
+        ] if snapshot.group_id == created.group.group_id
+            && snapshot.protocol == GroupProtocol::sender_key_v1()
+    ));
+    assert_eq!(alice2_groups.known_sender_event_pubkeys().len(), 1);
+    assert_eq!(
+        alice2_groups
+            .group(&created.group.group_id)
+            .expect("local sibling has sender-key group")
+            .revision,
+        1
+    );
+
+    Ok(())
+}
+
+#[test]
 fn sender_key_outer_message_waits_for_distribution() -> Result<()> {
     let alice = manager_device(3, 31);
     let bob = manager_device(4, 41);
