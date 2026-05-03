@@ -5,7 +5,7 @@ use nostr_double_ratchet_runtime::{
     GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND, MESSAGE_EVENT_KIND,
 };
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn runtime(device: &Keys, owner: nostr::PublicKey, device_id: &str) -> NdrRuntime {
     NdrRuntime::new(
@@ -246,6 +246,61 @@ fn runtime_replays_prepared_pairwise_publish_after_restart_before_app_drain() {
         decrypted.is_some(),
         "replayed event should decrypt at receiver"
     );
+}
+
+#[test]
+fn runtime_init_preserves_restored_multi_device_local_roster() {
+    let alice_owner = Keys::generate();
+    let alice_primary = Keys::generate();
+    let alice_linked = Keys::generate();
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+
+    let linked = runtime_with_storage(
+        &alice_linked,
+        alice_owner.public_key(),
+        "alice-linked",
+        storage.clone(),
+    );
+    linked.init().unwrap();
+    let _ = published_events(&linked);
+
+    let roster_created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_add(1);
+    linked.ingest_app_keys_snapshot(
+        alice_owner.public_key(),
+        AppKeys::new(vec![
+            DeviceEntry::new(alice_primary.public_key(), roster_created_at.saturating_sub(10)),
+            DeviceEntry::new(alice_linked.public_key(), roster_created_at.saturating_sub(5)),
+        ]),
+        roster_created_at,
+    );
+    assert_eq!(
+        linked
+            .known_device_identity_pubkeys_for_owner(alice_owner.public_key())
+            .len(),
+        2
+    );
+    drop(linked);
+
+    // Regression: init used to replace the restored AppKeys roster with a
+    // wall-clock single-device roster, making linked siblings stale.
+    std::thread::sleep(Duration::from_secs(2));
+
+    let restarted = runtime_with_storage(
+        &alice_linked,
+        alice_owner.public_key(),
+        "alice-linked",
+        storage,
+    );
+    restarted.init().unwrap();
+    let devices = restarted.known_device_identity_pubkeys_for_owner(alice_owner.public_key());
+
+    assert_eq!(devices.len(), 2);
+    assert!(devices.contains(&alice_primary.public_key()));
+    assert!(devices.contains(&alice_linked.public_key()));
 }
 
 #[test]

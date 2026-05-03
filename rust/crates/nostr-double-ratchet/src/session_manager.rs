@@ -208,6 +208,10 @@ impl SessionManager {
         self.apply_roster_for_owner(self.local_owner_pubkey, roster)
     }
 
+    pub fn replace_local_roster(&mut self, roster: DeviceRoster) -> RosterSnapshotDecision {
+        self.apply_roster_for_owner_inner(self.local_owner_pubkey, roster, true)
+    }
+
     pub fn observe_peer_roster(
         &mut self,
         owner_pubkey: OwnerPubkey,
@@ -766,9 +770,22 @@ impl SessionManager {
         owner_pubkey: OwnerPubkey,
         incoming_roster: DeviceRoster,
     ) -> RosterSnapshotDecision {
+        self.apply_roster_for_owner_inner(owner_pubkey, incoming_roster, false)
+    }
+
+    fn apply_roster_for_owner_inner(
+        &mut self,
+        owner_pubkey: OwnerPubkey,
+        incoming_roster: DeviceRoster,
+        replace_existing: bool,
+    ) -> RosterSnapshotDecision {
         let user = self.user_record_mut(owner_pubkey);
         let current_roster = user.roster.as_ref();
-        let (decision, next_roster) = apply_roster_snapshot(current_roster, &incoming_roster);
+        let (decision, next_roster) = if replace_existing {
+            (RosterSnapshotDecision::Advanced, incoming_roster)
+        } else {
+            apply_roster_snapshot(current_roster, &incoming_roster)
+        };
 
         let previous_authorized = current_roster
             .map(authorized_device_set)

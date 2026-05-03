@@ -247,12 +247,21 @@ impl NdrRuntime {
             let mut rng = OsRng;
             let mut ctx = ProtocolContext::new(now, &mut rng);
             let mut state = self.state.lock().unwrap();
-            let local_roster = DeviceRoster::new(
-                now,
-                vec![AuthorizedDevice::new(device(self.our_public_key), now)],
-            );
-            state.core.apply_local_roster(local_roster);
+            let has_local_roster = state.core.snapshot().users.into_iter().any(|user| {
+                user.owner_pubkey == owner(self.owner_public_key) && user.roster.is_some()
+            });
             let invite = state.core.ensure_local_invite(&mut ctx)?.clone();
+            if !has_local_roster {
+                let created_at = invite.created_at;
+                let local_roster = DeviceRoster::new(
+                    created_at,
+                    vec![AuthorizedDevice::new(
+                        device(self.our_public_key),
+                        created_at,
+                    )],
+                );
+                state.core.apply_local_roster(local_roster);
+            }
             drop(state);
             self.publish_local_invite(&invite)?;
         }
@@ -703,7 +712,16 @@ impl NdrRuntime {
                 .collect(),
         );
         if owner_pubkey == self.owner_public_key {
-            state.core.apply_local_roster(roster);
+            if should_replace_provisional_local_roster(
+                &state.core.snapshot(),
+                self.owner_public_key,
+                self.our_public_key,
+                &roster,
+            ) {
+                state.core.replace_local_roster(roster);
+            } else {
+                state.core.apply_local_roster(roster);
+            }
         } else {
             state.core.observe_peer_roster(owner(owner_pubkey), roster);
         }
@@ -1922,6 +1940,35 @@ fn session_matches_sender(state: &SessionState, sender: DevicePubkey) -> bool {
     state.their_current_nostr_public_key == Some(sender)
         || state.their_next_nostr_public_key == Some(sender)
         || state.skipped_keys.contains_key(&sender)
+}
+
+fn should_replace_provisional_local_roster(
+    snapshot: &SessionManagerSnapshot,
+    owner_pubkey: PublicKey,
+    local_device_pubkey: PublicKey,
+    incoming_roster: &DeviceRoster,
+) -> bool {
+    let incoming_devices = incoming_roster.devices();
+    if incoming_devices.len() <= 1
+        || !incoming_devices
+            .iter()
+            .any(|entry| entry.device_pubkey == device(local_device_pubkey))
+    {
+        return false;
+    }
+
+    let Some(current_roster) = snapshot
+        .users
+        .iter()
+        .find(|user| user.owner_pubkey == owner(owner_pubkey))
+        .and_then(|user| user.roster.as_ref())
+    else {
+        return false;
+    };
+    let current_devices = current_roster.devices();
+    current_devices.len() == 1
+        && current_devices[0].device_pubkey == device(local_device_pubkey)
+        && current_roster.created_at > incoming_roster.created_at
 }
 
 fn owner(public_key: PublicKey) -> OwnerPubkey {
