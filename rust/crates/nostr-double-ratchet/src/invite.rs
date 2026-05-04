@@ -23,6 +23,8 @@ pub struct Invite {
     pub inviter_ephemeral_private_key: Option<[u8; 32]>,
     pub max_uses: Option<usize>,
     pub used_by: Vec<DevicePubkey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub used_response_contents: Vec<String>,
     pub created_at: UnixSeconds,
     pub inviter_owner_pubkey: Option<OwnerPubkey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +136,7 @@ impl Invite {
             inviter_ephemeral_private_key: Some(inviter_ephemeral_private_key),
             max_uses,
             used_by: Vec::new(),
+            used_response_contents: Vec::new(),
             created_at: ctx.now,
             inviter_owner_pubkey,
             purpose: None,
@@ -325,6 +328,9 @@ impl Invite {
         )?;
 
         let payload: InviteResponsePayload = serde_json::from_str(&dh_decrypted)?;
+        if self.used_response_contents.contains(&envelope.content) {
+            return Err(DomainError::InviteAlreadyUsed.into());
+        }
         self.ensure_accept_allowed(inner_event.pubkey)?;
         let session = Session::new_responder(
             ctx,
@@ -333,6 +339,7 @@ impl Invite {
             self.shared_secret,
         )?;
         self.record_use(inner_event.pubkey);
+        self.record_response_content(envelope.content.clone());
 
         Ok(InviteResponse {
             session,
@@ -348,7 +355,7 @@ impl Invite {
 
     fn ensure_accept_allowed(&self, invitee_public_key: DevicePubkey) -> Result<()> {
         if self.used_by.contains(&invitee_public_key) {
-            return Err(DomainError::InviteAlreadyUsed.into());
+            return Ok(());
         }
         if self
             .max_uses
@@ -365,6 +372,14 @@ impl Invite {
         }
         self.used_by.push(invitee_public_key);
         self.used_by.sort();
+    }
+
+    fn record_response_content(&mut self, content: String) {
+        if self.used_response_contents.contains(&content) {
+            return;
+        }
+        self.used_response_contents.push(content);
+        self.used_response_contents.sort();
     }
 }
 

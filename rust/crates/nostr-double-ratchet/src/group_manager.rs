@@ -1079,8 +1079,8 @@ where
     where
         R: RngCore + CryptoRng,
     {
-        let prepared =
-            session_manager.prepare_local_sibling_send_reusing_sessions(ctx, payload.clone())?;
+        let prepared = session_manager
+            .prepare_local_sibling_send_reusing_all_sessions(ctx, payload.clone())?;
         let pending_fanouts = if prepared.relay_gaps.is_empty() {
             Vec::new()
         } else {

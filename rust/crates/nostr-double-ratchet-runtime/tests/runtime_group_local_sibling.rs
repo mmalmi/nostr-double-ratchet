@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use nostr::{Event, Keys, PublicKey};
 use nostr_double_ratchet_runtime::{
     AuthorizedDevice, DevicePubkey, DeviceRoster, GroupIncomingEvent, Invite, NdrRuntime,
-    OwnerPubkey, SessionManagerEvent, UnixSeconds,
+    OwnerPubkey, SessionManagerEvent, UnixSeconds, MESSAGE_EVENT_KIND,
 };
 
+#[derive(Clone)]
 struct Published {
     event: Event,
     target_device_id: Option<String>,
@@ -164,17 +167,14 @@ fn sender_key_group_create_syncs_to_linked_runtime_device() {
     deliver(&seed_bob, &alice_linked);
 
     alice_primary
-        .send_text(
-            charlie_owner.public_key(),
-            "seed charlie".to_string(),
-            None,
-        )
+        .send_text(charlie_owner.public_key(), "seed charlie".to_string(), None)
         .expect("seed charlie");
     let seed_charlie = drain_published(&alice_primary, &alice_primary_device);
     deliver(&seed_charlie, &charlie);
     deliver(&seed_charlie, &alice_linked);
 
-    let alice_devices = alice_primary.known_device_identity_pubkeys_for_owner(alice_owner.public_key());
+    let alice_devices =
+        alice_primary.known_device_identity_pubkeys_for_owner(alice_owner.public_key());
     assert!(
         alice_devices.contains(&alice_linked_device.public_key()),
         "primary runtime should still know linked device in local roster; devices={:?}",
@@ -191,9 +191,7 @@ fn sender_key_group_create_syncs_to_linked_runtime_device() {
             .and_then(|user| {
                 user.devices
                     .into_iter()
-                    .find(|record| {
-                        record.device_pubkey == device(alice_linked_device.public_key())
-                    })
+                    .find(|record| record.device_pubkey == device(alice_linked_device.public_key()))
                     .map(|record| {
                         usize::from(record.active_session.is_some())
                             + record.inactive_sessions.len()
@@ -201,9 +199,9 @@ fn sender_key_group_create_syncs_to_linked_runtime_device() {
             })
             .unwrap_or_default()
     });
-    assert_eq!(
-        linked_session_count, 1,
-        "direct sender-copy fanout should reuse the linked-device session instead of creating duplicate invite sessions"
+    assert!(
+        (1..=2).contains(&linked_session_count),
+        "direct sender-copy fanout may refresh a one-way linked-device bootstrap, but should keep the session set bounded; count={linked_session_count}"
     );
 
     let created = alice_primary
@@ -213,6 +211,10 @@ fn sender_key_group_create_syncs_to_linked_runtime_device() {
         )
         .expect("create group");
     let group_events = drain_published(&alice_primary, &alice_primary_device);
+    let linked_subscribed_authors = alice_linked
+        .get_all_message_push_author_pubkeys()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let linked_device_hex = alice_linked_device.public_key().to_hex();
     let linked_target_count = group_events
         .iter()
@@ -229,7 +231,27 @@ fn sender_key_group_create_syncs_to_linked_runtime_device() {
 
     let _ = deliver(&group_events, &bob);
     let _ = deliver(&group_events, &charlie);
-    let linked_events = deliver(&group_events, &alice_linked);
+    let linked_visible_events = group_events
+        .iter()
+        .filter(|published| {
+            u32::from(published.event.kind.as_u16()) == MESSAGE_EVENT_KIND
+                && linked_subscribed_authors.contains(&published.event.pubkey)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        !linked_visible_events.is_empty(),
+        "group local-sibling sync must include at least one event from an author already visible to the linked device subscription; subscribed={:?} event_authors={:?}",
+        linked_subscribed_authors
+            .iter()
+            .map(PublicKey::to_hex)
+            .collect::<Vec<_>>(),
+        group_events
+            .iter()
+            .map(|published| published.event.pubkey.to_hex())
+            .collect::<Vec<_>>()
+    );
+    let linked_events = deliver(&linked_visible_events, &alice_linked);
 
     assert!(
         linked_events

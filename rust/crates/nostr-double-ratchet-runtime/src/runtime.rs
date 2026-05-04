@@ -1321,7 +1321,9 @@ impl NdrRuntime {
                 Some(payload) => Some(
                     state
                         .core
-                        .prepare_local_sibling_send_reusing_sessions(&mut ctx, payload)?,
+                        .prepare_local_sibling_send_refreshing_one_way_sessions(
+                            &mut ctx, payload,
+                        )?,
                 ),
                 None => None,
             };
@@ -1614,7 +1616,7 @@ impl NdrRuntime {
                     }
                     GroupPendingFanout::LocalSiblings { payload } => state
                         .core
-                        .prepare_local_sibling_send_reusing_sessions(&mut ctx, payload.clone()),
+                        .prepare_local_sibling_send_reusing_all_sessions(&mut ctx, payload.clone()),
                 }
             };
 

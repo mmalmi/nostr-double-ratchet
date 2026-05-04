@@ -1,8 +1,9 @@
 use nostr::{Event, Keys};
 use nostr_double_ratchet::GroupIncomingEvent;
 use nostr_double_ratchet_runtime::{
-    AppKeys, DeviceEntry, InMemoryStorage, NdrRuntime, SessionManagerEvent, StorageAdapter,
-    GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND, MESSAGE_EVENT_KIND,
+    nostr_codec, AppKeys, DeviceEntry, InMemoryStorage, NdrRuntime, SessionManagerEvent,
+    StorageAdapter, GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
+    MESSAGE_EVENT_KIND,
 };
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -127,7 +128,7 @@ fn runtime_sender_copy_from_restored_same_owner_device_decrypts_with_conversatio
     fresh.ingest_app_keys_snapshot(alice_owner.public_key(), alice_app_keys, roster_created_at);
     fresh.ingest_app_keys_snapshot(bob_owner.public_key(), bob_app_keys, roster_created_at);
     fresh.setup_user(bob_owner.public_key()).unwrap();
-    fresh.process_received_event(old_invite);
+    fresh.process_received_event(old_invite.clone());
     fresh.process_received_event(bob_invite);
     let _ = published_events(&fresh);
 
@@ -137,6 +138,18 @@ fn runtime_sender_copy_from_restored_same_owner_device_decrypts_with_conversatio
         .unwrap();
     assert_eq!(event_ids.len(), 2);
     let outgoing = published_events(&fresh);
+    let old_invite = nostr_codec::parse_invite_event(&old_invite).unwrap();
+    assert!(
+        outgoing.iter().any(|event| {
+            event.kind.as_u16() as u32 == INVITE_RESPONSE_KIND
+                && event.tags.iter().any(|tag| {
+                    tag.as_slice().first().map(String::as_str) == Some("p")
+                        && tag.as_slice().get(1)
+                            == Some(&old_invite.inviter_ephemeral_public_key.to_string())
+                })
+        }),
+        "fresh same-owner sender copy should publish an invite response for the old device"
+    );
     assert_eq!(
         outgoing
             .iter()
@@ -170,6 +183,63 @@ fn runtime_sender_copy_from_restored_same_owner_device_decrypts_with_conversatio
     assert_eq!(
         decrypted,
         Some((alice_owner.public_key(), Some(bob_owner.public_key())))
+    );
+}
+
+#[test]
+fn runtime_sender_copy_bootstraps_old_roster_device_when_restored_device_is_deferred() {
+    let alice_owner = Keys::generate();
+    let alice_old_device = Keys::generate();
+    let alice_fresh_device = Keys::generate();
+    let bob_owner = Keys::generate();
+    let bob_device = Keys::generate();
+
+    let old = runtime(&alice_old_device, alice_owner.public_key(), "alice-old");
+    let fresh = runtime(&alice_fresh_device, alice_owner.public_key(), "alice-fresh");
+    let bob = runtime(&bob_device, bob_owner.public_key(), "bob");
+
+    old.init().unwrap();
+    fresh.init().unwrap();
+    bob.init().unwrap();
+
+    let old_invite_event = first_event_of_kind(&published_events(&old), INVITE_EVENT_KIND);
+    let old_invite = nostr_codec::parse_invite_event(&old_invite_event).unwrap();
+    let bob_invite = first_event_of_kind(&published_events(&bob), INVITE_EVENT_KIND);
+    let _ = published_events(&fresh);
+
+    let alice_app_keys = AppKeys::new(vec![DeviceEntry::new(alice_old_device.public_key(), 1)]);
+    let bob_app_keys = AppKeys::new(vec![DeviceEntry::new(bob_device.public_key(), 1)]);
+    let roster_created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_add(1);
+    fresh.ingest_app_keys_snapshot(alice_owner.public_key(), alice_app_keys, roster_created_at);
+    fresh.ingest_app_keys_snapshot(bob_owner.public_key(), bob_app_keys, roster_created_at);
+    fresh.setup_user(bob_owner.public_key()).unwrap();
+    fresh.process_received_event(old_invite_event);
+    fresh.process_received_event(bob_invite);
+    let _ = published_events(&fresh);
+
+    let (_, event_ids) = fresh
+        .send_text_with_inner_id(
+            bob_owner.public_key(),
+            "deferred restored device sender copy".to_string(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(event_ids.len(), 2);
+    let outgoing = published_events(&fresh);
+    assert!(
+        outgoing.iter().any(|event| {
+            event.kind.as_u16() as u32 == INVITE_RESPONSE_KIND
+                && event.tags.iter().any(|tag| {
+                    tag.as_slice().first().map(String::as_str) == Some("p")
+                        && tag.as_slice().get(1)
+                            == Some(&old_invite.inviter_ephemeral_public_key.to_string())
+                })
+        }),
+        "deferred restored sender copy should publish an invite response for the old device"
     );
 }
 

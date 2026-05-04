@@ -221,7 +221,9 @@ fn prerelease_runtime_group_membership_admin_and_restart_flow() {
         .into_iter()
         .find(|group| group.group_id == group_id)
         .expect("charlie group after admin");
-    assert!(charlie_group.admins.contains(&owner(charlie_owner.public_key())));
+    assert!(charlie_group
+        .admins
+        .contains(&owner(charlie_owner.public_key())));
 
     alice
         .remove_group_member(&group_id, bob_owner.public_key())
@@ -256,7 +258,5 @@ fn prerelease_runtime_group_membership_admin_and_restart_flow() {
         .find(|group| group.group_id == group_id)
         .expect("restored group snapshot");
     assert!(!restored.members.contains(&owner(bob_owner.public_key())));
-    assert!(restored
-        .admins
-        .contains(&owner(charlie_owner.public_key())));
+    assert!(restored.admins.contains(&owner(charlie_owner.public_key())));
 }

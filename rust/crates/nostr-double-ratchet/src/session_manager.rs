@@ -1,5 +1,5 @@
 use crate::{
-    AuthorizedDevice, DevicePubkey, DeviceRoster, DomainError, Invite, InviteResponse,
+    AuthorizedDevice, DevicePubkey, DeviceRoster, DomainError, Error, Invite, InviteResponse,
     InviteResponseEnvelope, MessageEnvelope, OwnerPubkey, ProtocolContext, Result,
     RosterSnapshotDecision, Session, SessionState, UnixSeconds,
 };
@@ -32,6 +32,7 @@ struct DeviceRecord {
     stale_since: Option<UnixSeconds>,
     claimed_owner_pubkey: Option<OwnerPubkey>,
     public_invite: Option<Invite>,
+    invite_response_generated: bool,
     active_session: Option<Session>,
     inactive_sessions: Vec<Session>,
     last_activity: Option<UnixSeconds>,
@@ -62,6 +63,8 @@ pub struct DeviceRecordSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_owner_pubkey: Option<OwnerPubkey>,
     pub public_invite: Option<Invite>,
+    #[serde(default)]
+    pub invite_response_generated: bool,
     pub active_session: Option<SessionState>,
     pub inactive_sessions: Vec<SessionState>,
     pub last_activity: Option<UnixSeconds>,
@@ -285,6 +288,7 @@ impl SessionManager {
             record.authorized = true;
             record.is_stale = false;
         }
+        record.invite_response_generated = true;
         record.upsert_session(session, ctx.now);
 
         Ok(Some(ProcessedInviteResponse {
@@ -331,7 +335,7 @@ impl SessionManager {
     where
         R: RngCore + CryptoRng,
     {
-        self.prepare_local_sibling_send_inner(ctx, payload, true)
+        self.prepare_local_sibling_send_inner(ctx, payload, false)
     }
 
     pub fn prepare_local_sibling_send_reusing_sessions<R>(
@@ -345,11 +349,80 @@ impl SessionManager {
         self.prepare_local_sibling_send_inner(ctx, payload, false)
     }
 
+    pub fn prepare_local_sibling_send_refreshing_one_way_sessions<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        payload: Vec<u8>,
+    ) -> Result<PreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.prepare_local_sibling_send_inner(ctx, payload, true)
+    }
+
+    pub fn prepare_local_sibling_send_reusing_all_sessions<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        payload: Vec<u8>,
+    ) -> Result<PreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mut targets = BTreeSet::new();
+        self.collect_local_sibling_targets(&mut targets);
+
+        let mut deliveries = Vec::new();
+        let mut invite_responses = Vec::new();
+        let mut relay_gaps = Vec::new();
+
+        for target in targets {
+            let mut target_deliveries = self.prepare_device_deliveries_for_all_send_sessions(
+                ctx,
+                target.owner_pubkey,
+                target.device_pubkey,
+                &payload,
+            )?;
+            if target_deliveries.is_empty() {
+                match self.prepare_device_delivery(
+                    ctx,
+                    target.owner_pubkey,
+                    target.device_pubkey,
+                    &payload,
+                    false,
+                )? {
+                    Some((delivery, maybe_response)) => {
+                        target_deliveries.push(delivery);
+                        if let Some(response) = maybe_response {
+                            invite_responses.push(response);
+                        }
+                    }
+                    None => {
+                        relay_gaps.push(RelayGap::MissingDeviceInvite {
+                            owner_pubkey: target.owner_pubkey,
+                            device_pubkey: target.device_pubkey,
+                        });
+                    }
+                }
+            }
+            deliveries.extend(target_deliveries);
+        }
+
+        relay_gaps.sort();
+
+        Ok(PreparedSend {
+            recipient_owner: self.local_owner_pubkey,
+            payload,
+            deliveries,
+            invite_responses,
+            relay_gaps,
+        })
+    }
+
     fn prepare_local_sibling_send_inner<R>(
         &mut self,
         ctx: &mut ProtocolContext<'_, R>,
         payload: Vec<u8>,
-        prefer_public_invite: bool,
+        refresh_one_way_bootstrap: bool,
     ) -> Result<PreparedSend>
     where
         R: RngCore + CryptoRng,
@@ -367,7 +440,7 @@ impl SessionManager {
                 target.owner_pubkey,
                 target.device_pubkey,
                 &payload,
-                prefer_public_invite,
+                refresh_one_way_bootstrap,
             )? {
                 Some((delivery, maybe_response)) => {
                     deliveries.push(delivery);
@@ -516,6 +589,7 @@ impl SessionManager {
         let record = user.device_record_mut(device_pubkey, now);
         record.authorized = true;
         record.is_stale = false;
+        record.invite_response_generated = true;
         record.upsert_session(Session::from_state(state), now);
     }
 
@@ -525,12 +599,13 @@ impl SessionManager {
         owner_pubkey: OwnerPubkey,
         device_pubkey: DevicePubkey,
         payload: &[u8],
-        prefer_public_invite: bool,
+        refresh_one_way_bootstrap: bool,
     ) -> Result<Option<(Delivery, Option<InviteResponseEnvelope>)>>
     where
         R: RngCore + CryptoRng,
     {
         let claimed_owner = Some(self.local_owner_pubkey);
+        let local_owner_pubkey = self.local_owner_pubkey;
         let local_device_pubkey = self.local_device_pubkey;
         let local_device_secret_key = self.local_device_secret_key;
         let user = self.user_record_mut(owner_pubkey);
@@ -540,31 +615,51 @@ impl SessionManager {
             return Ok(None);
         }
 
-        if prefer_public_invite {
-            if let Some(public_invite) = record.public_invite.clone() {
-                let (mut session, invite_response) = public_invite.accept_with_owner_context(
-                    ctx,
-                    local_device_pubkey,
-                    local_device_secret_key,
-                    claimed_owner,
-                )?;
-                let envelope = session
-                    .apply_send(session.plan_send(payload, ctx.now)?)
-                    .envelope;
-                record.upsert_session(session, ctx.now);
+        let source = record.best_send_session_source();
+        let should_refresh_local_sibling_bootstrap = refresh_one_way_bootstrap
+            && owner_pubkey == local_owner_pubkey
+            && device_pubkey != local_device_pubkey
+            && record.public_invite.is_some()
+            && source
+                .as_ref()
+                .and_then(|source| record.session_for_send_source(source))
+                .is_some_and(is_one_way_bootstrap_session);
 
-                return Ok(Some((
-                    Delivery {
-                        owner_pubkey,
-                        device_pubkey,
-                        envelope,
-                    },
-                    Some(invite_response),
-                )));
+        if should_refresh_local_sibling_bootstrap {
+            let public_invite = record
+                .public_invite
+                .clone()
+                .expect("checked public invite presence");
+            match public_invite.accept_with_owner_context(
+                ctx,
+                local_device_pubkey,
+                local_device_secret_key,
+                claimed_owner,
+            ) {
+                Ok((mut session, invite_response)) => {
+                    let envelope = session
+                        .apply_send(session.plan_send(payload, ctx.now)?)
+                        .envelope;
+                    record.invite_response_generated = true;
+                    record.upsert_session(session, ctx.now);
+
+                    return Ok(Some((
+                        Delivery {
+                            owner_pubkey,
+                            device_pubkey,
+                            envelope,
+                        },
+                        Some(invite_response),
+                    )));
+                }
+                Err(Error::Domain(
+                    DomainError::InviteAlreadyUsed | DomainError::InviteExhausted,
+                )) => {}
+                Err(error) => return Err(error),
             }
         }
 
-        if let Some(source) = record.best_send_session_source() {
+        if let Some(source) = source {
             let plan = match source {
                 SendSessionSource::Active => record
                     .active_session
@@ -608,15 +703,22 @@ impl SessionManager {
             return Ok(None);
         };
 
-        let (mut session, invite_response) = public_invite.accept_with_owner_context(
+        let (mut session, invite_response) = match public_invite.accept_with_owner_context(
             ctx,
             local_device_pubkey,
             local_device_secret_key,
             claimed_owner,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(Error::Domain(DomainError::InviteAlreadyUsed | DomainError::InviteExhausted)) => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
         let envelope = session
             .apply_send(session.plan_send(payload, ctx.now)?)
             .envelope;
+        record.invite_response_generated = true;
         record.upsert_session(session, ctx.now);
 
         Ok(Some((
@@ -627,6 +729,58 @@ impl SessionManager {
             },
             Some(invite_response),
         )))
+    }
+
+    fn prepare_device_deliveries_for_all_send_sessions<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        owner_pubkey: OwnerPubkey,
+        device_pubkey: DevicePubkey,
+        payload: &[u8],
+    ) -> Result<Vec<Delivery>>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let user = self.user_record_mut(owner_pubkey);
+        let record = user.device_record_mut(device_pubkey, ctx.now);
+
+        if !record.authorized || record.is_stale {
+            return Ok(Vec::new());
+        }
+
+        let mut deliveries = Vec::new();
+
+        if let Some(active_session) = record.active_session.as_mut() {
+            if active_session.can_send() {
+                let plan = active_session.plan_send(payload, ctx.now)?;
+                let envelope = active_session.apply_send(plan).envelope;
+                deliveries.push(Delivery {
+                    owner_pubkey,
+                    device_pubkey,
+                    envelope,
+                });
+            }
+        }
+
+        let inactive_sessions = std::mem::take(&mut record.inactive_sessions);
+        for mut session in inactive_sessions {
+            if session.can_send() {
+                let plan = session.plan_send(payload, ctx.now)?;
+                let envelope = session.apply_send(plan).envelope;
+                deliveries.push(Delivery {
+                    owner_pubkey,
+                    device_pubkey,
+                    envelope,
+                });
+            }
+            record.upsert_session(session, ctx.now);
+        }
+
+        if !deliveries.is_empty() {
+            record.last_activity = Some(ctx.now);
+        }
+
+        Ok(deliveries)
     }
 
     fn prepare_send_inner<R>(
@@ -970,6 +1124,7 @@ impl DeviceRecord {
             stale_since: None,
             claimed_owner_pubkey: None,
             public_invite: None,
+            invite_response_generated: false,
             active_session: None,
             inactive_sessions: Vec::new(),
             last_activity: None,
@@ -985,6 +1140,7 @@ impl DeviceRecord {
             stale_since: snapshot.stale_since,
             claimed_owner_pubkey: snapshot.claimed_owner_pubkey,
             public_invite: snapshot.public_invite,
+            invite_response_generated: snapshot.invite_response_generated,
             active_session: snapshot.active_session.map(Session::from_state),
             inactive_sessions: snapshot
                 .inactive_sessions
@@ -1004,6 +1160,7 @@ impl DeviceRecord {
             stale_since: self.stale_since,
             claimed_owner_pubkey: self.claimed_owner_pubkey,
             public_invite: self.public_invite.clone(),
+            invite_response_generated: self.invite_response_generated,
             active_session: self
                 .active_session
                 .as_ref()
@@ -1041,6 +1198,13 @@ impl DeviceRecord {
         }
 
         best.map(|(source, _)| source)
+    }
+
+    fn session_for_send_source(&self, source: &SendSessionSource) -> Option<&Session> {
+        match source {
+            SendSessionSource::Active => self.active_session.as_ref(),
+            SendSessionSource::Inactive(index) => self.inactive_sessions.get(*index),
+        }
     }
 
     fn upsert_session(&mut self, session: Session, now: UnixSeconds) {
@@ -1098,6 +1262,7 @@ impl DeviceRecord {
                 self.public_invite = Some(public_invite);
             }
         }
+        self.invite_response_generated |= other.invite_response_generated;
 
         if let Some(session) = other.active_session.take() {
             self.upsert_session(session, now);
@@ -1218,6 +1383,11 @@ fn session_priority(session: &Session) -> (u8, u32, u32) {
         session.state.receiving_chain_message_number,
         session.state.sending_chain_message_number,
     )
+}
+
+fn is_one_way_bootstrap_session(session: &Session) -> bool {
+    session.state.receiving_chain_key.is_none()
+        && session.state.their_current_nostr_public_key.is_none()
 }
 
 fn merge_created_at(current: UnixSeconds, observed: UnixSeconds) -> UnixSeconds {
