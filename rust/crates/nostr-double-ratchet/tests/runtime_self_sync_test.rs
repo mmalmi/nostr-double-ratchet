@@ -55,15 +55,35 @@ fn first_event_of_kind(events: &[Event], kind: u32) -> Event {
         .expect("event kind")
 }
 
+fn is_group_sender_key_outer_event(event: &Event) -> bool {
+    event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND
+        && !event.tags.iter().any(|tag| {
+            tag.as_slice()
+                .first()
+                .is_some_and(|value| value == "header")
+        })
+}
+
+fn first_group_sender_key_outer_event(events: &[Event]) -> Event {
+    events
+        .iter()
+        .find(|event| is_group_sender_key_outer_event(event))
+        .cloned()
+        .expect("group sender-key outer event")
+}
+
 fn deliver_group_related_events(
     receiver: &NdrRuntime,
     events: Vec<Event>,
 ) -> Vec<GroupIncomingEvent> {
     let mut group_events = Vec::new();
     for event in events {
-        if event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND {
-            group_events.extend(receiver.group_handle_outer_event(&event));
-            continue;
+        if is_group_sender_key_outer_event(&event) {
+            let handled = receiver.group_handle_outer_event(&event);
+            if !handled.is_empty() {
+                group_events.extend(handled);
+                continue;
+            }
         }
         receiver.process_received_event(event);
         for runtime_event in receiver.drain_events() {
@@ -418,7 +438,7 @@ fn runtime_replays_prepared_group_sender_key_publish_after_restart_before_app_dr
     let replayed = published_events(&restarted);
     let replayed_sender_key_ids = replayed
         .iter()
-        .filter(|event| event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND)
+        .filter(|event| is_group_sender_key_outer_event(event))
         .map(|event| event.id.to_string())
         .collect::<Vec<_>>();
 
@@ -539,7 +559,7 @@ fn runtime_sender_key_distribution_gap_retries_after_invite_without_reencrypting
     assert_eq!(event_ids.len(), 1);
     let initial_group_outers = published_events(&alice)
         .into_iter()
-        .filter(|event| event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND)
+        .filter(|event| is_group_sender_key_outer_event(event))
         .collect::<Vec<_>>();
     assert_eq!(initial_group_outers.len(), 1);
     assert_eq!(initial_group_outers[0].id.to_string(), event_ids[0]);
@@ -571,7 +591,7 @@ fn runtime_sender_key_distribution_gap_retries_after_invite_without_reencrypting
     assert!(
         !retried
             .iter()
-            .any(|event| event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND),
+            .any(|event| is_group_sender_key_outer_event(event)),
         "retrying missing pairwise sender-key distribution must not re-encrypt the outer group message"
     );
 
@@ -653,7 +673,7 @@ fn runtime_queues_sender_key_outer_until_required_revision_arrives() {
         .send_group_message(&created.group.group_id, body.clone(), None)
         .expect("send group message at revision 2");
     assert_eq!(ids.len(), 1);
-    let outer = first_event_of_kind(&published_events(&alice), GROUP_SENDER_KEY_MESSAGE_KIND);
+    let outer = first_group_sender_key_outer_event(&published_events(&alice));
 
     assert!(
         bob.group_handle_outer_event(&outer).is_empty(),
@@ -672,7 +692,7 @@ fn runtime_queues_sender_key_outer_until_required_revision_arrives() {
 }
 
 #[test]
-fn runtime_queues_pairwise_group_payload_until_required_revision_arrives() {
+fn runtime_applies_newer_pairwise_group_metadata_snapshot_without_base_revision() {
     let alice_owner = Keys::generate();
     let alice_device = Keys::generate();
     let bob_owner = Keys::generate();
@@ -722,8 +742,16 @@ fn runtime_queues_pairwise_group_payload_until_required_revision_arrives() {
 
     let early = deliver_group_related_events(&bob, revision_3_events);
     assert!(
-        early.is_empty(),
-        "future pairwise group payload should be queued until base revision arrives"
+        early.iter().any(|event| {
+            matches!(
+                event,
+                GroupIncomingEvent::MetadataUpdated(group)
+                    if group.group_id == created.group.group_id
+                        && group.revision == 3
+                        && group.name == "revision 3"
+            )
+        }),
+        "newer metadata snapshots should apply without waiting for the missing base revision"
     );
     let replayed = deliver_group_related_events(&bob, revision_2_events);
     assert!(
@@ -736,6 +764,6 @@ fn runtime_queues_pairwise_group_payload_until_required_revision_arrives() {
                         && group.name == "revision 3"
             )
         }),
-        "queued pairwise revision should replay after the missing base revision arrives"
+        "older metadata snapshots should not roll back current group state"
     );
 }
