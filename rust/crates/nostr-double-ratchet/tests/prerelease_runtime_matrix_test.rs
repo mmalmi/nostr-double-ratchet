@@ -62,6 +62,15 @@ fn first_event_of_kind(events: &[Event], kind: u32) -> Event {
         .expect("event kind")
 }
 
+fn is_group_sender_key_outer_event(event: &Event) -> bool {
+    event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND
+        && !event.tags.iter().any(|tag| {
+            tag.as_slice()
+                .first()
+                .is_some_and(|value| value == "header")
+        })
+}
+
 fn owner(pubkey: PublicKey) -> OwnerPubkey {
     OwnerPubkey::from_bytes(pubkey.to_bytes())
 }
@@ -98,9 +107,10 @@ fn teach_receiver_sender_roster(
 
 fn deliver_group_related_events(receiver: &NdrRuntime, events: &[Event]) {
     for event in events {
-        if event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND {
-            let _ = receiver.group_handle_outer_event(event);
-            continue;
+        if is_group_sender_key_outer_event(event) {
+            if !receiver.group_handle_outer_event(event).is_empty() {
+                continue;
+            }
         }
         receiver.process_received_event(event.clone());
         for runtime_event in receiver.drain_events() {

@@ -161,11 +161,13 @@ pub trait GroupPayloadCodec: Clone {
 
     fn encode_sender_key_plaintext(
         &self,
+        ctx: GroupPayloadEncodeContext,
         plaintext: &GroupSenderKeyPlaintext,
     ) -> crate::Result<Vec<u8>>;
 
     fn decode_sender_key_plaintext(
         &self,
+        ctx: GroupSenderKeyPlaintextDecodeContext<'_>,
         payload: &[u8],
     ) -> crate::Result<Option<GroupSenderKeyPlaintext>>;
 }
@@ -190,6 +192,12 @@ pub struct GroupSenderKeyPlaintext {
     pub group_id: String,
     pub revision: u64,
     pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupSenderKeyPlaintextDecodeContext<'a> {
+    pub group_id: &'a str,
+    pub current_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

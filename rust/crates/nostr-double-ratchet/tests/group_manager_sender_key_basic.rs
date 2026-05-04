@@ -1,11 +1,11 @@
 mod support;
 
+use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use nostr_double_ratchet::{
     GroupIncomingEvent, GroupManagerSnapshot, GroupProtocol, GroupSenderKeyHandleResult,
     GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, Result, SessionManager, UnixSeconds,
 };
 use nostr_double_ratchet_nostr::NostrGroupManager as GroupManager;
-use serde_json::json;
 use support::{
     context, manager_device, manager_observe_invite_response, manager_public_device_invite,
     manager_receive_delivery, roster_for, session_manager, snapshot,
@@ -589,13 +589,15 @@ fn sender_key_valid_ciphertext_with_invalid_group_plaintext_does_not_burn_messag
         .find(|state| state.key_id() == key_id)
         .expect("sender-key state")
         .clone();
-    let forged_plaintext = serde_json::to_vec(&json!({
-        "wire_format_version": 1,
-        "group_id": fixture.group_id,
-        "revision": 999,
-        "body": [102, 111, 114, 103, 101, 100]
-    }))
-    .expect("forged plaintext json");
+    let forged_inner = EventBuilder::new(Kind::from(14), "forged")
+        .tags(vec![
+            Tag::parse(["l".to_string(), fixture.group_id.clone()]).unwrap(),
+            Tag::parse(["ms".to_string(), "1900043010000".to_string()]).unwrap(),
+            Tag::parse(["revision".to_string(), "999".to_string()]).unwrap(),
+        ])
+        .custom_created_at(Timestamp::from(1_900_043_010))
+        .build(sender_record.sender_event_pubkey.to_nostr().unwrap());
+    let forged_plaintext = serde_json::to_vec(&forged_inner).expect("forged plaintext json");
     let (message_number, ciphertext) = forged_sender_state
         .encrypt_to_bytes(&forged_plaintext)
         .expect("forge sender-key ciphertext");

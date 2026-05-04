@@ -4,9 +4,9 @@ use crate::{
     GroupPayloadCodec, GroupPayloadEncodeContext, GroupPendingFanout, GroupPreparedPublish,
     GroupPreparedSend, GroupProtocol, GroupReceivedMessage, GroupSenderKeyHandleResult,
     GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, GroupSenderKeyPlaintext,
-    GroupSenderKeyRecordSnapshot, GroupSnapshot, OwnerPubkey, ProtocolContext, Result,
-    SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent, SenderKeyState,
-    SessionManager, UnixSeconds,
+    GroupSenderKeyPlaintextDecodeContext, GroupSenderKeyRecordSnapshot, GroupSnapshot, OwnerPubkey,
+    ProtocolContext, Result, SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent,
+    SenderKeyState, SessionManager, UnixSeconds,
 };
 use rand::{CryptoRng, RngCore};
 use std::collections::{BTreeMap, BTreeSet};
@@ -126,6 +126,15 @@ where
 
     pub fn known_sender_event_pubkeys(&self) -> Vec<SenderEventPubkey> {
         self.sender_event_index.keys().copied().collect()
+    }
+
+    pub fn group_id_for_sender_event_pubkey(
+        &self,
+        sender_event_pubkey: SenderEventPubkey,
+    ) -> Option<String> {
+        self.sender_event_index
+            .get(&sender_event_pubkey)
+            .map(|id| id.group_id.clone())
     }
 
     pub fn create_group<R>(
@@ -749,7 +758,14 @@ where
         let plan = state.plan_decrypt(&content)?;
         let plaintext = plan.plaintext.clone();
 
-        let Some(plaintext) = self.payload_codec.decode_sender_key_plaintext(&plaintext)? else {
+        let Some(plaintext) = self.payload_codec.decode_sender_key_plaintext(
+            GroupSenderKeyPlaintextDecodeContext {
+                group_id: &group.group_id,
+                current_revision: group.revision,
+            },
+            &plaintext,
+        )?
+        else {
             return Ok(GroupSenderKeyHandleResult::Ignored);
         };
         if plaintext.group_id != group.group_id {
@@ -923,13 +939,14 @@ where
             .states
             .get_mut(&key_id)
             .ok_or_else(|| group_error("missing local sender-key state"))?;
-        let plaintext =
-            self.payload_codec
-                .encode_sender_key_plaintext(&GroupSenderKeyPlaintext {
-                    group_id: record.group_id.clone(),
-                    revision: record.revision,
-                    body,
-                })?;
+        let plaintext = self.payload_codec.encode_sender_key_plaintext(
+            encode_context(session_manager, ctx),
+            &GroupSenderKeyPlaintext {
+                group_id: record.group_id.clone(),
+                revision: record.revision,
+                body,
+            },
+        )?;
         let plan = state.plan_encrypt(&plaintext)?;
         let message_number = plan.message_number;
         let ciphertext = plan.ciphertext.clone();

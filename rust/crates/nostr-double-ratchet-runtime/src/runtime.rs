@@ -95,7 +95,7 @@ struct StoredRuntimeState {
     #[serde(default)]
     pending_prepared_publishes: Vec<PendingPreparedPublish>,
     #[serde(default)]
-    pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
+    pending_group_sender_key_messages: Vec<nostr_codec::ParsedGroupSenderKeyMessageEvent>,
     #[serde(default)]
     pending_group_pairwise_payloads: Vec<PendingGroupPairwisePayload>,
     #[serde(default)]
@@ -153,7 +153,7 @@ struct RuntimeState {
     core: SessionManager,
     group_manager: GroupManager,
     pending_prepared_publishes: Vec<PendingPreparedPublish>,
-    pending_group_sender_key_messages: Vec<GroupSenderKeyMessage>,
+    pending_group_sender_key_messages: Vec<nostr_codec::ParsedGroupSenderKeyMessageEvent>,
     pending_group_pairwise_payloads: Vec<PendingGroupPairwisePayload>,
     pending_group_fanouts: Vec<PendingGroupFanout>,
     pending_outbound: Vec<PendingOutbound>,
@@ -845,6 +845,19 @@ impl NdrRuntime {
             .collect()
     }
 
+    pub fn group_id_for_sender_event_pubkey(
+        &self,
+        sender_event_pubkey: PublicKey,
+    ) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .group_manager
+            .group_id_for_sender_event_pubkey(DevicePubkey::from_bytes(
+                sender_event_pubkey.to_bytes(),
+            ))
+    }
+
     pub fn group_outer_subscription_plan(&self) -> GroupOuterSubscriptionPlan {
         let authors = self.group_known_sender_event_pubkeys();
         GroupOuterSubscriptionPlan {
@@ -1083,7 +1096,16 @@ impl NdrRuntime {
     }
 
     pub fn group_handle_outer_event(&self, outer: &Event) -> Vec<GroupIncomingEvent> {
-        let Ok(message) = nostr_codec::parse_group_sender_key_message_event(outer) else {
+        let Ok(parsed) = nostr_codec::parse_group_sender_key_message_event(outer) else {
+            return Vec::new();
+        };
+        let Some(message) = self.group_sender_key_message_from_parsed(&parsed) else {
+            let mut state = self.state.lock().unwrap();
+            if !state.pending_group_sender_key_messages.contains(&parsed) {
+                state.pending_group_sender_key_messages.push(parsed);
+            }
+            drop(state);
+            let _ = self.persist_state();
             return Vec::new();
         };
         let mut state = self.state.lock().unwrap();
@@ -1098,16 +1120,16 @@ impl NdrRuntime {
                 vec![event]
             }
             Ok(GroupSenderKeyHandleResult::PendingDistribution { .. }) => {
-                if !state.pending_group_sender_key_messages.contains(&message) {
-                    state.pending_group_sender_key_messages.push(message);
+                if !state.pending_group_sender_key_messages.contains(&parsed) {
+                    state.pending_group_sender_key_messages.push(parsed);
                 }
                 drop(state);
                 let _ = self.persist_state();
                 Vec::new()
             }
             Ok(GroupSenderKeyHandleResult::PendingRevision { .. }) => {
-                if !state.pending_group_sender_key_messages.contains(&message) {
-                    state.pending_group_sender_key_messages.push(message);
+                if !state.pending_group_sender_key_messages.contains(&parsed) {
+                    state.pending_group_sender_key_messages.push(parsed);
                 }
                 drop(state);
                 let _ = self.persist_state();
@@ -1162,17 +1184,32 @@ impl NdrRuntime {
         let mut still_pending = Vec::new();
         {
             let mut state = self.state.lock().unwrap();
-            for message in pending {
+            for parsed in pending {
+                let Some(group_id) = state
+                    .group_manager
+                    .group_id_for_sender_event_pubkey(parsed.sender_event_pubkey)
+                else {
+                    still_pending.push(parsed);
+                    continue;
+                };
+                let message = GroupSenderKeyMessage {
+                    group_id,
+                    sender_event_pubkey: parsed.sender_event_pubkey,
+                    key_id: parsed.key_id,
+                    message_number: parsed.message_number,
+                    created_at: parsed.created_at,
+                    ciphertext: parsed.ciphertext.clone(),
+                };
                 match state
                     .group_manager
                     .handle_sender_key_message(message.clone())
                 {
                     Ok(GroupSenderKeyHandleResult::Event(event)) => events.push(event),
                     Ok(GroupSenderKeyHandleResult::PendingDistribution { .. }) => {
-                        still_pending.push(message)
+                        still_pending.push(parsed)
                     }
                     Ok(GroupSenderKeyHandleResult::PendingRevision { .. }) => {
-                        still_pending.push(message)
+                        still_pending.push(parsed)
                     }
                     Ok(GroupSenderKeyHandleResult::Ignored) => {}
                     Err(_) => {}
@@ -1181,6 +1218,26 @@ impl NdrRuntime {
             state.pending_group_sender_key_messages = still_pending;
         }
         events
+    }
+
+    fn group_sender_key_message_from_parsed(
+        &self,
+        parsed: &nostr_codec::ParsedGroupSenderKeyMessageEvent,
+    ) -> Option<GroupSenderKeyMessage> {
+        let group_id = self
+            .state
+            .lock()
+            .unwrap()
+            .group_manager
+            .group_id_for_sender_event_pubkey(parsed.sender_event_pubkey)?;
+        Some(GroupSenderKeyMessage {
+            group_id,
+            sender_event_pubkey: parsed.sender_event_pubkey,
+            key_id: parsed.key_id,
+            message_number: parsed.message_number,
+            created_at: parsed.created_at,
+            ciphertext: parsed.ciphertext.clone(),
+        })
     }
 
     pub fn drain_events(&self) -> Vec<SessionManagerEvent> {

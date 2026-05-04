@@ -1,16 +1,20 @@
 use nostr::{EventBuilder, Kind, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
-    Error, GroupPairwiseCommand, GroupPayloadCodec, GroupPayloadEncodeContext, GroupProtocol,
-    GroupSenderKeyPlaintext, GroupSnapshot, OwnerPubkey, Result, SenderKeyDistribution,
-    UnixSeconds,
+    DevicePubkey, Error, GroupPairwiseCommand, GroupPayloadCodec, GroupPayloadEncodeContext,
+    GroupProtocol, GroupSenderKeyPlaintext, GroupSenderKeyPlaintextDecodeContext, GroupSnapshot,
+    OwnerPubkey, Result, SenderKeyDistribution, UnixSeconds,
 };
 use serde::{Deserialize, Serialize};
 
 pub const GROUP_METADATA_KIND: u32 = 40;
+pub const GROUP_SENDER_KEY_DISTRIBUTION_KIND: u32 = 10446;
 
 const GROUP_WIRE_FORMAT_VERSION_V1: u8 = 1;
+const CHAT_MESSAGE_KIND: u32 = 14;
 const GROUP_LABEL_TAG: &str = "l";
+const KEY_TAG: &str = "key";
 const MS_TAG: &str = "ms";
+const REVISION_TAG: &str = "revision";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonGroupPayloadCodecV1;
@@ -96,11 +100,14 @@ struct MasterGroupMetadataContent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct GroupSenderKeyPlaintextV1 {
-    wire_format_version: u8,
+#[serde(rename_all = "camelCase")]
+struct SenderKeyDistributionContent {
     group_id: String,
-    revision: u64,
-    body: Vec<u8>,
+    key_id: u32,
+    chain_key: String,
+    iteration: u32,
+    created_at: UnixSeconds,
+    sender_event_pubkey: String,
 }
 
 impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
@@ -129,15 +136,16 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
                 body: body.clone(),
             }),
             GroupPairwiseCommand::SenderKeyDistribution { distribution } => {
-                encode_envelope(GroupPairwisePayloadV1::SenderKeyDistribution {
-                    distribution: distribution.clone(),
-                })
+                encode_sender_key_distribution(ctx, distribution)
             }
         }
     }
 
     fn decode_pairwise_command(&self, payload: &[u8]) -> Result<Option<GroupPairwiseCommand>> {
         if let Some(command) = decode_master_metadata_snapshot(payload)? {
+            return Ok(Some(command));
+        }
+        if let Some(command) = decode_sender_key_distribution(payload)? {
             return Ok(Some(command));
         }
 
@@ -147,32 +155,53 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
         if envelope.wire_format_version != GROUP_WIRE_FORMAT_VERSION_V1 {
             return Ok(None);
         }
-        Ok(Some(command_from_v1_payload(envelope.payload)?))
+        command_from_v1_payload(envelope.payload)
     }
 
-    fn encode_sender_key_plaintext(&self, plaintext: &GroupSenderKeyPlaintext) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&GroupSenderKeyPlaintextV1 {
-            wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
-            group_id: plaintext.group_id.clone(),
-            revision: plaintext.revision,
-            body: plaintext.body.clone(),
-        })?)
+    fn encode_sender_key_plaintext(
+        &self,
+        ctx: GroupPayloadEncodeContext,
+        plaintext: &GroupSenderKeyPlaintext,
+    ) -> Result<Vec<u8>> {
+        let content = String::from_utf8(plaintext.body.clone())
+            .map_err(|error| Error::Parse(error.to_string()))?;
+        let millis = ctx.created_at.get().saturating_mul(1000).to_string();
+        let revision = plaintext.revision.to_string();
+        let event = EventBuilder::new(Kind::from(CHAT_MESSAGE_KIND as u16), content)
+            .tags(vec![
+                tag([GROUP_LABEL_TAG, plaintext.group_id.as_str()])?,
+                tag([MS_TAG, millis.as_str()])?,
+                tag([REVISION_TAG, revision.as_str()])?,
+            ])
+            .custom_created_at(Timestamp::from(ctx.created_at.get()))
+            .build(ctx.local_device_pubkey.to_nostr()?);
+        Ok(serde_json::to_vec(&event)?)
     }
 
     fn decode_sender_key_plaintext(
         &self,
+        ctx: GroupSenderKeyPlaintextDecodeContext<'_>,
         payload: &[u8],
     ) -> Result<Option<GroupSenderKeyPlaintext>> {
-        let Ok(plaintext) = serde_json::from_slice::<GroupSenderKeyPlaintextV1>(payload) else {
+        let Ok(event) = serde_json::from_slice::<UnsignedEvent>(payload) else {
             return Ok(None);
         };
-        if plaintext.wire_format_version != GROUP_WIRE_FORMAT_VERSION_V1 {
+        if event.kind.as_u16() as u32 != CHAT_MESSAGE_KIND {
             return Ok(None);
         }
+        let Some(group_id) = first_tag_value(&event, GROUP_LABEL_TAG) else {
+            return Ok(None);
+        };
+        if group_id != ctx.group_id {
+            return Ok(None);
+        }
+        let revision = first_tag_value(&event, REVISION_TAG)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(ctx.current_revision);
         Ok(Some(GroupSenderKeyPlaintext {
-            group_id: plaintext.group_id,
-            revision: plaintext.revision,
-            body: plaintext.body,
+            group_id,
+            revision,
+            body: event.content.into_bytes(),
         }))
     }
 }
@@ -251,6 +280,82 @@ fn decode_master_metadata_snapshot(payload: &[u8]) -> Result<Option<GroupPairwis
     }))
 }
 
+fn encode_sender_key_distribution(
+    ctx: GroupPayloadEncodeContext,
+    distribution: &SenderKeyDistribution,
+) -> Result<Vec<u8>> {
+    let content = serde_json::to_string(&SenderKeyDistributionContent {
+        group_id: distribution.group_id.clone(),
+        key_id: distribution.key_id,
+        chain_key: hex::encode(distribution.chain_key),
+        iteration: distribution.iteration,
+        created_at: distribution.created_at,
+        sender_event_pubkey: distribution.sender_event_pubkey.to_string(),
+    })?;
+    let millis = ctx.created_at.get().saturating_mul(1000).to_string();
+    let key_id = distribution.key_id.to_string();
+    let event = EventBuilder::new(
+        Kind::from(GROUP_SENDER_KEY_DISTRIBUTION_KIND as u16),
+        content,
+    )
+    .tags(vec![
+        tag([GROUP_LABEL_TAG, distribution.group_id.as_str()])?,
+        tag([KEY_TAG, key_id.as_str()])?,
+        tag([MS_TAG, millis.as_str()])?,
+    ])
+    .custom_created_at(Timestamp::from(ctx.created_at.get()))
+    .build(ctx.local_device_pubkey.to_nostr()?);
+    Ok(serde_json::to_vec(&event)?)
+}
+
+fn decode_sender_key_distribution(payload: &[u8]) -> Result<Option<GroupPairwiseCommand>> {
+    let Ok(event) = serde_json::from_slice::<UnsignedEvent>(payload) else {
+        return Ok(None);
+    };
+    if event.kind.as_u16() as u32 != GROUP_SENDER_KEY_DISTRIBUTION_KIND {
+        return Ok(None);
+    }
+
+    let content = serde_json::from_str::<SenderKeyDistributionContent>(&event.content)?;
+    if content.group_id.is_empty() {
+        return Ok(None);
+    }
+    if let Some(tagged_group_id) = first_tag_value(&event, GROUP_LABEL_TAG) {
+        if tagged_group_id != content.group_id {
+            return Err(Error::Parse(
+                "sender-key distribution group id/tag mismatch".to_string(),
+            ));
+        }
+    }
+    if let Some(tagged_key_id) = first_tag_value(&event, KEY_TAG) {
+        let tagged_key_id = tagged_key_id
+            .parse::<u32>()
+            .map_err(|error| Error::Parse(error.to_string()))?;
+        if tagged_key_id != content.key_id {
+            return Err(Error::Parse(
+                "sender-key distribution key id/tag mismatch".to_string(),
+            ));
+        }
+    }
+    let chain_key =
+        hex::decode(&content.chain_key).map_err(|error| Error::Parse(error.to_string()))?;
+    let chain_key = <[u8; 32]>::try_from(chain_key.as_slice()).map_err(|_| {
+        Error::Parse("sender-key distribution chain key must be 32 bytes".to_string())
+    })?;
+    let sender_event_pubkey = parse_device_pubkey_hex(&content.sender_event_pubkey)?;
+
+    Ok(Some(GroupPairwiseCommand::SenderKeyDistribution {
+        distribution: SenderKeyDistribution {
+            group_id: content.group_id,
+            key_id: content.key_id,
+            sender_event_pubkey,
+            chain_key,
+            iteration: content.iteration,
+            created_at: content.created_at,
+        },
+    }))
+}
+
 fn encode_envelope(payload: GroupPairwisePayloadV1) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&GroupWireEnvelopeV1 {
         wire_format_version: GROUP_WIRE_FORMAT_VERSION_V1,
@@ -258,10 +363,12 @@ fn encode_envelope(payload: GroupPairwisePayloadV1) -> Result<Vec<u8>> {
     })?)
 }
 
-fn command_from_v1_payload(payload: GroupPairwisePayloadV1) -> Result<GroupPairwiseCommand> {
+fn command_from_v1_payload(
+    payload: GroupPairwisePayloadV1,
+) -> Result<Option<GroupPairwiseCommand>> {
     Ok(match payload {
         GroupPairwisePayloadV1::MetadataSnapshot { snapshot } => {
-            GroupPairwiseCommand::MetadataSnapshot { snapshot }
+            Some(GroupPairwiseCommand::MetadataSnapshot { snapshot })
         }
         GroupPairwisePayloadV1::CreateGroup {
             group_id,
@@ -280,7 +387,7 @@ fn command_from_v1_payload(payload: GroupPairwisePayloadV1) -> Result<GroupPairw
                     "create group base revision must be 0".to_string(),
                 ));
             }
-            GroupPairwiseCommand::MetadataSnapshot {
+            Some(GroupPairwiseCommand::MetadataSnapshot {
                 snapshot: GroupSnapshot {
                     group_id,
                     protocol,
@@ -292,7 +399,7 @@ fn command_from_v1_payload(payload: GroupPairwisePayloadV1) -> Result<GroupPairw
                     created_at,
                     updated_at,
                 },
-            }
+            })
         }
         GroupPairwisePayloadV1::SyncGroup {
             group_id,
@@ -304,7 +411,7 @@ fn command_from_v1_payload(payload: GroupPairwisePayloadV1) -> Result<GroupPairw
             admins,
             created_at,
             updated_at,
-        } => GroupPairwiseCommand::MetadataSnapshot {
+        } => Some(GroupPairwiseCommand::MetadataSnapshot {
             snapshot: GroupSnapshot {
                 group_id,
                 protocol,
@@ -316,19 +423,17 @@ fn command_from_v1_payload(payload: GroupPairwisePayloadV1) -> Result<GroupPairw
                 created_at,
                 updated_at,
             },
-        },
+        }),
         GroupPairwisePayloadV1::GroupMessage {
             group_id,
             revision,
             body,
-        } => GroupPairwiseCommand::GroupMessage {
+        } => Some(GroupPairwiseCommand::GroupMessage {
             group_id,
             revision,
             body,
-        },
-        GroupPairwisePayloadV1::SenderKeyDistribution { distribution } => {
-            GroupPairwiseCommand::SenderKeyDistribution { distribution }
-        }
+        }),
+        GroupPairwisePayloadV1::SenderKeyDistribution { .. } => None,
     })
 }
 
@@ -344,6 +449,13 @@ fn first_tag_value(event: &UnsignedEvent, key: &str) -> Option<String> {
 
 fn tag<const N: usize>(parts: [&str; N]) -> Result<Tag> {
     Tag::parse(parts.map(str::to_owned)).map_err(|error| Error::Parse(error.to_string()))
+}
+
+fn parse_device_pubkey_hex(value: &str) -> Result<DevicePubkey> {
+    let bytes = hex::decode(value).map_err(|error| Error::Parse(error.to_string()))?;
+    let bytes = <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| Error::Parse("expected 32-byte public key".to_string()))?;
+    Ok(DevicePubkey::from_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -481,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn sender_key_plaintext_roundtrips_through_versioned_json_envelope() {
+    fn sender_key_plaintext_roundtrips_through_old_inner_rumor() {
         let codec = JsonGroupPayloadCodecV1;
         let plaintext = GroupSenderKeyPlaintext {
             group_id: "group-1".to_string(),
@@ -489,16 +601,65 @@ mod tests {
             body: b"hello group".to_vec(),
         };
 
-        let encoded = codec.encode_sender_key_plaintext(&plaintext).unwrap();
+        let encoded = codec
+            .encode_sender_key_plaintext(encode_context(), &plaintext)
+            .unwrap();
+        let event = serde_json::from_slice::<UnsignedEvent>(&encoded).unwrap();
+        assert_eq!(event.kind.as_u16() as u32, CHAT_MESSAGE_KIND);
+        assert_eq!(event.content, "hello group");
+        assert_eq!(event.pubkey, device(9).to_nostr().unwrap());
+        assert_eq!(
+            first_tag_value(&event, GROUP_LABEL_TAG).as_deref(),
+            Some("group-1")
+        );
+        assert_eq!(first_tag_value(&event, REVISION_TAG).as_deref(), Some("3"));
 
         assert_eq!(
-            codec.decode_sender_key_plaintext(&encoded).unwrap(),
+            codec
+                .decode_sender_key_plaintext(
+                    GroupSenderKeyPlaintextDecodeContext {
+                        group_id: "group-1",
+                        current_revision: 3,
+                    },
+                    &encoded,
+                )
+                .unwrap(),
             Some(plaintext)
         );
     }
 
     #[test]
-    fn sender_key_distribution_command_roundtrips() {
+    fn sender_key_plaintext_decodes_old_ts_rumor_without_revision() {
+        let codec = JsonGroupPayloadCodecV1;
+        let event = EventBuilder::new(Kind::from(CHAT_MESSAGE_KIND as u16), "legacy")
+            .tags(vec![
+                tag([GROUP_LABEL_TAG, "group-1"]).unwrap(),
+                tag([MS_TAG, "12000"]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(12))
+            .build(device(7).to_nostr().unwrap());
+        let encoded = serde_json::to_vec(&event).unwrap();
+
+        assert_eq!(
+            codec
+                .decode_sender_key_plaintext(
+                    GroupSenderKeyPlaintextDecodeContext {
+                        group_id: "group-1",
+                        current_revision: 8,
+                    },
+                    &encoded,
+                )
+                .unwrap(),
+            Some(GroupSenderKeyPlaintext {
+                group_id: "group-1".to_string(),
+                revision: 8,
+                body: b"legacy".to_vec(),
+            })
+        );
+    }
+
+    #[test]
+    fn sender_key_distribution_command_encodes_old_10446_rumor() {
         let codec = JsonGroupPayloadCodecV1;
         let distribution = SenderKeyDistribution {
             group_id: "group-1".to_string(),
@@ -515,10 +676,52 @@ mod tests {
         let encoded = codec
             .encode_pairwise_command(encode_context(), &command)
             .unwrap();
+        let mut event = serde_json::from_slice::<UnsignedEvent>(&encoded).unwrap();
+        assert_eq!(
+            event.kind.as_u16() as u32,
+            GROUP_SENDER_KEY_DISTRIBUTION_KIND
+        );
+        assert_eq!(event.pubkey, device(9).to_nostr().unwrap());
+        assert_eq!(
+            first_tag_value(&event, GROUP_LABEL_TAG).as_deref(),
+            Some("group-1")
+        );
+        assert_eq!(first_tag_value(&event, KEY_TAG).as_deref(), Some("7"));
+        assert_eq!(first_tag_value(&event, MS_TAG).as_deref(), Some("12000"));
+        let content = serde_json::from_str::<serde_json::Value>(&event.content).unwrap();
+        assert_eq!(content["groupId"], "group-1");
+        assert_eq!(content["keyId"], 7);
+        assert_eq!(content["chainKey"], hex::encode([4; 32]));
+        assert_eq!(content["iteration"], 9);
+        assert_eq!(content["createdAt"], 11);
+        assert_eq!(content["senderEventPubkey"], device(3).to_string());
+
+        // The old plaintext pubkey is compatibility-only. Core identity comes from authenticated
+        // pairwise session context, so the codec must not depend on this field.
+        event.pubkey = device(5).to_nostr().unwrap();
+        let encoded = serde_json::to_vec(&event).unwrap();
 
         assert_eq!(
             codec.decode_pairwise_command(&encoded).unwrap(),
             Some(command)
         );
+    }
+
+    #[test]
+    fn current_sender_key_distribution_envelope_is_not_consumed() {
+        let codec = JsonGroupPayloadCodecV1;
+        let distribution = SenderKeyDistribution {
+            group_id: "group-1".to_string(),
+            key_id: 7,
+            sender_event_pubkey: device(3),
+            chain_key: [4; 32],
+            iteration: 9,
+            created_at: UnixSeconds(11),
+        };
+        let encoded =
+            encode_envelope(GroupPairwisePayloadV1::SenderKeyDistribution { distribution })
+                .unwrap();
+
+        assert_eq!(codec.decode_pairwise_command(&encoded).unwrap(), None);
     }
 }

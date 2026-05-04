@@ -1,5 +1,5 @@
 use crate::{
-    AuthorizedDevice, DevicePubkey, DeviceRoster, Error as CoreError, GroupSenderKeyMessage,
+    AuthorizedDevice, DevicePubkey, DeviceRoster, Error as CoreError,
     GroupSenderKeyMessageEnvelope, Invite, InviteResponseEnvelope, MessageEnvelope, OwnerPubkey,
     UnixSeconds,
 };
@@ -8,7 +8,7 @@ use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 use thiserror::Error;
 
 pub const MESSAGE_EVENT_KIND: u32 = 1060;
-pub const GROUP_SENDER_KEY_MESSAGE_KIND: u32 = 10447;
+pub const GROUP_SENDER_KEY_MESSAGE_KIND: u32 = MESSAGE_EVENT_KIND;
 pub const INVITE_EVENT_KIND: u32 = 30078;
 pub const INVITE_RESPONSE_KIND: u32 = 1059;
 pub const ROSTER_EVENT_KIND: u32 = 30078;
@@ -16,13 +16,19 @@ pub const ROSTER_EVENT_KIND: u32 = 30078;
 const ROSTER_D_TAG: &str = "double-ratchet/app-keys";
 const ROSTER_VERSION: &str = "1";
 const INVITE_LIST_LABEL: &str = "double-ratchet/invites";
-const GROUP_SENDER_KEY_PROTOCOL: &str = "group-sender-key";
-const GROUP_SENDER_KEY_VERSION: &str = "1";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedRosterEvent {
     pub owner_pubkey: OwnerPubkey,
     pub roster: DeviceRoster,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParsedGroupSenderKeyMessageEvent {
+    pub sender_event_pubkey: DevicePubkey,
+    pub key_id: u32,
+    pub message_number: u32,
+    pub created_at: UnixSeconds,
+    pub ciphertext: Vec<u8>,
 }
 
 #[derive(Error, Debug)]
@@ -108,43 +114,26 @@ pub fn group_sender_key_message_event(envelope: &GroupSenderKeyMessageEnvelope) 
         &envelope.ciphertext,
     );
     let unsigned = EventBuilder::new(Kind::from(GROUP_SENDER_KEY_MESSAGE_KIND as u16), content)
-        .tag(tag(["ndr-protocol", GROUP_SENDER_KEY_PROTOCOL])?)
-        .tag(tag(["ndr-version", GROUP_SENDER_KEY_VERSION])?)
-        .tag(tag(["l", &envelope.group_id])?)
-        .tag(tag(["key", &envelope.key_id.to_string()])?)
         .custom_created_at(Timestamp::from(envelope.created_at.get()))
         .build(public_key(envelope.sender_event_pubkey)?);
 
     Ok(unsigned.sign_with_keys(&author_keys)?)
 }
 
-pub fn parse_group_sender_key_message_event(event: &Event) -> Result<GroupSenderKeyMessage> {
+pub fn parse_group_sender_key_message_event(
+    event: &Event,
+) -> Result<ParsedGroupSenderKeyMessageEvent> {
     verify_event_kind(event, GROUP_SENDER_KEY_MESSAGE_KIND)?;
     event.verify()?;
-    if optional_tag_value(event, "ndr-protocol").as_deref() != Some(GROUP_SENDER_KEY_PROTOCOL) {
+    if optional_tag_value(event, "header").is_some() {
         return Err(Error::InvalidEvent(
-            "missing group sender-key protocol tag".to_string(),
-        ));
-    }
-    if optional_tag_value(event, "ndr-version").as_deref() != Some(GROUP_SENDER_KEY_VERSION) {
-        return Err(Error::InvalidEvent(
-            "unsupported group sender-key version".to_string(),
+            "pairwise message event is not a group sender-key outer event".to_string(),
         ));
     }
 
-    let group_id = required_tag_value(event, "l")?;
     let parsed = parse_group_sender_key_content(&event.content)?;
-    let tagged_key_id = required_tag_value(event, "key")?
-        .parse::<u32>()
-        .map_err(|e| Error::InvalidEvent(e.to_string()))?;
-    if tagged_key_id != parsed.0 {
-        return Err(Error::InvalidEvent(
-            "group sender-key key tag/content mismatch".to_string(),
-        ));
-    }
 
-    Ok(GroupSenderKeyMessage {
-        group_id,
+    Ok(ParsedGroupSenderKeyMessageEvent {
         sender_event_pubkey: DevicePubkey::from_bytes(event.pubkey.to_bytes()),
         key_id: parsed.0,
         message_number: parsed.1,
@@ -531,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn group_sender_key_message_event_roundtrip_uses_group_kind() {
+    fn group_sender_key_message_event_roundtrip_uses_old_message_kind() {
         let signer_secret = [22u8; 32];
         let sender_event_pubkey = DevicePubkey::from_bytes(
             Keys::new(secret_key_from_bytes(&signer_secret).unwrap())
@@ -549,9 +538,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(event.kind.as_u16() as u32, GROUP_SENDER_KEY_MESSAGE_KIND);
+        assert_eq!(event.kind.as_u16() as u32, MESSAGE_EVENT_KIND);
+        assert_eq!(GROUP_SENDER_KEY_MESSAGE_KIND, MESSAGE_EVENT_KIND);
+        assert!(event.tags.is_empty());
         let parsed = parse_group_sender_key_message_event(&event).unwrap();
-        assert_eq!(parsed.group_id, "group-1");
         assert_eq!(parsed.sender_event_pubkey, sender_event_pubkey);
         assert_eq!(parsed.key_id, 7);
         assert_eq!(parsed.message_number, 11);
