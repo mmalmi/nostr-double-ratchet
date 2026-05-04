@@ -51,11 +51,17 @@ if [[ -z "$DRY_RUN" ]]; then
     fi
 fi
 
-# Tier 1: Library (no internal dependencies)
-publish_crate "nostr-double-ratchet"
+# Tier 1: Core library. Uses --no-verify because dev-dependencies on
+# sibling workspace crates would otherwise fail to resolve until those
+# siblings are themselves published.
+publish_crate "nostr-double-ratchet" "--no-verify"
 
-# Tier 2: crates that depend on the library
-publish_crate "ndr-ffi"
+# Tier 2: leaf crates that only depend on the core library
+publish_crate "nostr-double-ratchet-pairwise-codec"
+publish_crate "nostr-double-ratchet-nostr"
+
+# Tier 3: runtime, depends on all of the above
+publish_crate "nostr-double-ratchet-runtime"
 
 echo ""
 echo "=========================================="

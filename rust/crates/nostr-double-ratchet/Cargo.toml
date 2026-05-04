@@ -22,9 +22,9 @@ base64.workspace = true
 rand.workspace = true
 
 [dev-dependencies]
-nostr-double-ratchet-nostr.workspace = true
-nostr-double-ratchet-pairwise-codec.workspace = true
-nostr-double-ratchet-runtime = { workspace = true, features = ["nearby"] }
+nostr-double-ratchet-nostr = { path = "../nostr-double-ratchet-nostr" }
+nostr-double-ratchet-pairwise-codec = { path = "../nostr-double-ratchet-pairwise-codec" }
+nostr-double-ratchet-runtime = { path = "../nostr-double-ratchet-runtime", features = ["nearby"] }
 tokio.workspace = true
 crossbeam-channel.workspace = true
 urlencoding.workspace = true
