@@ -1,36 +1,70 @@
 mod support;
 
-use nostr_double_ratchet::{DomainError, Error, GroupIncomingEvent, GroupProtocol, Result};
-use nostr_double_ratchet_nostr::NostrGroupManager as GroupManager;
+use nostr_double_ratchet::{
+    DevicePubkey, DomainError, Error, GroupIncomingEvent, GroupPairwiseCommand, GroupPayloadCodec,
+    GroupPayloadEncodeContext, GroupProtocol, GroupSnapshot, OwnerPubkey, Result, UnixSeconds,
+};
+use nostr_double_ratchet_nostr::{
+    group_codec::JsonGroupPayloadCodecV1, NostrGroupManager as GroupManager,
+};
 use support::{context, manager_device, roster_for, session_manager};
 
 fn create_remote_owned_group(
-    local_owner: nostr_double_ratchet::OwnerPubkey,
-    remote_owner: nostr_double_ratchet::OwnerPubkey,
+    local_owner: OwnerPubkey,
+    remote_owner: OwnerPubkey,
 ) -> Result<(GroupManager, String)> {
     let mut groups = GroupManager::new(local_owner);
-    let payload = serde_json::to_vec(&serde_json::json!({
-        "wire_format_version": 1,
-        "payload": {
-            "kind": "create_group",
-            "group_id": "group-1",
-            "protocol": "pairwise_fanout_v1",
-            "base_revision": 0,
-            "new_revision": 1,
-            "name": "Remote",
-            "created_by": remote_owner,
-            "members": [remote_owner, local_owner],
-            "admins": [remote_owner],
-            "created_at": 1_900_001_000u64,
-            "updated_at": 1_900_001_000u64
-        }
-    }))?;
+    let payload = metadata_payload(metadata_snapshot(
+        "group-1",
+        GroupProtocol::pairwise_fanout_v1(),
+        "Remote",
+        remote_owner,
+        vec![remote_owner, local_owner],
+        vec![remote_owner],
+        1,
+        1_900_001_000,
+    ))?;
     let event = groups.handle_incoming(remote_owner, &payload)?;
     assert!(matches!(
         event,
         Some(GroupIncomingEvent::MetadataUpdated(snapshot)) if snapshot.protocol == GroupProtocol::PairwiseFanoutV1
     ));
     Ok((groups, "group-1".to_string()))
+}
+
+fn metadata_snapshot(
+    group_id: &str,
+    protocol: GroupProtocol,
+    name: &str,
+    created_by: OwnerPubkey,
+    members: Vec<OwnerPubkey>,
+    admins: Vec<OwnerPubkey>,
+    revision: u64,
+    updated_at: u64,
+) -> GroupSnapshot {
+    GroupSnapshot {
+        group_id: group_id.to_string(),
+        protocol,
+        name: name.to_string(),
+        created_by,
+        members,
+        admins,
+        revision,
+        created_at: UnixSeconds(1_900_001_000),
+        updated_at: UnixSeconds(updated_at),
+    }
+}
+
+fn metadata_payload(snapshot: GroupSnapshot) -> Result<Vec<u8>> {
+    let codec = JsonGroupPayloadCodecV1;
+    let sender_device = DevicePubkey::from_bytes(snapshot.created_by.to_bytes());
+    codec.encode_pairwise_command(
+        GroupPayloadEncodeContext {
+            local_device_pubkey: sender_device,
+            created_at: snapshot.updated_at,
+        },
+        &GroupPairwiseCommand::MetadataSnapshot { snapshot },
+    )
 }
 
 #[test]
@@ -149,16 +183,16 @@ fn incoming_control_from_non_admin_and_wrong_revision_message_are_rejected() -> 
     let carol = manager_device(10, 101);
     let (mut groups, group_id) = create_remote_owned_group(alice.owner_pubkey, bob.owner_pubkey)?;
 
-    let unauthorized_rename = serde_json::to_vec(&serde_json::json!({
-        "wire_format_version": 1,
-        "payload": {
-            "kind": "rename_group",
-            "group_id": group_id,
-            "base_revision": 1,
-            "new_revision": 2,
-            "name": "Hijack"
-        }
-    }))?;
+    let unauthorized_rename = metadata_payload(metadata_snapshot(
+        &group_id,
+        GroupProtocol::pairwise_fanout_v1(),
+        "Hijack",
+        bob.owner_pubkey,
+        vec![bob.owner_pubkey, alice.owner_pubkey],
+        vec![bob.owner_pubkey],
+        2,
+        1_900_001_001,
+    ))?;
     let rename = groups.handle_incoming(carol.owner_pubkey, &unauthorized_rename);
     assert!(matches!(
         rename,
@@ -237,16 +271,16 @@ fn duplicate_rename_is_idempotent() -> Result<()> {
     let bob = manager_device(16, 161);
     let (mut groups, group_id) = create_remote_owned_group(alice.owner_pubkey, bob.owner_pubkey)?;
 
-    let rename = serde_json::to_vec(&serde_json::json!({
-        "wire_format_version": 1,
-        "payload": {
-            "kind": "rename_group",
-            "group_id": group_id,
-            "base_revision": 1,
-            "new_revision": 2,
-            "name": "Renamed"
-        }
-    }))?;
+    let rename = metadata_payload(metadata_snapshot(
+        &group_id,
+        GroupProtocol::pairwise_fanout_v1(),
+        "Renamed",
+        bob.owner_pubkey,
+        vec![bob.owner_pubkey, alice.owner_pubkey],
+        vec![bob.owner_pubkey],
+        2,
+        1_900_001_001,
+    ))?;
 
     let first = groups.handle_incoming(bob.owner_pubkey, &rename)?;
     let second = groups.handle_incoming(bob.owner_pubkey, &rename)?;

@@ -672,7 +672,7 @@ fn runtime_queues_sender_key_outer_until_required_revision_arrives() {
 }
 
 #[test]
-fn runtime_queues_pairwise_group_payload_until_required_revision_arrives() {
+fn runtime_applies_newer_pairwise_group_metadata_snapshot_without_base_revision() {
     let alice_owner = Keys::generate();
     let alice_device = Keys::generate();
     let bob_owner = Keys::generate();
@@ -722,8 +722,16 @@ fn runtime_queues_pairwise_group_payload_until_required_revision_arrives() {
 
     let early = deliver_group_related_events(&bob, revision_3_events);
     assert!(
-        early.is_empty(),
-        "future pairwise group payload should be queued until base revision arrives"
+        early.iter().any(|event| {
+            matches!(
+                event,
+                GroupIncomingEvent::MetadataUpdated(group)
+                    if group.group_id == created.group.group_id
+                        && group.revision == 3
+                        && group.name == "revision 3"
+            )
+        }),
+        "newer metadata snapshots should apply without waiting for the missing base revision"
     );
     let replayed = deliver_group_related_events(&bob, revision_2_events);
     assert!(
@@ -736,6 +744,6 @@ fn runtime_queues_pairwise_group_payload_until_required_revision_arrives() {
                         && group.name == "revision 3"
             )
         }),
-        "queued pairwise revision should replay after the missing base revision arrives"
+        "older metadata snapshots should not roll back current group state"
     );
 }

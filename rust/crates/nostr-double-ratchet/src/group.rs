@@ -139,10 +139,20 @@ pub struct GroupCreateResult {
     pub prepared: GroupPreparedSend,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupPayloadEncodeContext {
+    pub local_device_pubkey: DevicePubkey,
+    pub created_at: UnixSeconds,
+}
+
 pub trait GroupPayloadCodec: Clone {
     fn is_pairwise_payload(&self, payload: &[u8]) -> bool;
 
-    fn encode_pairwise_command(&self, command: &GroupPairwiseCommand) -> crate::Result<Vec<u8>>;
+    fn encode_pairwise_command(
+        &self,
+        ctx: GroupPayloadEncodeContext,
+        command: &GroupPairwiseCommand,
+    ) -> crate::Result<Vec<u8>>;
 
     fn decode_pairwise_command(
         &self,
@@ -162,58 +172,8 @@ pub trait GroupPayloadCodec: Clone {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupPairwiseCommand {
-    CreateGroup {
-        group_id: String,
-        protocol: GroupProtocol,
-        base_revision: u64,
-        new_revision: u64,
-        name: String,
-        created_by: OwnerPubkey,
-        members: Vec<OwnerPubkey>,
-        admins: Vec<OwnerPubkey>,
-        created_at: UnixSeconds,
-        updated_at: UnixSeconds,
-    },
-    SyncGroup {
-        group_id: String,
-        protocol: GroupProtocol,
-        revision: u64,
-        name: String,
-        created_by: OwnerPubkey,
-        members: Vec<OwnerPubkey>,
-        admins: Vec<OwnerPubkey>,
-        created_at: UnixSeconds,
-        updated_at: UnixSeconds,
-    },
-    RenameGroup {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        name: String,
-    },
-    AddMembers {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        members: Vec<OwnerPubkey>,
-    },
-    RemoveMembers {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        members: Vec<OwnerPubkey>,
-    },
-    AddAdmins {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        admins: Vec<OwnerPubkey>,
-    },
-    RemoveAdmins {
-        group_id: String,
-        base_revision: u64,
-        new_revision: u64,
-        admins: Vec<OwnerPubkey>,
+    MetadataSnapshot {
+        snapshot: GroupSnapshot,
     },
     GroupMessage {
         group_id: String,

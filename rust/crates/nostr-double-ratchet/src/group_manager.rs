@@ -1,11 +1,12 @@
 use crate::{
     device_pubkey_from_secret_bytes, random_secret_key_bytes, DevicePubkey, DomainError,
     GroupCreateResult, GroupIncomingEvent, GroupManagerSnapshot, GroupPairwiseCommand,
-    GroupPayloadCodec, GroupPendingFanout, GroupPreparedPublish, GroupPreparedSend, GroupProtocol,
-    GroupReceivedMessage, GroupSenderKeyHandleResult, GroupSenderKeyMessage,
-    GroupSenderKeyMessageEnvelope, GroupSenderKeyPlaintext, GroupSenderKeyRecordSnapshot,
-    GroupSnapshot, OwnerPubkey, ProtocolContext, Result, SenderEventPubkey, SenderKeyDistribution,
-    SenderKeyMessageContent, SenderKeyState, SessionManager, UnixSeconds,
+    GroupPayloadCodec, GroupPayloadEncodeContext, GroupPendingFanout, GroupPreparedPublish,
+    GroupPreparedSend, GroupProtocol, GroupReceivedMessage, GroupSenderKeyHandleResult,
+    GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, GroupSenderKeyPlaintext,
+    GroupSenderKeyRecordSnapshot, GroupSnapshot, OwnerPubkey, ProtocolContext, Result,
+    SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent, SenderKeyState,
+    SessionManager, UnixSeconds,
 };
 use rand::{CryptoRng, RngCore};
 use std::collections::{BTreeMap, BTreeSet};
@@ -181,7 +182,7 @@ where
             created_at: ctx.now,
             updated_at: ctx.now,
         };
-        let payload = record.create_payload();
+        let payload = record.metadata_payload();
         let recipients = record.remote_members(self.local_owner_pubkey);
         let prepared = GroupPreparedSend {
             group_id: group_id.clone(),
@@ -231,7 +232,7 @@ where
                 ctx,
                 &record.group_id,
                 recipients,
-                &record.create_payload(),
+                &record.metadata_payload(),
             )?,
             local_sibling: self.local_sibling_sync(session_manager, ctx, &record)?,
         };
@@ -301,12 +302,7 @@ where
             ctx.now,
         )?;
 
-        let payload = GroupPairwiseCommand::RenameGroup {
-            group_id: current.group_id.clone(),
-            base_revision: current.revision,
-            new_revision: next.revision,
-            name,
-        };
+        let payload = next.metadata_payload();
 
         let prepared = GroupPreparedSend {
             group_id: current.group_id.clone(),
@@ -334,14 +330,7 @@ where
     {
         let current = self.group_record(group_id)?.clone();
         current.ensure_admin(self.local_owner_pubkey)?;
-        let (base_revision, new_revision) = current.retry_delta_revisions("rename")?;
-
-        let payload = GroupPairwiseCommand::RenameGroup {
-            group_id: current.group_id.clone(),
-            base_revision,
-            new_revision,
-            name: current.name.clone(),
-        };
+        let payload = current.metadata_payload();
 
         Ok(GroupPreparedSend {
             group_id: current.group_id.clone(),
@@ -377,40 +366,14 @@ where
             ctx.now,
         )?;
 
-        let delta_payload = GroupPairwiseCommand::AddMembers {
-            group_id: current.group_id.clone(),
-            base_revision: current.revision,
-            new_revision: next.revision,
-            members: additions.iter().copied().collect(),
-        };
-        let bootstrap_payload = next.create_payload();
-
-        let existing_recipients: Vec<_> = current
-            .remote_members(self.local_owner_pubkey)
-            .into_iter()
-            .filter(|owner| !additions.contains(owner))
-            .collect();
-        let new_recipients: Vec<_> = additions
-            .iter()
-            .copied()
-            .filter(|owner| *owner != self.local_owner_pubkey)
-            .collect();
-
-        let mut remote = self.fanout_payload(
+        let payload = next.metadata_payload();
+        let remote = self.fanout_payload(
             session_manager,
             ctx,
             &current.group_id,
-            existing_recipients,
-            &delta_payload,
+            next.remote_members(self.local_owner_pubkey),
+            &payload,
         )?;
-        let bootstrapped = self.fanout_payload(
-            session_manager,
-            ctx,
-            &current.group_id,
-            new_recipients,
-            &bootstrap_payload,
-        )?;
-        merge_group_prepared_publish(&mut remote, bootstrapped);
 
         let mut prepared = GroupPreparedSend {
             group_id: current.group_id.clone(),
@@ -437,45 +400,18 @@ where
         let additions = validate_unique_owners(&members, "members")?;
         let current = self.group_record(group_id)?.clone();
         current.ensure_admin(self.local_owner_pubkey)?;
-        let (base_revision, new_revision) = current.retry_delta_revisions("add members")?;
         for owner in &additions {
             current.ensure_member(*owner)?;
         }
 
-        let delta_payload = GroupPairwiseCommand::AddMembers {
-            group_id: current.group_id.clone(),
-            base_revision,
-            new_revision,
-            members: additions.iter().copied().collect(),
-        };
-        let bootstrap_payload = current.create_payload();
-
-        let existing_recipients: Vec<_> = current
-            .remote_members(self.local_owner_pubkey)
-            .into_iter()
-            .filter(|owner| !additions.contains(owner))
-            .collect();
-        let new_recipients: Vec<_> = additions
-            .iter()
-            .copied()
-            .filter(|owner| *owner != self.local_owner_pubkey)
-            .collect();
-
-        let mut remote = self.fanout_payload(
+        let payload = current.metadata_payload();
+        let remote = self.fanout_payload(
             session_manager,
             ctx,
             &current.group_id,
-            existing_recipients,
-            &delta_payload,
+            current.remote_members(self.local_owner_pubkey),
+            &payload,
         )?;
-        let bootstrapped = self.fanout_payload(
-            session_manager,
-            ctx,
-            &current.group_id,
-            new_recipients,
-            &bootstrap_payload,
-        )?;
-        merge_group_prepared_publish(&mut remote, bootstrapped);
         let prepared = GroupPreparedSend {
             group_id: current.group_id.clone(),
             remote,
@@ -509,12 +445,7 @@ where
             ctx.now,
         )?;
 
-        let payload = GroupPairwiseCommand::RemoveMembers {
-            group_id: current.group_id.clone(),
-            base_revision: current.revision,
-            new_revision: next.revision,
-            members: removals.iter().copied().collect(),
-        };
+        let payload = next.metadata_payload();
 
         let mut prepared = GroupPreparedSend {
             group_id: current.group_id.clone(),
@@ -547,7 +478,6 @@ where
         let removals = validate_unique_owners(&members, "members")?;
         let current = self.group_record(group_id)?.clone();
         current.ensure_admin(self.local_owner_pubkey)?;
-        let (base_revision, new_revision) = current.retry_delta_revisions("remove members")?;
         for owner in &removals {
             if current.members.contains(owner) {
                 return Err(group_error(format!(
@@ -556,12 +486,7 @@ where
             }
         }
 
-        let payload = GroupPairwiseCommand::RemoveMembers {
-            group_id: current.group_id.clone(),
-            base_revision,
-            new_revision,
-            members: removals.iter().copied().collect(),
-        };
+        let payload = current.metadata_payload();
 
         let mut recipients = current
             .remote_members(self.local_owner_pubkey)
@@ -613,12 +538,7 @@ where
             ctx.now,
         )?;
 
-        let payload = GroupPairwiseCommand::AddAdmins {
-            group_id: current.group_id.clone(),
-            base_revision: current.revision,
-            new_revision: next.revision,
-            admins: additions.iter().copied().collect(),
-        };
+        let payload = next.metadata_payload();
 
         let prepared = GroupPreparedSend {
             group_id: current.group_id.clone(),
@@ -656,12 +576,7 @@ where
             ctx.now,
         )?;
 
-        let payload = GroupPairwiseCommand::RemoveAdmins {
-            group_id: current.group_id.clone(),
-            base_revision: current.revision,
-            new_revision: next.revision,
-            admins: removals.iter().copied().collect(),
-        };
+        let payload = next.metadata_payload();
 
         let prepared = GroupPreparedSend {
             group_id: current.group_id.clone(),
@@ -706,33 +621,10 @@ where
         };
 
         let event = match command {
-            GroupPairwiseCommand::CreateGroup {
-                group_id,
-                protocol,
-                base_revision,
-                new_revision,
-                name,
-                created_by,
-                members,
-                admins,
-                created_at,
-                updated_at,
-            } => {
-                if validate_supported_protocol(protocol).is_err() {
-                    return Ok(None);
-                }
-                let record = GroupRecord::from_create_payload(
-                    group_id,
-                    protocol,
-                    name,
-                    created_by,
-                    members,
-                    admins,
-                    new_revision,
-                    created_at,
-                    updated_at,
-                    sender_owner,
-                )?;
+            GroupPairwiseCommand::MetadataSnapshot { snapshot } => {
+                let record = GroupRecord::from_metadata_snapshot(snapshot)?;
+                let is_self_sync = sender_owner == self.local_owner_pubkey;
+
                 if let Some(existing) = self.groups.get(&record.group_id) {
                     if existing.protocol != record.protocol {
                         return Err(group_error(format!(
@@ -740,182 +632,37 @@ where
                             record.group_id, existing.protocol, record.protocol
                         )));
                     }
-                    if existing == &record {
+                    if record.revision < existing.revision || existing == &record {
                         GroupIncomingEvent::MetadataUpdated(existing.snapshot())
-                    } else {
+                    } else if record.revision == existing.revision {
                         return Err(group_error(format!(
-                            "group `{}` already exists",
-                            record.group_id
+                            "conflicting metadata snapshot for group `{}` at revision {}",
+                            record.group_id, record.revision
                         )));
-                    }
-                } else {
-                    if base_revision != 0 {
-                        return Err(group_error("create group base revision must be 0"));
-                    }
-                    let snapshot = record.snapshot();
-                    self.groups.insert(record.group_id.clone(), record);
-                    GroupIncomingEvent::MetadataUpdated(snapshot)
-                }
-            }
-            GroupPairwiseCommand::SyncGroup {
-                group_id,
-                protocol,
-                revision,
-                name,
-                created_by,
-                members,
-                admins,
-                created_at,
-                updated_at,
-            } => {
-                if validate_supported_protocol(protocol).is_err() {
-                    return Ok(None);
-                }
-                let record = GroupRecord::from_sync_payload(
-                    group_id,
-                    protocol,
-                    name,
-                    created_by,
-                    members,
-                    admins,
-                    revision,
-                    created_at,
-                    updated_at,
-                    sender_owner,
-                    self.local_owner_pubkey,
-                )?;
-                if let Some(existing) = self.groups.get(&record.group_id) {
-                    if existing.protocol != record.protocol {
-                        return Err(group_error(format!(
-                            "group `{}` protocol mismatch: expected {:?}, got {:?}",
-                            record.group_id, existing.protocol, record.protocol
-                        )));
-                    }
-                    if existing == &record || existing.revision > record.revision {
-                        GroupIncomingEvent::MetadataUpdated(existing.snapshot())
                     } else {
+                        if !is_self_sync && !existing.admins.contains(&sender_owner) {
+                            return Err(group_error(format!(
+                                "owner {sender_owner} is not an admin of group `{}`",
+                                record.group_id
+                            )));
+                        }
                         let snapshot = record.snapshot();
                         self.groups.insert(record.group_id.clone(), record);
                         GroupIncomingEvent::MetadataUpdated(snapshot)
                     }
                 } else {
+                    if !record.members.contains(&self.local_owner_pubkey) {
+                        return Ok(None);
+                    }
+                    if !is_self_sync && !record.admins.contains(&sender_owner) {
+                        return Err(group_error(format!(
+                            "owner {sender_owner} is not an admin of group `{}`",
+                            record.group_id
+                        )));
+                    }
                     let snapshot = record.snapshot();
                     self.groups.insert(record.group_id.clone(), record);
                     GroupIncomingEvent::MetadataUpdated(snapshot)
-                }
-            }
-            GroupPairwiseCommand::RenameGroup {
-                group_id,
-                base_revision,
-                new_revision,
-                name,
-            } => {
-                let group = self.group_record_mut(&group_id)?;
-                if group.reflects_rename(&name, new_revision) {
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                } else if !group.should_apply_delta_revision(base_revision)? {
-                    return Ok(None);
-                } else {
-                    group.apply_rename(
-                        sender_owner,
-                        name,
-                        base_revision,
-                        new_revision,
-                        group.updated_at,
-                    )?;
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                }
-            }
-            GroupPairwiseCommand::AddMembers {
-                group_id,
-                base_revision,
-                new_revision,
-                members,
-            } => {
-                let additions = validate_unique_owners(&members, "members")?;
-                let group = self.group_record_mut(&group_id)?;
-                if group.reflects_added_members(&additions, new_revision) {
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                } else if !group.should_apply_delta_revision(base_revision)? {
-                    return Ok(None);
-                } else {
-                    group.apply_add_members(
-                        sender_owner,
-                        &additions,
-                        base_revision,
-                        new_revision,
-                        group.updated_at,
-                    )?;
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                }
-            }
-            GroupPairwiseCommand::RemoveMembers {
-                group_id,
-                base_revision,
-                new_revision,
-                members,
-            } => {
-                let removals = validate_unique_owners(&members, "members")?;
-                let group = self.group_record_mut(&group_id)?;
-                if group.reflects_removed_members(&removals, new_revision) {
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                } else if !group.should_apply_delta_revision(base_revision)? {
-                    return Ok(None);
-                } else {
-                    group.apply_remove_members(
-                        sender_owner,
-                        &removals,
-                        base_revision,
-                        new_revision,
-                        group.updated_at,
-                    )?;
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                }
-            }
-            GroupPairwiseCommand::AddAdmins {
-                group_id,
-                base_revision,
-                new_revision,
-                admins,
-            } => {
-                let additions = validate_unique_owners(&admins, "admins")?;
-                let group = self.group_record_mut(&group_id)?;
-                if group.reflects_added_admins(&additions, new_revision) {
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                } else if !group.should_apply_delta_revision(base_revision)? {
-                    return Ok(None);
-                } else {
-                    group.apply_add_admins(
-                        sender_owner,
-                        &additions,
-                        base_revision,
-                        new_revision,
-                        group.updated_at,
-                    )?;
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                }
-            }
-            GroupPairwiseCommand::RemoveAdmins {
-                group_id,
-                base_revision,
-                new_revision,
-                admins,
-            } => {
-                let removals = validate_unique_owners(&admins, "admins")?;
-                let group = self.group_record_mut(&group_id)?;
-                if group.reflects_removed_admins(&removals, new_revision) {
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
-                } else if !group.should_apply_delta_revision(base_revision)? {
-                    return Ok(None);
-                } else {
-                    group.apply_remove_admins(
-                        sender_owner,
-                        &removals,
-                        base_revision,
-                        new_revision,
-                        group.updated_at,
-                    )?;
-                    GroupIncomingEvent::MetadataUpdated(group.snapshot())
                 }
             }
             GroupPairwiseCommand::GroupMessage {
@@ -1044,9 +791,10 @@ where
         if !session_manager.has_authorized_local_siblings() {
             return Ok(GroupPreparedPublish::empty());
         }
-        let payload = self
-            .payload_codec
-            .encode_pairwise_command(&record.sync_payload())?;
+        let payload = self.payload_codec.encode_pairwise_command(
+            encode_context(session_manager, ctx),
+            &record.metadata_payload(),
+        )?;
         self.local_sibling_payload_bytes(session_manager, ctx, payload)
     }
 
@@ -1066,7 +814,8 @@ where
         self.local_sibling_payload_bytes(
             session_manager,
             ctx,
-            self.payload_codec.encode_pairwise_command(payload)?,
+            self.payload_codec
+                .encode_pairwise_command(encode_context(session_manager, ctx), payload)?,
         )
     }
 
@@ -1107,7 +856,9 @@ where
         R: RngCore + CryptoRng,
     {
         let mut prepared = GroupPreparedPublish::empty();
-        let payload_bytes = self.payload_codec.encode_pairwise_command(payload)?;
+        let payload_bytes = self
+            .payload_codec
+            .encode_pairwise_command(encode_context(session_manager, ctx), payload)?;
 
         for recipient in recipients {
             let next =
@@ -1414,12 +1165,6 @@ where
             .get(group_id)
             .ok_or_else(|| group_error(format!("unknown group `{group_id}`")))
     }
-
-    fn group_record_mut(&mut self, group_id: &str) -> Result<&mut GroupRecord> {
-        self.groups
-            .get_mut(group_id)
-            .ok_or_else(|| group_error(format!("unknown group `{group_id}`")))
-    }
 }
 
 impl<C> GroupManager<C>
@@ -1455,85 +1200,13 @@ impl GroupRecord {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn from_create_payload(
-        group_id: String,
-        protocol: GroupProtocol,
-        name: String,
-        created_by: OwnerPubkey,
-        members: Vec<OwnerPubkey>,
-        admins: Vec<OwnerPubkey>,
-        new_revision: u64,
-        created_at: UnixSeconds,
-        updated_at: UnixSeconds,
-        sender_owner: OwnerPubkey,
-    ) -> Result<Self> {
-        let member_set = validate_unique_owners(&members, "members")?;
-        let admin_set = validate_unique_owners(&admins, "admins")?;
-        validate_supported_protocol(protocol)?;
-        if created_by != sender_owner {
-            return Err(group_error("create group sender must match created_by"));
+    fn from_metadata_snapshot(snapshot: GroupSnapshot) -> Result<Self> {
+        let record = Self::from_snapshot(snapshot)?;
+        validate_supported_protocol(record.protocol)?;
+        if record.revision == 0 {
+            return Err(group_error("metadata snapshot revision must be at least 1"));
         }
-        if new_revision == 0 {
-            return Err(group_error("create group revision must be at least 1"));
-        }
-        if !admin_set.contains(&sender_owner) {
-            return Err(group_error("create group sender must be an admin"));
-        }
-        validate_group_invariants(&member_set, &admin_set)?;
-
-        Ok(Self {
-            group_id,
-            protocol,
-            name,
-            created_by,
-            members: member_set,
-            admins: admin_set,
-            revision: new_revision,
-            created_at,
-            updated_at,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn from_sync_payload(
-        group_id: String,
-        protocol: GroupProtocol,
-        name: String,
-        created_by: OwnerPubkey,
-        members: Vec<OwnerPubkey>,
-        admins: Vec<OwnerPubkey>,
-        revision: u64,
-        created_at: UnixSeconds,
-        updated_at: UnixSeconds,
-        sender_owner: OwnerPubkey,
-        local_owner: OwnerPubkey,
-    ) -> Result<Self> {
-        let member_set = validate_unique_owners(&members, "members")?;
-        let admin_set = validate_unique_owners(&admins, "admins")?;
-        validate_supported_protocol(protocol)?;
-        if sender_owner != local_owner {
-            return Err(group_error("sync group sender must match local owner"));
-        }
-        if !member_set.contains(&sender_owner) {
-            return Err(group_error("sync group sender must be a member"));
-        }
-        if revision == 0 {
-            return Err(group_error("sync group revision must be at least 1"));
-        }
-        validate_group_invariants(&member_set, &admin_set)?;
-
-        Ok(Self {
-            group_id,
-            protocol,
-            name,
-            created_by,
-            members: member_set,
-            admins: admin_set,
-            revision,
-            created_at,
-            updated_at,
-        })
+        Ok(record)
     }
 
     fn snapshot(&self) -> GroupSnapshot {
@@ -1550,32 +1223,9 @@ impl GroupRecord {
         }
     }
 
-    fn create_payload(&self) -> GroupPairwiseCommand {
-        GroupPairwiseCommand::CreateGroup {
-            group_id: self.group_id.clone(),
-            protocol: self.protocol,
-            base_revision: 0,
-            new_revision: self.revision,
-            name: self.name.clone(),
-            created_by: self.created_by,
-            members: self.members.iter().copied().collect(),
-            admins: self.admins.iter().copied().collect(),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        }
-    }
-
-    fn sync_payload(&self) -> GroupPairwiseCommand {
-        GroupPairwiseCommand::SyncGroup {
-            group_id: self.group_id.clone(),
-            protocol: self.protocol,
-            revision: self.revision,
-            name: self.name.clone(),
-            created_by: self.created_by,
-            members: self.members.iter().copied().collect(),
-            admins: self.admins.iter().copied().collect(),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+    fn metadata_payload(&self) -> GroupPairwiseCommand {
+        GroupPairwiseCommand::MetadataSnapshot {
+            snapshot: self.snapshot(),
         }
     }
 
@@ -1623,50 +1273,6 @@ impl GroupRecord {
             )));
         }
         Ok(())
-    }
-
-    fn retry_delta_revisions(&self, action: &str) -> Result<(u64, u64)> {
-        if self.revision < 2 {
-            return Err(group_error(format!(
-                "{action} retry requires an already-applied revision"
-            )));
-        }
-        Ok((self.revision - 1, self.revision))
-    }
-
-    fn reflects_rename(&self, name: &str, new_revision: u64) -> bool {
-        self.revision >= new_revision && self.name == name
-    }
-
-    fn reflects_added_members(&self, additions: &BTreeSet<OwnerPubkey>, new_revision: u64) -> bool {
-        self.revision >= new_revision && additions.iter().all(|owner| self.members.contains(owner))
-    }
-
-    fn reflects_removed_members(
-        &self,
-        removals: &BTreeSet<OwnerPubkey>,
-        new_revision: u64,
-    ) -> bool {
-        self.revision >= new_revision && removals.iter().all(|owner| !self.members.contains(owner))
-    }
-
-    fn reflects_added_admins(&self, additions: &BTreeSet<OwnerPubkey>, new_revision: u64) -> bool {
-        self.revision >= new_revision && additions.iter().all(|owner| self.admins.contains(owner))
-    }
-
-    fn reflects_removed_admins(&self, removals: &BTreeSet<OwnerPubkey>, new_revision: u64) -> bool {
-        self.revision >= new_revision && removals.iter().all(|owner| !self.admins.contains(owner))
-    }
-
-    fn should_apply_delta_revision(&self, base_revision: u64) -> Result<bool> {
-        if base_revision > self.revision {
-            return Err(pending_group_revision_error(
-                self.group_id.clone(),
-                self.revision,
-                base_revision,
-            ));
-        }
-        Ok(base_revision == self.revision)
     }
 
     fn apply_rename(
@@ -1858,6 +1464,19 @@ where
     let mut bytes = [0u8; 16];
     ctx.rng.fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+fn encode_context<R>(
+    session_manager: &SessionManager,
+    ctx: &ProtocolContext<'_, R>,
+) -> GroupPayloadEncodeContext
+where
+    R: RngCore + CryptoRng,
+{
+    GroupPayloadEncodeContext {
+        local_device_pubkey: session_manager.local_device_pubkey(),
+        created_at: ctx.now,
+    }
 }
 
 fn random_key_id<R>(ctx: &mut ProtocolContext<'_, R>) -> u32
