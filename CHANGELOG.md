@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.137 - 2026-05-04
+
+- Merge htree/master with the latest private invite, linked-device fanout, and runtime durability work into the published Rust crates.
+
 ## 0.0.136 - 2026-05-02
 
 - Let apps create additional local private invites without publishing them as relay-discoverable invite events.
