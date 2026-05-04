@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.136 - 2026-05-02
+
+- Let apps create additional local private invites without publishing them as relay-discoverable invite events.
+- Preserve private invite URL metadata and enforce one-use invite links after a successful response.
+- Accept owner claims carried by private capability invites/responses so multi-device private links install sessions under owner keys immediately.
+
+## 0.0.135 - 2026-05-02
+
+- Align the TLA+ models with the current runtime subscription, group sender-key, and session send-selection behavior.
+- Include skipped-key sender authors in message-push subscription filters and match TypeScript/Rust active session send preference.
+- Add a local triad relay churn/latency benchmark for direct and group `NdrRuntime` traffic.
+
 ## 0.0.134 - 2026-05-02
 
 - Move chat inner-event construction into neutral Rust/TypeScript message builder helpers.

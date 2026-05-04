@@ -201,6 +201,12 @@ pub fn invite_url(invite: &Invite, root: &str) -> Result<String> {
         "createdAt".to_string(),
         serde_json::Value::Number(serde_json::Number::from(invite.created_at.get())),
     );
+    if let Some(device_id) = invite.device_id.as_ref() {
+        data.insert(
+            "deviceId".to_string(),
+            serde_json::Value::String(device_id.clone()),
+        );
+    }
     let owner = invite
         .owner_public_key
         .map(|pk| OwnerPubkey::from_bytes(pk.to_bytes()))
@@ -215,6 +221,12 @@ pub fn invite_url(invite: &Invite, root: &str) -> Result<String> {
         data.insert(
             "purpose".to_string(),
             serde_json::Value::String(purpose.clone()),
+        );
+    }
+    if let Some(max_uses) = invite.max_uses {
+        data.insert(
+            "maxUses".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(max_uses)),
         );
     }
 
@@ -251,6 +263,7 @@ pub fn parse_invite_url(url: &str) -> Result<Invite> {
     let inviter_owner_pubkey = data["owner"]
         .as_str()
         .or_else(|| data["ownerPubkey"].as_str())
+        .or_else(|| data["ownerPublicKey"].as_str())
         .map(parse_owner_pubkey)
         .transpose()?;
 
@@ -259,7 +272,7 @@ pub fn parse_invite_url(url: &str) -> Result<Invite> {
         inviter_ephemeral_public_key,
         shared_secret,
         inviter_ephemeral_private_key: None,
-        max_uses: None,
+        max_uses: data["maxUses"].as_u64().map(|value| value as usize),
         used_by: Vec::new(),
         used_response_contents: Vec::new(),
         created_at: UnixSeconds(data["createdAt"].as_u64().unwrap_or(0)),
@@ -594,6 +607,7 @@ mod tests {
             parsed_from_url.inviter_owner_pubkey,
             invite.inviter_owner_pubkey
         );
+        assert_eq!(parsed_from_url.created_at, invite.created_at);
 
         let unsigned = invite_unsigned_event(&invite).unwrap();
         let keys = Keys::new(secret_key_from_bytes(&signer_secret).unwrap());
@@ -610,6 +624,47 @@ mod tests {
         assert_eq!(
             parsed_from_event.inviter_owner_pubkey,
             invite.inviter_owner_pubkey
+        );
+    }
+
+    #[test]
+    fn invite_url_preserves_private_one_use_metadata() {
+        let device = Keys::generate().public_key();
+        let owner = Keys::generate().public_key();
+        let mut invite =
+            Invite::create_new(device, Some(device.to_hex()), Some(1)).expect("invite");
+        invite.owner_public_key = Some(owner);
+        invite.inviter_owner_pubkey = Some(OwnerPubkey::from_bytes(owner.to_bytes()));
+        invite.purpose = Some("private".to_string());
+
+        let url = invite_url(&invite, "https://chat.iris.to").unwrap();
+        let parsed = parse_invite_url(&url).unwrap();
+
+        assert_eq!(parsed.device_id, Some(device.to_hex()));
+        assert_eq!(parsed.max_uses, Some(1));
+        assert_eq!(parsed.created_at, invite.created_at);
+        assert_eq!(parsed.owner_public_key, Some(owner));
+        assert_eq!(parsed.purpose.as_deref(), Some("private"));
+    }
+
+    #[test]
+    fn invite_url_accepts_owner_public_key_alias() {
+        let device = Keys::generate().public_key();
+        let owner = Keys::generate().public_key();
+        let payload = serde_json::json!({
+            "inviter": device.to_hex(),
+            "ephemeralKey": device.to_hex(),
+            "sharedSecret": "01".repeat(32),
+            "ownerPublicKey": owner.to_hex(),
+        })
+        .to_string();
+        let encoded = urlencoding::encode(&payload);
+        let parsed = parse_invite_url(&format!("https://chat.iris.to/#{encoded}")).unwrap();
+
+        assert_eq!(parsed.owner_public_key, Some(owner));
+        assert_eq!(
+            parsed.inviter_owner_pubkey,
+            Some(OwnerPubkey::from_bytes(owner.to_bytes()))
         );
     }
 

@@ -8,17 +8,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.134"
+version = "0.0.136"
 edition = "2021"
 authors = ["Martti Malmi"]
 license = "MIT"
 repository = "https://files.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-double-ratchet"
 
 [workspace.dependencies]
-nostr-double-ratchet = { version = "0.0.134", path = "crates/nostr-double-ratchet" }
-nostr-double-ratchet-nostr = { version = "0.0.134", path = "crates/nostr-double-ratchet-nostr" }
-nostr-double-ratchet-pairwise-codec = { version = "0.0.134", path = "crates/nostr-double-ratchet-pairwise-codec" }
-nostr-double-ratchet-runtime = { version = "0.0.134", path = "crates/nostr-double-ratchet-runtime" }
+nostr-double-ratchet = { version = "0.0.136", path = "crates/nostr-double-ratchet" }
+nostr-double-ratchet-nostr = { version = "0.0.136", path = "crates/nostr-double-ratchet-nostr" }
+nostr-double-ratchet-pairwise-codec = { version = "0.0.136", path = "crates/nostr-double-ratchet-pairwise-codec" }
+nostr-double-ratchet-runtime = { version = "0.0.136", path = "crates/nostr-double-ratchet-runtime" }
 nostr = { version = "0.44.2", default-features = false, features = ["std", "nip44"] }
 nostr-sdk = "0.44.1"
 tracing = "0.1"

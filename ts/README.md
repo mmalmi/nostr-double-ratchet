@@ -363,6 +363,7 @@ sessionManager.setAutoAdoptChatSettings(false);
 
 ```bash
 pnpm -C ts test:once
+pnpm -C ts bench:relay-churn
 ```
 
 ## Multi-Device Test Policy

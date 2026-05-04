@@ -182,6 +182,9 @@ For iOS/Android integration (for example Flutter/native apps), use:
 # TypeScript tests
 pnpm -C ts test:once
 
+# Local relay churn/latency benchmark
+pnpm -C ts bench:relay-churn
+
 # Rust library tests
 cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
 ```
