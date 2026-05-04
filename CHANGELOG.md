@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.138 - 2026-05-04
+
+- Switch group metadata to a snapshot-only model and slim `group_manager` accordingly.
+- Restore the legacy sender-key group wire format so older peers and snapshot consumers stay interoperable.
+- Make sibling workspace dev-deps path-only and refresh the crates.io publish script.
+
 ## 0.0.137 - 2026-05-04
 
 - Merge htree/master with the latest private invite, linked-device fanout, and runtime durability work into the published Rust crates.
