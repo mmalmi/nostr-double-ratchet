@@ -23,8 +23,10 @@ pub use file_storage::{DebouncedFileStorage, FileStorageAdapter};
 pub use message_queue::{MessageQueue, QueueEntry};
 #[cfg(feature = "nearby")]
 pub use nearby::{
-    decode_nearby_frame_json, encode_nearby_frame_json, nearby_frame_body_len_from_header,
-    read_nearby_frame, NearbyFrameAssembler, NEARBY_FRAME_HEADER_BYTES,
+    decode_nearby_envelope_frame, decode_nearby_envelope_json, decode_nearby_frame_json,
+    encode_nearby_envelope_frame, encode_nearby_envelope_json, encode_nearby_frame_json,
+    nearby_frame_body_len_from_header, read_nearby_frame, NearbyEnvelope, NearbyFrameAssembler,
+    NearbyInventoryItem, NEARBY_ENVELOPE_VERSION, NEARBY_FRAME_HEADER_BYTES,
     NEARBY_MAX_FRAME_BODY_BYTES,
 };
 #[cfg(feature = "nearby-mdns")]

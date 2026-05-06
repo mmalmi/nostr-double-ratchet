@@ -5,16 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::{
-    decode_nearby_frame_json, encode_nearby_frame_json, nearby_frame_body_len_from_header,
-    NEARBY_FRAME_HEADER_BYTES,
+    decode_nearby_envelope_frame, encode_nearby_envelope_frame, nearby_frame_body_len_from_header,
+    NearbyEnvelope, NEARBY_FRAME_HEADER_BYTES,
 };
 
 pub const IRIS_NEARBY_SERVICE_TYPE: &str = "_iris-chat._tcp.local.";
@@ -69,25 +67,15 @@ pub struct NearbyLanIncoming {
 }
 
 pub struct NearbyLanService {
-    peer_id: String,
     endpoint: SocketAddr,
     explicit_peers: Vec<SocketAddr>,
-    known_peers: Arc<Mutex<HashSet<SocketAddr>>>,
+    known_peers: Arc<Mutex<HashMap<SocketAddr, Option<String>>>>,
     incoming_rx: mpsc::UnboundedReceiver<NearbyLanIncoming>,
     tasks: Vec<JoinHandle<()>>,
     mdns: Option<ServiceDaemon>,
     service_type: String,
     service_fullname: String,
     browser_thread: Option<std::thread::JoinHandle<()>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct EventEnvelope {
-    v: u8,
-    #[serde(rename = "type")]
-    kind: String,
-    peer_id: String,
-    event_json: String,
 }
 
 impl NearbyLanService {
@@ -107,7 +95,7 @@ impl NearbyLanService {
             .collect::<Vec<_>>();
 
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let known_peers = Arc::new(Mutex::new(HashSet::new()));
+        let known_peers = Arc::new(Mutex::new(HashMap::new()));
 
         let (mdns, service_fullname, browser_thread) = start_mdns(
             &config,
@@ -115,14 +103,9 @@ impl NearbyLanService {
             Arc::clone(&known_peers),
             incoming_tx.clone(),
         )?;
-        let tasks = vec![spawn_accept_loop(
-            listener,
-            incoming_tx,
-            config.peer_id.clone(),
-        )];
+        let tasks = vec![spawn_accept_loop(listener, incoming_tx)];
 
         Ok(Self {
-            peer_id: config.peer_id,
             endpoint,
             explicit_peers,
             known_peers,
@@ -145,7 +128,7 @@ impl NearbyLanService {
             return 0;
         }
 
-        let Some(frame) = encode_event_frame(&self.peer_id, event) else {
+        let Some(frame) = encode_event_frame(event) else {
             return 0;
         };
 
@@ -161,7 +144,7 @@ impl NearbyLanService {
     pub fn peers(&self) -> Vec<SocketAddr> {
         let mut peers = self.explicit_peers.clone();
         if let Ok(known) = self.known_peers.lock() {
-            peers.extend(known.iter().copied());
+            peers.extend(known.keys().copied());
         }
         let mut seen = HashSet::new();
         peers
@@ -201,7 +184,7 @@ fn is_allowed_nearby_bind(addr: &SocketAddr) -> bool {
 fn start_mdns(
     config: &NearbyLanConfig,
     endpoint: SocketAddr,
-    known_peers: Arc<Mutex<HashSet<SocketAddr>>>,
+    known_peers: Arc<Mutex<HashMap<SocketAddr, Option<String>>>>,
     incoming_tx: mpsc::UnboundedSender<NearbyLanIncoming>,
 ) -> Result<(ServiceDaemon, String, std::thread::JoinHandle<()>), NearbyLanError> {
     let mdns = match config.mdns_port {
@@ -240,7 +223,12 @@ fn start_mdns(
             while let Ok(event) = receiver.recv() {
                 match event {
                     ServiceEvent::ServiceResolved(service) => {
-                        if service.get_property_val_str("peer_id") == Some(self_peer_id.as_str()) {
+                        let remote_peer_id = service
+                            .get_property_val_str("peer_id")
+                            .map(str::trim)
+                            .filter(|peer_id| !peer_id.is_empty())
+                            .map(str::to_string);
+                        if remote_peer_id.as_deref() == Some(self_peer_id.as_str()) {
                             continue;
                         }
                         let port = service.get_port();
@@ -251,13 +239,17 @@ fn start_mdns(
                             }
                             let inserted = thread_known_peers
                                 .lock()
-                                .map(|mut peers| peers.insert(addr))
+                                .map(|mut peers| {
+                                    let is_new = !peers.contains_key(&addr);
+                                    peers.insert(addr, remote_peer_id.clone());
+                                    is_new
+                                })
                                 .unwrap_or(false);
                             if inserted {
                                 let incoming_tx = incoming_tx.clone();
-                                let peer_id = self_peer_id.clone();
+                                let remote_peer_id = remote_peer_id.clone();
                                 runtime_handle.spawn(async move {
-                                    connect_and_read_peer(addr, peer_id, incoming_tx).await;
+                                    connect_and_read_peer(addr, remote_peer_id, incoming_tx).await;
                                 });
                             }
                         }
@@ -276,7 +268,6 @@ fn start_mdns(
 fn spawn_accept_loop(
     listener: TcpListener,
     incoming_tx: mpsc::UnboundedSender<NearbyLanIncoming>,
-    peer_id: String,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -287,9 +278,8 @@ fn spawn_accept_loop(
                 continue;
             }
             let incoming_tx = incoming_tx.clone();
-            let peer_id = peer_id.clone();
             tokio::spawn(async move {
-                read_peer_stream(stream, peer_id, incoming_tx, true).await;
+                read_peer_stream(stream, incoming_tx, true, None).await;
             });
         }
     })
@@ -297,7 +287,7 @@ fn spawn_accept_loop(
 
 async fn connect_and_read_peer(
     addr: SocketAddr,
-    peer_id: String,
+    remote_peer_id: Option<String>,
     incoming_tx: mpsc::UnboundedSender<NearbyLanIncoming>,
 ) {
     let connect = tokio::time::timeout(
@@ -308,18 +298,18 @@ async fn connect_and_read_peer(
     let Ok(Ok(stream)) = connect else {
         return;
     };
-    read_peer_stream(stream, peer_id, incoming_tx, true).await;
+    read_peer_stream(stream, incoming_tx, true, remote_peer_id).await;
 }
 
 async fn read_peer_stream(
     mut stream: TcpStream,
-    peer_id: String,
     incoming_tx: mpsc::UnboundedSender<NearbyLanIncoming>,
     send_hello: bool,
+    remote_peer_id: Option<String>,
 ) {
     let _ = stream.set_nodelay(true);
     if send_hello {
-        if let Some(frame) = encode_hello_frame(&peer_id) {
+        if let Some(frame) = encode_hello_frame() {
             let _ = stream.write_all(&frame).await;
         }
     }
@@ -329,7 +319,7 @@ async fn read_peer_stream(
             Ok(Some(frame)) => frame,
             Ok(None) | Err(_) => break,
         };
-        let Some(incoming) = decode_incoming_frame(&frame, &peer_id) else {
+        let Some(incoming) = decode_incoming_frame(&frame, remote_peer_id.clone()) else {
             continue;
         };
         let _ = incoming_tx.send(incoming);
@@ -355,25 +345,13 @@ async fn read_nearby_frame_async(stream: &mut TcpStream) -> std::io::Result<Opti
     Ok(Some(frame))
 }
 
-fn decode_incoming_frame(frame: &[u8], self_peer_id: &str) -> Option<NearbyLanIncoming> {
-    let json = decode_nearby_frame_json(frame)?;
-    let value: Value = serde_json::from_str(&json).ok()?;
-    if value.get("v")?.as_u64()? != 1 {
+fn decode_incoming_frame(
+    frame: &[u8],
+    remote_peer_id: Option<String>,
+) -> Option<NearbyLanIncoming> {
+    let NearbyEnvelope::Event { event_json, .. } = decode_nearby_envelope_frame(frame)? else {
         return None;
-    }
-    let remote_peer_id = value
-        .get("peer_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|peer_id| !peer_id.is_empty())
-        .map(str::to_string);
-    if remote_peer_id.as_deref() == Some(self_peer_id) {
-        return None;
-    }
-    if value.get("type")?.as_str()? != "event" {
-        return None;
-    }
-    let event_json = value.get("event_json")?.as_str()?;
+    };
     let event: nostr::Event = nostr::JsonUtil::from_json(event_json).ok()?;
     if event.verify().is_err() {
         return None;
@@ -384,25 +362,15 @@ fn decode_incoming_frame(frame: &[u8], self_peer_id: &str) -> Option<NearbyLanIn
     })
 }
 
-fn encode_hello_frame(peer_id: &str) -> Option<Vec<u8>> {
-    let envelope = serde_json::json!({
-        "v": 1,
-        "type": "hello",
-        "peer_id": peer_id,
-        "nonce": uuid::Uuid::new_v4().to_string(),
-        "name": HELLO_NAME,
-    });
-    encode_nearby_frame_json(&serde_json::to_string(&envelope).ok()?)
+fn encode_hello_frame() -> Option<Vec<u8>> {
+    encode_nearby_envelope_frame(&NearbyEnvelope::hello(
+        Some(uuid::Uuid::new_v4().to_string()),
+        Some(HELLO_NAME.to_string()),
+    ))
 }
 
-fn encode_event_frame(peer_id: &str, event: &nostr::Event) -> Option<Vec<u8>> {
-    let envelope = EventEnvelope {
-        v: 1,
-        kind: "event".to_string(),
-        peer_id: peer_id.to_string(),
-        event_json: nostr::JsonUtil::as_json(event),
-    };
-    encode_nearby_frame_json(&serde_json::to_string(&envelope).ok()?)
+fn encode_event_frame(event: &nostr::Event) -> Option<Vec<u8>> {
+    encode_nearby_envelope_frame(&NearbyEnvelope::event(nostr::JsonUtil::as_json(event)))
 }
 
 async fn send_frame_to_peer(peer: SocketAddr, frame: &[u8]) -> bool {
@@ -504,8 +472,8 @@ mod tests {
             .build(keys.public_key())
             .sign_with_keys(&keys)
             .unwrap();
-        let frame = encode_event_frame("peer-a", &event).unwrap();
-        let incoming = decode_incoming_frame(&frame, "peer-b").unwrap();
+        let frame = encode_event_frame(&event).unwrap();
+        let incoming = decode_incoming_frame(&frame, Some("peer-a".to_string())).unwrap();
         assert_eq!(incoming.remote_peer_id.as_deref(), Some("peer-a"));
         assert_eq!(incoming.event.id, event.id);
     }

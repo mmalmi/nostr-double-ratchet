@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const MAGIC: &[u8; 4] = b"IRIS";
@@ -11,6 +12,136 @@ const COMPRESSION_THRESHOLD: usize = 100;
 
 pub const NEARBY_FRAME_HEADER_BYTES: usize = 13;
 pub const NEARBY_MAX_FRAME_BODY_BYTES: usize = 256 * 1024;
+pub const NEARBY_ENVELOPE_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearbyInventoryItem {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub kind: u64,
+    pub created_at: u64,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum NearbyEnvelope {
+    #[serde(rename = "hello")]
+    Hello {
+        v: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nonce: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    #[serde(rename = "inv")]
+    Inv {
+        v: u8,
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+        kind: u64,
+        created_at: u64,
+        size: u64,
+    },
+    #[serde(rename = "want")]
+    Want { v: u8, id: String },
+    #[serde(rename = "event")]
+    Event { v: u8, event_json: String },
+}
+
+impl NearbyEnvelope {
+    pub fn hello(nonce: Option<String>, name: Option<String>) -> Self {
+        Self::Hello {
+            v: NEARBY_ENVELOPE_VERSION,
+            nonce,
+            name,
+        }
+    }
+
+    pub fn inv(item: NearbyInventoryItem) -> Self {
+        Self::Inv {
+            v: NEARBY_ENVELOPE_VERSION,
+            id: item.id,
+            author: item.author,
+            kind: item.kind,
+            created_at: item.created_at,
+            size: item.size,
+        }
+    }
+
+    pub fn want(id: impl Into<String>) -> Self {
+        Self::Want {
+            v: NEARBY_ENVELOPE_VERSION,
+            id: id.into(),
+        }
+    }
+
+    pub fn event(event_json: impl Into<String>) -> Self {
+        Self::Event {
+            v: NEARBY_ENVELOPE_VERSION,
+            event_json: event_json.into(),
+        }
+    }
+
+    fn version(&self) -> u8 {
+        match self {
+            Self::Hello { v, .. }
+            | Self::Inv { v, .. }
+            | Self::Want { v, .. }
+            | Self::Event { v, .. } => *v,
+        }
+    }
+}
+
+pub fn encode_nearby_envelope_json(envelope: &NearbyEnvelope) -> Option<String> {
+    if !validate_nearby_envelope(envelope) {
+        return None;
+    }
+    serde_json::to_string(envelope).ok()
+}
+
+pub fn decode_nearby_envelope_json(envelope_json: &str) -> Option<NearbyEnvelope> {
+    let value: Value = serde_json::from_str(envelope_json).ok()?;
+    if value.get("peer_id").is_some() {
+        return None;
+    }
+    let envelope: NearbyEnvelope = serde_json::from_value(value).ok()?;
+    validate_nearby_envelope(&envelope).then_some(envelope)
+}
+
+pub fn encode_nearby_envelope_frame(envelope: &NearbyEnvelope) -> Option<Vec<u8>> {
+    encode_nearby_frame_json(&encode_nearby_envelope_json(envelope)?)
+}
+
+pub fn decode_nearby_envelope_frame(frame: &[u8]) -> Option<NearbyEnvelope> {
+    decode_nearby_envelope_json(&decode_nearby_frame_json(frame)?)
+}
+
+fn validate_nearby_envelope(envelope: &NearbyEnvelope) -> bool {
+    if envelope.version() != NEARBY_ENVELOPE_VERSION {
+        return false;
+    }
+    match envelope {
+        NearbyEnvelope::Hello { .. } => true,
+        NearbyEnvelope::Inv {
+            id, author, size, ..
+        } => {
+            is_hex_id(id)
+                && author.as_ref().is_none_or(|author| is_hex_id(author))
+                && (1..=NEARBY_MAX_FRAME_BODY_BYTES as u64).contains(size)
+        }
+        NearbyEnvelope::Want { id, .. } => is_hex_id(id),
+        NearbyEnvelope::Event { event_json, .. } => {
+            !event_json.is_empty() && event_json.len() <= NEARBY_MAX_FRAME_BODY_BYTES
+        }
+    }
+}
+
+fn is_hex_id(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
 pub fn encode_nearby_frame_json(envelope_json: &str) -> Option<Vec<u8>> {
     let envelope: Value = serde_json::from_str(envelope_json).ok()?;
