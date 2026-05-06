@@ -91,6 +91,7 @@ pub struct Delivery {
 pub struct ProcessedInviteResponse {
     pub owner_pubkey: OwnerPubkey,
     pub device_pubkey: DevicePubkey,
+    pub claimed_owner_pubkey: Option<OwnerPubkey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,6 +295,7 @@ impl SessionManager {
         Ok(Some(ProcessedInviteResponse {
             owner_pubkey,
             device_pubkey: invitee_device_pubkey,
+            claimed_owner_pubkey: record.claimed_owner_pubkey,
         }))
     }
 
@@ -327,6 +329,26 @@ impl SessionManager {
         self.prepare_send_inner(ctx, recipient_owner, payload, false)
     }
 
+    pub fn prepare_remote_send_to_devices<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        recipient_owner: OwnerPubkey,
+        device_pubkeys: impl IntoIterator<Item = DevicePubkey>,
+        payload: Vec<u8>,
+    ) -> Result<PreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let targets = device_pubkeys
+            .into_iter()
+            .map(|device_pubkey| TargetDevice {
+                owner_pubkey: recipient_owner,
+                device_pubkey,
+            })
+            .collect();
+        self.prepare_explicit_send(ctx, recipient_owner, targets, payload, false)
+    }
+
     pub fn prepare_local_sibling_send<R>(
         &mut self,
         ctx: &mut ProtocolContext<'_, R>,
@@ -336,6 +358,25 @@ impl SessionManager {
         R: RngCore + CryptoRng,
     {
         self.prepare_local_sibling_send_inner(ctx, payload, false)
+    }
+
+    pub fn prepare_local_sibling_send_to_devices<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        device_pubkeys: impl IntoIterator<Item = DevicePubkey>,
+        payload: Vec<u8>,
+    ) -> Result<PreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let targets = device_pubkeys
+            .into_iter()
+            .map(|device_pubkey| TargetDevice {
+                owner_pubkey: self.local_owner_pubkey,
+                device_pubkey,
+            })
+            .collect();
+        self.prepare_explicit_send(ctx, self.local_owner_pubkey, targets, payload, false)
     }
 
     pub fn prepare_local_sibling_send_reusing_sessions<R>(
@@ -811,6 +852,55 @@ impl SessionManager {
                 target.device_pubkey,
                 &payload,
                 false,
+            )? {
+                Some((delivery, maybe_response)) => {
+                    deliveries.push(delivery);
+                    if let Some(response) = maybe_response {
+                        invite_responses.push(response);
+                    }
+                }
+                None => {
+                    relay_gaps.push(RelayGap::MissingDeviceInvite {
+                        owner_pubkey: target.owner_pubkey,
+                        device_pubkey: target.device_pubkey,
+                    });
+                }
+            }
+        }
+
+        relay_gaps.sort();
+
+        Ok(PreparedSend {
+            recipient_owner,
+            payload,
+            deliveries,
+            invite_responses,
+            relay_gaps,
+        })
+    }
+
+    fn prepare_explicit_send<R>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        recipient_owner: OwnerPubkey,
+        targets: BTreeSet<TargetDevice>,
+        payload: Vec<u8>,
+        refresh_one_way_bootstrap: bool,
+    ) -> Result<PreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mut deliveries = Vec::new();
+        let mut invite_responses = Vec::new();
+        let mut relay_gaps = Vec::new();
+
+        for target in targets {
+            match self.prepare_device_delivery(
+                ctx,
+                target.owner_pubkey,
+                target.device_pubkey,
+                &payload,
+                refresh_one_way_bootstrap,
             )? {
                 Some((delivery, maybe_response)) => {
                     deliveries.push(delivery);

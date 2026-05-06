@@ -5,6 +5,7 @@ use nostr::{Event, PublicKey};
 pub enum AppKeysSnapshotDecision {
     Advanced,
     Stale,
+    MergedStale,
     MergedEqualTimestamp,
 }
 
@@ -32,8 +33,8 @@ pub fn apply_app_keys_snapshot(
     let current_app_keys = current_app_keys.expect("checked above");
     if incoming_created_at < current_created_at {
         return AppKeysSnapshot {
-            decision: AppKeysSnapshotDecision::Stale,
-            app_keys: current_app_keys.clone(),
+            decision: AppKeysSnapshotDecision::MergedStale,
+            app_keys: current_app_keys.merge(incoming_app_keys),
             created_at: current_created_at,
         };
     }
@@ -358,6 +359,24 @@ mod tests {
     }
 
     #[test]
+    fn merges_stale_app_keys_snapshots_additively() {
+        let device1 = Keys::generate().public_key();
+        let device2 = Keys::generate().public_key();
+        let current = AppKeys::new(vec![DeviceEntry::new(device1, 200)]);
+        let incoming = AppKeys::new(vec![
+            DeviceEntry::new(device1, 100),
+            DeviceEntry::new(device2, 100),
+        ]);
+
+        let applied = apply_app_keys_snapshot(Some(&current), 200, &incoming, 100);
+
+        assert_eq!(applied.decision, AppKeysSnapshotDecision::MergedStale);
+        assert_eq!(applied.created_at, 200);
+        assert!(applied.app_keys.get_device(&device1).is_some());
+        assert!(applied.app_keys.get_device(&device2).is_some());
+    }
+
+    #[test]
     fn required_device_is_preserved_when_app_keys_snapshot_advances() {
         let remote_device = Keys::generate().public_key();
         let local_device = Keys::generate().public_key();
@@ -391,9 +410,9 @@ mod tests {
             Some(DeviceEntry::new(local_device, 200)),
         );
 
-        assert_eq!(applied.decision, AppKeysSnapshotDecision::Stale);
+        assert_eq!(applied.decision, AppKeysSnapshotDecision::MergedStale);
         assert!(applied.app_keys.get_device(&local_device).is_some());
-        assert!(applied.app_keys.get_device(&old_remote_device).is_none());
+        assert!(applied.app_keys.get_device(&old_remote_device).is_some());
     }
 
     #[test]
