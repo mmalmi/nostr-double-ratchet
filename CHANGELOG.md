@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.139 - 2026-05-06
+
+- Add canonical nearby envelope helpers for atomic `inv`/`want` messages without top-level peer routing fields.
+- Include optional author metadata on nearby inventory announcements so mobile peers can decide whether to request a payload before fetching it.
+
 ## 0.0.138 - 2026-05-04
 
 - Switch group metadata to a snapshot-only model and slim `group_manager` accordingly.
