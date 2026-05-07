@@ -955,17 +955,19 @@ where
             .sender_event_secret_key
             .ok_or_else(|| group_error("missing local sender-event secret key"))?;
 
-        remote
-            .sender_key_messages
-            .push(GroupSenderKeyMessageEnvelope {
-                group_id: record.group_id.clone(),
-                sender_event_pubkey: sender_record.sender_event_pubkey,
-                signer_secret_key,
-                key_id,
-                message_number,
-                created_at: ctx.now,
-                ciphertext,
-            });
+        let sender_key_message = GroupSenderKeyMessageEnvelope {
+            group_id: record.group_id.clone(),
+            sender_event_pubkey: sender_record.sender_event_pubkey,
+            signer_secret_key,
+            key_id,
+            message_number,
+            created_at: ctx.now,
+            ciphertext,
+        };
+        remote.sender_key_messages.push(sender_key_message.clone());
+        if session_manager.has_authorized_local_siblings() {
+            local_sibling.sender_key_messages.push(sender_key_message);
+        }
 
         Ok(GroupPreparedSend {
             group_id: record.group_id.clone(),

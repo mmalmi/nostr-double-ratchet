@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.141 - 2026-05-07
+
+- Include sender-key group messages in local-sibling prepared sends so linked devices receive AppCore group messages from sibling devices.
+
+## 0.0.140 - 2026-05-07
+
+- Expose session-manager support APIs for AppCore-owned protocol engines, including targeted remote and local-sibling sends.
+- Preserve claimed owner metadata on processed invite responses so host apps can reconcile device sessions without `NdrRuntime` ownership.
+
 ## 0.0.139 - 2026-05-06
 
 - Add canonical nearby envelope helpers for atomic `inv`/`want` messages without top-level peer routing fields.
