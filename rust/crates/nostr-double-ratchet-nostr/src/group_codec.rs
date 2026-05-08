@@ -183,7 +183,7 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
         ctx: GroupSenderKeyPlaintextDecodeContext<'_>,
         payload: &[u8],
     ) -> Result<Option<GroupSenderKeyPlaintext>> {
-        let Ok(event) = serde_json::from_slice::<UnsignedEvent>(payload) else {
+        let Some(event) = decode_verified_unsigned_event(payload)? else {
             return Ok(None);
         };
         if event.kind.as_u16() as u32 != CHAT_MESSAGE_KIND {
@@ -233,7 +233,7 @@ fn encode_master_metadata_snapshot(
 }
 
 fn decode_master_metadata_snapshot(payload: &[u8]) -> Result<Option<GroupPairwiseCommand>> {
-    let Ok(event) = serde_json::from_slice::<UnsignedEvent>(payload) else {
+    let Some(event) = decode_verified_unsigned_event(payload)? else {
         return Ok(None);
     };
     if event.kind.as_u16() as u32 != GROUP_METADATA_KIND {
@@ -309,7 +309,7 @@ fn encode_sender_key_distribution(
 }
 
 fn decode_sender_key_distribution(payload: &[u8]) -> Result<Option<GroupPairwiseCommand>> {
-    let Ok(event) = serde_json::from_slice::<UnsignedEvent>(payload) else {
+    let Some(event) = decode_verified_unsigned_event(payload)? else {
         return Ok(None);
     };
     if event.kind.as_u16() as u32 != GROUP_SENDER_KEY_DISTRIBUTION_KIND {
@@ -354,6 +354,17 @@ fn decode_sender_key_distribution(payload: &[u8]) -> Result<Option<GroupPairwise
             created_at: content.created_at,
         },
     }))
+}
+
+fn decode_verified_unsigned_event(payload: &[u8]) -> Result<Option<UnsignedEvent>> {
+    let Ok(mut event) = serde_json::from_slice::<UnsignedEvent>(payload) else {
+        return Ok(None);
+    };
+    event.ensure_id();
+    event
+        .verify_id()
+        .map_err(|error| Error::Parse(error.to_string()))?;
+    Ok(Some(event))
 }
 
 fn encode_envelope(payload: GroupPairwisePayloadV1) -> Result<Vec<u8>> {
@@ -461,6 +472,7 @@ fn parse_device_pubkey_hex(value: &str) -> Result<DevicePubkey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::EventId;
     use nostr_double_ratchet::{DevicePubkey, GroupProtocol};
 
     fn owner(byte: u8) -> OwnerPubkey {
@@ -699,12 +711,39 @@ mod tests {
         // The old plaintext pubkey is compatibility-only. Core identity comes from authenticated
         // pairwise session context, so the codec must not depend on this field.
         event.pubkey = device(5).to_nostr().unwrap();
+        event.id = None;
+        event.ensure_id();
         let encoded = serde_json::to_vec(&event).unwrap();
 
         assert_eq!(
             codec.decode_pairwise_command(&encoded).unwrap(),
             Some(command)
         );
+    }
+
+    #[test]
+    fn old_sender_key_distribution_rejects_mismatched_event_id() {
+        let codec = JsonGroupPayloadCodecV1;
+        let distribution = SenderKeyDistribution {
+            group_id: "group-1".to_string(),
+            key_id: 7,
+            sender_event_pubkey: device(3),
+            chain_key: [4; 32],
+            iteration: 9,
+            created_at: UnixSeconds(11),
+        };
+        let command = GroupPairwiseCommand::SenderKeyDistribution { distribution };
+        let encoded = codec
+            .encode_pairwise_command(encode_context(), &command)
+            .unwrap();
+        let mut event = serde_json::from_slice::<UnsignedEvent>(&encoded).unwrap();
+        event.id = Some(EventId::all_zeros());
+        let encoded = serde_json::to_vec(&event).unwrap();
+
+        assert!(matches!(
+            codec.decode_pairwise_command(&encoded),
+            Err(Error::Parse(_))
+        ));
     }
 
     #[test]

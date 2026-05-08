@@ -293,7 +293,9 @@ pub fn decode_strict(payload: &[u8]) -> Result<DecodedPairwiseRumor> {
 }
 
 pub fn decode_with_mode(payload: &[u8], mode: DecodeMode) -> Result<DecodedPairwiseRumor> {
-    let event = serde_json::from_slice::<UnsignedEvent>(payload)?;
+    let mut event = serde_json::from_slice::<UnsignedEvent>(payload)?;
+    event.ensure_id();
+    event.verify_id()?;
     let marker = protocol_marker(&event, mode)?;
     let kind = match event.kind.as_u16() as u32 {
         CHAT_MESSAGE_KIND => PairwiseRumorKind::Message {
@@ -453,14 +455,14 @@ mod tests {
 
     #[test]
     fn legacy_unmarked_master_message_decodes_leniently() {
-        let legacy = serde_json::json!({
-            "id": "5b35f7baf4c5b1228110df426d18dc045cd3853b1cb06d5b36b4e88c3dff67d2",
-            "pubkey": public_key().to_string(),
-            "created_at": 1710000000,
-            "kind": 14,
-            "tags": [["p", public_key().to_string()], ["ms", "1710000000123"]],
-            "content": "legacy hello"
-        });
+        let peer = public_key().to_string();
+        let legacy = EventBuilder::new(Kind::from(CHAT_MESSAGE_KIND as u16), "legacy hello")
+            .tags(vec![
+                tag(["p", peer.as_str()]).unwrap(),
+                tag([MS_TAG, "1710000000123"]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(1710000000))
+            .build(public_key());
         let payload = serde_json::to_vec(&legacy).expect("json");
 
         let decoded = decode(&payload).expect("decode");
@@ -472,6 +474,23 @@ mod tests {
         assert!(matches!(
             decode_strict(&payload),
             Err(Error::MissingProtocol)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_mismatched_event_id() {
+        let mut event = message_event(
+            public_key(),
+            "forged id",
+            EncodeOptions::new(1_710_000_000, 1_710_000_000_123),
+        )
+        .expect("event");
+        event.id = Some(nostr::EventId::all_zeros());
+        let payload = serde_json::to_vec(&event).expect("json");
+
+        assert!(matches!(
+            decode_strict(&payload),
+            Err(Error::NostrEvent(nostr::event::Error::InvalidId))
         ));
     }
 

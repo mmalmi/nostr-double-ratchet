@@ -1,4 +1,4 @@
-use crate::{Result, StorageAdapter};
+use crate::{Error, Result, StorageAdapter};
 use nostr::UnsignedEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -31,16 +31,22 @@ impl MessageQueue {
         format!("{}{}", self.prefix, id)
     }
 
-    fn event_id_or_random(event: &UnsignedEvent) -> String {
+    fn checked_event_id(mut event: UnsignedEvent) -> Result<(String, UnsignedEvent)> {
+        event.ensure_id();
         event
+            .verify_id()
+            .map_err(|error| Error::InvalidEvent(error.to_string()))?;
+        let id = event
             .id
             .as_ref()
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        Ok((id, event))
     }
 
     pub fn add(&self, target_key: &str, event: &UnsignedEvent) -> Result<String> {
-        let id = format!("{}/{}", Self::event_id_or_random(event), target_key);
+        let (event_id, event) = Self::checked_event_id(event.clone())?;
+        let id = format!("{}/{}", event_id, target_key);
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -48,7 +54,7 @@ impl MessageQueue {
         let entry = QueueEntry {
             id: id.clone(),
             target_key: target_key.to_string(),
-            event: event.clone(),
+            event,
             created_at,
         };
         self.storage
@@ -136,7 +142,7 @@ impl MessageQueue {
 mod tests {
     use super::*;
     use crate::InMemoryStorage;
-    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use nostr::{EventBuilder, EventId, Keys, Kind, Timestamp};
 
     fn make_rumor(content: &str, created_at: u64) -> UnsignedEvent {
         let mut event = EventBuilder::new(Kind::TextNote, content)
@@ -201,6 +207,20 @@ mod tests {
 
         assert!(queue.get_for_target("device-a").unwrap().is_empty());
         assert_eq!(queue.get_for_target("device-b").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn add_rejects_mismatched_event_id() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorage::new());
+        let queue = MessageQueue::new(storage, "v1/test-queue/");
+        let mut event = make_rumor("forged", 1);
+        event.id = Some(EventId::all_zeros());
+
+        assert!(matches!(
+            queue.add("device-a", &event),
+            Err(Error::InvalidEvent(_))
+        ));
+        assert!(queue.entries().unwrap().is_empty());
     }
 
     #[test]

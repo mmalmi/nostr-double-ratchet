@@ -410,8 +410,7 @@ impl NdrRuntime {
         recipient: PublicKey,
         mut event: UnsignedEvent,
     ) -> Result<Vec<String>> {
-        event.ensure_id();
-        let inner_id = event.id.as_ref().map(ToString::to_string);
+        let inner_id = validate_outbound_inner_event(self.owner_public_key, &mut event)?;
         let remote_payload = serde_json::to_vec(&event)?;
         let local_payload = local_sibling_payload(recipient, &remote_payload)?;
         self.prepare_and_publish(
@@ -1965,6 +1964,22 @@ fn group_publish_from_prepared_send(
     }
 }
 
+fn validate_outbound_inner_event(
+    owner_public_key: PublicKey,
+    event: &mut UnsignedEvent,
+) -> Result<Option<String>> {
+    event.ensure_id();
+    event
+        .verify_id()
+        .map_err(|error| Error::InvalidEvent(error.to_string()))?;
+    if event.pubkey != owner_public_key {
+        return Err(Error::InvalidEvent(
+            "inner event pubkey must match runtime owner".to_string(),
+        ));
+    }
+    Ok(event.id.as_ref().map(ToString::to_string))
+}
+
 fn local_sibling_payload(conversation_owner: PublicKey, payload: &[u8]) -> Result<Vec<u8>> {
     use base64::Engine;
     let wrapper = LocalSiblingPayload {
@@ -2074,4 +2089,53 @@ fn current_unix_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::{EventBuilder, EventId, Kind, Timestamp};
+
+    fn public_key() -> PublicKey {
+        nostr::Keys::generate().public_key()
+    }
+
+    fn unsigned_event(author: PublicKey) -> UnsignedEvent {
+        EventBuilder::new(Kind::TextNote, "hello")
+            .custom_created_at(Timestamp::from(1_710_000_000))
+            .build(author)
+    }
+
+    #[test]
+    fn outbound_inner_event_accepts_matching_owner_and_id() {
+        let author = public_key();
+        let mut event = unsigned_event(author);
+
+        let id = validate_outbound_inner_event(author, &mut event).unwrap();
+
+        assert_eq!(id, event.id.as_ref().map(ToString::to_string));
+    }
+
+    #[test]
+    fn outbound_inner_event_rejects_mismatched_id() {
+        let author = public_key();
+        let mut event = unsigned_event(author);
+        event.id = Some(EventId::all_zeros());
+
+        assert!(matches!(
+            validate_outbound_inner_event(author, &mut event),
+            Err(Error::InvalidEvent(_))
+        ));
+    }
+
+    #[test]
+    fn outbound_inner_event_rejects_mismatched_author() {
+        let author = public_key();
+        let mut event = unsigned_event(public_key());
+
+        assert!(matches!(
+            validate_outbound_inner_event(author, &mut event),
+            Err(Error::InvalidEvent(_))
+        ));
+    }
 }
