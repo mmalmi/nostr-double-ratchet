@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.142 - 2026-05-08
+
+- Verify unsigned inner event ids before pairwise codec decode, runtime queue storage, and old group unsigned-event wrapper decode.
+- Reject outbound `NdrRuntime::send_event` rumors whose inner author does not match the runtime owner.
+
 ## 0.0.141 - 2026-05-07
 
 - Include sender-key group messages in local-sibling prepared sends so linked devices receive AppCore group messages from sibling devices.
