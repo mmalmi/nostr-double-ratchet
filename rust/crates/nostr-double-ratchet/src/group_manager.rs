@@ -4,8 +4,9 @@ use crate::{
     GroupPayloadCodec, GroupPayloadEncodeContext, GroupPendingFanout, GroupPreparedPublish,
     GroupPreparedSend, GroupProtocol, GroupReceivedMessage, GroupSenderKeyHandleResult,
     GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, GroupSenderKeyPlaintext,
-    GroupSenderKeyPlaintextDecodeContext, GroupSenderKeyRecordSnapshot, GroupSnapshot, OwnerPubkey,
-    ProtocolContext, Result, SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent,
+    GroupSenderKeyPlaintextDecodeContext, GroupSenderKeyRecordSnapshot,
+    GroupSenderKeyRepairRequestEvent, GroupSnapshot, OwnerPubkey, ProtocolContext, Result,
+    SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent, SenderKeyRepairRequest,
     SenderKeyState, SessionManager, UnixSeconds,
 };
 use rand::{CryptoRng, RngCore};
@@ -49,6 +50,7 @@ struct SenderKeyRecord {
     sender_event_secret_key: Option<[u8; 32]>,
     latest_key_id: Option<u32>,
     states: BTreeMap<u32, SenderKeyState>,
+    distribution_history: BTreeMap<u32, SenderKeyDistribution>,
 }
 
 impl<C> GroupManager<C>
@@ -311,6 +313,108 @@ where
             )?,
             local_sibling,
         })
+    }
+
+    pub fn request_sender_key_repair<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        request: &SenderKeyRepairRequest,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let record = self.group_record(&request.group_id)?.clone();
+        if !record.protocol.is_sender_key_v1() || !record.members.contains(&self.local_owner_pubkey)
+        {
+            return Ok(empty_group_prepared_send(request.group_id.clone()));
+        }
+
+        let command = GroupPairwiseCommand::SenderKeyRepairRequest {
+            request: request.clone(),
+        };
+        Ok(GroupPreparedSend {
+            group_id: request.group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &request.group_id,
+                record.remote_members(self.local_owner_pubkey),
+                &command,
+            )?,
+            local_sibling: self.local_sibling_payload(
+                session_manager,
+                ctx,
+                &request.group_id,
+                &command,
+            )?,
+        })
+    }
+
+    pub fn respond_to_sender_key_repair_request<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        requester_owner: OwnerPubkey,
+        request: &SenderKeyRepairRequest,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let Some(record) = self.groups.get(&request.group_id).cloned() else {
+            return Ok(empty_group_prepared_send(request.group_id.clone()));
+        };
+        if !record.protocol.is_sender_key_v1() || !record.members.contains(&requester_owner) {
+            return Ok(empty_group_prepared_send(request.group_id.clone()));
+        }
+
+        let mut prepared = empty_group_prepared_send(request.group_id.clone());
+        if request
+            .required_revision
+            .is_some_and(|required| record.revision >= required)
+        {
+            let metadata = self.repair_payload_to_owner(
+                session_manager,
+                ctx,
+                requester_owner,
+                &record.metadata_payload(),
+            )?;
+            merge_group_prepared_publish(&mut prepared.remote, metadata.remote);
+            merge_group_prepared_publish(&mut prepared.local_sibling, metadata.local_sibling);
+        }
+
+        let Some(id) = self
+            .sender_event_index
+            .get(&request.sender_event_pubkey)
+            .cloned()
+        else {
+            return Ok(prepared);
+        };
+        if id.group_id != request.group_id || id.sender_owner != self.local_owner_pubkey {
+            return Ok(prepared);
+        }
+        let Some(sender_record) = self.sender_keys.get(&id) else {
+            return Ok(prepared);
+        };
+        if sender_record.sender_event_secret_key.is_none() {
+            return Ok(prepared);
+        }
+        let Some(distribution) = sender_record
+            .distribution_history
+            .get(&request.key_id)
+            .cloned()
+        else {
+            return Ok(prepared);
+        };
+        let distribution = self.repair_payload_to_owner(
+            session_manager,
+            ctx,
+            requester_owner,
+            &GroupPairwiseCommand::SenderKeyDistribution { distribution },
+        )?;
+        merge_group_prepared_publish(&mut prepared.remote, distribution.remote);
+        merge_group_prepared_publish(&mut prepared.local_sibling, distribution.local_sibling);
+        Ok(prepared)
     }
 
     pub fn update_name<R>(
@@ -732,6 +836,17 @@ where
                 let snapshot = self.group_record(&group_id)?.snapshot();
                 GroupIncomingEvent::MetadataUpdated(snapshot)
             }
+            GroupPairwiseCommand::SenderKeyRepairRequest { request } => {
+                let group = self.group_record(&request.group_id)?;
+                if !group.protocol.is_sender_key_v1() || !group.members.contains(&sender_owner) {
+                    return Ok(None);
+                }
+                GroupIncomingEvent::SenderKeyRepairRequested(GroupSenderKeyRepairRequestEvent {
+                    requester_owner: sender_owner,
+                    requester_device: sender_device,
+                    request,
+                })
+            }
         };
 
         Ok(Some(event))
@@ -917,6 +1032,51 @@ where
         Ok(prepared)
     }
 
+    fn repair_payload_to_owner<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        requester_owner: OwnerPubkey,
+        payload: &GroupPairwiseCommand,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let group_id = match payload {
+            GroupPairwiseCommand::MetadataSnapshot { snapshot } => snapshot.group_id.clone(),
+            GroupPairwiseCommand::GroupMessage { group_id, .. }
+            | GroupPairwiseCommand::SenderKeyDistribution {
+                distribution: SenderKeyDistribution { group_id, .. },
+            }
+            | GroupPairwiseCommand::SenderKeyRepairRequest {
+                request: SenderKeyRepairRequest { group_id, .. },
+            } => group_id.clone(),
+        };
+        if requester_owner == self.local_owner_pubkey {
+            return Ok(GroupPreparedSend {
+                group_id: group_id.clone(),
+                remote: GroupPreparedPublish::empty(),
+                local_sibling: self.local_sibling_payload(
+                    session_manager,
+                    ctx,
+                    &group_id,
+                    payload,
+                )?,
+            });
+        }
+        Ok(GroupPreparedSend {
+            group_id: group_id.clone(),
+            remote: self.fanout_payload(
+                session_manager,
+                ctx,
+                &group_id,
+                vec![requester_owner],
+                payload,
+            )?,
+            local_sibling: GroupPreparedPublish::empty(),
+        })
+    }
+
     fn send_sender_key_message<R>(
         &mut self,
         session_manager: &mut SessionManager,
@@ -1077,6 +1237,7 @@ where
                 sender_event_secret_key: Some(sender_event_secret_key),
                 latest_key_id: None,
                 states: BTreeMap::new(),
+                distribution_history: BTreeMap::new(),
             };
             self.sender_event_index
                 .insert(sender_event_pubkey, sender_record.id());
@@ -1088,6 +1249,7 @@ where
             .sender_keys
             .get_mut(&id)
             .ok_or_else(|| group_error("missing local sender-key record"))?;
+        let mut new_distribution = None;
         if force_rotate || sender_record.latest_key_id.is_none() {
             let key_id = random_key_id(ctx);
             let mut chain_key = [0u8; 32];
@@ -1096,6 +1258,14 @@ where
                 .states
                 .insert(key_id, SenderKeyState::new(key_id, chain_key, 0));
             sender_record.latest_key_id = Some(key_id);
+            new_distribution = Some(SenderKeyDistribution {
+                group_id: record.group_id.clone(),
+                key_id,
+                sender_event_pubkey: sender_record.sender_event_pubkey,
+                chain_key,
+                iteration: 0,
+                created_at: ctx.now,
+            });
             created_or_rotated = true;
         }
 
@@ -1106,17 +1276,20 @@ where
             .states
             .get(&key_id)
             .ok_or_else(|| group_error("missing local sender-key state"))?;
-        Ok((
-            SenderKeyDistribution {
-                group_id: record.group_id.clone(),
-                key_id,
-                sender_event_pubkey: sender_record.sender_event_pubkey,
-                chain_key: state.chain_key(),
-                iteration: state.iteration(),
-                created_at: ctx.now,
-            },
-            created_or_rotated,
-        ))
+        let distribution = new_distribution.unwrap_or_else(|| SenderKeyDistribution {
+            group_id: record.group_id.clone(),
+            key_id,
+            sender_event_pubkey: sender_record.sender_event_pubkey,
+            chain_key: state.chain_key(),
+            iteration: state.iteration(),
+            created_at: ctx.now,
+        });
+        if created_or_rotated {
+            sender_record
+                .distribution_history
+                .insert(distribution.key_id, distribution.clone());
+        }
+        Ok((distribution, created_or_rotated))
     }
 
     fn fanout_sender_key_distribution<R>(
@@ -1211,6 +1384,7 @@ where
                 sender_event_secret_key: None,
                 latest_key_id: None,
                 states: BTreeMap::new(),
+                distribution_history: BTreeMap::new(),
             });
         if record.sender_event_pubkey != distribution.sender_event_pubkey {
             self.sender_event_index.remove(&record.sender_event_pubkey);
@@ -1219,6 +1393,10 @@ where
         self.sender_event_index
             .insert(distribution.sender_event_pubkey, id);
         record.latest_key_id = Some(distribution.key_id);
+        record
+            .distribution_history
+            .entry(distribution.key_id)
+            .or_insert_with(|| distribution.clone());
         record.states.entry(distribution.key_id).or_insert_with(|| {
             SenderKeyState::new(
                 distribution.key_id,
@@ -1537,6 +1715,11 @@ impl SenderKeyRecord {
             sender_event_secret_key: snapshot.sender_event_secret_key,
             latest_key_id: snapshot.latest_key_id,
             states,
+            distribution_history: snapshot
+                .distribution_history
+                .into_iter()
+                .map(|distribution| (distribution.key_id, distribution))
+                .collect(),
         })
     }
 
@@ -1549,6 +1732,7 @@ impl SenderKeyRecord {
             sender_event_secret_key: self.sender_event_secret_key,
             latest_key_id: self.latest_key_id,
             states: self.states.values().cloned().collect(),
+            distribution_history: self.distribution_history.values().cloned().collect(),
         }
     }
 }
@@ -1633,6 +1817,14 @@ fn merge_group_prepared_publish(into: &mut GroupPreparedPublish, next: GroupPrep
         if !into.pending_fanouts.contains(&fanout) {
             into.pending_fanouts.push(fanout);
         }
+    }
+}
+
+fn empty_group_prepared_send(group_id: String) -> GroupPreparedSend {
+    GroupPreparedSend {
+        group_id,
+        remote: GroupPreparedPublish::empty(),
+        local_sibling: GroupPreparedPublish::empty(),
     }
 }
 

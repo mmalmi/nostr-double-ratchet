@@ -3,7 +3,8 @@ mod support;
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use nostr_double_ratchet::{
     GroupIncomingEvent, GroupManagerSnapshot, GroupProtocol, GroupSenderKeyHandleResult,
-    GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, Result, SessionManager, UnixSeconds,
+    GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, Result, SenderKeyRepairRequest,
+    SessionManager, UnixSeconds,
 };
 use nostr_double_ratchet_nostr::NostrGroupManager as GroupManager;
 use support::{
@@ -378,6 +379,171 @@ fn sender_key_outer_message_waits_for_distribution() -> Result<()> {
         result,
         GroupSenderKeyHandleResult::PendingDistribution { .. }
     ));
+
+    Ok(())
+}
+
+#[test]
+fn sender_key_repair_request_restores_original_distribution_after_sender_chain_advanced(
+) -> Result<()> {
+    let alice = manager_device(46, 86);
+    let bob = manager_device(47, 87);
+    let mut alice_manager = session_manager(&alice);
+    let mut bob_manager = session_manager(&bob);
+    let mut alice_groups = GroupManager::new(alice.owner_pubkey);
+    let mut bob_groups = GroupManager::new(bob.owner_pubkey);
+
+    bob_manager.observe_peer_roster(alice.owner_pubkey, roster_for(&[&alice], 1_900_070_000));
+    alice_manager.observe_peer_roster(bob.owner_pubkey, roster_for(&[&bob], 1_900_070_001));
+    alice_manager.observe_device_invite(
+        bob.owner_pubkey,
+        manager_public_device_invite(&mut bob_manager, &bob, 1_900_070_002, 1_900_070_002)?,
+    )?;
+
+    let created = alice_groups.create_group_with_protocol(
+        &mut alice_manager,
+        &mut context(1_900_070_003, 1_900_070_003),
+        "Repair dist".to_string(),
+        vec![bob.owner_pubkey],
+        GroupProtocol::sender_key_v1(),
+    )?;
+    observe_matching_invite_responses(
+        &mut bob_manager,
+        &created.prepared.remote.invite_responses,
+        1_900_070_004,
+        1_900_070_004,
+    )?;
+
+    let metadata_delivery = created.prepared.remote.deliveries[0].clone();
+    let received_metadata = manager_receive_delivery(
+        &mut bob_manager,
+        &mut context(1_900_070_005, 1_900_070_005),
+        alice.owner_pubkey,
+        &metadata_delivery,
+    )?
+    .expect("metadata delivery");
+    assert!(matches!(
+        bob_groups.handle_pairwise_payload(
+            received_metadata.owner_pubkey,
+            received_metadata.device_pubkey,
+            &received_metadata.payload,
+        )?,
+        Some(GroupIncomingEvent::MetadataUpdated(_))
+    ));
+
+    let first = alice_groups.send_message(
+        &mut alice_manager,
+        &mut context(1_900_070_006, 1_900_070_006),
+        &created.group.group_id,
+        b"repair me".to_vec(),
+    )?;
+    let first_outer = first.remote.sender_key_messages[0].clone();
+    assert!(matches!(
+        bob_groups.handle_sender_key_message(sender_key_message_from_envelope(&first_outer))?,
+        GroupSenderKeyHandleResult::PendingDistribution { .. }
+    ));
+
+    let _advanced = alice_groups.send_message(
+        &mut alice_manager,
+        &mut context(1_900_070_007, 1_900_070_007),
+        &created.group.group_id,
+        b"chain advanced".to_vec(),
+    )?;
+
+    let request = SenderKeyRepairRequest {
+        group_id: created.group.group_id.clone(),
+        sender_event_pubkey: first_outer.sender_event_pubkey,
+        key_id: first_outer.key_id,
+        message_number: first_outer.message_number,
+        required_revision: None,
+        created_at: UnixSeconds(1_900_070_008),
+    };
+    let repair_request = bob_groups.request_sender_key_repair(
+        &mut bob_manager,
+        &mut context(1_900_070_009, 1_900_070_009),
+        &request,
+    )?;
+    let alice_events = deliver_pairwise_group_events_for(
+        &mut alice_manager,
+        &mut alice_groups,
+        alice.owner_pubkey,
+        bob.owner_pubkey,
+        &repair_request,
+        1_900_070_010,
+        1_900_070_010,
+    )?;
+    assert!(matches!(
+        alice_events.as_slice(),
+        [GroupIncomingEvent::SenderKeyRepairRequested(event)]
+            if event.request == request && event.requester_owner == bob.owner_pubkey
+    ));
+
+    let repair_response = alice_groups.respond_to_sender_key_repair_request(
+        &mut alice_manager,
+        &mut context(1_900_070_011, 1_900_070_011),
+        bob.owner_pubkey,
+        &request,
+    )?;
+    let bob_events = deliver_pairwise_group_events_for(
+        &mut bob_manager,
+        &mut bob_groups,
+        bob.owner_pubkey,
+        alice.owner_pubkey,
+        &repair_response,
+        1_900_070_012,
+        1_900_070_012,
+    )?;
+    assert_eq!(bob_events.len(), 1);
+
+    let repaired =
+        bob_groups.handle_sender_key_message(sender_key_message_from_envelope(&first_outer))?;
+    assert!(matches!(
+        repaired,
+        GroupSenderKeyHandleResult::Event(GroupIncomingEvent::Message(message))
+            if message.body == b"repair me".to_vec()
+                && message.sender_device == Some(alice.device_pubkey)
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn sender_key_repair_request_from_removed_member_does_not_leak_distribution() -> Result<()> {
+    let mut fixture = established_sender_key_fixture(48, 1_900_071_000)?;
+    let sent = fixture.alice_groups.send_message(
+        &mut fixture.alice_manager,
+        &mut context(1_900_071_010, 1_900_071_010),
+        &fixture.group_id,
+        b"before removal".to_vec(),
+    )?;
+    let outer = sent.remote.sender_key_messages[0].clone();
+    let removed = fixture.alice_groups.remove_members(
+        &mut fixture.alice_manager,
+        &mut context(1_900_071_011, 1_900_071_011),
+        &fixture.group_id,
+        vec![fixture.bob_groups.snapshot().local_owner_pubkey],
+    )?;
+    assert!(!removed.remote.deliveries.is_empty());
+
+    let request = SenderKeyRepairRequest {
+        group_id: fixture.group_id.clone(),
+        sender_event_pubkey: outer.sender_event_pubkey,
+        key_id: outer.key_id,
+        message_number: outer.message_number,
+        required_revision: None,
+        created_at: UnixSeconds(1_900_071_012),
+    };
+    let response = fixture.alice_groups.respond_to_sender_key_repair_request(
+        &mut fixture.alice_manager,
+        &mut context(1_900_071_013, 1_900_071_013),
+        fixture.bob_groups.snapshot().local_owner_pubkey,
+        &request,
+    )?;
+
+    assert!(response.remote.deliveries.is_empty());
+    assert!(response.local_sibling.deliveries.is_empty());
+    assert!(response.remote.sender_key_messages.is_empty());
+    assert!(response.local_sibling.sender_key_messages.is_empty());
 
     Ok(())
 }

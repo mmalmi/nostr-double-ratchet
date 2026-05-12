@@ -2,7 +2,7 @@ use nostr::{EventBuilder, Kind, Tag, Timestamp, UnsignedEvent};
 use nostr_double_ratchet::{
     DevicePubkey, Error, GroupPairwiseCommand, GroupPayloadCodec, GroupPayloadEncodeContext,
     GroupProtocol, GroupSenderKeyPlaintext, GroupSenderKeyPlaintextDecodeContext, GroupSnapshot,
-    OwnerPubkey, Result, SenderKeyDistribution, UnixSeconds,
+    OwnerPubkey, Result, SenderKeyDistribution, SenderKeyRepairRequest, UnixSeconds,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,9 @@ enum GroupPairwisePayloadV1 {
     },
     SenderKeyDistribution {
         distribution: SenderKeyDistribution,
+    },
+    SenderKeyRepairRequest {
+        request: SenderKeyRepairRequest,
     },
 }
 
@@ -137,6 +140,11 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
             }),
             GroupPairwiseCommand::SenderKeyDistribution { distribution } => {
                 encode_sender_key_distribution(ctx, distribution)
+            }
+            GroupPairwiseCommand::SenderKeyRepairRequest { request } => {
+                encode_envelope(GroupPairwisePayloadV1::SenderKeyRepairRequest {
+                    request: request.clone(),
+                })
             }
         }
     }
@@ -445,6 +453,9 @@ fn command_from_v1_payload(
             body,
         }),
         GroupPairwisePayloadV1::SenderKeyDistribution { .. } => None,
+        GroupPairwisePayloadV1::SenderKeyRepairRequest { request } => {
+            Some(GroupPairwiseCommand::SenderKeyRepairRequest { request })
+        }
     })
 }
 
@@ -762,5 +773,30 @@ mod tests {
                 .unwrap();
 
         assert_eq!(codec.decode_pairwise_command(&encoded).unwrap(), None);
+    }
+
+    #[test]
+    fn sender_key_repair_request_command_roundtrips_in_current_envelope() {
+        let codec = JsonGroupPayloadCodecV1;
+        let request = nostr_double_ratchet::SenderKeyRepairRequest {
+            group_id: "group-1".to_string(),
+            sender_event_pubkey: device(3),
+            key_id: 7,
+            message_number: 42,
+            required_revision: Some(9),
+            created_at: UnixSeconds(13),
+        };
+        let command = GroupPairwiseCommand::SenderKeyRepairRequest {
+            request: request.clone(),
+        };
+
+        let encoded = codec
+            .encode_pairwise_command(encode_context(), &command)
+            .unwrap();
+
+        assert_eq!(
+            codec.decode_pairwise_command(&encoded).unwrap(),
+            Some(command)
+        );
     }
 }
