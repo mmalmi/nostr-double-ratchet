@@ -231,6 +231,14 @@ pub struct GroupSenderKeyRecordSnapshot {
     pub states: Vec<crate::SenderKeyState>,
     #[serde(default)]
     pub distribution_history: Vec<SenderKeyDistribution>,
+    #[serde(default)]
+    pub distributed_to: Vec<GroupSenderKeyDistributionRecipientsSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupSenderKeyDistributionRecipientsSnapshot {
+    pub key_id: u32,
+    pub recipients: Vec<OwnerPubkey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

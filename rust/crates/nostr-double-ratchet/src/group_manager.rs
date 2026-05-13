@@ -51,6 +51,7 @@ struct SenderKeyRecord {
     latest_key_id: Option<u32>,
     states: BTreeMap<u32, SenderKeyState>,
     distribution_history: BTreeMap<u32, SenderKeyDistribution>,
+    distributed_to: BTreeMap<u32, BTreeSet<OwnerPubkey>>,
 }
 
 impl<C> GroupManager<C>
@@ -1090,14 +1091,21 @@ where
         let mut remote = GroupPreparedPublish::empty();
         let mut local_sibling = self.local_sibling_sync(session_manager, ctx, record)?;
         let local_device = session_manager.local_device_pubkey();
-        let (distribution, created) =
-            self.ensure_local_sender_key_record(ctx, record, local_device, false)?;
+        let force_rotate = self.local_sender_key_has_removed_recipients(record, local_device);
+        let (distribution, _created) =
+            self.ensure_local_sender_key_record(ctx, record, local_device, force_rotate)?;
 
-        if created {
+        let recipients = self.sender_key_distribution_recipients(
+            record,
+            local_device,
+            distribution.key_id,
+            record.remote_members(self.local_owner_pubkey),
+        );
+        if !recipients.is_empty() {
             remote = self.fanout_sender_key_distribution(
                 session_manager,
                 ctx,
-                record.remote_members(self.local_owner_pubkey),
+                recipients,
                 &distribution,
             )?;
         }
@@ -1238,6 +1246,7 @@ where
                 latest_key_id: None,
                 states: BTreeMap::new(),
                 distribution_history: BTreeMap::new(),
+                distributed_to: BTreeMap::new(),
             };
             self.sender_event_index
                 .insert(sender_event_pubkey, sender_record.id());
@@ -1302,15 +1311,22 @@ where
     where
         R: RngCore + CryptoRng,
     {
-        self.fanout_payload(
+        let prepared = self.fanout_payload(
             session_manager,
             ctx,
             &distribution.group_id,
-            recipients,
+            recipients.clone(),
             &GroupPairwiseCommand::SenderKeyDistribution {
                 distribution: distribution.clone(),
             },
-        )
+        )?;
+        self.mark_sender_key_distribution_recipients(
+            &distribution.group_id,
+            session_manager.local_device_pubkey(),
+            distribution.key_id,
+            recipients,
+        );
+        Ok(prepared)
     }
 
     fn local_sibling_sender_key_distribution<R>(
@@ -1385,6 +1401,7 @@ where
                 latest_key_id: None,
                 states: BTreeMap::new(),
                 distribution_history: BTreeMap::new(),
+                distributed_to: BTreeMap::new(),
             });
         if record.sender_event_pubkey != distribution.sender_event_pubkey {
             self.sender_event_index.remove(&record.sender_event_pubkey);
@@ -1405,6 +1422,78 @@ where
             )
         });
         Ok(())
+    }
+
+    fn sender_key_distribution_recipients(
+        &self,
+        group: &GroupRecord,
+        local_device: DevicePubkey,
+        key_id: u32,
+        candidates: Vec<OwnerPubkey>,
+    ) -> Vec<OwnerPubkey> {
+        let id = SenderKeyRecordId::new(
+            group.group_id.clone(),
+            self.local_owner_pubkey,
+            local_device,
+        );
+        let Some(record) = self.sender_keys.get(&id) else {
+            return candidates;
+        };
+        let distributed = record.distributed_to.get(&key_id);
+        candidates
+            .into_iter()
+            .filter(|recipient| {
+                group.members.contains(recipient)
+                    && distributed.is_none_or(|owners| !owners.contains(recipient))
+            })
+            .collect()
+    }
+
+    fn local_sender_key_has_removed_recipients(
+        &self,
+        group: &GroupRecord,
+        local_device: DevicePubkey,
+    ) -> bool {
+        let id = SenderKeyRecordId::new(
+            group.group_id.clone(),
+            self.local_owner_pubkey,
+            local_device,
+        );
+        let Some(record) = self.sender_keys.get(&id) else {
+            return false;
+        };
+        let Some(key_id) = record.latest_key_id else {
+            return false;
+        };
+        record
+            .distributed_to
+            .get(&key_id)
+            .is_some_and(|recipients| {
+                recipients
+                    .iter()
+                    .any(|owner| !group.members.contains(owner))
+            })
+    }
+
+    fn mark_sender_key_distribution_recipients(
+        &mut self,
+        group_id: &str,
+        local_device: DevicePubkey,
+        key_id: u32,
+        recipients: Vec<OwnerPubkey>,
+    ) {
+        if recipients.is_empty() {
+            return;
+        }
+        let id =
+            SenderKeyRecordId::new(group_id.to_string(), self.local_owner_pubkey, local_device);
+        if let Some(record) = self.sender_keys.get_mut(&id) {
+            record
+                .distributed_to
+                .entry(key_id)
+                .or_default()
+                .extend(recipients);
+        }
     }
 
     fn group_record(&self, group_id: &str) -> Result<&GroupRecord> {
@@ -1720,6 +1809,11 @@ impl SenderKeyRecord {
                 .into_iter()
                 .map(|distribution| (distribution.key_id, distribution))
                 .collect(),
+            distributed_to: snapshot
+                .distributed_to
+                .into_iter()
+                .map(|entry| (entry.key_id, entry.recipients.into_iter().collect()))
+                .collect(),
         })
     }
 
@@ -1733,6 +1827,16 @@ impl SenderKeyRecord {
             latest_key_id: self.latest_key_id,
             states: self.states.values().cloned().collect(),
             distribution_history: self.distribution_history.values().cloned().collect(),
+            distributed_to: self
+                .distributed_to
+                .iter()
+                .map(
+                    |(key_id, recipients)| crate::GroupSenderKeyDistributionRecipientsSnapshot {
+                        key_id: *key_id,
+                        recipients: recipients.iter().copied().collect(),
+                    },
+                )
+                .collect(),
         }
     }
 }
