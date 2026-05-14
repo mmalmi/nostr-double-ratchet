@@ -8,11 +8,14 @@ use serde::{Deserialize, Serialize};
 
 pub const GROUP_METADATA_KIND: u32 = 40;
 pub const GROUP_SENDER_KEY_DISTRIBUTION_KIND: u32 = 10446;
+pub const GROUP_SENDER_KEY_REPAIR_REQUEST_KIND: u32 = 10447;
 
 const GROUP_WIRE_FORMAT_VERSION_V1: u8 = 1;
 const CHAT_MESSAGE_KIND: u32 = 14;
 const GROUP_LABEL_TAG: &str = "l";
 const KEY_TAG: &str = "key";
+const SENDER_TAG: &str = "sender";
+const MESSAGE_TAG: &str = "message";
 const MS_TAG: &str = "ms";
 const REVISION_TAG: &str = "revision";
 
@@ -64,9 +67,6 @@ enum GroupPairwisePayloadV1 {
     SenderKeyDistribution {
         distribution: SenderKeyDistribution,
     },
-    SenderKeyRepairRequest {
-        request: SenderKeyRepairRequest,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +113,18 @@ struct SenderKeyDistributionContent {
     sender_event_pubkey: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SenderKeyRepairRequestContent {
+    group_id: String,
+    sender_event_pubkey: String,
+    key_id: u32,
+    message_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    required_revision: Option<u64>,
+    created_at: UnixSeconds,
+}
+
 impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
     fn is_pairwise_payload(&self, payload: &[u8]) -> bool {
         self.decode_pairwise_command(payload)
@@ -142,9 +154,7 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
                 encode_sender_key_distribution(ctx, distribution)
             }
             GroupPairwiseCommand::SenderKeyRepairRequest { request } => {
-                encode_envelope(GroupPairwisePayloadV1::SenderKeyRepairRequest {
-                    request: request.clone(),
-                })
+                encode_sender_key_repair_request(ctx, request)
             }
         }
     }
@@ -154,6 +164,9 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
             return Ok(Some(command));
         }
         if let Some(command) = decode_sender_key_distribution(payload)? {
+            return Ok(Some(command));
+        }
+        if let Some(command) = decode_sender_key_repair_request(payload)? {
             return Ok(Some(command));
         }
 
@@ -364,6 +377,82 @@ fn decode_sender_key_distribution(payload: &[u8]) -> Result<Option<GroupPairwise
     }))
 }
 
+fn encode_sender_key_repair_request(
+    ctx: GroupPayloadEncodeContext,
+    request: &SenderKeyRepairRequest,
+) -> Result<Vec<u8>> {
+    let content = serde_json::to_string(&SenderKeyRepairRequestContent {
+        group_id: request.group_id.clone(),
+        sender_event_pubkey: request.sender_event_pubkey.to_string(),
+        key_id: request.key_id,
+        message_number: request.message_number,
+        required_revision: request.required_revision,
+        created_at: request.created_at,
+    })?;
+    let millis = ctx.created_at.get().saturating_mul(1000).to_string();
+    let key_id = request.key_id.to_string();
+    let message_number = request.message_number.to_string();
+    let sender_event_pubkey = request.sender_event_pubkey.to_string();
+    let mut tags = vec![
+        tag([GROUP_LABEL_TAG, request.group_id.as_str()])?,
+        tag([KEY_TAG, key_id.as_str()])?,
+        tag([SENDER_TAG, sender_event_pubkey.as_str()])?,
+        tag([MESSAGE_TAG, message_number.as_str()])?,
+        tag([MS_TAG, millis.as_str()])?,
+    ];
+    let revision;
+    if let Some(required_revision) = request.required_revision {
+        revision = required_revision.to_string();
+        tags.push(tag([REVISION_TAG, revision.as_str()])?);
+    }
+
+    let event = EventBuilder::new(
+        Kind::from(GROUP_SENDER_KEY_REPAIR_REQUEST_KIND as u16),
+        content,
+    )
+    .tags(tags)
+    .custom_created_at(Timestamp::from(ctx.created_at.get()))
+    .build(ctx.local_device_pubkey.to_nostr()?);
+    Ok(serde_json::to_vec(&event)?)
+}
+
+fn decode_sender_key_repair_request(payload: &[u8]) -> Result<Option<GroupPairwiseCommand>> {
+    let Some(event) = decode_verified_unsigned_event(payload)? else {
+        return Ok(None);
+    };
+    if event.kind.as_u16() as u32 != GROUP_SENDER_KEY_REPAIR_REQUEST_KIND {
+        return Ok(None);
+    }
+
+    let content = serde_json::from_str::<SenderKeyRepairRequestContent>(&event.content)?;
+    if content.group_id.is_empty() {
+        return Ok(None);
+    }
+    require_tag_string(&event, GROUP_LABEL_TAG, &content.group_id)?;
+    require_tag_u32(&event, KEY_TAG, content.key_id)?;
+    require_tag_string(&event, SENDER_TAG, &content.sender_event_pubkey)?;
+    require_tag_u32(&event, MESSAGE_TAG, content.message_number)?;
+    match content.required_revision {
+        Some(required_revision) => require_tag_u64(&event, REVISION_TAG, required_revision)?,
+        None => {
+            if first_tag_value(&event, REVISION_TAG).is_some() {
+                return Err(Error::Parse("revision tag mismatch".to_string()));
+            }
+        }
+    }
+
+    Ok(Some(GroupPairwiseCommand::SenderKeyRepairRequest {
+        request: SenderKeyRepairRequest {
+            group_id: content.group_id,
+            sender_event_pubkey: parse_device_pubkey_hex(&content.sender_event_pubkey)?,
+            key_id: content.key_id,
+            message_number: content.message_number,
+            required_revision: content.required_revision,
+            created_at: content.created_at,
+        },
+    }))
+}
+
 fn decode_verified_unsigned_event(payload: &[u8]) -> Result<Option<UnsignedEvent>> {
     let Ok(mut event) = serde_json::from_slice::<UnsignedEvent>(payload) else {
         return Ok(None);
@@ -453,9 +542,6 @@ fn command_from_v1_payload(
             body,
         }),
         GroupPairwisePayloadV1::SenderKeyDistribution { .. } => None,
-        GroupPairwisePayloadV1::SenderKeyRepairRequest { request } => {
-            Some(GroupPairwiseCommand::SenderKeyRepairRequest { request })
-        }
     })
 }
 
@@ -467,6 +553,42 @@ fn first_tag_value(event: &UnsignedEvent, key: &str) -> Option<String> {
         }
         values.get(1).cloned()
     })
+}
+
+fn require_tag_string(event: &UnsignedEvent, key: &str, expected: &str) -> Result<()> {
+    let Some(value) = first_tag_value(event, key) else {
+        return Err(Error::Parse(format!("missing {key} tag")));
+    };
+    if value != expected {
+        return Err(Error::Parse(format!("{key} tag mismatch")));
+    }
+    Ok(())
+}
+
+fn require_tag_u32(event: &UnsignedEvent, key: &str, expected: u32) -> Result<()> {
+    let Some(value) = first_tag_value(event, key) else {
+        return Err(Error::Parse(format!("missing {key} tag")));
+    };
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| Error::Parse(error.to_string()))?;
+    if value != expected {
+        return Err(Error::Parse(format!("{key} tag mismatch")));
+    }
+    Ok(())
+}
+
+fn require_tag_u64(event: &UnsignedEvent, key: &str, expected: u64) -> Result<()> {
+    let Some(value) = first_tag_value(event, key) else {
+        return Err(Error::Parse(format!("missing {key} tag")));
+    };
+    let value = value
+        .parse::<u64>()
+        .map_err(|error| Error::Parse(error.to_string()))?;
+    if value != expected {
+        return Err(Error::Parse(format!("{key} tag mismatch")));
+    }
+    Ok(())
 }
 
 fn tag<const N: usize>(parts: [&str; N]) -> Result<Tag> {
@@ -776,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn sender_key_repair_request_command_roundtrips_in_current_envelope() {
+    fn sender_key_repair_request_command_encodes_10447_rumor() {
         let codec = JsonGroupPayloadCodecV1;
         let request = nostr_double_ratchet::SenderKeyRepairRequest {
             group_id: "group-1".to_string(),
@@ -793,10 +915,147 @@ mod tests {
         let encoded = codec
             .encode_pairwise_command(encode_context(), &command)
             .unwrap();
+        let event = serde_json::from_slice::<UnsignedEvent>(&encoded).unwrap();
+        assert_eq!(
+            event.kind.as_u16() as u32,
+            GROUP_SENDER_KEY_REPAIR_REQUEST_KIND
+        );
+        assert_eq!(event.pubkey, device(9).to_nostr().unwrap());
+        assert_eq!(
+            first_tag_value(&event, GROUP_LABEL_TAG).as_deref(),
+            Some("group-1")
+        );
+        assert_eq!(first_tag_value(&event, KEY_TAG).as_deref(), Some("7"));
+        assert_eq!(
+            first_tag_value(&event, SENDER_TAG).as_deref(),
+            Some(device(3).to_string().as_str())
+        );
+        assert_eq!(first_tag_value(&event, MESSAGE_TAG).as_deref(), Some("42"));
+        assert_eq!(first_tag_value(&event, REVISION_TAG).as_deref(), Some("9"));
+        assert_eq!(first_tag_value(&event, MS_TAG).as_deref(), Some("12000"));
+        let content = serde_json::from_str::<serde_json::Value>(&event.content).unwrap();
+        assert_eq!(content["groupId"], "group-1");
+        assert_eq!(content["senderEventPubkey"], device(3).to_string());
+        assert_eq!(content["keyId"], 7);
+        assert_eq!(content["messageNumber"], 42);
+        assert_eq!(content["requiredRevision"], 9);
+        assert_eq!(content["createdAt"], 13);
 
         assert_eq!(
             codec.decode_pairwise_command(&encoded).unwrap(),
             Some(command)
         );
+    }
+
+    #[test]
+    fn old_sender_key_repair_request_envelope_is_not_consumed() {
+        let codec = JsonGroupPayloadCodecV1;
+        let encoded = serde_json::to_vec(&serde_json::json!({
+            "wire_format_version": 1,
+            "payload": {
+                "kind": "sender_key_repair_request",
+                "request": {
+                    "group_id": "group-1",
+                    "sender_event_pubkey": device(3),
+                    "key_id": 7,
+                    "message_number": 42,
+                    "required_revision": 9,
+                    "created_at": 13
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(codec.decode_pairwise_command(&encoded).unwrap(), None);
+    }
+
+    #[test]
+    fn sender_key_repair_request_rejects_mismatched_tags() {
+        let codec = JsonGroupPayloadCodecV1;
+        let request = nostr_double_ratchet::SenderKeyRepairRequest {
+            group_id: "group-1".to_string(),
+            sender_event_pubkey: device(3),
+            key_id: 7,
+            message_number: 42,
+            required_revision: Some(9),
+            created_at: UnixSeconds(13),
+        };
+        let command = GroupPairwiseCommand::SenderKeyRepairRequest { request };
+        let encoded = codec
+            .encode_pairwise_command(encode_context(), &command)
+            .unwrap();
+        let event = serde_json::from_slice::<UnsignedEvent>(&encoded).unwrap();
+        let sender_hex = device(3).to_string();
+        let event = EventBuilder::new(
+            Kind::from(GROUP_SENDER_KEY_REPAIR_REQUEST_KIND as u16),
+            event.content,
+        )
+        .tags(vec![
+            tag([GROUP_LABEL_TAG, "group-2"]).unwrap(),
+            tag([KEY_TAG, "7"]).unwrap(),
+            tag([SENDER_TAG, sender_hex.as_str()]).unwrap(),
+            tag([MESSAGE_TAG, "42"]).unwrap(),
+            tag([REVISION_TAG, "9"]).unwrap(),
+        ])
+        .custom_created_at(Timestamp::from(12))
+        .build(device(9).to_nostr().unwrap());
+        let encoded = serde_json::to_vec(&event).unwrap();
+
+        assert!(matches!(
+            codec.decode_pairwise_command(&encoded),
+            Err(Error::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn sender_key_repair_request_without_revision_omits_revision_tag() {
+        let codec = JsonGroupPayloadCodecV1;
+        let request = nostr_double_ratchet::SenderKeyRepairRequest {
+            group_id: "group-1".to_string(),
+            sender_event_pubkey: device(3),
+            key_id: 7,
+            message_number: 42,
+            required_revision: None,
+            created_at: UnixSeconds(13),
+        };
+        let command = GroupPairwiseCommand::SenderKeyRepairRequest {
+            request: request.clone(),
+        };
+        let encoded = codec
+            .encode_pairwise_command(encode_context(), &command)
+            .unwrap();
+        let event = serde_json::from_slice::<UnsignedEvent>(&encoded).unwrap();
+        assert_eq!(first_tag_value(&event, REVISION_TAG), None);
+
+        assert_eq!(
+            codec.decode_pairwise_command(&encoded).unwrap(),
+            Some(GroupPairwiseCommand::SenderKeyRepairRequest { request })
+        );
+    }
+
+    #[test]
+    fn sender_key_repair_request_rejects_missing_required_tags() {
+        let codec = JsonGroupPayloadCodecV1;
+        let content = serde_json::to_string(&SenderKeyRepairRequestContent {
+            group_id: "group-1".to_string(),
+            sender_event_pubkey: device(3).to_string(),
+            key_id: 7,
+            message_number: 42,
+            required_revision: Some(9),
+            created_at: UnixSeconds(13),
+        })
+        .unwrap();
+        let event = EventBuilder::new(
+            Kind::from(GROUP_SENDER_KEY_REPAIR_REQUEST_KIND as u16),
+            content,
+        )
+        .custom_created_at(Timestamp::from(12))
+        .build(device(9).to_nostr().unwrap());
+        let encoded = serde_json::to_vec(&event).unwrap();
+
+        assert!(matches!(
+            codec.decode_pairwise_command(&encoded),
+            Err(Error::Parse(_))
+        ));
     }
 }
