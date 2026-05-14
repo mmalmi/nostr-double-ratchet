@@ -1346,14 +1346,27 @@ where
     where
         R: RngCore + CryptoRng,
     {
-        self.local_sibling_payload(
+        let prepared = self.local_sibling_payload(
             session_manager,
             ctx,
             &distribution.group_id,
             &GroupPairwiseCommand::SenderKeyDistribution {
                 distribution: distribution.clone(),
             },
-        )
+        )?;
+        let intended_for_local_sibling = !prepared.deliveries.is_empty()
+            || !prepared.invite_responses.is_empty()
+            || !prepared.relay_gaps.is_empty()
+            || !prepared.pending_fanouts.is_empty();
+        if intended_for_local_sibling {
+            self.record_sender_key_repair_snapshot(
+                &distribution.group_id,
+                session_manager.local_device_pubkey(),
+                distribution,
+                &[self.local_owner_pubkey],
+            );
+        }
+        Ok(prepared)
     }
 
     fn observe_sender_key_distribution(

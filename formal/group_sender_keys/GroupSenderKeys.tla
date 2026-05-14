@@ -8,6 +8,7 @@ CONSTANTS
     MaxKey,
     MaxMsg,
     MaxClock,
+    SyncLocalSiblings,
     AllowUnauthorizedMembershipMutations,
     BugRepairUsesKeyHistory
 
@@ -18,6 +19,7 @@ ASSUME InitialAdmins # {}
 ASSUME MaxKey \in Nat \ {0}
 ASSUME MaxMsg \in Nat \ {0}
 ASSUME MaxClock \in Nat \ {0}
+ASSUME SyncLocalSiblings \in BOOLEAN
 ASSUME AllowUnauthorizedMembershipMutations \in BOOLEAN
 ASSUME BugRepairUsesKeyHistory \in BOOLEAN
 
@@ -234,12 +236,14 @@ SendMessage(sender) ==
     /\ LET rotate == NeedsRotation(sender)
            key == IF rotate THEN currentKey[sender] + 1 ELSE currentKey[sender]
            number == IF rotate THEN 0 ELSE nextMsg[sender]
-           recipients == members \ {sender}
-           possibleReaders == Devices \ {sender}
-           missing == {d \in recipients: DistPair(sender, d, key) \notin distributedTo}
+           remoteRecipients == members \ {sender}
+           siblingRecipients == IF SyncLocalSiblings THEN {sender} ELSE {}
+           distributionRecipients == remoteRecipients \cup siblingRecipients
+           possibleReaders == (Devices \ {sender}) \cup siblingRecipients
+           missing == {d \in distributionRecipients: DistPair(sender, d, key) \notin distributedTo}
            newDists == {DistItem(sender, d, key, number) : d \in missing}
            newMsgRelays == {MsgItem(sender, d, key, number, clock + 1) : d \in possibleReaders}
-           newMsgNeeds == {MsgItem(sender, d, key, number, clock + 1) : d \in recipients}
+           newMsgNeeds == {MsgItem(sender, d, key, number, clock + 1) : d \in distributionRecipients}
        IN
        /\ (~rotate \/ currentKey[sender] < MaxKey)
        /\ number < MaxMsg
