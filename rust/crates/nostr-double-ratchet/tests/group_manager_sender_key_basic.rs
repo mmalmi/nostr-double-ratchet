@@ -21,6 +21,18 @@ struct SenderKeyFixture {
     group_id: String,
 }
 
+struct SenderKeyLateMemberRepairFixture {
+    bob: support::ManagerDevice,
+    carol: support::ManagerDevice,
+    bob_manager: SessionManager,
+    carol_manager: SessionManager,
+    bob_groups: GroupManager,
+    carol_groups: GroupManager,
+    group_id: String,
+    pre_join_outer: GroupSenderKeyMessageEnvelope,
+    post_join_outer: GroupSenderKeyMessageEnvelope,
+}
+
 fn sender_key_message_from_envelope(
     envelope: &GroupSenderKeyMessageEnvelope,
 ) -> GroupSenderKeyMessage {
@@ -194,6 +206,171 @@ fn established_sender_key_fixture(owner_fill: u8, base_secs: u64) -> Result<Send
         alice_groups,
         bob_groups,
         group_id,
+    })
+}
+
+fn late_member_repair_fixture(
+    owner_fill: u8,
+    base_secs: u64,
+) -> Result<SenderKeyLateMemberRepairFixture> {
+    let alice = manager_device(owner_fill, owner_fill.wrapping_add(40));
+    let bob = manager_device(owner_fill.wrapping_add(1), owner_fill.wrapping_add(41));
+    let carol = manager_device(owner_fill.wrapping_add(2), owner_fill.wrapping_add(42));
+    let mut alice_manager = session_manager(&alice);
+    let mut bob_manager = session_manager(&bob);
+    let mut carol_manager = session_manager(&carol);
+    let mut alice_groups = GroupManager::new(alice.owner_pubkey);
+    let mut bob_groups = GroupManager::new(bob.owner_pubkey);
+    let mut carol_groups = GroupManager::new(carol.owner_pubkey);
+
+    bob_manager.observe_peer_roster(alice.owner_pubkey, roster_for(&[&alice], base_secs));
+    carol_manager.observe_peer_roster(alice.owner_pubkey, roster_for(&[&alice], base_secs + 1));
+    carol_manager.observe_peer_roster(bob.owner_pubkey, roster_for(&[&bob], base_secs + 2));
+    alice_manager.observe_peer_roster(bob.owner_pubkey, roster_for(&[&bob], base_secs + 3));
+    alice_manager.observe_peer_roster(carol.owner_pubkey, roster_for(&[&carol], base_secs + 4));
+    bob_manager.observe_peer_roster(carol.owner_pubkey, roster_for(&[&carol], base_secs + 5));
+    alice_manager.observe_device_invite(
+        bob.owner_pubkey,
+        manager_public_device_invite(&mut bob_manager, &bob, base_secs + 6, base_secs + 6)?,
+    )?;
+    alice_manager.observe_device_invite(
+        carol.owner_pubkey,
+        manager_public_device_invite(&mut carol_manager, &carol, base_secs + 7, base_secs + 7)?,
+    )?;
+    bob_manager.observe_device_invite(
+        carol.owner_pubkey,
+        manager_public_device_invite(&mut carol_manager, &carol, base_secs + 8, base_secs + 8)?,
+    )?;
+
+    let created = alice_groups.create_group_with_protocol(
+        &mut alice_manager,
+        &mut context(base_secs + 9, base_secs + 9),
+        "Late member repair".to_string(),
+        vec![bob.owner_pubkey],
+        GroupProtocol::sender_key_v1(),
+    )?;
+    let group_id = created.group.group_id.clone();
+    observe_matching_invite_responses(
+        &mut bob_manager,
+        &created.prepared.remote.invite_responses,
+        base_secs + 10,
+        base_secs + 10,
+    )?;
+    assert_eq!(
+        deliver_pairwise_group_events_for(
+            &mut bob_manager,
+            &mut bob_groups,
+            bob.owner_pubkey,
+            alice.owner_pubkey,
+            &created.prepared,
+            base_secs + 11,
+            base_secs + 11,
+        )?
+        .len(),
+        2
+    );
+
+    let pre_join = bob_groups.send_message(
+        &mut bob_manager,
+        &mut context(base_secs + 12, base_secs + 12),
+        &group_id,
+        b"pre-join from bob".to_vec(),
+    )?;
+    assert!(
+        pre_join
+            .remote
+            .deliveries
+            .iter()
+            .any(|delivery| delivery.owner_pubkey == alice.owner_pubkey),
+        "bob's first sender-key send should distribute to existing member alice"
+    );
+    deliver_pairwise_group_events_for(
+        &mut alice_manager,
+        &mut alice_groups,
+        alice.owner_pubkey,
+        bob.owner_pubkey,
+        &pre_join,
+        base_secs + 13,
+        base_secs + 13,
+    )?;
+    assert!(matches!(
+        alice_groups.handle_sender_key_message(sender_key_message_from_envelope(
+            &pre_join.remote.sender_key_messages[0],
+        ))?,
+        GroupSenderKeyHandleResult::Event(GroupIncomingEvent::Message(message))
+            if message.body == b"pre-join from bob".to_vec()
+    ));
+
+    let added = alice_groups.add_members(
+        &mut alice_manager,
+        &mut context(base_secs + 14, base_secs + 14),
+        &group_id,
+        vec![carol.owner_pubkey],
+    )?;
+    observe_matching_invite_responses(
+        &mut carol_manager,
+        &added.remote.invite_responses,
+        base_secs + 15,
+        base_secs + 15,
+    )?;
+    assert_eq!(
+        deliver_pairwise_group_events_for(
+            &mut bob_manager,
+            &mut bob_groups,
+            bob.owner_pubkey,
+            alice.owner_pubkey,
+            &added,
+            base_secs + 16,
+            base_secs + 16,
+        )?
+        .len(),
+        2
+    );
+    assert_eq!(
+        deliver_pairwise_group_events_for(
+            &mut carol_manager,
+            &mut carol_groups,
+            carol.owner_pubkey,
+            alice.owner_pubkey,
+            &added,
+            base_secs + 17,
+            base_secs + 17,
+        )?
+        .len(),
+        2
+    );
+
+    let post_join = bob_groups.send_message(
+        &mut bob_manager,
+        &mut context(base_secs + 18, base_secs + 18),
+        &group_id,
+        b"post-join from bob".to_vec(),
+    )?;
+    observe_matching_invite_responses(
+        &mut carol_manager,
+        &post_join.remote.invite_responses,
+        base_secs + 19,
+        base_secs + 19,
+    )?;
+    assert!(
+        post_join
+            .remote
+            .deliveries
+            .iter()
+            .any(|delivery| delivery.owner_pubkey == carol.owner_pubkey),
+        "bob must distribute the current sender key to late member carol"
+    );
+
+    Ok(SenderKeyLateMemberRepairFixture {
+        bob,
+        carol,
+        bob_manager,
+        carol_manager,
+        bob_groups,
+        carol_groups,
+        group_id,
+        pre_join_outer: pre_join.remote.sender_key_messages[0].clone(),
+        post_join_outer: post_join.remote.sender_key_messages[0].clone(),
     })
 }
 
@@ -575,6 +752,143 @@ fn sender_key_repair_request_from_removed_member_does_not_leak_distribution() ->
         &mut fixture.alice_manager,
         &mut context(1_900_071_013, 1_900_071_013),
         fixture.bob_groups.snapshot().local_owner_pubkey,
+        &request,
+    )?;
+
+    assert!(response.remote.deliveries.is_empty());
+    assert!(response.local_sibling.deliveries.is_empty());
+    assert!(response.remote.sender_key_messages.is_empty());
+    assert!(response.local_sibling.sender_key_messages.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn sender_key_late_member_repair_denies_pre_join_outer() -> Result<()> {
+    let mut fixture = late_member_repair_fixture(50, 1_900_074_000)?;
+    assert!(matches!(
+        fixture
+            .carol_groups
+            .handle_sender_key_message(sender_key_message_from_envelope(&fixture.pre_join_outer))?,
+        GroupSenderKeyHandleResult::PendingDistribution { .. }
+    ));
+
+    let request = SenderKeyRepairRequest {
+        group_id: fixture.group_id.clone(),
+        sender_event_pubkey: fixture.pre_join_outer.sender_event_pubkey,
+        key_id: fixture.pre_join_outer.key_id,
+        message_number: fixture.pre_join_outer.message_number,
+        required_revision: None,
+        created_at: UnixSeconds(1_900_074_020),
+    };
+    let response = fixture.bob_groups.respond_to_sender_key_repair_request(
+        &mut fixture.bob_manager,
+        &mut context(1_900_074_021, 1_900_074_021),
+        fixture.carol.owner_pubkey,
+        &request,
+    )?;
+
+    assert!(response.remote.deliveries.is_empty());
+    assert!(response.local_sibling.deliveries.is_empty());
+    assert!(response.remote.sender_key_messages.is_empty());
+    assert!(response.local_sibling.sender_key_messages.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn sender_key_late_member_repair_allows_post_join_missed_distribution() -> Result<()> {
+    let mut fixture = late_member_repair_fixture(53, 1_900_075_000)?;
+    assert!(matches!(
+        fixture
+            .carol_groups
+            .handle_sender_key_message(sender_key_message_from_envelope(
+                &fixture.post_join_outer
+            ))?,
+        GroupSenderKeyHandleResult::PendingDistribution { .. }
+    ));
+
+    let request = SenderKeyRepairRequest {
+        group_id: fixture.group_id.clone(),
+        sender_event_pubkey: fixture.post_join_outer.sender_event_pubkey,
+        key_id: fixture.post_join_outer.key_id,
+        message_number: fixture.post_join_outer.message_number,
+        required_revision: None,
+        created_at: UnixSeconds(1_900_075_020),
+    };
+    let response = fixture.bob_groups.respond_to_sender_key_repair_request(
+        &mut fixture.bob_manager,
+        &mut context(1_900_075_021, 1_900_075_021),
+        fixture.carol.owner_pubkey,
+        &request,
+    )?;
+    assert!(
+        response
+            .remote
+            .deliveries
+            .iter()
+            .any(|delivery| delivery.owner_pubkey == fixture.carol.owner_pubkey),
+        "late member should receive a repair distribution for a post-join sender-key message"
+    );
+    observe_matching_invite_responses(
+        &mut fixture.carol_manager,
+        &response.remote.invite_responses,
+        1_900_075_022,
+        1_900_075_022,
+    )?;
+
+    let events = deliver_pairwise_group_events_for(
+        &mut fixture.carol_manager,
+        &mut fixture.carol_groups,
+        fixture.carol.owner_pubkey,
+        fixture.bob.owner_pubkey,
+        &response,
+        1_900_075_023,
+        1_900_075_023,
+    )?;
+    assert_eq!(events.len(), 1);
+
+    let pre_join_result = fixture
+        .carol_groups
+        .handle_sender_key_message(sender_key_message_from_envelope(&fixture.pre_join_outer));
+    assert!(
+        pre_join_result.is_err(),
+        "post-join repair distribution must not decrypt pre-join sender-key messages"
+    );
+
+    let post_join_result = fixture
+        .carol_groups
+        .handle_sender_key_message(sender_key_message_from_envelope(&fixture.post_join_outer))?;
+    assert!(matches!(
+        post_join_result,
+        GroupSenderKeyHandleResult::Event(GroupIncomingEvent::Message(message))
+            if message.body == b"post-join from bob".to_vec()
+                && message.sender_owner == fixture.bob.owner_pubkey
+                && message.sender_device == Some(fixture.bob.device_pubkey)
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn sender_key_late_member_repair_snapshot_roundtrip_preserves_authorization() -> Result<()> {
+    let mut fixture = late_member_repair_fixture(56, 1_900_076_000)?;
+    let restored_snapshot: GroupManagerSnapshot =
+        serde_json::from_str(&snapshot(&fixture.bob_groups.snapshot())).unwrap();
+    fixture.bob_groups = GroupManager::from_snapshot(restored_snapshot)?;
+
+    let request = SenderKeyRepairRequest {
+        group_id: fixture.group_id.clone(),
+        sender_event_pubkey: fixture.pre_join_outer.sender_event_pubkey,
+        key_id: fixture.pre_join_outer.key_id,
+        message_number: fixture.pre_join_outer.message_number,
+        required_revision: None,
+        created_at: UnixSeconds(1_900_076_020),
+    };
+    let response = fixture.bob_groups.respond_to_sender_key_repair_request(
+        &mut fixture.bob_manager,
+        &mut context(1_900_076_021, 1_900_076_021),
+        fixture.carol.owner_pubkey,
         &request,
     )?;
 
@@ -1358,26 +1672,21 @@ fn sender_key_existing_member_rotates_after_another_admin_removes_prior_recipien
             .any(|delivery| delivery.owner_pubkey == carol.owner_pubkey),
         "bob's sender key should be distributed to carol before removal"
     );
-    let bob_distribution = latest_sender_key_distribution(
-        &bob_groups,
-        &created.group.group_id,
-        bob.owner_pubkey,
+    let bob_distribution =
+        latest_sender_key_distribution(&bob_groups, &created.group.group_id, bob.owner_pubkey);
+    let _ =
+        install_sender_key_distribution(&mut carol_groups, &bob, bob_distribution, 1_900_046_114)?;
+    let carol_before = carol_groups.handle_sender_key_message(sender_key_message_from_envelope(
+        &before_remove.remote.sender_key_messages[0],
+    ))?;
+    assert!(
+        matches!(
+            &carol_before,
+            GroupSenderKeyHandleResult::Event(GroupIncomingEvent::Message(message))
+                if message.body == b"before carol removed".to_vec()
+        ),
+        "unexpected pre-removal result: {carol_before:?}"
     );
-    let _ = install_sender_key_distribution(
-        &mut carol_groups,
-        &bob,
-        bob_distribution,
-        1_900_046_114,
-    )?;
-    let carol_before =
-        carol_groups.handle_sender_key_message(sender_key_message_from_envelope(
-            &before_remove.remote.sender_key_messages[0],
-        ))?;
-    assert!(matches!(
-        &carol_before,
-        GroupSenderKeyHandleResult::Event(GroupIncomingEvent::Message(message))
-            if message.body == b"before carol removed".to_vec()
-    ), "unexpected pre-removal result: {carol_before:?}");
 
     let removed = alice_groups.remove_members(
         &mut alice_manager,

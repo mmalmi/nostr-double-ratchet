@@ -5,9 +5,9 @@ use crate::{
     GroupPreparedSend, GroupProtocol, GroupReceivedMessage, GroupSenderKeyHandleResult,
     GroupSenderKeyMessage, GroupSenderKeyMessageEnvelope, GroupSenderKeyPlaintext,
     GroupSenderKeyPlaintextDecodeContext, GroupSenderKeyRecordSnapshot,
-    GroupSenderKeyRepairRequestEvent, GroupSnapshot, OwnerPubkey, ProtocolContext, Result,
-    SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent, SenderKeyRepairRequest,
-    SenderKeyState, SessionManager, UnixSeconds,
+    GroupSenderKeyRepairRequestEvent, GroupSenderKeyRepairSnapshot, GroupSnapshot, OwnerPubkey,
+    ProtocolContext, Result, SenderEventPubkey, SenderKeyDistribution, SenderKeyMessageContent,
+    SenderKeyRepairRequest, SenderKeyState, SessionManager, UnixSeconds,
 };
 use rand::{CryptoRng, RngCore};
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,6 +52,7 @@ struct SenderKeyRecord {
     states: BTreeMap<u32, SenderKeyState>,
     distribution_history: BTreeMap<u32, SenderKeyDistribution>,
     distributed_to: BTreeMap<u32, BTreeSet<OwnerPubkey>>,
+    repair_snapshots: Vec<GroupSenderKeyRepairSnapshot>,
 }
 
 impl<C> GroupManager<C>
@@ -400,11 +401,11 @@ where
         if sender_record.sender_event_secret_key.is_none() {
             return Ok(prepared);
         }
-        let Some(distribution) = sender_record
-            .distribution_history
-            .get(&request.key_id)
-            .cloned()
-        else {
+        let Some(distribution) = sender_record.repair_distribution_for(
+            requester_owner,
+            request.key_id,
+            request.message_number,
+        ) else {
             return Ok(prepared);
         };
         let distribution = self.repair_payload_to_owner(
@@ -1247,6 +1248,7 @@ where
                 states: BTreeMap::new(),
                 distribution_history: BTreeMap::new(),
                 distributed_to: BTreeMap::new(),
+                repair_snapshots: Vec::new(),
             };
             self.sender_event_index
                 .insert(sender_event_pubkey, sender_record.id());
@@ -1320,6 +1322,12 @@ where
                 distribution: distribution.clone(),
             },
         )?;
+        self.record_sender_key_repair_snapshot(
+            &distribution.group_id,
+            session_manager.local_device_pubkey(),
+            distribution,
+            &recipients,
+        );
         self.mark_sender_key_distribution_recipients(
             &distribution.group_id,
             session_manager.local_device_pubkey(),
@@ -1402,6 +1410,7 @@ where
                 states: BTreeMap::new(),
                 distribution_history: BTreeMap::new(),
                 distributed_to: BTreeMap::new(),
+                repair_snapshots: Vec::new(),
             });
         if record.sender_event_pubkey != distribution.sender_event_pubkey {
             self.sender_event_index.remove(&record.sender_event_pubkey);
@@ -1494,6 +1503,39 @@ where
                 .or_default()
                 .extend(recipients);
         }
+    }
+
+    fn record_sender_key_repair_snapshot(
+        &mut self,
+        group_id: &str,
+        local_device: DevicePubkey,
+        distribution: &SenderKeyDistribution,
+        recipients: &[OwnerPubkey],
+    ) {
+        if recipients.is_empty() {
+            return;
+        }
+        let id =
+            SenderKeyRecordId::new(group_id.to_string(), self.local_owner_pubkey, local_device);
+        let Some(record) = self.sender_keys.get_mut(&id) else {
+            return;
+        };
+
+        let mut recipients: Vec<_> = recipients.iter().copied().collect();
+        recipients.sort_unstable();
+        recipients.dedup();
+        if record.repair_snapshots.iter().any(|snapshot| {
+            snapshot.key_id == distribution.key_id
+                && snapshot.distribution.iteration == distribution.iteration
+                && snapshot.recipients == recipients
+        }) {
+            return;
+        }
+        record.repair_snapshots.push(GroupSenderKeyRepairSnapshot {
+            key_id: distribution.key_id,
+            distribution: distribution.clone(),
+            recipients,
+        });
     }
 
     fn group_record(&self, group_id: &str) -> Result<&GroupRecord> {
@@ -1814,7 +1856,23 @@ impl SenderKeyRecord {
                 .into_iter()
                 .map(|entry| (entry.key_id, entry.recipients.into_iter().collect()))
                 .collect(),
+            repair_snapshots: snapshot.repair_snapshots,
         })
+    }
+
+    fn repair_distribution_for(
+        &self,
+        requester_owner: OwnerPubkey,
+        key_id: u32,
+        message_number: u32,
+    ) -> Option<SenderKeyDistribution> {
+        self.repair_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.key_id == key_id)
+            .filter(|snapshot| snapshot.distribution.iteration <= message_number)
+            .filter(|snapshot| snapshot.recipients.contains(&requester_owner))
+            .max_by_key(|snapshot| snapshot.distribution.iteration)
+            .map(|snapshot| snapshot.distribution.clone())
     }
 
     fn snapshot(&self) -> GroupSenderKeyRecordSnapshot {
@@ -1837,6 +1895,7 @@ impl SenderKeyRecord {
                     },
                 )
                 .collect(),
+            repair_snapshots: self.repair_snapshots.clone(),
         }
     }
 }
