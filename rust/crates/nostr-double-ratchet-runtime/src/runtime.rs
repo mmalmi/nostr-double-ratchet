@@ -348,9 +348,15 @@ impl NdrRuntime {
         self.persist_state()?;
         self.refresh_protocol_subscriptions()?;
 
-        if invite.purpose.as_deref() == Some("link") {
-            self.send_link_bootstrap(invite_owner)?;
-        }
+        // Always send the invite-response + a bootstrap rumor so the inviter
+        // learns our session ephemeral pubkey and we install a session on
+        // our side. Without it, the inviter's relay REQ excludes us and we
+        // never see their replies — and our own subscription excludes the
+        // inviter's ephemeral key because no session is installed yet. This
+        // matches the TypeScript `SessionManager.acceptInvite`, which
+        // unconditionally publishes the invite-response and runs
+        // `sendInviteBootstrap`.
+        self.send_invite_bootstrap(invite_owner)?;
 
         Ok(AcceptInviteResult {
             owner_pubkey: invite_owner,
@@ -1708,13 +1714,20 @@ impl NdrRuntime {
         self.sync_direct_message_subscriptions()
     }
 
-    fn send_link_bootstrap(&self, invite_owner: PublicKey) -> Result<()> {
+    fn send_invite_bootstrap(&self, invite_owner: PublicKey) -> Result<()> {
+        // Send a typing rumor whose expiration is already in the past. This
+        // forces the underlying `send_event` to install our side of the
+        // session and to publish the kind-1059 invite-response + kind-1060
+        // outer event the inviter needs to install their side. The recipient
+        // treats the inner typing rumor as "stop typing" (per the wire-shape
+        // check in apply_typing_event / iris-chat's `expiresAt <= nowSeconds`
+        // check), so it does not flash a typing indicator for a chat the
+        // user has not actually started typing in.
         let now = now();
-        let expires_at = now.get().saturating_add(60);
         let event = pairwise_codec::typing_event(
             self.owner_public_key,
             pairwise_codec::EncodeOptions::new(now.get(), current_unix_millis())
-                .with_expiration(expires_at),
+                .with_expiration(1),
         )
         .map_err(|e| Error::InvalidEvent(e.to_string()))?;
         self.send_event(invite_owner, event).map(|_| ())

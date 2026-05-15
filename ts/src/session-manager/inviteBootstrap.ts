@@ -2,13 +2,18 @@ import type { VerifiedEvent } from "nostr-tools"
 import type { Session } from "../Session"
 import { buildTypingRumor } from "../messageBuilders"
 
-export const INVITE_BOOTSTRAP_EXPIRATION_SECONDS = 60
+// The invite bootstrap is a typing rumor sent only to install the session
+// on the inviter's side. It is not a "real" typing event, so we tag it
+// with an expiration already in the past — receivers treat that as
+// stop-typing (see iris-chat's `expiresAt <= nowSeconds` check and the
+// equivalent guard in iris-chat-rs `apply_typing_event`), which avoids
+// flashing a typing indicator for a chat the user has not actually
+// started typing in.
+export const INVITE_BOOTSTRAP_EXPIRATION_SECONDS = 1
 export const INVITE_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1500] as const
 
 export function planInviteBootstrapEvents(session: Session): VerifiedEvent[] {
-  const expiresAt =
-    Math.floor(Date.now() / 1000) +
-    INVITE_BOOTSTRAP_EXPIRATION_SECONDS
+  const expiresAt = INVITE_BOOTSTRAP_EXPIRATION_SECONDS
 
   return INVITE_BOOTSTRAP_RETRY_DELAYS_MS.map(
     () => session.sendEvent(buildTypingRumor({ expiration: { expiresAt } })).event
