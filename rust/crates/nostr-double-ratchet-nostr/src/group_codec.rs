@@ -5,8 +5,6 @@ use nostr_double_ratchet::{
     OwnerPubkey, Result, SenderKeyDistribution, SenderKeyRepairRequest, UnixSeconds,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::io::Write;
 
 pub const GROUP_METADATA_KIND: u32 = 40;
 pub const GROUP_SENDER_KEY_DISTRIBUTION_KIND: u32 = 10446;
@@ -139,7 +137,6 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
         ctx: GroupPayloadEncodeContext,
         command: &GroupPairwiseCommand,
     ) -> Result<Vec<u8>> {
-        log_plaintext_group_pairwise_command(ctx, command);
         match command {
             GroupPairwiseCommand::MetadataSnapshot { snapshot } => {
                 encode_master_metadata_snapshot(ctx, snapshot)
@@ -199,17 +196,6 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
             ])
             .custom_created_at(Timestamp::from(ctx.created_at.get()))
             .build(ctx.local_device_pubkey.to_nostr()?);
-        log_plaintext_json(
-            "sender_key_plaintext_event",
-            json!({
-                "local_device_pubkey": ctx.local_device_pubkey.to_string(),
-                "created_at": ctx.created_at.get(),
-                "group_id": plaintext.group_id,
-                "revision": plaintext.revision,
-                "body_utf8": String::from_utf8_lossy(&plaintext.body),
-                "event": event,
-            }),
-        );
         Ok(serde_json::to_vec(&event)?)
     }
 
@@ -239,78 +225,6 @@ impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
             body: event.content.into_bytes(),
         }))
     }
-}
-
-fn log_plaintext_group_pairwise_command(
-    ctx: GroupPayloadEncodeContext,
-    command: &GroupPairwiseCommand,
-) {
-    let payload = match command {
-        GroupPairwiseCommand::MetadataSnapshot { snapshot } => json!({
-            "type": "metadata_snapshot",
-            "local_device_pubkey": ctx.local_device_pubkey.to_string(),
-            "created_at": ctx.created_at.get(),
-            "group_id": snapshot.group_id,
-            "revision": snapshot.revision,
-            "members": snapshot.members.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "admins": snapshot.admins.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        }),
-        GroupPairwiseCommand::GroupMessage {
-            group_id,
-            revision,
-            body,
-        } => json!({
-            "type": "pairwise_group_message",
-            "local_device_pubkey": ctx.local_device_pubkey.to_string(),
-            "created_at": ctx.created_at.get(),
-            "group_id": group_id,
-            "revision": revision,
-            "body_utf8": String::from_utf8_lossy(body),
-        }),
-        GroupPairwiseCommand::SenderKeyDistribution { distribution } => json!({
-            "type": "sender_key_distribution",
-            "local_device_pubkey": ctx.local_device_pubkey.to_string(),
-            "created_at": ctx.created_at.get(),
-            "group_id": distribution.group_id,
-            "sender_event_pubkey": distribution.sender_event_pubkey.to_string(),
-            "key_id": distribution.key_id,
-            "iteration": distribution.iteration,
-            "distribution_created_at": distribution.created_at.get(),
-        }),
-        GroupPairwiseCommand::SenderKeyRepairRequest { request } => json!({
-            "type": "sender_key_repair_request",
-            "local_device_pubkey": ctx.local_device_pubkey.to_string(),
-            "created_at": ctx.created_at.get(),
-            "group_id": request.group_id,
-            "sender_event_pubkey": request.sender_event_pubkey.to_string(),
-            "key_id": request.key_id,
-            "message_number": request.message_number,
-            "required_revision": request.required_revision,
-            "request_created_at": request.created_at.get(),
-        }),
-    };
-    log_plaintext_json("pairwise_group_command", payload);
-}
-
-fn log_plaintext_json(stage: &str, payload: serde_json::Value) {
-    let Some(path) = std::env::var_os("IRIS_PROTOCOL_PLAINTEXT_LOG_FILE")
-        .or_else(|| std::env::var_os("IRIS_IOS_HARNESS_PROTOCOL_PLAINTEXT_LOG_FILE"))
-        .or_else(|| std::env::var_os("IRIS_ANDROID_HARNESS_PROTOCOL_PLAINTEXT_LOG_FILE"))
-    else {
-        return;
-    };
-    let line = json!({
-        "stage": stage,
-        "payload": payload,
-    });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "{line}");
-    }
-    eprintln!("IRIS_PROTOCOL_PLAINTEXT: {line}");
 }
 
 fn encode_master_metadata_snapshot(
