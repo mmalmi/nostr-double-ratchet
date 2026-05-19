@@ -8,8 +8,10 @@ CONSTANTS
     UpdatedMessageAuthors,
     UpdatedSkippedMessageAuthors,
     BugSessionManagerOwnsDirectSubscriptions,
-    BugRuntimeSkipsSync,
-    BugRuntimeLeavesStaleSubscriptions,
+    BugSkipDesiredRefresh,
+    BugReportDesiredAsApplied,
+    BugApplyNeverClearsInFlight,
+    BugCatchupUsesAppliedPlan,
     BugSessionManagerOmitsSkippedAuthors,
     BugThrottleAddedAuthors
 
@@ -19,8 +21,10 @@ ASSUME InitialSkippedMessageAuthors \subseteq Authors
 ASSUME UpdatedMessageAuthors \subseteq Authors
 ASSUME UpdatedSkippedMessageAuthors \subseteq Authors
 ASSUME BugSessionManagerOwnsDirectSubscriptions \in BOOLEAN
-ASSUME BugRuntimeSkipsSync \in BOOLEAN
-ASSUME BugRuntimeLeavesStaleSubscriptions \in BOOLEAN
+ASSUME BugSkipDesiredRefresh \in BOOLEAN
+ASSUME BugReportDesiredAsApplied \in BOOLEAN
+ASSUME BugApplyNeverClearsInFlight \in BOOLEAN
+ASSUME BugCatchupUsesAppliedPlan \in BOOLEAN
 ASSUME BugSessionManagerOmitsSkippedAuthors \in BOOLEAN
 ASSUME BugThrottleAddedAuthors \in BOOLEAN
 
@@ -33,80 +37,173 @@ VARIABLES
     managerChainAuthors,
     managerSkippedAuthors,
     managerAuthors,
-    runtimeSubscriptionAuthors,
     managerDirectSubscriptionAuthors,
-    needsSync,
-    throttlePending,
+    desiredPlan,
+    applyingPlan,
+    appliedPlan,
+    refreshDirty,
+    refreshInFlight,
+    connectRequested,
+    applyFailureDone,
     syncedOnce,
     changeDone,
     relayUp,
     relayBag,
     published,
-    delivered
+    delivered,
+    badAppliedBeforeSuccess,
+    badApplyStuckAfterFailure
 
 vars ==
     <<managerChainAuthors, managerSkippedAuthors, managerAuthors,
-      runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-      needsSync, throttlePending, syncedOnce, changeDone,
-      relayUp, relayBag, published, delivered>>
+      managerDirectSubscriptionAuthors, desiredPlan, applyingPlan, appliedPlan,
+      refreshDirty, refreshInFlight, connectRequested, applyFailureDone,
+      syncedOnce, changeDone, relayUp, relayBag, published, delivered,
+      badAppliedBeforeSuccess, badApplyStuckAfterFailure>>
+
+ApplyTarget ==
+    IF BugCatchupUsesAppliedPlan THEN appliedPlan ELSE desiredPlan
+
+InitialTracked ==
+    TrackedAuthors(InitialMessageAuthors, InitialSkippedMessageAuthors)
+
+UpdatedTracked ==
+    TrackedAuthors(UpdatedMessageAuthors, UpdatedSkippedMessageAuthors)
+
+InitialDesired ==
+    IF BugSkipDesiredRefresh THEN {} ELSE InitialTracked
+
+InitialApplied ==
+    IF BugReportDesiredAsApplied THEN InitialDesired ELSE {}
 
 Init ==
     /\ managerChainAuthors = InitialMessageAuthors
     /\ managerSkippedAuthors = InitialSkippedMessageAuthors
-    /\ managerAuthors = TrackedAuthors(InitialMessageAuthors, InitialSkippedMessageAuthors)
-    /\ runtimeSubscriptionAuthors = {}
+    /\ managerAuthors = InitialTracked
     /\ managerDirectSubscriptionAuthors =
-        IF BugSessionManagerOwnsDirectSubscriptions THEN managerAuthors ELSE {}
-    /\ needsSync = (managerAuthors # {})
-    /\ throttlePending = FALSE
-    /\ syncedOnce = (managerAuthors = {})
+        IF BugSessionManagerOwnsDirectSubscriptions THEN InitialTracked ELSE {}
+    /\ desiredPlan = InitialDesired
+    /\ applyingPlan = {}
+    /\ appliedPlan = InitialApplied
+    /\ refreshDirty = (InitialDesired # InitialApplied)
+    /\ refreshInFlight = FALSE
+    /\ connectRequested = FALSE
+    /\ applyFailureDone = FALSE
+    /\ syncedOnce = (InitialDesired = InitialApplied)
     /\ changeDone = FALSE
     /\ relayUp = TRUE
     /\ relayBag = {}
     /\ published = {}
     /\ delivered = {}
+    /\ badAppliedBeforeSuccess = (BugReportDesiredAsApplied /\ InitialDesired # {})
+    /\ badApplyStuckAfterFailure = FALSE
 
 SessionStateChanges ==
     /\ ~changeDone
-    /\ ~needsSync
-    /\ syncedOnce
-    /\ LET nextAuthors == TrackedAuthors(UpdatedMessageAuthors, UpdatedSkippedMessageAuthors)
-           addedAuthors == nextAuthors \ runtimeSubscriptionAuthors
+    /\ ~refreshDirty
+    /\ ~refreshInFlight
+    /\ appliedPlan = desiredPlan
+    /\ LET nextAuthors == UpdatedTracked
+           addedAuthors == nextAuthors \ desiredPlan
+           nextDesired ==
+               IF BugSkipDesiredRefresh
+                   THEN desiredPlan
+                   ELSE IF addedAuthors # {} /\ BugThrottleAddedAuthors
+                       THEN desiredPlan
+                       ELSE nextAuthors
        IN
        /\ managerChainAuthors' = UpdatedMessageAuthors
        /\ managerSkippedAuthors' = UpdatedSkippedMessageAuthors
        /\ managerAuthors' = nextAuthors
        /\ managerDirectSubscriptionAuthors' =
            IF BugSessionManagerOwnsDirectSubscriptions THEN nextAuthors ELSE {}
-       /\ IF addedAuthors # {} /\ ~BugRuntimeSkipsSync /\ ~BugThrottleAddedAuthors
-             THEN /\ runtimeSubscriptionAuthors' =
-                       IF BugRuntimeLeavesStaleSubscriptions
-                           THEN runtimeSubscriptionAuthors \cup nextAuthors
-                           ELSE nextAuthors
-                  /\ needsSync' = FALSE
-                  /\ throttlePending' = FALSE
-                  /\ syncedOnce' = TRUE
-             ELSE /\ runtimeSubscriptionAuthors' = runtimeSubscriptionAuthors
-                  /\ needsSync' = (nextAuthors # runtimeSubscriptionAuthors)
-                  /\ throttlePending' = (nextAuthors # runtimeSubscriptionAuthors)
-                  /\ syncedOnce' = syncedOnce
+       /\ desiredPlan' = nextDesired
+       /\ refreshDirty' = (nextDesired # appliedPlan)
+    /\ applyingPlan' = applyingPlan
+    /\ appliedPlan' = appliedPlan
+    /\ refreshInFlight' = FALSE
+    /\ connectRequested' = connectRequested
+    /\ applyFailureDone' = FALSE
+    /\ syncedOnce' = syncedOnce
     /\ changeDone' = TRUE
-    /\ UNCHANGED <<relayUp, relayBag, published, delivered>>
+    /\ UNCHANGED <<relayUp, relayBag, published, delivered, badAppliedBeforeSuccess, badApplyStuckAfterFailure>>
 
-SyncRuntimeSubscription ==
-    /\ needsSync
-    /\ ~BugRuntimeSkipsSync
-    /\ runtimeSubscriptionAuthors' =
-        IF BugRuntimeLeavesStaleSubscriptions
-            THEN runtimeSubscriptionAuthors \cup managerAuthors
-            ELSE managerAuthors
-    /\ needsSync' = FALSE
-    /\ throttlePending' = FALSE
-    /\ syncedOnce' = TRUE
+RequestConnection ==
+    /\ refreshDirty
+    /\ ~refreshInFlight
+    /\ ~relayUp
+    /\ ~connectRequested
+    /\ connectRequested' = TRUE
     /\ UNCHANGED <<
         managerChainAuthors, managerSkippedAuthors, managerAuthors,
-        managerDirectSubscriptionAuthors, changeDone,
-        relayUp, relayBag, published, delivered
+        managerDirectSubscriptionAuthors, desiredPlan, applyingPlan, appliedPlan,
+        refreshDirty, refreshInFlight, applyFailureDone, syncedOnce,
+        changeDone, relayUp, relayBag, published, delivered, badAppliedBeforeSuccess, badApplyStuckAfterFailure
+      >>
+
+ConnectRelay ==
+    /\ ~relayUp
+    /\ relayUp' = TRUE
+    /\ connectRequested' = FALSE
+    /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, applyingPlan, appliedPlan,
+        refreshDirty, refreshInFlight, applyFailureDone, syncedOnce,
+        changeDone, relayBag, published, delivered, badAppliedBeforeSuccess, badApplyStuckAfterFailure
+      >>
+
+StartApply ==
+    /\ refreshDirty
+    /\ ~refreshInFlight
+    /\ relayUp
+    /\ applyingPlan' = desiredPlan
+    /\ refreshInFlight' = TRUE
+    /\ refreshDirty' = FALSE
+    /\ IF BugReportDesiredAsApplied
+          THEN /\ appliedPlan' = desiredPlan
+               /\ badAppliedBeforeSuccess' = TRUE
+          ELSE /\ appliedPlan' = appliedPlan
+               /\ badAppliedBeforeSuccess' = badAppliedBeforeSuccess
+    /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, connectRequested,
+        applyFailureDone, syncedOnce, changeDone, relayUp, relayBag,
+        published, delivered, badApplyStuckAfterFailure
+      >>
+
+ApplySuccess ==
+    /\ refreshInFlight
+    /\ LET completedPlan == applyingPlan
+       IN
+       /\ appliedPlan' = completedPlan
+       /\ applyingPlan' = {}
+       /\ refreshInFlight' = FALSE
+       /\ refreshDirty' = (desiredPlan # completedPlan)
+       /\ syncedOnce' = TRUE
+    /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, connectRequested,
+        applyFailureDone, changeDone, relayUp, relayBag, published,
+        delivered, badAppliedBeforeSuccess, badApplyStuckAfterFailure
+      >>
+
+ApplyFailureOrTimeout ==
+    /\ refreshInFlight
+    /\ ~applyFailureDone
+    /\ refreshDirty' = TRUE
+    /\ IF BugApplyNeverClearsInFlight
+          THEN /\ refreshInFlight' = TRUE
+               /\ applyingPlan' = applyingPlan
+          ELSE /\ refreshInFlight' = FALSE
+               /\ applyingPlan' = {}
+    /\ applyFailureDone' = TRUE
+    /\ badApplyStuckAfterFailure' =
+        (badApplyStuckAfterFailure \/ BugApplyNeverClearsInFlight)
+    /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, appliedPlan,
+        connectRequested, syncedOnce, changeDone, relayUp, relayBag,
+        published, delivered, badAppliedBeforeSuccess
       >>
 
 PublishInbound(a) ==
@@ -115,39 +212,47 @@ PublishInbound(a) ==
     /\ relayBag' = relayBag \cup {a}
     /\ published' = published \cup {a}
     /\ UNCHANGED <<
-        managerChainAuthors, managerSkippedAuthors,
-        managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, throttlePending, syncedOnce, changeDone, relayUp, delivered
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, applyingPlan, appliedPlan,
+        refreshDirty, refreshInFlight, connectRequested, applyFailureDone,
+        syncedOnce, changeDone, relayUp, delivered, badAppliedBeforeSuccess, badApplyStuckAfterFailure
       >>
 
-RelayDeliver(a) ==
+RelayDeliverByAppliedSubscription(a) ==
     /\ relayUp
     /\ a \in relayBag
-    /\ a \in runtimeSubscriptionAuthors
+    /\ a \in appliedPlan
     /\ relayBag' = relayBag \ {a}
     /\ delivered' = delivered \cup {a}
     /\ UNCHANGED <<
-        managerChainAuthors, managerSkippedAuthors,
-        managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, throttlePending, syncedOnce, changeDone, relayUp, published
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, applyingPlan, appliedPlan,
+        refreshDirty, refreshInFlight, connectRequested, applyFailureDone,
+        syncedOnce, changeDone, published, relayUp, badAppliedBeforeSuccess, badApplyStuckAfterFailure
+      >>
+
+CatchupDeliverByPlan(a) ==
+    /\ relayUp
+    /\ a \in relayBag
+    /\ a \in ApplyTarget
+    /\ relayBag' = relayBag \ {a}
+    /\ delivered' = delivered \cup {a}
+    /\ UNCHANGED <<
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, applyingPlan, appliedPlan,
+        refreshDirty, refreshInFlight, connectRequested, applyFailureDone,
+        syncedOnce, changeDone, published, relayUp, badAppliedBeforeSuccess, badApplyStuckAfterFailure
       >>
 
 RelayPartition ==
     /\ relayUp
     /\ relayUp' = FALSE
     /\ UNCHANGED <<
-        managerChainAuthors, managerSkippedAuthors,
-        managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, throttlePending, syncedOnce, changeDone, relayBag, published, delivered
-      >>
-
-RelayRecover ==
-    /\ ~relayUp
-    /\ relayUp' = TRUE
-    /\ UNCHANGED <<
-        managerChainAuthors, managerSkippedAuthors,
-        managerAuthors, runtimeSubscriptionAuthors, managerDirectSubscriptionAuthors,
-        needsSync, throttlePending, syncedOnce, changeDone, relayBag, published, delivered
+        managerChainAuthors, managerSkippedAuthors, managerAuthors,
+        managerDirectSubscriptionAuthors, desiredPlan, applyingPlan, appliedPlan,
+        refreshDirty, refreshInFlight, connectRequested, applyFailureDone,
+        syncedOnce, changeDone, relayBag, published, delivered,
+        badAppliedBeforeSuccess, badApplyStuckAfterFailure
       >>
 
 RelayDelay ==
@@ -162,11 +267,15 @@ RelayEventuallyRecovers ==
 
 Next ==
     \/ SessionStateChanges
-    \/ SyncRuntimeSubscription
+    \/ RequestConnection
+    \/ ConnectRelay
+    \/ StartApply
+    \/ ApplySuccess
+    \/ ApplyFailureOrTimeout
     \/ \E a \in Authors: PublishInbound(a)
-    \/ \E a \in Authors: RelayDeliver(a)
+    \/ \E a \in Authors: RelayDeliverByAppliedSubscription(a)
+    \/ \E a \in Authors: CatchupDeliverByPlan(a)
     \/ RelayPartition
-    \/ RelayRecover
     \/ RelayDelay
     \/ Stutter
 
@@ -174,9 +283,13 @@ Spec ==
     /\ Init
     /\ [][Next]_vars
     /\ WF_vars(SessionStateChanges)
-    /\ WF_vars(SyncRuntimeSubscription)
+    /\ WF_vars(RequestConnection)
+    /\ WF_vars(ConnectRelay)
+    /\ WF_vars(StartApply)
+    /\ WF_vars(ApplySuccess)
     /\ \A a \in Authors: WF_vars(PublishInbound(a))
-    /\ \A a \in Authors: SF_vars(RelayDeliver(a))
+    /\ \A a \in Authors: SF_vars(RelayDeliverByAppliedSubscription(a))
+    /\ \A a \in Authors: SF_vars(CatchupDeliverByPlan(a))
 
 SpecUnderRecovery ==
     /\ Spec
@@ -185,20 +298,31 @@ SpecUnderRecovery ==
 SessionManagerDoesNotOwnDirectMessageSubscriptions ==
     managerDirectSubscriptionAuthors = {}
 
-CleanRuntimeSubscriptionMirrorsSessionManager ==
-    ~needsSync => runtimeSubscriptionAuthors = managerAuthors
+DesiredPlanMirrorsProtocolState ==
+    desiredPlan = managerAuthors
 
-NewAuthorsSubscribedImmediately ==
-    syncedOnce => managerAuthors \subseteq runtimeSubscriptionAuthors
+AppliedPlanOnlyAfterSuccessfulApply ==
+    ~badAppliedBeforeSuccess
+
+ApplyFailureClearsInFlight ==
+    ~badApplyStuckAfterFailure
+
+CleanAppliedPlanMirrorsDesiredPlan ==
+    (~refreshDirty /\ ~refreshInFlight) => appliedPlan = desiredPlan
+
+NewAuthorsEnterDesiredPlanImmediately ==
+    managerAuthors \subseteq desiredPlan
 
 SkippedMessageAuthorsAreTracked ==
     managerSkippedAuthors \subseteq managerAuthors
 
-RuntimeSubscriptionAuthorsAreKnown ==
-    runtimeSubscriptionAuthors \subseteq Authors
+ProtocolPlansContainKnownAuthors ==
+    /\ desiredPlan \subseteq Authors
+    /\ applyingPlan \subseteq Authors
+    /\ appliedPlan \subseteq Authors
 
-RuntimeSubscriptionEventuallyClean ==
-    [](needsSync => <> ~needsSync)
+RefreshEventuallyCleanUnderRecovery ==
+    [](refreshDirty => <> (~refreshDirty /\ ~refreshInFlight /\ appliedPlan = desiredPlan))
 
 TrackedInboundEventuallyDeliveredUnderRecovery ==
     \A a \in Authors:
@@ -206,6 +330,6 @@ TrackedInboundEventuallyDeliveredUnderRecovery ==
 
 RemovedAuthorsEventuallyUnsubscribed ==
     \A a \in InitialMessageAuthors \ UpdatedMessageAuthors:
-        [](changeDone => <> (a \notin runtimeSubscriptionAuthors))
+        [](changeDone => <> (a \notin desiredPlan /\ a \notin appliedPlan))
 
 ====

@@ -198,6 +198,9 @@ pub enum GroupPairwiseCommand {
     SenderKeyDistribution {
         distribution: SenderKeyDistribution,
     },
+    SenderKeyRepairRequest {
+        request: SenderKeyRepairRequest,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +229,7 @@ pub struct GroupReceivedMessage {
 pub enum GroupIncomingEvent {
     MetadataUpdated(GroupSnapshot),
     Message(GroupReceivedMessage),
+    SenderKeyRepairRequested(GroupSenderKeyRepairRequestEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,6 +242,25 @@ pub struct GroupSenderKeyRecordSnapshot {
     pub sender_event_secret_key: Option<[u8; 32]>,
     pub latest_key_id: Option<u32>,
     pub states: Vec<crate::SenderKeyState>,
+    #[serde(default)]
+    pub distribution_history: Vec<SenderKeyDistribution>,
+    #[serde(default)]
+    pub distributed_to: Vec<GroupSenderKeyDistributionRecipientsSnapshot>,
+    #[serde(default)]
+    pub repair_snapshots: Vec<GroupSenderKeyRepairSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupSenderKeyDistributionRecipientsSnapshot {
+    pub key_id: u32,
+    pub recipients: Vec<OwnerPubkey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupSenderKeyRepairSnapshot {
+    pub key_id: u32,
+    pub distribution: SenderKeyDistribution,
+    pub recipients: Vec<OwnerPubkey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +272,24 @@ pub struct SenderKeyDistribution {
     pub chain_key: [u8; 32],
     pub iteration: u32,
     pub created_at: UnixSeconds,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SenderKeyRepairRequest {
+    pub group_id: String,
+    pub sender_event_pubkey: SenderEventPubkey,
+    pub key_id: u32,
+    pub message_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_revision: Option<u64>,
+    pub created_at: UnixSeconds,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSenderKeyRepairRequestEvent {
+    pub requester_owner: OwnerPubkey,
+    pub requester_device: Option<DevicePubkey>,
+    pub request: SenderKeyRepairRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -65,7 +65,9 @@ if [[ "${MODE}" == "all" ]]; then
   for cfg in \
     DirectMessageSubscriptions.current.cfg \
     DirectMessageSubscriptions.added-author.current.cfg \
-    DirectMessageSubscriptions.skipped-author.current.cfg
+    DirectMessageSubscriptions.skipped-author.current.cfg \
+    DirectMessageSubscriptions.applied-before-success.current.cfg \
+    DirectMessageSubscriptions.stuck-apply.current.cfg
   do
     if run_cfg "${cfg}"; then
       echo "Expected ${cfg} to fail, but it passed." >&2

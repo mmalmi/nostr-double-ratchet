@@ -68,6 +68,13 @@ if [[ "${MODE}" == "all" ]]; then
   else
     echo "GroupSenderKeys.current.cfg failed as expected."
   fi
+
+  if run_cfg GroupSenderKeys.repair-leak.current.cfg; then
+    echo "Expected GroupSenderKeys.repair-leak.current.cfg to fail, but it passed." >&2
+    exit 1
+  else
+    echo "GroupSenderKeys.repair-leak.current.cfg failed as expected."
+  fi
 fi
 
 run_cfg GroupSenderKeys.fixed.cfg
