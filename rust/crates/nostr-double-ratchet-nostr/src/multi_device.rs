@@ -33,8 +33,8 @@ pub fn apply_app_keys_snapshot(
     let current_app_keys = current_app_keys.expect("checked above");
     if incoming_created_at < current_created_at {
         return AppKeysSnapshot {
-            decision: AppKeysSnapshotDecision::MergedStale,
-            app_keys: current_app_keys.merge(incoming_app_keys),
+            decision: AppKeysSnapshotDecision::Stale,
+            app_keys: current_app_keys.clone(),
             created_at: current_created_at,
         };
     }
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn merges_stale_app_keys_snapshots_additively() {
+    fn ignores_stale_app_keys_snapshots() {
         let device1 = Keys::generate().public_key();
         let device2 = Keys::generate().public_key();
         let current = AppKeys::new(vec![DeviceEntry::new(device1, 200)]);
@@ -370,10 +370,10 @@ mod tests {
 
         let applied = apply_app_keys_snapshot(Some(&current), 200, &incoming, 100);
 
-        assert_eq!(applied.decision, AppKeysSnapshotDecision::MergedStale);
+        assert_eq!(applied.decision, AppKeysSnapshotDecision::Stale);
         assert_eq!(applied.created_at, 200);
         assert!(applied.app_keys.get_device(&device1).is_some());
-        assert!(applied.app_keys.get_device(&device2).is_some());
+        assert!(applied.app_keys.get_device(&device2).is_none());
     }
 
     #[test]
@@ -410,9 +410,9 @@ mod tests {
             Some(DeviceEntry::new(local_device, 200)),
         );
 
-        assert_eq!(applied.decision, AppKeysSnapshotDecision::MergedStale);
+        assert_eq!(applied.decision, AppKeysSnapshotDecision::Stale);
         assert!(applied.app_keys.get_device(&local_device).is_some());
-        assert!(applied.app_keys.get_device(&old_remote_device).is_some());
+        assert!(applied.app_keys.get_device(&old_remote_device).is_none());
     }
 
     #[test]
