@@ -73,6 +73,7 @@ where
         snapshot: GroupManagerSnapshot,
         payload_codec: C,
     ) -> Result<Self> {
+        let local_owner_pubkey = snapshot.local_owner_pubkey;
         let mut groups = BTreeMap::new();
         for group in snapshot.groups {
             let record = GroupRecord::from_snapshot(group)?;
@@ -85,19 +86,27 @@ where
         for snapshot in snapshot.sender_keys {
             let record = SenderKeyRecord::from_snapshot(snapshot)?;
             let id = record.id();
-            if sender_keys.insert(id.clone(), record.clone()).is_some() {
+            if sender_keys.contains_key(&id) {
                 return Err(group_error("duplicate sender-key record in snapshot"));
             }
-            if sender_event_index
-                .insert(record.sender_event_pubkey, id)
-                .is_some()
+            if let Some(existing_id) = sender_event_index.get(&record.sender_event_pubkey).cloned()
             {
-                return Err(group_error("duplicate sender-event pubkey in snapshot"));
+                let existing = sender_keys
+                    .get(&existing_id)
+                    .ok_or_else(|| group_error("sender-event index points to missing state"))?;
+                if prefer_new_duplicate_sender_key(local_owner_pubkey, existing, &record) {
+                    sender_keys.remove(&existing_id);
+                    sender_event_index.insert(record.sender_event_pubkey, id.clone());
+                    sender_keys.insert(id, record);
+                }
+                continue;
             }
+            sender_event_index.insert(record.sender_event_pubkey, id.clone());
+            sender_keys.insert(id, record);
         }
         Ok(Self {
             payload_codec,
-            local_owner_pubkey: snapshot.local_owner_pubkey,
+            local_owner_pubkey,
             groups,
             sender_keys,
             sender_event_index,
@@ -122,6 +131,19 @@ where
 
     pub fn groups(&self) -> Vec<GroupSnapshot> {
         self.groups.values().map(GroupRecord::snapshot).collect()
+    }
+
+    pub fn sync_group_to_local_siblings<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+    ) -> Result<GroupPreparedPublish>
+    where
+        R: RngCore + CryptoRng,
+    {
+        let record = self.group_record(group_id)?.clone();
+        self.local_sibling_sync(session_manager, ctx, &record)
     }
 
     pub fn known_sender_event_pubkeys(&self) -> Vec<SenderEventPubkey> {
@@ -1150,6 +1172,34 @@ where
         group.ensure_member(sender_owner)?;
 
         let id = SenderKeyRecordId::new(distribution.group_id.clone(), sender_owner, sender_device);
+        if let Some(existing_id) = self
+            .sender_event_index
+            .get(&distribution.sender_event_pubkey)
+            .cloned()
+            .filter(|existing_id| *existing_id != id)
+        {
+            let prefer_new = self
+                .sender_keys
+                .get(&existing_id)
+                .map(|existing| {
+                    let incoming = SenderKeyRecord {
+                        group_id: distribution.group_id.clone(),
+                        sender_owner,
+                        sender_device,
+                        sender_event_pubkey: distribution.sender_event_pubkey,
+                        sender_event_secret_key: None,
+                        latest_key_id: Some(distribution.key_id),
+                        states: BTreeMap::new(),
+                    };
+                    prefer_new_duplicate_sender_key(self.local_owner_pubkey, existing, &incoming)
+                })
+                .unwrap_or(true);
+            if prefer_new {
+                self.sender_keys.remove(&existing_id);
+            } else {
+                return Ok(());
+            }
+        }
         let record = self
             .sender_keys
             .entry(id.clone())
@@ -1432,6 +1482,33 @@ impl SenderKeyRecordId {
             sender_owner,
             sender_device,
         }
+    }
+}
+
+// Older clients briefly forwarded remote sender-key distributions through
+// local sibling channels. Heal that persisted shape by keeping a real local
+// sender key with its secret, or the remote record over a secretless local copy.
+fn prefer_new_duplicate_sender_key(
+    local_owner_pubkey: OwnerPubkey,
+    existing: &SenderKeyRecord,
+    incoming: &SenderKeyRecord,
+) -> bool {
+    let existing_is_local = existing.sender_owner == local_owner_pubkey;
+    let incoming_is_local = incoming.sender_owner == local_owner_pubkey;
+    let existing_has_secret = existing.sender_event_secret_key.is_some();
+    let incoming_has_secret = incoming.sender_event_secret_key.is_some();
+
+    match (
+        existing_is_local,
+        existing_has_secret,
+        incoming_is_local,
+        incoming_has_secret,
+    ) {
+        (true, true, _, _) => false,
+        (_, _, true, true) => true,
+        (true, false, false, _) => true,
+        (false, _, true, false) => false,
+        _ => false,
     }
 }
 

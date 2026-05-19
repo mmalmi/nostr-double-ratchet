@@ -673,6 +673,36 @@ fn sender_key_group_manager_snapshot_roundtrip_preserves_pending_decrypt_state()
 }
 
 #[test]
+fn sender_key_snapshot_discards_forwarded_duplicate_sender_event_record() -> Result<()> {
+    let mut fixture = established_sender_key_fixture(19, 1_900_044_100)?;
+    let sent = fixture.alice_groups.send_message(
+        &mut fixture.alice_manager,
+        &mut context(1_900_044_110, 1_900_044_110),
+        &fixture.group_id,
+        b"after duplicate restore".to_vec(),
+    )?;
+    let mut restored_snapshot = fixture.bob_groups.snapshot();
+    let mut duplicate = restored_snapshot.sender_keys[0].clone();
+    duplicate.sender_owner = restored_snapshot.local_owner_pubkey;
+    duplicate.sender_event_secret_key = None;
+    restored_snapshot.sender_keys.push(duplicate);
+
+    let mut restored = GroupManager::from_snapshot(restored_snapshot)?;
+
+    assert_eq!(restored.snapshot().sender_keys.len(), 1);
+    let result = restored.handle_sender_key_message(sender_key_message_from_envelope(
+        &sent.remote.sender_key_messages[0],
+    ))?;
+    assert!(matches!(
+        result,
+        GroupSenderKeyHandleResult::Event(GroupIncomingEvent::Message(message))
+            if message.body == b"after duplicate restore".to_vec()
+    ));
+
+    Ok(())
+}
+
+#[test]
 fn sender_key_added_member_receives_distribution_at_current_iteration() -> Result<()> {
     let mut fixture = established_sender_key_fixture(20, 1_900_045_000)?;
     let carol = manager_device(22, 62);
