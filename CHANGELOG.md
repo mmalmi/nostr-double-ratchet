@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.146 - 2026-05-20
+
+- Expose the default sender-key repair retry cadence as a deterministic helper so clients can share the same backoff without moving app scheduling state into the protocol core.
+- Add a helper for deriving a sender-key repair request from a blocked sender-key message and its pending handle result.
+
 ## 0.0.145 - 2026-05-20
 
 - Add sender-key repair requests so receivers can ask a sender to resend the key material and, when needed, the current group metadata for a blocked group message.

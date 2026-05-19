@@ -285,6 +285,64 @@ pub struct SenderKeyRepairRequest {
     pub created_at: UnixSeconds,
 }
 
+impl SenderKeyRepairRequest {
+    pub fn from_pending_sender_key_message(
+        message: &GroupSenderKeyMessage,
+        result: &GroupSenderKeyHandleResult,
+        created_at: UnixSeconds,
+    ) -> Option<Self> {
+        match result {
+            GroupSenderKeyHandleResult::PendingDistribution {
+                group_id,
+                sender_event_pubkey,
+                key_id,
+            } => Some(Self {
+                group_id: group_id.clone(),
+                sender_event_pubkey: *sender_event_pubkey,
+                key_id: *key_id,
+                message_number: message.message_number,
+                required_revision: None,
+                created_at,
+            }),
+            GroupSenderKeyHandleResult::PendingRevision {
+                group_id,
+                required_revision,
+                ..
+            } => Some(Self {
+                group_id: group_id.clone(),
+                sender_event_pubkey: message.sender_event_pubkey,
+                key_id: message.key_id,
+                message_number: message.message_number,
+                required_revision: Some(*required_revision),
+                created_at,
+            }),
+            _ => None,
+        }
+    }
+}
+
+pub const SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS: [u64; 5] = [30, 120, 600, 3_600, 21_600];
+
+pub fn sender_key_repair_default_retry_delay_secs(sent_request_count: u32) -> u64 {
+    let index = sent_request_count
+        .saturating_sub(1)
+        .min((SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS.len() - 1) as u32)
+        as usize;
+    SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS[index]
+}
+
+pub fn sender_key_repair_default_next_retry_at(
+    now: UnixSeconds,
+    sent_request_count: u32,
+) -> UnixSeconds {
+    UnixSeconds(
+        now.get()
+            .saturating_add(sender_key_repair_default_retry_delay_secs(
+                sent_request_count,
+            )),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupSenderKeyRepairRequestEvent {
     pub requester_owner: OwnerPubkey,
@@ -328,6 +386,113 @@ pub enum GroupSenderKeyHandleResult {
         required_revision: u64,
     },
     Ignored,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sender_key_repair_default_retry_policy_starts_fast_then_backs_off() {
+        assert_eq!(sender_key_repair_default_retry_delay_secs(0), 30);
+        assert_eq!(sender_key_repair_default_retry_delay_secs(1), 30);
+        assert_eq!(sender_key_repair_default_retry_delay_secs(2), 120);
+        assert_eq!(sender_key_repair_default_retry_delay_secs(3), 600);
+        assert_eq!(sender_key_repair_default_retry_delay_secs(4), 3_600);
+        assert_eq!(sender_key_repair_default_retry_delay_secs(5), 21_600);
+        assert_eq!(sender_key_repair_default_retry_delay_secs(u32::MAX), 21_600);
+    }
+
+    #[test]
+    fn sender_key_repair_default_next_retry_saturates() {
+        assert_eq!(
+            sender_key_repair_default_next_retry_at(UnixSeconds(100), 2),
+            UnixSeconds(220)
+        );
+        assert_eq!(
+            sender_key_repair_default_next_retry_at(UnixSeconds(u64::MAX - 10), 1),
+            UnixSeconds(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn sender_key_repair_request_from_pending_distribution_uses_blocked_message_number() {
+        let sender_event_pubkey = DevicePubkey::from_bytes([7; 32]);
+        let request = SenderKeyRepairRequest::from_pending_sender_key_message(
+            &GroupSenderKeyMessage {
+                group_id: "ignored-message-group".to_string(),
+                sender_event_pubkey: DevicePubkey::from_bytes([8; 32]),
+                key_id: 99,
+                message_number: 42,
+                created_at: UnixSeconds(100),
+                ciphertext: vec![1, 2, 3],
+            },
+            &GroupSenderKeyHandleResult::PendingDistribution {
+                group_id: "group-1".to_string(),
+                sender_event_pubkey,
+                key_id: 7,
+            },
+            UnixSeconds(200),
+        )
+        .expect("pending distribution should request repair");
+
+        assert_eq!(request.group_id, "group-1");
+        assert_eq!(request.sender_event_pubkey, sender_event_pubkey);
+        assert_eq!(request.key_id, 7);
+        assert_eq!(request.message_number, 42);
+        assert_eq!(request.required_revision, None);
+        assert_eq!(request.created_at, UnixSeconds(200));
+    }
+
+    #[test]
+    fn sender_key_repair_request_from_pending_revision_requests_metadata_too() {
+        let sender_event_pubkey = DevicePubkey::from_bytes([9; 32]);
+        let request = SenderKeyRepairRequest::from_pending_sender_key_message(
+            &GroupSenderKeyMessage {
+                group_id: "group-1".to_string(),
+                sender_event_pubkey,
+                key_id: 11,
+                message_number: 12,
+                created_at: UnixSeconds(100),
+                ciphertext: vec![1, 2, 3],
+            },
+            &GroupSenderKeyHandleResult::PendingRevision {
+                group_id: "group-1".to_string(),
+                current_revision: 3,
+                required_revision: 4,
+            },
+            UnixSeconds(200),
+        )
+        .expect("pending revision should request repair");
+
+        assert_eq!(request.group_id, "group-1");
+        assert_eq!(request.sender_event_pubkey, sender_event_pubkey);
+        assert_eq!(request.key_id, 11);
+        assert_eq!(request.message_number, 12);
+        assert_eq!(request.required_revision, Some(4));
+        assert_eq!(request.created_at, UnixSeconds(200));
+    }
+
+    #[test]
+    fn sender_key_repair_request_from_consumed_result_returns_none() {
+        let message = GroupSenderKeyMessage {
+            group_id: "group-1".to_string(),
+            sender_event_pubkey: DevicePubkey::from_bytes([9; 32]),
+            key_id: 11,
+            message_number: 12,
+            created_at: UnixSeconds(100),
+            ciphertext: vec![1, 2, 3],
+        };
+
+        assert_eq!(
+            SenderKeyRepairRequest::from_pending_sender_key_message(
+                &message,
+                &GroupSenderKeyHandleResult::Ignored,
+                UnixSeconds(200)
+            ),
+            None
+        );
+    }
 }
 
 mod serde_bytes_array {
