@@ -9,6 +9,7 @@ import {
 
 import {
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+  GROUP_SENDER_KEY_REPAIR_REQUEST_KIND,
   type GroupData,
 } from "./GroupMeta";
 import {
@@ -18,6 +19,11 @@ import {
   type MessageOrigin,
 } from "./MessageOrigin";
 import { OneToManyChannel } from "./OneToManyChannel";
+import {
+  buildSenderKeyRepairRequestRumor,
+  parseSenderKeyRepairRequestRumor,
+  type SenderKeyRepairRequest,
+} from "./SenderKeyRepair";
 import type { SenderKeyDistribution, SenderKeyStateSerialized } from "./SenderKey";
 import { SenderKeyState } from "./SenderKey";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
@@ -52,6 +58,12 @@ export interface GroupDecryptedEvent {
   keyId: number;
   messageNumber: number;
   inner: Rumor;
+}
+
+interface SenderKeyRepairSnapshot {
+  keyId: number;
+  distribution: SenderKeyDistribution;
+  recipients: string[];
 }
 
 function getFirstTagValue(
@@ -214,6 +226,10 @@ export class Group {
     return `${this.groupSenderPrefix(senderDevicePubkey)}/key/${keyId >>> 0}`;
   }
 
+  private senderKeyRepairSnapshotsKey(senderDevicePubkey: string): string {
+    return `${this.groupSenderPrefix(senderDevicePubkey)}/repair-snapshots`;
+  }
+
   private setSenderEventMapping(senderDevicePubkey: string, senderEventPubkey: string): void {
     const prev = this.senderDeviceToEvent.get(senderDevicePubkey);
     if (prev && prev !== senderEventPubkey) {
@@ -367,6 +383,81 @@ export class Group {
     await this.storage.put(this.senderKeyStateKey(senderDevicePubkey, st.keyId), st.toJSON());
   }
 
+  private async loadSenderKeyRepairSnapshots(senderDevicePubkey: string): Promise<SenderKeyRepairSnapshot[]> {
+    const snapshots = await this.storage.get<SenderKeyRepairSnapshot[]>(
+      this.senderKeyRepairSnapshotsKey(senderDevicePubkey),
+    );
+    if (!Array.isArray(snapshots)) return [];
+    return snapshots.filter((snapshot) => {
+      const dist = snapshot?.distribution;
+      return (
+        typeof snapshot?.keyId === "number" &&
+        Array.isArray(snapshot?.recipients) &&
+        dist &&
+        typeof dist.groupId === "string" &&
+        typeof dist.keyId === "number" &&
+        typeof dist.chainKey === "string" &&
+        typeof dist.iteration === "number" &&
+        typeof dist.createdAt === "number"
+      );
+    });
+  }
+
+  private async saveSenderKeyRepairSnapshots(
+    senderDevicePubkey: string,
+    snapshots: SenderKeyRepairSnapshot[],
+  ): Promise<void> {
+    await this.storage.put(this.senderKeyRepairSnapshotsKey(senderDevicePubkey), snapshots);
+  }
+
+  private async recordSenderKeyRepairSnapshot(
+    dist: SenderKeyDistribution,
+    recipients: string[],
+  ): Promise<void> {
+    const uniqueRecipients = Array.from(new Set(recipients));
+    const snapshots = await this.loadSenderKeyRepairSnapshots(this.ourDevicePubkey);
+    const duplicate = snapshots.some((snapshot) => (
+      snapshot.keyId === dist.keyId &&
+      snapshot.distribution.iteration === dist.iteration &&
+      snapshot.distribution.senderEventPubkey === dist.senderEventPubkey
+    ));
+    if (duplicate) return;
+
+    snapshots.push({
+      keyId: dist.keyId >>> 0,
+      distribution: { ...dist },
+      recipients: uniqueRecipients,
+    });
+    await this.saveSenderKeyRepairSnapshots(this.ourDevicePubkey, snapshots);
+  }
+
+  private async repairDistributionFor(
+    requesterOwnerPubkey: string,
+    request: SenderKeyRepairRequest,
+  ): Promise<SenderKeyDistribution | null> {
+    if (request.groupId !== this.groupId()) return null;
+    if (!this.isMemberOwnerPubkey(this.ourOwnerPubkey)) return null;
+    if (!this.isMemberOwnerPubkey(requesterOwnerPubkey)) return null;
+
+    const localSenderEventPubkey =
+      this.senderDeviceToEvent.get(this.ourDevicePubkey) ||
+      (await this.storage.get<string>(this.senderEventPubkeyKey(this.ourDevicePubkey)));
+    if (localSenderEventPubkey !== request.senderEventPubkey) return null;
+
+    const snapshots = await this.loadSenderKeyRepairSnapshots(this.ourDevicePubkey);
+    const candidates = snapshots
+      .filter((snapshot) => (
+        snapshot.keyId === (request.keyId >>> 0) &&
+        snapshot.distribution.groupId === request.groupId &&
+        snapshot.distribution.senderEventPubkey === request.senderEventPubkey &&
+        snapshot.distribution.iteration <= (request.messageNumber >>> 0) &&
+        snapshot.recipients.includes(requesterOwnerPubkey)
+      ))
+      .sort((a, b) => b.distribution.iteration - a.distribution.iteration);
+
+    return candidates[0]?.distribution ?? null;
+  }
+
   private async ensureOurSenderKeyState(forceRotate: boolean): Promise<{ state: SenderKeyState; created: boolean }> {
     await this.init();
 
@@ -474,8 +565,10 @@ export class Group {
 
     // Include our owner so sibling devices on the same account can decrypt
     // subsequent outer messages in self-only and multi-device group chats.
+    const recipients = this.senderKeyRecipientOwnerPubkeys();
+    await this.recordSenderKeyRepairSnapshot(dist, recipients);
     await Promise.allSettled(
-      this.senderKeyRecipientOwnerPubkeys().map((pk) => opts.sendPairwise(pk, rumor))
+      recipients.map((pk) => opts.sendPairwise(pk, rumor))
     );
 
     return dist;
@@ -504,8 +597,10 @@ export class Group {
     if (senderKeyCreated || senderEventKeysChanged) {
       const dist = this.buildDistribution(nowSeconds, senderEventPubkey, senderKey);
       const rumor = this.buildDistributionRumor(nowSeconds, nowMs, dist);
+      const recipients = this.senderKeyRecipientOwnerPubkeys();
+      await this.recordSenderKeyRepairSnapshot(dist, recipients);
       await Promise.allSettled(
-        this.senderKeyRecipientOwnerPubkeys().map((pk) => opts.sendPairwise(pk, rumor))
+        recipients.map((pk) => opts.sendPairwise(pk, rumor))
       );
     }
 
@@ -535,10 +630,71 @@ export class Group {
     );
   }
 
+  senderKeyRepairRequestForOuterEvent(
+    outer: VerifiedEvent,
+    createdAtSeconds: number = Math.floor(Date.now() / 1000),
+    requiredRevision?: number,
+  ): SenderKeyRepairRequest | null {
+    if (outer.kind !== MESSAGE_EVENT_KIND) return null;
+    if (!verifyEvent(outer)) return null;
+
+    try {
+      const parsed = this.oneToMany.parseOuterContent(outer.content);
+      return {
+        groupId: this.groupId(),
+        senderEventPubkey: outer.pubkey,
+        keyId: parsed.keyId,
+        messageNumber: parsed.messageNumber,
+        ...(requiredRevision !== undefined
+          ? { requiredRevision: Math.max(0, Math.floor(requiredRevision)) }
+          : {}),
+        createdAt: Math.max(0, Math.floor(createdAtSeconds)),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async requestSenderKeyRepair(
+    request: SenderKeyRepairRequest,
+    opts: { sendPairwise: PairwiseSend; nowMs?: number },
+  ): Promise<Rumor | null> {
+    await this.init();
+
+    if (request.groupId !== this.groupId()) return null;
+    if (!this.isMemberOwnerPubkey(this.ourOwnerPubkey)) return null;
+
+    const rumor = buildSenderKeyRepairRequestRumor(
+      request,
+      this.ourDevicePubkey,
+      opts.nowMs,
+    );
+    const recipients = this.senderKeyRecipientOwnerPubkeys();
+    await Promise.allSettled(recipients.map((pk) => opts.sendPairwise(pk, rumor)));
+    return rumor;
+  }
+
+  async respondToSenderKeyRepairRequest(
+    requesterOwnerPubkey: string,
+    request: SenderKeyRepairRequest,
+    opts: { sendPairwise: PairwiseSend; nowMs?: number },
+  ): Promise<SenderKeyDistribution | null> {
+    await this.init();
+
+    const dist = await this.repairDistributionFor(requesterOwnerPubkey, request);
+    if (!dist) return null;
+
+    const nowMs = opts.nowMs ?? Date.now();
+    const nowSeconds = Math.floor(nowMs / 1000);
+    const rumor = this.buildDistributionRumor(nowSeconds, nowMs, dist);
+    await opts.sendPairwise(requesterOwnerPubkey, rumor);
+    return dist;
+  }
+
   /**
    * Handle an incoming 1:1 session rumor (decrypted Double Ratchet event).
    *
-   * Currently this only consumes sender-key distribution rumors (kind 10446) for this group.
+   * This consumes sender-key distribution rumors and repair requests for this group.
    * It may return decrypted outer group events that were pending until the distribution arrived.
    *
    * `fromSenderDevicePubkey` must come from authenticated session context (not `event.pubkey`).
@@ -556,6 +712,37 @@ export class Group {
 
     const gid = getFirstTagValue(event.tags, "l");
     if (gid !== this.groupId()) return [];
+
+    if (event.kind === GROUP_SENDER_KEY_REPAIR_REQUEST_KIND) {
+      const request = parseSenderKeyRepairRequestRumor(event);
+      if (!request || request.groupId !== this.groupId()) return [];
+
+      const senderDevicePubkey = fromSenderDevicePubkey;
+      if (!senderDevicePubkey || !isHex32(senderDevicePubkey)) return [];
+      if (isHex32(event.pubkey) && event.pubkey !== senderDevicePubkey) return [];
+
+      const origin = classifyMessageOrigin({
+        ourOwnerPubkey: this.ourOwnerPubkey,
+        ourDevicePubkey: this.ourDevicePubkey,
+        senderOwnerPubkey: fromOwnerPubkey,
+        senderDevicePubkey,
+      });
+
+      return [{
+        groupId: this.groupId(),
+        senderEventPubkey: senderDevicePubkey,
+        senderDevicePubkey,
+        senderOwnerPubkey: fromOwnerPubkey,
+        origin,
+        isSelf: isSelfOrigin(origin),
+        isCrossDeviceSelf: isCrossDeviceSelfOrigin(origin),
+        outerEventId: event.id,
+        outerCreatedAt: event.created_at,
+        keyId: request.keyId,
+        messageNumber: request.messageNumber,
+        inner: event,
+      }];
+    }
 
     if (event.kind !== GROUP_SENDER_KEY_DISTRIBUTION_KIND) return [];
 
@@ -629,14 +816,13 @@ export class Group {
       return null;
     }
 
+    const nextState = SenderKeyState.fromJSON(st.toJSON());
     let plaintext: string;
     try {
-      plaintext = st.decryptFromBytes(parsed.messageNumber, parsed.ciphertext);
+      plaintext = nextState.decryptFromBytes(parsed.messageNumber, parsed.ciphertext);
     } catch {
       return null;
     }
-
-    await this.saveSenderKeyState(senderDevicePubkey, st);
 
     let inner: Rumor;
     try {
@@ -659,6 +845,8 @@ export class Group {
     if (innerGid && innerGid !== this.groupId()) {
       return null;
     }
+
+    await this.saveSenderKeyState(senderDevicePubkey, nextState);
 
     const senderOwnerPubkey =
       this.senderDeviceToOwner.get(senderDevicePubkey) ||

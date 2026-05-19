@@ -349,7 +349,7 @@ sessionManager.setAutoAdoptChatSettings(false);
 | 40    | `GROUP_METADATA_KIND`                       | Group metadata rumor                         |
 | 10445 | `GROUP_INVITE_RUMOR_KIND`                   | Group bootstrap invite rumor                 |
 | 10446 | `GROUP_SENDER_KEY_DISTRIBUTION_KIND`        | Group sender-key distribution rumor          |
-| 10447 | `GROUP_SENDER_KEY_MESSAGE_KIND`             | Group sender-key message rumor kind constant |
+| 10447 | `GROUP_SENDER_KEY_REPAIR_REQUEST_KIND`      | Group sender-key repair request rumor        |
 | 4     | `SHARED_CHANNEL_KIND`                       | Shared-channel transport event kind          |
 
 ## Scalability And Tradeoffs

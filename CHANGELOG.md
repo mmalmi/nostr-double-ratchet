@@ -4,6 +4,9 @@
 
 - Expose the default sender-key repair retry cadence as a deterministic helper so clients can share the same backoff without moving app scheduling state into the protocol core.
 - Add a helper for deriving a sender-key repair request from a blocked sender-key message and its pending handle result.
+- Bring the TypeScript group sender-key path to repair parity with Rust: 10447 repair request rumors, request/response APIs, durable sender-key repair snapshots, and removed-member authorization checks.
+- Preserve TypeScript receiver sender-key state until decrypted group plaintext passes validation, so malformed or wrong-group ciphertext cannot burn the next valid message key.
+- Add TypeScript/Rust sender-key repair request vectors to lock down the cross-language 10447 wire format.
 
 ## 0.0.145 - 2026-05-20
 

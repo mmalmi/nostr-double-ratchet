@@ -7,6 +7,7 @@ import {
   createGroupData,
   GROUP_METADATA_KIND,
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+  GROUP_SENDER_KEY_REPAIR_REQUEST_KIND,
   type GroupData,
   type GroupMetadata,
   parseGroupMetadata,
@@ -19,6 +20,10 @@ import {
   isSelfOrigin,
 } from "./MessageOrigin";
 import { OneToManyChannel } from "./OneToManyChannel";
+import {
+  parseSenderKeyRepairRequestRumor,
+  type SenderKeyRepairRequest,
+} from "./SenderKeyRepair";
 import type { SenderKeyDistribution } from "./SenderKey";
 import { InMemoryStorageAdapter, type StorageAdapter } from "./StorageAdapter";
 import {
@@ -35,6 +40,8 @@ export interface GroupManagerErrorContext {
     | "sendEvent"
     | "sendMessage"
     | "rotateSenderKey"
+    | "requestSenderKeyRepair"
+    | "respondToSenderKeyRepairRequest"
     | "handleIncomingSessionEvent"
     | "handleOuterEvent"
     | "syncOuterSubscription";
@@ -399,6 +406,69 @@ export class GroupManager {
     });
   }
 
+  async requestSenderKeyRepair(
+    groupId: string,
+    request: SenderKeyRepairRequest,
+    opts: { sendPairwise: PairwiseSend; nowMs?: number },
+  ): Promise<Rumor | null> {
+    return this.enqueueOperation(async () => {
+      const group = this.groups.get(groupId);
+      if (!group) {
+        throw new Error(`Unknown group: ${groupId}`);
+      }
+
+      try {
+        return await group.requestSenderKeyRepair(request, opts);
+      } catch (error) {
+        this.reportError(error, { operation: "requestSenderKeyRepair", groupId });
+        throw error;
+      }
+    });
+  }
+
+  async respondToSenderKeyRepairRequest(
+    groupId: string,
+    requesterOwnerPubkey: string,
+    request: SenderKeyRepairRequest,
+    opts: { sendPairwise: PairwiseSend; nowMs?: number },
+  ): Promise<SenderKeyDistribution | null> {
+    return this.enqueueOperation(async () => {
+      const group = this.groups.get(groupId);
+      if (!group) {
+        throw new Error(`Unknown group: ${groupId}`);
+      }
+
+      try {
+        const result = await group.respondToSenderKeyRepairRequest(
+          requesterOwnerPubkey,
+          request,
+          opts,
+        );
+        await this.refreshGroupSenderMappings(groupId);
+        await this.syncOuterSubscription();
+        return result;
+      } catch (error) {
+        this.reportError(error, { operation: "respondToSenderKeyRepairRequest", groupId });
+        throw error;
+      }
+    });
+  }
+
+  senderKeyRepairRequestForOuterEvent(
+    groupId: string,
+    outer: VerifiedEvent,
+    createdAtSeconds?: number,
+    requiredRevision?: number,
+  ): SenderKeyRepairRequest | null {
+    const group = this.groups.get(groupId);
+    if (!group) return null;
+    return group.senderKeyRepairRequestForOuterEvent(
+      outer,
+      createdAtSeconds,
+      requiredRevision,
+    );
+  }
+
   async handleIncomingSessionEvent(
     event: Rumor,
     fromOwnerPubkey: string,
@@ -414,6 +484,11 @@ export class GroupManager {
         distribution = parseSenderKeyDistribution(event.content);
         if (distribution?.groupId) {
           groupId = distribution.groupId;
+        }
+      } else if (event.kind === GROUP_SENDER_KEY_REPAIR_REQUEST_KIND) {
+        const request = parseSenderKeyRepairRequestRumor(event);
+        if (request?.groupId) {
+          groupId = request.groupId;
         }
       } else if (event.kind === GROUP_METADATA_KIND) {
         metadata = parseGroupMetadata(event.content);
