@@ -633,7 +633,10 @@ fn sender_key_local_sibling_can_repair_missed_rotated_distribution() -> Result<(
             &received_remove.payload,
         )?
         .expect("removal metadata event");
-    assert!(matches!(remove_event, GroupIncomingEvent::MetadataUpdated(_)));
+    assert!(matches!(
+        remove_event,
+        GroupIncomingEvent::MetadataUpdated(_)
+    ));
 
     let sent = alice1_groups.send_message(
         &mut alice1_manager,
@@ -728,7 +731,8 @@ fn sender_key_local_sibling_can_repair_missed_rotated_distribution() -> Result<(
         &received_response.payload,
     )?;
 
-    let repaired = alice2_groups.handle_sender_key_message(sender_key_message_from_envelope(&outer))?;
+    let repaired =
+        alice2_groups.handle_sender_key_message(sender_key_message_from_envelope(&outer))?;
     assert!(matches!(
         repaired,
         GroupSenderKeyHandleResult::Event(GroupIncomingEvent::Message(message))

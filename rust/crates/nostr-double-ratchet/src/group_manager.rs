@@ -1400,6 +1400,9 @@ where
                         sender_event_secret_key: None,
                         latest_key_id: Some(distribution.key_id),
                         states: BTreeMap::new(),
+                        distribution_history: BTreeMap::new(),
+                        distributed_to: BTreeMap::new(),
+                        repair_snapshots: Vec::new(),
                     };
                     prefer_new_duplicate_sender_key(self.local_owner_pubkey, existing, &incoming)
                 })
