@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.145 - 2026-05-20
+
+- Add sender-key repair requests so receivers can ask a sender to resend the key material and, when needed, the current group metadata for a blocked group message.
+- Record sender-key repair snapshots with recipient authorization windows, preventing removed members and pre-join late members from receiving keys they were not meant to have.
+- Encode sender-key repair requests as authenticated kind 10447 rumors with group, sender, key, message, and optional revision tags.
+- Expand the formal group sender-key and direct-message subscription models for repair and liveness cases.
+
 ## 0.0.144 - 2026-05-19
 
 - Add optional `picture` and `about` fields to `GroupSnapshot` so the group avatar URL and free-text description travel in the same revisioned metadata snapshot as name/membership, rather than over a separate side channel that out-of-sync members can miss.

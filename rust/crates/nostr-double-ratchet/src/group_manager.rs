@@ -433,9 +433,12 @@ where
     where
         R: RngCore + CryptoRng,
     {
-        self.update_metadata_with(session_manager, ctx, group_id, |next, actor, base, new_rev, now| {
-            next.apply_rename(actor, name, base, new_rev, now)
-        })
+        self.update_metadata_with(
+            session_manager,
+            ctx,
+            group_id,
+            |next, actor, base, new_rev, now| next.apply_rename(actor, name, base, new_rev, now),
+        )
     }
 
     /// Set or clear the group's picture URL. `Some(url)` updates, `None`
@@ -452,9 +455,14 @@ where
     where
         R: RngCore + CryptoRng,
     {
-        self.update_metadata_with(session_manager, ctx, group_id, |next, actor, base, new_rev, now| {
-            next.apply_picture_change(actor, picture, base, new_rev, now)
-        })
+        self.update_metadata_with(
+            session_manager,
+            ctx,
+            group_id,
+            |next, actor, base, new_rev, now| {
+                next.apply_picture_change(actor, picture, base, new_rev, now)
+            },
+        )
     }
 
     /// Set or clear the group's free-text description. `Some(text)` updates,
@@ -469,9 +477,14 @@ where
     where
         R: RngCore + CryptoRng,
     {
-        self.update_metadata_with(session_manager, ctx, group_id, |next, actor, base, new_rev, now| {
-            next.apply_about_change(actor, about, base, new_rev, now)
-        })
+        self.update_metadata_with(
+            session_manager,
+            ctx,
+            group_id,
+            |next, actor, base, new_rev, now| {
+                next.apply_about_change(actor, about, base, new_rev, now)
+            },
+        )
     }
 
     /// Common implementation for `update_name` / `update_picture` /
