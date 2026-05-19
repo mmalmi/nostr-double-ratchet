@@ -1726,8 +1726,7 @@ impl NdrRuntime {
         let now = now();
         let event = pairwise_codec::typing_event(
             self.owner_public_key,
-            pairwise_codec::EncodeOptions::new(now.get(), current_unix_millis())
-                .with_expiration(1),
+            pairwise_codec::EncodeOptions::new(now.get(), current_unix_millis()).with_expiration(1),
         )
         .map_err(|e| Error::InvalidEvent(e.to_string()))?;
         self.send_event(invite_owner, event).map(|_| ())

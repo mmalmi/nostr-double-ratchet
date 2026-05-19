@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.143 - 2026-05-19
+
+- Sync remote-created group metadata to local sibling devices for AppCore-owned protocol engines.
+- Heal duplicate sender-key snapshot records left by older local-sibling sender-key forwarding behavior.
+
 ## 0.0.142 - 2026-05-08
 
 - Verify unsigned inner event ids before pairwise codec decode, runtime queue storage, and old group unsigned-event wrapper decode.
