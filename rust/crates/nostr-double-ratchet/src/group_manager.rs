@@ -25,6 +25,8 @@ struct GroupRecord {
     group_id: String,
     protocol: GroupProtocol,
     name: String,
+    picture: Option<String>,
+    about: Option<String>,
     created_by: OwnerPubkey,
     members: BTreeSet<OwnerPubkey>,
     admins: BTreeSet<OwnerPubkey>,
@@ -206,6 +208,8 @@ where
             group_id: group_id.clone(),
             protocol,
             name,
+            picture: None,
+            about: None,
             created_by: self.local_owner_pubkey,
             members,
             admins,
@@ -323,13 +327,72 @@ where
     where
         R: RngCore + CryptoRng,
     {
+        self.update_metadata_with(session_manager, ctx, group_id, |next, actor, base, new_rev, now| {
+            next.apply_rename(actor, name, base, new_rev, now)
+        })
+    }
+
+    /// Set or clear the group's picture URL. `Some(url)` updates, `None`
+    /// clears. Travels in the same metadata snapshot as name/membership so
+    /// new joiners and out-of-sync admins converge automatically — no
+    /// separate side channel.
+    pub fn update_picture<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        picture: Option<String>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.update_metadata_with(session_manager, ctx, group_id, |next, actor, base, new_rev, now| {
+            next.apply_picture_change(actor, picture, base, new_rev, now)
+        })
+    }
+
+    /// Set or clear the group's free-text description. `Some(text)` updates,
+    /// `None` clears.
+    pub fn update_about<R>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        about: Option<String>,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.update_metadata_with(session_manager, ctx, group_id, |next, actor, base, new_rev, now| {
+            next.apply_about_change(actor, about, base, new_rev, now)
+        })
+    }
+
+    /// Common implementation for `update_name` / `update_picture` /
+    /// `update_about`: clone the current record, ask the caller to mutate
+    /// the new copy via one of the `apply_*` admin-checked helpers, then
+    /// fan the resulting metadata snapshot out to remote members and our
+    /// local siblings.
+    fn update_metadata_with<R, F>(
+        &mut self,
+        session_manager: &mut SessionManager,
+        ctx: &mut ProtocolContext<'_, R>,
+        group_id: &str,
+        apply: F,
+    ) -> Result<GroupPreparedSend>
+    where
+        R: RngCore + CryptoRng,
+        F: FnOnce(&mut GroupRecord, OwnerPubkey, u64, u64, UnixSeconds) -> Result<()>,
+    {
         let current = self.group_record(group_id)?.clone();
         let mut next = current.clone();
-        next.apply_rename(
+        let base_revision = current.revision;
+        let new_revision = base_revision + 1;
+        apply(
+            &mut next,
             self.local_owner_pubkey,
-            name.clone(),
-            current.revision,
-            current.revision + 1,
+            base_revision,
+            new_revision,
             ctx.now,
         )?;
 
@@ -1260,6 +1323,8 @@ impl GroupRecord {
             group_id: snapshot.group_id,
             protocol: snapshot.protocol,
             name: snapshot.name,
+            picture: snapshot.picture,
+            about: snapshot.about,
             created_by: snapshot.created_by,
             members,
             admins,
@@ -1283,6 +1348,8 @@ impl GroupRecord {
             group_id: self.group_id.clone(),
             protocol: self.protocol,
             name: self.name.clone(),
+            picture: self.picture.clone(),
+            about: self.about.clone(),
             created_by: self.created_by,
             members: self.members.iter().copied().collect(),
             admins: self.admins.iter().copied().collect(),
@@ -1355,6 +1422,38 @@ impl GroupRecord {
         self.ensure_admin(actor)?;
         self.ensure_revision(base_revision, new_revision)?;
         self.name = name;
+        self.revision = new_revision;
+        self.updated_at = updated_at;
+        Ok(())
+    }
+
+    fn apply_picture_change(
+        &mut self,
+        actor: OwnerPubkey,
+        picture: Option<String>,
+        base_revision: u64,
+        new_revision: u64,
+        updated_at: UnixSeconds,
+    ) -> Result<()> {
+        self.ensure_admin(actor)?;
+        self.ensure_revision(base_revision, new_revision)?;
+        self.picture = picture.filter(|value| !value.is_empty());
+        self.revision = new_revision;
+        self.updated_at = updated_at;
+        Ok(())
+    }
+
+    fn apply_about_change(
+        &mut self,
+        actor: OwnerPubkey,
+        about: Option<String>,
+        base_revision: u64,
+        new_revision: u64,
+        updated_at: UnixSeconds,
+    ) -> Result<()> {
+        self.ensure_admin(actor)?;
+        self.ensure_revision(base_revision, new_revision)?;
+        self.about = about.filter(|value| !value.is_empty());
         self.revision = new_revision;
         self.updated_at = updated_at;
         Ok(())

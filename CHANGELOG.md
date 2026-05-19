@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.144 - 2026-05-19
+
+- Add optional `picture` and `about` fields to `GroupSnapshot` so the group avatar URL and free-text description travel in the same revisioned metadata snapshot as name/membership, rather than over a separate side channel that out-of-sync members can miss.
+- Add `GroupManager::update_picture` / `GroupManager::update_about` admin APIs mirroring `update_name`.
+- Wire-compatible: missing fields decode as `None`, and outbound snapshots omit them when unset, so older 0.0.x peers keep round-tripping snapshots unchanged.
+
 ## 0.0.143 - 2026-05-19
 
 - Sync remote-created group metadata to local sibling devices for AppCore-owned protocol engines.

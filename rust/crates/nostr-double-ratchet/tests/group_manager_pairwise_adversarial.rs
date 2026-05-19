@@ -46,6 +46,8 @@ fn metadata_snapshot(
         group_id: group_id.to_string(),
         protocol,
         name: name.to_string(),
+        picture: None,
+        about: None,
         created_by,
         members,
         admins,
@@ -432,5 +434,99 @@ fn removed_member_cannot_send_after_processing_removal() -> Result<()> {
         Err(Error::Domain(DomainError::InvalidGroupOperation(message)))
             if message.contains("member")
     ));
+    Ok(())
+}
+
+#[test]
+fn picture_and_about_round_trip_through_metadata_snapshot() -> Result<()> {
+    let alice = manager_device(20, 120);
+    let bob = manager_device(21, 121);
+    let mut session_manager = session_manager(&alice);
+    let mut groups = GroupManager::new(alice.owner_pubkey);
+
+    let mut create_ctx = context(20, 1_900_002_000);
+    let created = groups.create_group(
+        &mut session_manager,
+        &mut create_ctx,
+        "Photo Crew".to_string(),
+        vec![bob.owner_pubkey],
+    )?;
+    let group_id = created.group.group_id.clone();
+    assert!(created.group.picture.is_none());
+    assert!(created.group.about.is_none());
+
+    let mut picture_ctx = context(21, 1_900_002_010);
+    groups.update_picture(
+        &mut session_manager,
+        &mut picture_ctx,
+        &group_id,
+        Some("htree://nhash1abc/photo.jpg".to_string()),
+    )?;
+    let after_picture = groups.group(&group_id).expect("group present");
+    assert_eq!(
+        after_picture.picture.as_deref(),
+        Some("htree://nhash1abc/photo.jpg")
+    );
+    assert_eq!(after_picture.revision, 2);
+
+    let mut about_ctx = context(22, 1_900_002_020);
+    groups.update_about(
+        &mut session_manager,
+        &mut about_ctx,
+        &group_id,
+        Some("we share photos".to_string()),
+    )?;
+    let after_about = groups.group(&group_id).expect("group present");
+    assert_eq!(after_about.about.as_deref(), Some("we share photos"));
+    assert_eq!(after_about.revision, 3);
+    // Picture must survive an unrelated metadata update.
+    assert_eq!(
+        after_about.picture.as_deref(),
+        Some("htree://nhash1abc/photo.jpg")
+    );
+
+    // Clearing one field doesn't touch the other.
+    let mut clear_ctx = context(23, 1_900_002_030);
+    groups.update_picture(&mut session_manager, &mut clear_ctx, &group_id, None)?;
+    let cleared = groups.group(&group_id).expect("group present");
+    assert!(cleared.picture.is_none());
+    assert_eq!(cleared.about.as_deref(), Some("we share photos"));
+
+    Ok(())
+}
+
+#[test]
+fn non_admin_cannot_set_picture_or_about() -> Result<()> {
+    let alice = manager_device(30, 130);
+    let bob = manager_device(31, 131);
+    let mut session_manager = session_manager(&alice);
+    let (mut groups, group_id) = create_remote_owned_group(alice.owner_pubkey, bob.owner_pubkey)?;
+    let mut ctx = context(30, 1_900_003_000);
+
+    let picture = groups.update_picture(
+        &mut session_manager,
+        &mut ctx,
+        &group_id,
+        Some("htree://nope".to_string()),
+    );
+    assert!(matches!(
+        picture,
+        Err(Error::Domain(DomainError::InvalidGroupOperation(message)))
+            if message.contains("admin")
+    ));
+
+    let mut about_ctx = context(31, 1_900_003_010);
+    let about = groups.update_about(
+        &mut session_manager,
+        &mut about_ctx,
+        &group_id,
+        Some("nope".to_string()),
+    );
+    assert!(matches!(
+        about,
+        Err(Error::Domain(DomainError::InvalidGroupOperation(message)))
+            if message.contains("admin")
+    ));
+
     Ok(())
 }

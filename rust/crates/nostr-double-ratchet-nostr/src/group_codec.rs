@@ -39,6 +39,10 @@ enum GroupPairwisePayloadV1 {
         base_revision: u64,
         new_revision: u64,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        picture: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<String>,
         created_by: OwnerPubkey,
         members: Vec<OwnerPubkey>,
         admins: Vec<OwnerPubkey>,
@@ -50,6 +54,10 @@ enum GroupPairwisePayloadV1 {
         protocol: GroupProtocol,
         revision: u64,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        picture: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<String>,
         created_by: OwnerPubkey,
         members: Vec<OwnerPubkey>,
         admins: Vec<OwnerPubkey>,
@@ -70,6 +78,10 @@ enum GroupPairwisePayloadV1 {
 struct MasterGroupMetadataContent {
     id: String,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    picture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    about: Option<String>,
     members: Vec<OwnerPubkey>,
     admins: Vec<OwnerPubkey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +225,8 @@ fn encode_master_metadata_snapshot(
     let content = serde_json::to_string(&MasterGroupMetadataContent {
         id: snapshot.group_id.clone(),
         name: snapshot.name.clone(),
+        picture: snapshot.picture.clone(),
+        about: snapshot.about.clone(),
         members: snapshot.members.clone(),
         admins: snapshot.admins.clone(),
         protocol: Some(snapshot.protocol),
@@ -270,6 +284,8 @@ fn decode_master_metadata_snapshot(payload: &[u8]) -> Result<Option<GroupPairwis
                 .protocol
                 .unwrap_or_else(GroupProtocol::sender_key_v1),
             name: content.name,
+            picture: content.picture,
+            about: content.about,
             created_by,
             members: content.members,
             admins: content.admins,
@@ -387,6 +403,8 @@ fn command_from_v1_payload(
             base_revision,
             new_revision,
             name,
+            picture,
+            about,
             created_by,
             members,
             admins,
@@ -403,6 +421,8 @@ fn command_from_v1_payload(
                     group_id,
                     protocol,
                     name,
+                    picture,
+                    about,
                     created_by,
                     members,
                     admins,
@@ -417,6 +437,8 @@ fn command_from_v1_payload(
             protocol,
             revision,
             name,
+            picture,
+            about,
             created_by,
             members,
             admins,
@@ -427,6 +449,8 @@ fn command_from_v1_payload(
                 group_id,
                 protocol,
                 name,
+                picture,
+                about,
                 created_by,
                 members,
                 admins,
@@ -495,6 +519,8 @@ mod tests {
             group_id: "group-1".to_string(),
             protocol: GroupProtocol::sender_key_v1(),
             name: "Team".to_string(),
+            picture: None,
+            about: None,
             created_by: owner(1),
             members: vec![owner(1), owner(2)],
             admins: vec![owner(1)],
@@ -570,6 +596,8 @@ mod tests {
             protocol: GroupProtocol::sender_key_v1(),
             revision: 2,
             name: "Renamed".to_string(),
+            picture: None,
+            about: None,
             created_by: owner(1),
             members: vec![owner(1), owner(2)],
             admins: vec![owner(1)],

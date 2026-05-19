@@ -78,6 +78,19 @@ pub struct GroupSnapshot {
     pub group_id: String,
     pub protocol: GroupProtocol,
     pub name: String,
+    /// Optional URL of the group's picture/avatar. Travels alongside `name`
+    /// in the same revisioned metadata snapshot so new joiners receive it
+    /// automatically on their first sync, and there is no separate side
+    /// channel for picture updates that could be reordered against
+    /// membership changes. `None` means the group has no picture set.
+    /// Skipped on the wire when absent so pre-0.0.144 peers keep round-tripping
+    /// snapshots unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    /// Optional free-text description of the group (Signal calls this the
+    /// group description). Same wire-compat treatment as `picture`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
     pub created_by: OwnerPubkey,
     pub members: Vec<OwnerPubkey>,
     pub admins: Vec<OwnerPubkey>,
