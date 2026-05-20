@@ -7,6 +7,7 @@
 - Bring the TypeScript group sender-key path to repair parity with Rust: 10447 repair request rumors, request/response APIs, durable sender-key repair snapshots, and removed-member authorization checks.
 - Preserve TypeScript receiver sender-key state until decrypted group plaintext passes validation, so malformed or wrong-group ciphertext cannot burn the next valid message key.
 - Add TypeScript/Rust sender-key repair request vectors to lock down the cross-language 10447 wire format.
+- Add a larger TLA+ sender-key repair safety config that checks repair after the sender chain has advanced.
 
 ## 0.0.145 - 2026-05-20
 

@@ -38,12 +38,16 @@ Modeled dimensions:
 - `GroupSenderKeys.current.cfg` (expected to fail; demonstrates unauthorized-membership mutation bug)
 - `GroupSenderKeys.repair-leak.current.cfg` (expected to fail; demonstrates key-history repair leaking pre-join key material)
 - `GroupSenderKeys.fixed.cfg` (expected to satisfy safety invariants)
+- `GroupSenderKeys.repair-advanced.pass.cfg` (expected to satisfy safety invariants with two
+  sender-key messages, so repair can happen after the sender chain has advanced)
 - `GroupSenderKeys.recovery.pass.cfg` (expected to satisfy safety + recovery-conditioned liveness)
 
 `GroupSenderKeys.fixed.cfg` enables local sibling sync and checks that the sender owner receives
-a recipient-scoped repair snapshot for local sibling recovery. `GroupSenderKeys.recovery.pass.cfg`
-keeps local sibling sync disabled so temporal recovery checking stays small enough for routine runs;
-the local sibling recovery path is covered by the fixed safety model plus the Rust regression test.
+a recipient-scoped repair snapshot for local sibling recovery. `GroupSenderKeys.repair-advanced.pass.cfg`
+keeps the same safety shape but raises `MaxMsg` to 2, covering a blocked message whose sender
+chain advances before repair. `GroupSenderKeys.recovery.pass.cfg` keeps local sibling sync disabled
+so temporal recovery checking stays small enough for routine runs; the local sibling recovery path
+is covered by the fixed safety model plus the Rust regression test.
 
 ## Run TLC (CI mode)
 

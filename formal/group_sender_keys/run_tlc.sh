@@ -78,4 +78,7 @@ if [[ "${MODE}" == "all" ]]; then
 fi
 
 run_cfg GroupSenderKeys.fixed.cfg
+if [[ "${MODE}" == "all" ]]; then
+  run_cfg GroupSenderKeys.repair-advanced.pass.cfg
+fi
 run_cfg GroupSenderKeys.recovery.pass.cfg
