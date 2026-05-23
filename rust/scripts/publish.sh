@@ -7,8 +7,11 @@
 
 set -e
 
+cd "$(dirname "$0")/.."
+
 DRY_RUN=""
 ALLOW_DIRTY="--allow-dirty"
+FAILED=0
 
 if [[ "$1" == "--dry-run" ]]; then
     DRY_RUN="--dry-run"
@@ -21,13 +24,18 @@ WAIT_TIME=30
 publish_crate() {
     local crate=$1
     local extra_flags=${2:-""}
+    local flags="$DRY_RUN $ALLOW_DIRTY $extra_flags"
+
+    if [[ -n "$DRY_RUN" && "$flags" != *"--no-verify"* ]]; then
+        flags="$flags --no-verify"
+    fi
 
     echo ""
     echo "=========================================="
     echo "Publishing: $crate"
     echo "=========================================="
 
-    if cargo publish -p "$crate" $DRY_RUN $ALLOW_DIRTY $extra_flags; then
+    if cargo publish -p "$crate" $flags; then
         echo "✓ $crate published successfully"
 
         if [[ -z "$DRY_RUN" ]]; then
@@ -36,6 +44,7 @@ publish_crate() {
         fi
     else
         echo "✗ Failed to publish $crate (continuing...)"
+        FAILED=1
     fi
 }
 
@@ -62,6 +71,12 @@ publish_crate "nostr-double-ratchet-nostr"
 
 # Tier 3: runtime, depends on all of the above
 publish_crate "nostr-double-ratchet-runtime"
+
+if [[ "$FAILED" -ne 0 ]]; then
+    echo ""
+    echo "One or more crates failed to publish." >&2
+    exit 1
+fi
 
 echo ""
 echo "=========================================="

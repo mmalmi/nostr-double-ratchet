@@ -729,12 +729,14 @@ describe("GroupManager", () => {
       publishOuter: async (outer) => {
         published.push(outer);
       },
+      nowMs: 1_000,
     });
     await alice.sendMessage("fetch backfill #2", {
       sendPairwise: async () => {},
       publishOuter: async (outer) => {
         published.push(outer);
       },
+      nowMs: 2_000,
     });
 
     const received: string[] = [];

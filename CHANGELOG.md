@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.147 - 2026-05-23
+
+- Hide sender-key key ids and message counters from new one-to-many outer messages, including the standalone Rust and TypeScript helpers.
+- Keep legacy no-header one-to-many messages readable while new events carry only ciphertext plus an encrypted cover header.
+- Add blind sender-key decrypt support so hidden-counter group messages can still recover from out-of-order delivery.
+- Allow sender-key repair requests for hidden-counter messages without re-publishing the hidden key id or message number.
+
 ## 0.0.146 - 2026-05-20
 
 - Expose the default sender-key repair retry cadence as a deterministic helper so clients can share the same backoff without moving app scheduling state into the protocol core.
