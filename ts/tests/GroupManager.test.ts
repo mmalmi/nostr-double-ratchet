@@ -13,7 +13,11 @@ import { InMemoryStorageAdapter } from "../src/StorageAdapter";
 import { CHAT_MESSAGE_KIND, REACTION_KIND, TYPING_KIND } from "../src/types";
 import type { NostrFetch, NostrSubscribe, Rumor } from "../src/types";
 
-function makeGroup(groupId: string, members: string[], admins: string[]): GroupData {
+function makeGroup(
+  groupId: string,
+  members: string[],
+  admins: string[],
+): GroupData {
   return {
     id: groupId,
     name: "Test",
@@ -38,26 +42,44 @@ describe("GroupManager", () => {
     });
 
     const sent: Array<{ recipient: string; rumor: Rumor }> = [];
-    const created = await manager.createGroup("Metadata Group", [bobOwnerPk, carolOwnerPk], {
-      sendPairwise: async (recipient, rumor) => {
-        sent.push({ recipient, rumor });
+    const created = await manager.createGroup(
+      "Metadata Group",
+      [bobOwnerPk, carolOwnerPk],
+      {
+        sendPairwise: async (recipient, rumor) => {
+          sent.push({ recipient, rumor });
+        },
       },
-    });
+    );
 
     expect(created.group.name).toBe("Metadata Group");
-    expect(created.group.members).toEqual([aliceOwnerPk, bobOwnerPk, carolOwnerPk]);
+    expect(created.group.members).toEqual([
+      aliceOwnerPk,
+      bobOwnerPk,
+      carolOwnerPk,
+    ]);
     expect(created.fanout.enabled).toBe(true);
     expect(created.fanout.attempted).toBe(2);
-    expect(created.fanout.succeeded.sort()).toEqual([bobOwnerPk, carolOwnerPk].sort());
+    expect(created.fanout.succeeded.sort()).toEqual(
+      [bobOwnerPk, carolOwnerPk].sort(),
+    );
     expect(created.fanout.failed).toEqual([]);
     expect(sent).toHaveLength(2);
 
     for (const entry of sent) {
       expect(entry.rumor.kind).toBe(GROUP_METADATA_KIND);
       expect(entry.rumor.pubkey).toBe(aliceDevicePk);
-      expect(entry.rumor.tags.some((tag) => tag[0] === "l" && tag[1] === created.group.id)).toBe(true);
+      expect(
+        entry.rumor.tags.some(
+          (tag) => tag[0] === "l" && tag[1] === created.group.id,
+        ),
+      ).toBe(true);
       expect(entry.rumor.tags.some((tag) => tag[0] === "ms")).toBe(true);
-      expect(entry.rumor.tags.some((tag) => tag[0] === "p" && tag[1] === entry.recipient)).toBe(true);
+      expect(
+        entry.rumor.tags.some(
+          (tag) => tag[0] === "p" && tag[1] === entry.recipient,
+        ),
+      ).toBe(true);
 
       const parsed = JSON.parse(entry.rumor.content) as {
         id: string;
@@ -83,9 +105,13 @@ describe("GroupManager", () => {
       storage: new InMemoryStorageAdapter(),
     });
 
-    const created = await manager.createGroup("Local Draft Group", [bobOwnerPk], {
-      fanoutMetadata: false,
-    });
+    const created = await manager.createGroup(
+      "Local Draft Group",
+      [bobOwnerPk],
+      {
+        fanoutMetadata: false,
+      },
+    );
 
     expect(created.group.name).toBe("Local Draft Group");
     expect(created.fanout.enabled).toBe(false);
@@ -103,8 +129,12 @@ describe("GroupManager", () => {
     });
 
     await expect(
-      manager.createGroup("Needs Fanout Sender", [getPublicKey(generateSecretKey())])
-    ).rejects.toThrow("sendPairwise is required when fanoutMetadata is enabled");
+      manager.createGroup("Needs Fanout Sender", [
+        getPublicKey(generateSecretKey()),
+      ]),
+    ).rejects.toThrow(
+      "sendPairwise is required when fanoutMetadata is enabled",
+    );
   });
 
   it("drains queued outer events after sender-key distribution and emits callbacks", async () => {
@@ -138,7 +168,9 @@ describe("GroupManager", () => {
       },
     });
 
-    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     let distribution: Rumor | null = null;
     let outer: VerifiedEvent | null = null;
@@ -163,7 +195,7 @@ describe("GroupManager", () => {
     const drained = await manager.handleIncomingSessionEvent(
       distribution!,
       aliceOwnerPk,
-      aliceDevicePk
+      aliceDevicePk,
     );
 
     expect(drained).toHaveLength(1);
@@ -204,11 +236,15 @@ describe("GroupManager", () => {
     });
 
     let metadataRumor: Rumor | null = null;
-    const created = await aliceManager.createGroup("Remote Group", [bobOwnerPk], {
-      sendPairwise: async (_recipient, rumor) => {
-        metadataRumor = rumor;
+    const created = await aliceManager.createGroup(
+      "Remote Group",
+      [bobOwnerPk],
+      {
+        sendPairwise: async (_recipient, rumor) => {
+          metadataRumor = rumor;
+        },
       },
-    });
+    );
 
     let distributionRumor: Rumor | null = null;
     let outer: VerifiedEvent | null = null;
@@ -273,7 +309,9 @@ describe("GroupManager", () => {
       storage: new InMemoryStorageAdapter(),
     });
 
-    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     const pairwise: Array<{ recipient: string; rumor: Rumor }> = [];
     const published: VerifiedEvent[] = [];
@@ -289,12 +327,17 @@ describe("GroupManager", () => {
 
     expect(sent.inner.pubkey).toBe(aliceDevicePk);
     expect(pairwise).toHaveLength(2);
-    expect(pairwise.map((entry) => entry.recipient).sort()).toEqual([
-      aliceOwnerPk,
-      bobOwnerPk,
-    ].sort());
-    expect(pairwise.every((entry) => entry.rumor.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND)).toBe(true);
-    expect(pairwise.every((entry) => entry.rumor.pubkey === aliceDevicePk)).toBe(true);
+    expect(pairwise.map((entry) => entry.recipient).sort()).toEqual(
+      [aliceOwnerPk, bobOwnerPk].sort(),
+    );
+    expect(
+      pairwise.every(
+        (entry) => entry.rumor.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+      ),
+    ).toBe(true);
+    expect(
+      pairwise.every((entry) => entry.rumor.pubkey === aliceDevicePk),
+    ).toBe(true);
     expect(published).toHaveLength(1);
   });
 
@@ -311,7 +354,9 @@ describe("GroupManager", () => {
       storage: new InMemoryStorageAdapter(),
     });
 
-    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     const sent = await manager.sendEvent(
       groupId,
@@ -323,13 +368,19 @@ describe("GroupManager", () => {
       {
         sendPairwise: async () => {},
         publishOuter: async () => {},
-      }
+      },
     );
 
     expect(sent.inner.kind).toBe(REACTION_KIND);
     expect(sent.inner.pubkey).toBe(aliceDevicePk);
-    expect(sent.inner.tags.some((tag) => tag[0] === "e" && tag[1] === "target-event-id")).toBe(true);
-    expect(sent.inner.tags.some((tag) => tag[0] === "l" && tag[1] === groupId)).toBe(true);
+    expect(
+      sent.inner.tags.some(
+        (tag) => tag[0] === "e" && tag[1] === "target-event-id",
+      ),
+    ).toBe(true);
+    expect(
+      sent.inner.tags.some((tag) => tag[0] === "l" && tag[1] === groupId),
+    ).toBe(true);
   });
 
   it("serializes concurrent same-group sends so typing does not race the first message", async () => {
@@ -351,8 +402,12 @@ describe("GroupManager", () => {
       storage: new InMemoryStorageAdapter(),
     });
 
-    await sender.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
-    await receiver.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await sender.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
+    await receiver.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     const pairwise: Array<{ recipient: string; rumor: Rumor }> = [];
     const published: VerifiedEvent[] = [];
@@ -372,7 +427,7 @@ describe("GroupManager", () => {
           publishOuter: async (outer) => {
             published.push(outer);
           },
-        }
+        },
       ),
       sender.sendEvent(
         groupId,
@@ -388,34 +443,29 @@ describe("GroupManager", () => {
           publishOuter: async (outer) => {
             published.push(outer);
           },
-        }
+        },
       ),
     ]);
 
     expect(pairwise).toHaveLength(2);
-    expect(pairwise.map((entry) => entry.recipient).sort()).toEqual([
-      aliceOwnerPk,
-      bobOwnerPk,
-    ].sort());
+    expect(pairwise.map((entry) => entry.recipient).sort()).toEqual(
+      [aliceOwnerPk, bobOwnerPk].sort(),
+    );
     expect(published).toHaveLength(2);
 
-    const parseOuterMessageNumber = (content: string): number => {
-      const bytes = Buffer.from(content, "base64");
-      return bytes.readUInt32BE(4);
-    };
-
-    const orderedOuterEvents = [...published].sort(
-      (a, b) =>
-        parseOuterMessageNumber(a.content) - parseOuterMessageNumber(b.content)
-    );
-
-    expect(orderedOuterEvents.map((event) => parseOuterMessageNumber(event.content))).toEqual([
-      0, 1,
-    ]);
+    expect(
+      published.every((event) =>
+        event.tags.some((tag) => tag[0] === "header" && tag[1]),
+      ),
+    ).toBe(true);
 
     const received: Array<{ kind: number; content: string }> = [];
-    await receiver.handleIncomingSessionEvent(pairwise[0]!.rumor, aliceOwnerPk, aliceDevicePk);
-    for (const outer of orderedOuterEvents) {
+    await receiver.handleIncomingSessionEvent(
+      pairwise[0]!.rumor,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
+    for (const outer of published) {
       const decrypted = await receiver.handleOuterEvent(outer);
       if (decrypted) {
         received.push({
@@ -468,8 +518,12 @@ describe("GroupManager", () => {
       }) as NostrSubscribe,
     });
 
-    await manager.upsertGroup(makeGroup(groupAId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
-    await manager.upsertGroup(makeGroup(groupBId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.upsertGroup(
+      makeGroup(groupAId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
+    await manager.upsertGroup(
+      makeGroup(groupBId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     let distA: Rumor | null = null;
     let outerA: VerifiedEvent | null = null;
@@ -493,16 +547,26 @@ describe("GroupManager", () => {
       },
     });
 
-    await manager.handleIncomingSessionEvent(distA!, aliceOwnerPk, aliceDevicePk);
+    await manager.handleIncomingSessionEvent(
+      distA!,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
     const liveFiltersAfterA = filters.filter((filter) => !("since" in filter));
     expect(liveFiltersAfterA).toHaveLength(1);
     expect(liveFiltersAfterA[0]!.authors).toEqual([outerA!.pubkey]);
     expect(unsubscribeCalls).toBe(0);
 
-    await manager.handleIncomingSessionEvent(distB!, aliceOwnerPk, aliceDevicePk);
+    await manager.handleIncomingSessionEvent(
+      distB!,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
     const liveFiltersAfterB = filters.filter((filter) => !("since" in filter));
     expect(liveFiltersAfterB).toHaveLength(2);
-    expect(liveFiltersAfterB[1]!.authors).toEqual([outerA!.pubkey, outerB!.pubkey].sort());
+    expect(liveFiltersAfterB[1]!.authors).toEqual(
+      [outerA!.pubkey, outerB!.pubkey].sort(),
+    );
     expect(unsubscribeCalls).toBe(1);
   });
 
@@ -540,7 +604,9 @@ describe("GroupManager", () => {
       },
     });
 
-    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     let distribution: Rumor | null = null;
     let outer: VerifiedEvent | null = null;
@@ -553,9 +619,15 @@ describe("GroupManager", () => {
       },
     });
 
-    await manager.handleIncomingSessionEvent(distribution!, aliceOwnerPk, aliceDevicePk);
+    await manager.handleIncomingSessionEvent(
+      distribution!,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
 
-    const backfillSubscription = subscriptions.find((entry) => "since" in entry.filter);
+    const backfillSubscription = subscriptions.find(
+      (entry) => "since" in entry.filter,
+    );
     expect(backfillSubscription).toBeDefined();
 
     backfillSubscription!.onEvent(outer!);
@@ -614,8 +686,14 @@ describe("GroupManager", () => {
         },
       });
 
-      await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
-      await manager.handleIncomingSessionEvent(distribution!, aliceOwnerPk, aliceDevicePk);
+      await manager.upsertGroup(
+        makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+      );
+      await manager.handleIncomingSessionEvent(
+        distribution!,
+        aliceOwnerPk,
+        aliceDevicePk,
+      );
 
       expect(received).toEqual([]);
       await vi.advanceTimersByTimeAsync(30);
@@ -669,7 +747,9 @@ describe("GroupManager", () => {
       outerBackfillRetryDelaysMs: [0],
       nostrFetch: (async (filter) => {
         fetchCalls.push({
-          authors: Array.isArray(filter.authors) ? [...filter.authors] : undefined,
+          authors: Array.isArray(filter.authors)
+            ? [...filter.authors]
+            : undefined,
           since: typeof filter.since === "number" ? filter.since : undefined,
         });
         return [published[1]!, published[0]!];
@@ -679,8 +759,14 @@ describe("GroupManager", () => {
       },
     });
 
-    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
-    await manager.handleIncomingSessionEvent(distribution!, aliceOwnerPk, aliceDevicePk);
+    await manager.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
+    await manager.handleIncomingSessionEvent(
+      distribution!,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(fetchCalls).toHaveLength(1);
@@ -705,7 +791,9 @@ describe("GroupManager", () => {
       },
     });
 
-    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     let outer: VerifiedEvent | null = null;
     await manager.sendMessage(groupId, "local-device-message", {
@@ -752,7 +840,9 @@ describe("GroupManager", () => {
       }) as NostrSubscribe,
     });
 
-    await manager.upsertGroup(makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]));
+    await manager.upsertGroup(
+      makeGroup(groupId, [aliceOwnerPk, bobOwnerPk], [aliceOwnerPk]),
+    );
 
     let firstDistribution: Rumor | null = null;
     let firstOuter: VerifiedEvent | null = null;
@@ -768,7 +858,7 @@ describe("GroupManager", () => {
     const drained = await manager.handleIncomingSessionEvent(
       firstDistribution!,
       aliceOwnerPk,
-      aliceDevicePk
+      aliceDevicePk,
     );
     expect(drained).toEqual([]);
     const liveFilters = filters.filter((filter) => !("since" in filter));
@@ -803,7 +893,7 @@ describe("GroupManager", () => {
     const drainedAfterRemoval = await manager.handleIncomingSessionEvent(
       rotateDistribution!,
       aliceOwnerPk,
-      aliceDevicePk
+      aliceDevicePk,
     );
     expect(drainedAfterRemoval).toEqual([]);
     expect(filters.filter((filter) => !("since" in filter))).toHaveLength(1);

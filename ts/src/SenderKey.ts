@@ -37,12 +37,25 @@ export interface SenderKeyStateSerialized {
   skippedMessageKeys?: Record<string, string>;
 }
 
+export interface SenderKeyBlindDecryptResult {
+  keyId: number;
+  messageNumber: number;
+  plaintext: string;
+}
+
+interface SenderKeyBlindDecryptPlan extends SenderKeyBlindDecryptResult {
+  nextState: SenderKeyState;
+}
+
 function deriveMessageKey(chainKey: Uint8Array): [Uint8Array, Uint8Array] {
   const [nextChainKey, messageKey] = kdf(chainKey, SENDER_KEY_KDF_SALT, 2);
   return [nextChainKey, messageKey];
 }
 
-function decryptWithMessageKeyBytes(messageKey: Uint8Array, ciphertextBytes: Uint8Array): string {
+function decryptWithMessageKeyBytes(
+  messageKey: Uint8Array,
+  ciphertextBytes: Uint8Array,
+): string {
   const payload = base64Encode(ciphertextBytes);
   return nip44.v2.decrypt(payload, messageKey);
 }
@@ -66,7 +79,11 @@ export class SenderKeyState {
     if (!(chainKey instanceof Uint8Array) || chainKey.length !== 32) {
       throw new Error("Invalid chainKey (expected 32 bytes)");
     }
-    if (!Number.isInteger(iteration) || iteration < 0 || iteration > 0xffff_ffff) {
+    if (
+      !Number.isInteger(iteration) ||
+      iteration < 0 ||
+      iteration > 0xffff_ffff
+    ) {
       throw new Error("Invalid iteration (expected u32)");
     }
 
@@ -88,7 +105,10 @@ export class SenderKeyState {
     return this.skippedMessageKeys.size;
   }
 
-  encryptToBytes(plaintext: string): { messageNumber: number; ciphertext: Uint8Array } {
+  encryptToBytes(plaintext: string): {
+    messageNumber: number;
+    ciphertext: Uint8Array;
+  } {
     const messageNumber = this.iteration;
     const [nextChainKey, messageKey] = deriveMessageKey(this.chainKey);
 
@@ -143,6 +163,76 @@ export class SenderKeyState {
     return decryptWithMessageKeyBytes(messageKey, ciphertextBytes);
   }
 
+  planDecryptBlind(ciphertextBytes: Uint8Array): SenderKeyBlindDecryptPlan {
+    for (const [
+      messageNumber,
+      messageKey,
+    ] of this.skippedMessageKeys.entries()) {
+      try {
+        const plaintext = decryptWithMessageKeyBytes(
+          messageKey,
+          ciphertextBytes,
+        );
+        const nextState = SenderKeyState.fromJSON(this.toJSON());
+        nextState.skippedMessageKeys.delete(messageNumber);
+        return {
+          nextState,
+          keyId: this.keyId,
+          messageNumber,
+          plaintext,
+        };
+      } catch {
+        // Try the next cached key.
+      }
+    }
+
+    const nextState = SenderKeyState.fromJSON(this.toJSON());
+    const maxMessageNumber = Math.min(
+      0xffff_ffff,
+      this.iteration + SENDER_KEY_MAX_SKIP,
+    );
+
+    while (nextState.iteration <= maxMessageNumber) {
+      const messageNumber = nextState.iteration;
+      const [nextChainKey, messageKey] = deriveMessageKey(nextState.chainKey);
+      nextState.chainKey = nextChainKey;
+      if (nextState.iteration === 0xffff_ffff) {
+        throw new Error("sender-key iteration overflow");
+      }
+      nextState.iteration = (nextState.iteration + 1) >>> 0;
+
+      try {
+        const plaintext = decryptWithMessageKeyBytes(
+          messageKey,
+          ciphertextBytes,
+        );
+        nextState.pruneSkipped();
+        return {
+          nextState,
+          keyId: this.keyId,
+          messageNumber,
+          plaintext,
+        };
+      } catch {
+        nextState.skippedMessageKeys.set(messageNumber, messageKey);
+      }
+    }
+
+    throw new Error("sender-key blind decrypt failed");
+  }
+
+  decryptBlindFromBytes(
+    ciphertextBytes: Uint8Array,
+  ): SenderKeyBlindDecryptResult {
+    const plan = this.planDecryptBlind(ciphertextBytes);
+    this.replaceWith(plan.nextState);
+    return {
+      keyId: plan.keyId,
+      messageNumber: plan.messageNumber,
+      plaintext: plan.plaintext,
+    };
+  }
+
   decrypt(messageNumber: number, ciphertext: string): string {
     const msgNum = messageNumber >>> 0;
 
@@ -174,7 +264,11 @@ export class SenderKeyState {
   }
 
   static fromJSON(data: SenderKeyStateSerialized): SenderKeyState {
-    const state = new SenderKeyState(data.keyId, hexToBytes(data.chainKey), data.iteration);
+    const state = new SenderKeyState(
+      data.keyId,
+      hexToBytes(data.chainKey),
+      data.iteration,
+    );
     if (data.skippedMessageKeys) {
       for (const [k, v] of Object.entries(data.skippedMessageKeys)) {
         const n = Number.parseInt(k, 10);
@@ -188,7 +282,22 @@ export class SenderKeyState {
   }
 
   static fromDistribution(dist: SenderKeyDistribution): SenderKeyState {
-    return new SenderKeyState(dist.keyId, hexToBytes(dist.chainKey), dist.iteration);
+    return new SenderKeyState(
+      dist.keyId,
+      hexToBytes(dist.chainKey),
+      dist.iteration,
+    );
+  }
+
+  private replaceWith(other: SenderKeyState): void {
+    this.chainKey = new Uint8Array(other.chainKey);
+    this.iteration = other.iteration;
+    this.skippedMessageKeys = new Map(
+      Array.from(other.skippedMessageKeys.entries()).map(([k, v]) => [
+        k,
+        new Uint8Array(v),
+      ]),
+    );
   }
 
   private pruneSkipped(): void {
@@ -196,11 +305,13 @@ export class SenderKeyState {
       return;
     }
 
-    const keys = Array.from(this.skippedMessageKeys.keys()).sort((a, b) => a - b);
-    const toRemove = this.skippedMessageKeys.size - SENDER_KEY_MAX_STORED_SKIPPED_KEYS;
+    const keys = Array.from(this.skippedMessageKeys.keys()).sort(
+      (a, b) => a - b,
+    );
+    const toRemove =
+      this.skippedMessageKeys.size - SENDER_KEY_MAX_STORED_SKIPPED_KEYS;
     for (const k of keys.slice(0, toRemove)) {
       this.skippedMessageKeys.delete(k);
     }
   }
 }
-

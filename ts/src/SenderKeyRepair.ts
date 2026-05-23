@@ -1,23 +1,17 @@
 import { getEventHash } from "nostr-tools";
 
-import {
-  GROUP_SENDER_KEY_REPAIR_REQUEST_KIND,
-} from "./GroupMeta";
+import { GROUP_SENDER_KEY_REPAIR_REQUEST_KIND } from "./GroupMeta";
 import type { Rumor } from "./types";
 
 export const SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS = [
-  30,
-  120,
-  600,
-  3_600,
-  21_600,
+  30, 120, 600, 3_600, 21_600,
 ] as const;
 
 export interface SenderKeyRepairRequest {
   groupId: string;
   senderEventPubkey: string;
-  keyId: number;
-  messageNumber: number;
+  keyId?: number;
+  messageNumber?: number;
   requiredRevision?: number;
   /** UNIX seconds */
   createdAt: number;
@@ -25,8 +19,8 @@ export interface SenderKeyRepairRequest {
 
 export interface SenderKeyRepairBlockedMessage {
   senderEventPubkey: string;
-  keyId: number;
-  messageNumber: number;
+  keyId?: number;
+  messageNumber?: number;
 }
 
 export type SenderKeyRepairHandleResult =
@@ -34,7 +28,7 @@ export type SenderKeyRepairHandleResult =
       type: "pending_distribution";
       groupId: string;
       senderEventPubkey: string;
-      keyId: number;
+      keyId?: number;
     }
   | {
       type: "pending_revision";
@@ -45,7 +39,10 @@ export type SenderKeyRepairHandleResult =
   | { type: "event" }
   | { type: "ignored" };
 
-function getFirstTagValue(tags: string[][] | undefined, key: string): string | undefined {
+function getFirstTagValue(
+  tags: string[][] | undefined,
+  key: string,
+): string | undefined {
   const tag = tags?.find((entry) => entry[0] === key);
   return tag?.[1];
 }
@@ -55,17 +52,26 @@ function isHex32(value: unknown): value is string {
 }
 
 function isU32(value: unknown): value is number {
-  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff;
+  return (
+    Number.isInteger(value) &&
+    (value as number) >= 0 &&
+    (value as number) <= 0xffff_ffff
+  );
 }
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-export function senderKeyRepairDefaultRetryDelaySeconds(sentRequestCount: number): number {
+export function senderKeyRepairDefaultRetryDelaySeconds(
+  sentRequestCount: number,
+): number {
   const count = Math.max(0, Math.floor(sentRequestCount));
   if (count <= 1) return SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS[0];
-  const index = Math.min(count - 1, SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS.length - 1);
+  const index = Math.min(
+    count - 1,
+    SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS.length - 1,
+  );
   return SENDER_KEY_REPAIR_DEFAULT_RETRY_DELAYS_SECS[index];
 }
 
@@ -88,8 +94,10 @@ export function senderKeyRepairRequestFromPendingSenderKeyMessage(
     return {
       groupId: result.groupId,
       senderEventPubkey: result.senderEventPubkey,
-      keyId: result.keyId,
-      messageNumber: message.messageNumber >>> 0,
+      ...(result.keyId !== undefined ? { keyId: result.keyId >>> 0 } : {}),
+      ...(message.messageNumber !== undefined
+        ? { messageNumber: message.messageNumber >>> 0 }
+        : {}),
       createdAt: Math.max(0, Math.floor(createdAt)),
     };
   }
@@ -98,8 +106,10 @@ export function senderKeyRepairRequestFromPendingSenderKeyMessage(
     return {
       groupId: result.groupId,
       senderEventPubkey: message.senderEventPubkey,
-      keyId: message.keyId >>> 0,
-      messageNumber: message.messageNumber >>> 0,
+      ...(message.keyId !== undefined ? { keyId: message.keyId >>> 0 } : {}),
+      ...(message.messageNumber !== undefined
+        ? { messageNumber: message.messageNumber >>> 0 }
+        : {}),
       requiredRevision: Math.max(0, Math.floor(result.requiredRevision)),
       createdAt: Math.max(0, Math.floor(createdAt)),
     };
@@ -117,13 +127,20 @@ export function buildSenderKeyRepairRequestRumor(
   const createdAtSeconds = Math.floor(createdAtMs / 1000);
   const tags = [
     ["l", request.groupId],
-    ["key", String(request.keyId >>> 0)],
     ["sender", request.senderEventPubkey],
-    ["message", String(request.messageNumber >>> 0)],
     ["ms", String(createdAtMs)],
   ];
+  if (request.keyId !== undefined) {
+    tags.push(["key", String(request.keyId >>> 0)]);
+  }
+  if (request.messageNumber !== undefined) {
+    tags.push(["message", String(request.messageNumber >>> 0)]);
+  }
   if (request.requiredRevision !== undefined) {
-    tags.push(["revision", String(Math.max(0, Math.floor(request.requiredRevision)))]);
+    tags.push([
+      "revision",
+      String(Math.max(0, Math.floor(request.requiredRevision))),
+    ]);
   }
 
   const rumor: Rumor = {
@@ -131,10 +148,14 @@ export function buildSenderKeyRepairRequestRumor(
     content: JSON.stringify({
       groupId: request.groupId,
       senderEventPubkey: request.senderEventPubkey,
-      keyId: request.keyId >>> 0,
-      messageNumber: request.messageNumber >>> 0,
+      ...(request.keyId !== undefined ? { keyId: request.keyId >>> 0 } : {}),
+      ...(request.messageNumber !== undefined
+        ? { messageNumber: request.messageNumber >>> 0 }
+        : {}),
       ...(request.requiredRevision !== undefined
-        ? { requiredRevision: Math.max(0, Math.floor(request.requiredRevision)) }
+        ? {
+            requiredRevision: Math.max(0, Math.floor(request.requiredRevision)),
+          }
         : {}),
       createdAt: Math.max(0, Math.floor(request.createdAt)),
     }),
@@ -147,7 +168,9 @@ export function buildSenderKeyRepairRequestRumor(
   return rumor;
 }
 
-export function parseSenderKeyRepairRequestRumor(event: Rumor): SenderKeyRepairRequest | null {
+export function parseSenderKeyRepairRequestRumor(
+  event: Rumor,
+): SenderKeyRepairRequest | null {
   if (event.kind !== GROUP_SENDER_KEY_REPAIR_REQUEST_KIND) return null;
   if (event.id && getEventHash(event) !== event.id) return null;
 
@@ -158,10 +181,12 @@ export function parseSenderKeyRepairRequestRumor(event: Rumor): SenderKeyRepairR
     return null;
   }
 
-  if (typeof parsed.groupId !== "string" || parsed.groupId.length === 0) return null;
+  if (typeof parsed.groupId !== "string" || parsed.groupId.length === 0)
+    return null;
   if (!isHex32(parsed.senderEventPubkey)) return null;
-  if (!isU32(parsed.keyId)) return null;
-  if (!isU32(parsed.messageNumber)) return null;
+  if (parsed.keyId !== undefined && !isU32(parsed.keyId)) return null;
+  if (parsed.messageNumber !== undefined && !isU32(parsed.messageNumber))
+    return null;
   if (!isSafeNonNegativeInteger(parsed.createdAt)) return null;
   if (
     parsed.requiredRevision !== undefined &&
@@ -171,22 +196,37 @@ export function parseSenderKeyRepairRequestRumor(event: Rumor): SenderKeyRepairR
   }
 
   if (getFirstTagValue(event.tags, "l") !== parsed.groupId) return null;
-  if (getFirstTagValue(event.tags, "key") !== String(parsed.keyId >>> 0)) return null;
-  if (getFirstTagValue(event.tags, "sender") !== parsed.senderEventPubkey) return null;
-  if (getFirstTagValue(event.tags, "message") !== String(parsed.messageNumber >>> 0)) return null;
+  if (getFirstTagValue(event.tags, "sender") !== parsed.senderEventPubkey)
+    return null;
+  const keyTag = getFirstTagValue(event.tags, "key");
+  if (parsed.keyId === undefined) {
+    if (keyTag !== undefined) return null;
+  } else if (keyTag !== String(parsed.keyId >>> 0)) {
+    return null;
+  }
+  const messageTag = getFirstTagValue(event.tags, "message");
+  if (parsed.messageNumber === undefined) {
+    if (messageTag !== undefined) return null;
+  } else if (messageTag !== String(parsed.messageNumber >>> 0)) {
+    return null;
+  }
 
   const revisionTag = getFirstTagValue(event.tags, "revision");
   if (parsed.requiredRevision === undefined) {
     if (revisionTag !== undefined) return null;
-  } else if (revisionTag !== String(Math.max(0, Math.floor(parsed.requiredRevision)))) {
+  } else if (
+    revisionTag !== String(Math.max(0, Math.floor(parsed.requiredRevision)))
+  ) {
     return null;
   }
 
   return {
     groupId: parsed.groupId,
     senderEventPubkey: parsed.senderEventPubkey,
-    keyId: parsed.keyId >>> 0,
-    messageNumber: parsed.messageNumber >>> 0,
+    ...(parsed.keyId !== undefined ? { keyId: parsed.keyId >>> 0 } : {}),
+    ...(parsed.messageNumber !== undefined
+      ? { messageNumber: parsed.messageNumber >>> 0 }
+      : {}),
     ...(parsed.requiredRevision !== undefined
       ? { requiredRevision: Math.max(0, Math.floor(parsed.requiredRevision)) }
       : {}),

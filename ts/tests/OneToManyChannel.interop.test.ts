@@ -9,7 +9,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
-import { getPublicKey } from "nostr-tools";
+import { getPublicKey, type VerifiedEvent } from "nostr-tools";
 
 import { OneToManyChannel } from "../src/OneToManyChannel";
 import { SenderKeyState } from "../src/SenderKey";
@@ -43,14 +43,16 @@ describe("OneToMany Interop Vector Generation", () => {
   beforeAll(() => {
     const outputPath = path.join(
       __dirname,
-      "../../test-vectors/ts-one-to-many-vectors.json"
+      "../../test-vectors/ts-one-to-many-vectors.json",
     );
 
     const shouldRegenerate =
       process.env.REGENERATE_VECTORS === "true" || !fs.existsSync(outputPath);
 
     if (!shouldRegenerate) {
-      vectors = JSON.parse(fs.readFileSync(outputPath, "utf-8")) as OneToManyVectors;
+      vectors = JSON.parse(
+        fs.readFileSync(outputPath, "utf-8"),
+      ) as OneToManyVectors;
       return;
     }
 
@@ -63,15 +65,21 @@ describe("OneToMany Interop Vector Generation", () => {
     const outer0 = channel.encryptToOuterEvent(
       senderSk,
       sender,
-      JSON.stringify({ kind: 14, content: "Hello from TypeScript sender keys (0)" }),
-      CREATED_AT
+      JSON.stringify({
+        kind: 14,
+        content: "Hello from TypeScript sender keys (0)",
+      }),
+      CREATED_AT,
     );
 
     const outer1 = channel.encryptToOuterEvent(
       senderSk,
       sender,
-      JSON.stringify({ kind: 14, content: "Hello from TypeScript sender keys (1)" }),
-      CREATED_AT
+      JSON.stringify({
+        kind: 14,
+        content: "Hello from TypeScript sender keys (1)",
+      }),
+      CREATED_AT,
     );
 
     vectors = {
@@ -115,14 +123,18 @@ describe("OneToMany Interop Vector Generation", () => {
     const receiver = new SenderKeyState(
       vectors.key_id,
       hexToBytes(vectors.chain_key_hex),
-      vectors.iteration
+      vectors.iteration,
     );
 
     const m1 = vectors.messages[1];
     const m0 = vectors.messages[0];
 
-    const p1 = channel.parseOuterContent(m1.outer_event.content);
-    const p0 = channel.parseOuterContent(m0.outer_event.content);
+    const p1 = channel.parseOuterEvent(
+      m1.outer_event as unknown as VerifiedEvent,
+    );
+    const p0 = channel.parseOuterEvent(
+      m0.outer_event as unknown as VerifiedEvent,
+    );
 
     expect(p1.decrypt(receiver)).toBe(m1.plaintext);
     expect(p0.decrypt(receiver)).toBe(m0.plaintext);
@@ -133,7 +145,7 @@ describe("Rust-generated OneToMany vectors", () => {
   it("TypeScript can decrypt Rust OneToMany outer events (out-of-order)", () => {
     const vectorPath = path.join(
       __dirname,
-      "../../test-vectors/rust-one-to-many-vectors.json"
+      "../../test-vectors/rust-one-to-many-vectors.json",
     );
 
     if (!fs.existsSync(vectorPath)) {
@@ -141,21 +153,27 @@ describe("Rust-generated OneToMany vectors", () => {
       return;
     }
 
-    const vectors: OneToManyVectors = JSON.parse(fs.readFileSync(vectorPath, "utf-8"));
+    const vectors: OneToManyVectors = JSON.parse(
+      fs.readFileSync(vectorPath, "utf-8"),
+    );
 
     const channel = OneToManyChannel.default();
     const receiver = new SenderKeyState(
       vectors.key_id,
       hexToBytes(vectors.chain_key_hex),
-      vectors.iteration
+      vectors.iteration,
     );
 
     // Deliver second first to validate skip-key caching.
     const m1 = vectors.messages[1];
     const m0 = vectors.messages[0];
 
-    const p1 = channel.parseOuterContent(m1.outer_event.content);
-    const p0 = channel.parseOuterContent(m0.outer_event.content);
+    const p1 = channel.parseOuterEvent(
+      m1.outer_event as unknown as VerifiedEvent,
+    );
+    const p0 = channel.parseOuterEvent(
+      m0.outer_event as unknown as VerifiedEvent,
+    );
 
     expect(p1.decrypt(receiver)).toBe(m1.plaintext);
     expect(p0.decrypt(receiver)).toBe(m0.plaintext);

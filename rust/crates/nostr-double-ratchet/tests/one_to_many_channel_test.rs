@@ -1,3 +1,4 @@
+use base64::Engine;
 use nostr_double_ratchet::SenderKeyState;
 use nostr_double_ratchet_nostr::{OneToManyChannel, CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND};
 
@@ -37,8 +38,16 @@ fn one_to_many_outer_payload_roundtrip() {
         .is_some_and(|value| value == "header")));
     assert!(outer.verify().is_ok());
 
-    let parsed = channel.parse_outer_content(&outer.content).unwrap();
-    assert_eq!(parsed.key_id, key_id);
+    let public_counter_prefix = [key_id.to_be_bytes(), 0u32.to_be_bytes()].concat();
+    let outer_bytes = base64::engine::general_purpose::STANDARD
+        .decode(outer.content.as_bytes())
+        .unwrap();
+    assert_ne!(outer_bytes.get(..8), Some(public_counter_prefix.as_slice()));
+
+    let parsed = channel.parse_outer_event(&outer).unwrap();
+    assert_eq!(parsed.key_id, 0);
+    assert_eq!(parsed.message_number, 0);
+    assert!(parsed.encrypted_header.is_some());
     let plaintext = parsed.decrypt(&mut receiver_state).unwrap();
     assert_eq!(plaintext, inner_json);
 }

@@ -83,13 +83,11 @@ fn test_decrypt_typescript_one_to_many_vectors_out_of_order() -> Result<()> {
     assert_eq!(e0.pubkey.to_hex(), vectors.sender_pubkey);
     assert_eq!(e1.pubkey.to_hex(), vectors.sender_pubkey);
 
-    let parsed1 = channel.parse_outer_content(&e1.content)?;
-    assert_eq!(parsed1.key_id, vectors.key_id);
+    let parsed1 = channel.parse_outer_event(&e1)?;
     let p1 = parsed1.decrypt(&mut receiver)?;
     assert_eq!(p1, m1.plaintext);
 
-    let parsed0 = channel.parse_outer_content(&e0.content)?;
-    assert_eq!(parsed0.key_id, vectors.key_id);
+    let parsed0 = channel.parse_outer_event(&e0)?;
     let p0 = parsed0.decrypt(&mut receiver)?;
     assert_eq!(p0, m0.plaintext);
 
@@ -191,11 +189,11 @@ fn test_generate_rust_one_to_many_vectors() -> Result<()> {
     assert_eq!(e0.pubkey.to_hex(), vectors.sender_pubkey);
     assert_eq!(e1.pubkey.to_hex(), vectors.sender_pubkey);
 
-    let parsed1 = channel.parse_outer_content(&e1.content)?;
+    let parsed1 = channel.parse_outer_event(&e1)?;
     let p1 = parsed1.decrypt(&mut receiver)?;
     assert_eq!(p1, m1.plaintext);
 
-    let parsed0 = channel.parse_outer_content(&e0.content)?;
+    let parsed0 = channel.parse_outer_event(&e0)?;
     let p0 = parsed0.decrypt(&mut receiver)?;
     assert_eq!(p0, m0.plaintext);
 

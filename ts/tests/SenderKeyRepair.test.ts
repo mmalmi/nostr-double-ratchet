@@ -26,7 +26,11 @@ import {
   GROUP_SENDER_KEY_REPAIR_REQUEST_KIND,
 } from "../src/GroupMeta";
 
-function makeGroup(groupId: string, members: string[], admins: string[]): GroupData {
+function makeGroup(
+  groupId: string,
+  members: string[],
+  admins: string[],
+): GroupData {
   return {
     id: groupId,
     name: "Test",
@@ -54,7 +58,9 @@ describe("sender-key repair requests", () => {
     expect(senderKeyRepairDefaultRetryDelaySeconds(3)).toBe(600);
     expect(senderKeyRepairDefaultRetryDelaySeconds(4)).toBe(3_600);
     expect(senderKeyRepairDefaultRetryDelaySeconds(5)).toBe(21_600);
-    expect(senderKeyRepairDefaultRetryDelaySeconds(Number.MAX_SAFE_INTEGER)).toBe(21_600);
+    expect(
+      senderKeyRepairDefaultRetryDelaySeconds(Number.MAX_SAFE_INTEGER),
+    ).toBe(21_600);
     expect(senderKeyRepairDefaultNextRetryAt(100, 2)).toBe(220);
   });
 
@@ -106,7 +112,11 @@ describe("sender-key repair requests", () => {
     });
 
     expect(
-      senderKeyRepairRequestFromPendingSenderKeyMessage(message, { type: "event" }, 13),
+      senderKeyRepairRequestFromPendingSenderKeyMessage(
+        message,
+        { type: "event" },
+        13,
+      ),
     ).toBeNull();
   });
 
@@ -122,16 +132,20 @@ describe("sender-key repair requests", () => {
       createdAt: 13,
     };
 
-    const rumor = buildSenderKeyRepairRequestRumor(request, requesterDevicePubkey, 12_000);
+    const rumor = buildSenderKeyRepairRequestRumor(
+      request,
+      requesterDevicePubkey,
+      12_000,
+    );
     expect(rumor.kind).toBe(GROUP_SENDER_KEY_REPAIR_REQUEST_KIND);
     expect(rumor.pubkey).toBe(requesterDevicePubkey);
     expect(rumor.created_at).toBe(12);
     expect(rumor.tags).toEqual([
       ["l", "group-1"],
-      ["key", "7"],
       ["sender", senderEventPubkey],
-      ["message", "42"],
       ["ms", "12000"],
+      ["key", "7"],
+      ["message", "42"],
       ["revision", "9"],
     ]);
     expect(JSON.parse(rumor.content)).toEqual({
@@ -167,6 +181,33 @@ describe("sender-key repair requests", () => {
     expect(parseSenderKeyRepairRequestRumor(oldEnvelope)).toBeNull();
   });
 
+  it("omits sender-key counters from broad repair requests", () => {
+    const requesterDevicePubkey = getPublicKey(generateSecretKey());
+    const senderEventPubkey = getPublicKey(generateSecretKey());
+    const request: SenderKeyRepairRequest = {
+      groupId: "group-1",
+      senderEventPubkey,
+      createdAt: 13,
+    };
+
+    const rumor = buildSenderKeyRepairRequestRumor(
+      request,
+      requesterDevicePubkey,
+      12_000,
+    );
+    expect(rumor.tags).toEqual([
+      ["l", "group-1"],
+      ["sender", senderEventPubkey],
+      ["ms", "12000"],
+    ]);
+    expect(JSON.parse(rumor.content)).toEqual({
+      groupId: "group-1",
+      senderEventPubkey,
+      createdAt: 13,
+    });
+    expect(parseSenderKeyRepairRequestRumor(rumor)).toEqual(request);
+  });
+
   it("repairs a missed sender-key distribution after the sender chain advances", async () => {
     const groupId = "group-repair-flow";
     const aliceOwnerPk = getPublicKey(generateSecretKey());
@@ -198,13 +239,17 @@ describe("sender-key repair requests", () => {
     });
 
     expect(await bob.handleOuterEvent(published[0]!)).toBeNull();
-    const request = bob.senderKeyRepairRequestForOuterEvent(published[0]!, 1_700_000_001);
+    const request = bob.senderKeyRepairRequestForOuterEvent(
+      published[0]!,
+      1_700_000_001,
+    );
     expect(request).toMatchObject({
       groupId,
       senderEventPubkey: published[0]!.pubkey,
-      messageNumber: 0,
       createdAt: 1_700_000_001,
     });
+    expect(request!.keyId).toBeUndefined();
+    expect(request!.messageNumber).toBeUndefined();
 
     const repairRequests: Array<{ to: string; rumor: Rumor }> = [];
     const repairRumor = await bob.requestSenderKeyRepair(request!, {
@@ -222,8 +267,12 @@ describe("sender-key repair requests", () => {
       bobDevicePk,
     );
     expect(aliceRepairEvents).toHaveLength(1);
-    expect(aliceRepairEvents[0]!.inner.kind).toBe(GROUP_SENDER_KEY_REPAIR_REQUEST_KIND);
-    expect(parseSenderKeyRepairRequestRumor(aliceRepairEvents[0]!.inner)).toEqual(request);
+    expect(aliceRepairEvents[0]!.inner.kind).toBe(
+      GROUP_SENDER_KEY_REPAIR_REQUEST_KIND,
+    );
+    expect(
+      parseSenderKeyRepairRequestRumor(aliceRepairEvents[0]!.inner),
+    ).toEqual(request);
 
     await alice.sendMessage("sender chain moved on", {
       nowMs: 1_700_000_002_000,
@@ -232,16 +281,22 @@ describe("sender-key repair requests", () => {
     });
 
     const repairResponses: Array<{ to: string; rumor: Rumor }> = [];
-    const response = await alice.respondToSenderKeyRepairRequest(bobOwnerPk, request!, {
-      nowMs: 1_700_000_003_000,
-      sendPairwise: async (to, rumor) => repairResponses.push({ to, rumor }),
-    });
+    const response = await alice.respondToSenderKeyRepairRequest(
+      bobOwnerPk,
+      request!,
+      {
+        nowMs: 1_700_000_003_000,
+        sendPairwise: async (to, rumor) => repairResponses.push({ to, rumor }),
+      },
+    );
 
     expect(response).not.toBeNull();
     expect(response!.iteration).toBe(0);
     expect(repairResponses).toHaveLength(1);
     expect(repairResponses[0]!.to).toBe(bobOwnerPk);
-    expect(repairResponses[0]!.rumor.kind).toBe(GROUP_SENDER_KEY_DISTRIBUTION_KIND);
+    expect(repairResponses[0]!.rumor.kind).toBe(
+      GROUP_SENDER_KEY_DISTRIBUTION_KIND,
+    );
 
     const drained = await bob.handleIncomingSessionEvent(
       repairResponses[0]!.rumor,
@@ -280,14 +335,21 @@ describe("sender-key repair requests", () => {
       },
     });
 
-    const request = bob.senderKeyRepairRequestForOuterEvent(published[0]!, 1_700_000_010);
+    const request = bob.senderKeyRepairRequestForOuterEvent(
+      published[0]!,
+      1_700_000_010,
+    );
     expect(request).not.toBeNull();
 
     alice.setData(makeGroup(groupId, [aliceOwnerPk], [aliceOwnerPk]));
     const repairResponses: Array<{ to: string; rumor: Rumor }> = [];
-    const response = await alice.respondToSenderKeyRepairRequest(bobOwnerPk, request!, {
-      sendPairwise: async (to, rumor) => repairResponses.push({ to, rumor }),
-    });
+    const response = await alice.respondToSenderKeyRepairRequest(
+      bobOwnerPk,
+      request!,
+      {
+        sendPairwise: async (to, rumor) => repairResponses.push({ to, rumor }),
+      },
+    );
 
     expect(response).toBeNull();
     expect(repairResponses).toEqual([]);
@@ -326,7 +388,11 @@ describe("sender-key repair requests", () => {
     });
 
     const distRumor = rumorForRecipient(distributions, bobOwnerPk);
-    await bob.handleIncomingSessionEvent(distRumor, aliceOwnerPk, aliceDevicePk);
+    await bob.handleIncomingSessionEvent(
+      distRumor,
+      aliceOwnerPk,
+      aliceDevicePk,
+    );
 
     const dist = JSON.parse(distRumor.content) as SenderKeyDistribution;
     const senderSecretHex = await aliceStorage.get<string>(

@@ -1,6 +1,11 @@
 import { getEventHash, type VerifiedEvent } from "nostr-tools";
 
-import { Group, type GroupDecryptedEvent, type PairwiseSend, type PublishOuter } from "./GroupChannel";
+import {
+  Group,
+  type GroupDecryptedEvent,
+  type PairwiseSend,
+  type PublishOuter,
+} from "./GroupChannel";
 import {
   applyMetadataUpdate,
   buildGroupMetadataContent,
@@ -95,7 +100,10 @@ export interface CreateGroupResult {
   fanout: GroupMetadataFanoutResult;
 }
 
-function getFirstTagValue(tags: string[][] | undefined, key: string): string | undefined {
+function getFirstTagValue(
+  tags: string[][] | undefined,
+  key: string,
+): string | undefined {
   const t = tags?.find((tag) => tag[0] === key);
   return t?.[1];
 }
@@ -104,16 +112,38 @@ function isHex32(value: string): boolean {
   return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
 }
 
-function parseSenderKeyDistribution(content: string): SenderKeyDistribution | null {
+function parseSenderKeyDistribution(
+  content: string,
+): SenderKeyDistribution | null {
   try {
     const d = JSON.parse(content) as Partial<SenderKeyDistribution>;
     if (!d || typeof d !== "object") return null;
     if (typeof d.groupId !== "string") return null;
-    if (typeof d.keyId !== "number" || !Number.isInteger(d.keyId) || d.keyId < 0) return null;
-    if (typeof d.chainKey !== "string" || !/^[0-9a-f]{64}$/i.test(d.chainKey)) return null;
-    if (typeof d.iteration !== "number" || !Number.isInteger(d.iteration) || d.iteration < 0) return null;
-    if (typeof d.createdAt !== "number" || !Number.isInteger(d.createdAt) || d.createdAt < 0) return null;
-    if (d.senderEventPubkey !== undefined && typeof d.senderEventPubkey !== "string") return null;
+    if (
+      typeof d.keyId !== "number" ||
+      !Number.isInteger(d.keyId) ||
+      d.keyId < 0
+    )
+      return null;
+    if (typeof d.chainKey !== "string" || !/^[0-9a-f]{64}$/i.test(d.chainKey))
+      return null;
+    if (
+      typeof d.iteration !== "number" ||
+      !Number.isInteger(d.iteration) ||
+      d.iteration < 0
+    )
+      return null;
+    if (
+      typeof d.createdAt !== "number" ||
+      !Number.isInteger(d.createdAt) ||
+      d.createdAt < 0
+    )
+      return null;
+    if (
+      d.senderEventPubkey !== undefined &&
+      typeof d.senderEventPubkey !== "string"
+    )
+      return null;
     return d as SenderKeyDistribution;
   } catch {
     return null;
@@ -134,7 +164,10 @@ export class GroupManager {
   private readonly nostrSubscribe?: NostrSubscribe;
   private readonly nostrFetch?: NostrFetch;
   private readonly onDecryptedEvent?: (event: GroupDecryptedEvent) => void;
-  private readonly onError?: (error: unknown, context: GroupManagerErrorContext) => void;
+  private readonly onError?: (
+    error: unknown,
+    context: GroupManagerErrorContext,
+  ) => void;
   private readonly suppressLocalDeviceEcho: boolean;
   private readonly outerBackfillLookbackSeconds: number;
   private readonly outerBackfillDurationMs: number;
@@ -143,8 +176,14 @@ export class GroupManager {
   private readonly groups = new Map<string, Group>();
   private readonly senderEventToGroup = new Map<string, string>();
   private readonly groupToSenderEvents = new Map<string, Set<string>>();
-  private readonly pendingOuterBySenderEvent = new Map<string, VerifiedEvent[]>();
-  private readonly pendingSessionByGroup = new Map<string, PendingSessionEvent[]>();
+  private readonly pendingOuterBySenderEvent = new Map<
+    string,
+    VerifiedEvent[]
+  >();
+  private readonly pendingSessionByGroup = new Map<
+    string,
+    PendingSessionEvent[]
+  >();
   private readonly seenOuterEventIds = new Set<string>();
   private readonly seenOuterEventOrder: string[] = [];
 
@@ -152,7 +191,9 @@ export class GroupManager {
   private outerAuthorsKey = "";
   private outerAuthors: string[] = [];
   private readonly outerBackfillUnsubscribes = new Set<Unsubscribe>();
-  private readonly outerBackfillTimers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly outerBackfillTimers = new Set<
+    ReturnType<typeof setTimeout>
+  >();
   private readonly maxPendingPerSenderEvent = 128;
   private readonly maxSeenOuterEventIds = 4096;
   private operationQueue: Promise<void> = Promise.resolve();
@@ -167,10 +208,11 @@ export class GroupManager {
     this.onDecryptedEvent = opts.onDecryptedEvent;
     this.onError = opts.onError;
     this.suppressLocalDeviceEcho = opts.suppressLocalDeviceEcho ?? true;
-    this.outerBackfillLookbackSeconds = opts.outerBackfillLookbackSeconds ?? 3600;
+    this.outerBackfillLookbackSeconds =
+      opts.outerBackfillLookbackSeconds ?? 3600;
     this.outerBackfillDurationMs = opts.outerBackfillDurationMs ?? 2000;
     this.outerBackfillRetryDelaysMs = this.normalizeRetryDelays(
-      opts.outerBackfillRetryDelaysMs ?? [0, 500, 1500]
+      opts.outerBackfillRetryDelaysMs ?? [0, 500, 1500],
     );
   }
 
@@ -179,7 +221,7 @@ export class GroupManager {
     const result = previous.catch(() => undefined).then(action);
     this.operationQueue = result.then(
       () => undefined,
-      () => undefined
+      () => undefined,
     );
     return result;
   }
@@ -256,10 +298,14 @@ export class GroupManager {
   async createGroup(
     name: string,
     memberOwnerPubkeys: string[],
-    opts: CreateGroupOptions = {}
+    opts: CreateGroupOptions = {},
   ): Promise<CreateGroupResult> {
     return this.enqueueOperation(async () => {
-      const group = createGroupData(name, this.ourOwnerPubkey, memberOwnerPubkeys);
+      const group = createGroupData(
+        name,
+        this.ourOwnerPubkey,
+        memberOwnerPubkeys,
+      );
       let existing = this.groups.get(group.id);
       if (!existing) {
         existing = new Group({
@@ -291,7 +337,9 @@ export class GroupManager {
       }
 
       if (!opts.sendPairwise) {
-        throw new Error("sendPairwise is required when fanoutMetadata is enabled");
+        throw new Error(
+          "sendPairwise is required when fanoutMetadata is enabled",
+        );
       }
 
       const nowMs = opts.nowMs ?? Date.now();
@@ -308,7 +356,9 @@ export class GroupManager {
       };
       metadataRumor.id = getEventHash(metadataRumor);
 
-      const recipients = group.members.filter((pubkey) => pubkey !== this.ourOwnerPubkey);
+      const recipients = group.members.filter(
+        (pubkey) => pubkey !== this.ourOwnerPubkey,
+      );
       const deliveries = await Promise.allSettled(
         recipients.map(async (recipient) => {
           const rumorForRecipient: Rumor = {
@@ -318,7 +368,7 @@ export class GroupManager {
           rumorForRecipient.id = getEventHash(rumorForRecipient);
           await opts.sendPairwise!(recipient, rumorForRecipient);
           return recipient;
-        })
+        }),
       );
 
       const succeeded: string[] = [];
@@ -349,7 +399,11 @@ export class GroupManager {
   async sendMessage(
     groupId: string,
     message: string,
-    opts: { sendPairwise: PairwiseSend; publishOuter: PublishOuter; nowMs?: number }
+    opts: {
+      sendPairwise: PairwiseSend;
+      publishOuter: PublishOuter;
+      nowMs?: number;
+    },
   ): Promise<{ outer: VerifiedEvent; inner: Rumor }> {
     return this.sendEvent(
       groupId,
@@ -357,14 +411,18 @@ export class GroupManager {
         kind: CHAT_MESSAGE_KIND,
         content: message,
       },
-      opts
+      opts,
     );
   }
 
   async sendEvent(
     groupId: string,
     event: { kind: number; content: string; tags?: string[][] },
-    opts: { sendPairwise: PairwiseSend; publishOuter: PublishOuter; nowMs?: number }
+    opts: {
+      sendPairwise: PairwiseSend;
+      publishOuter: PublishOuter;
+      nowMs?: number;
+    },
   ): Promise<{ outer: VerifiedEvent; inner: Rumor }> {
     return this.enqueueOperation(async () => {
       const group = this.groups.get(groupId);
@@ -386,7 +444,7 @@ export class GroupManager {
 
   async rotateSenderKey(
     groupId: string,
-    opts: { sendPairwise: PairwiseSend; nowMs?: number }
+    opts: { sendPairwise: PairwiseSend; nowMs?: number },
   ): Promise<SenderKeyDistribution> {
     return this.enqueueOperation(async () => {
       const group = this.groups.get(groupId);
@@ -420,7 +478,10 @@ export class GroupManager {
       try {
         return await group.requestSenderKeyRepair(request, opts);
       } catch (error) {
-        this.reportError(error, { operation: "requestSenderKeyRepair", groupId });
+        this.reportError(error, {
+          operation: "requestSenderKeyRepair",
+          groupId,
+        });
         throw error;
       }
     });
@@ -448,7 +509,10 @@ export class GroupManager {
         await this.syncOuterSubscription();
         return result;
       } catch (error) {
-        this.reportError(error, { operation: "respondToSenderKeyRepairRequest", groupId });
+        this.reportError(error, {
+          operation: "respondToSenderKeyRepairRequest",
+          groupId,
+        });
         throw error;
       }
     });
@@ -472,7 +536,7 @@ export class GroupManager {
   async handleIncomingSessionEvent(
     event: Rumor,
     fromOwnerPubkey: string,
-    fromSenderDevicePubkey?: string
+    fromSenderDevicePubkey?: string,
   ): Promise<GroupDecryptedEvent[]> {
     return this.enqueueOperation(async () => {
       const taggedGroupId = getFirstTagValue(event.tags, "l");
@@ -536,13 +600,19 @@ export class GroupManager {
         this.emitDecryptedEvents(all);
         return all;
       } catch (error) {
-        this.reportError(error, { operation: "handleIncomingSessionEvent", groupId, eventId: event.id });
+        this.reportError(error, {
+          operation: "handleIncomingSessionEvent",
+          groupId,
+          eventId: event.id,
+        });
         return [];
       }
     });
   }
 
-  async handleOuterEvent(outer: VerifiedEvent): Promise<GroupDecryptedEvent | null> {
+  async handleOuterEvent(
+    outer: VerifiedEvent,
+  ): Promise<GroupDecryptedEvent | null> {
     return this.enqueueOperation(async () => {
       if (outer.kind !== this.oneToMany.outerEventKind()) return null;
       if (this.hasSeenOuterEvent(outer.id)) return null;
@@ -591,7 +661,9 @@ export class GroupManager {
       authors = authors.filter((author) => !localSenderEvents.has(author));
     }
     authors.sort();
-    const addedAuthors = authors.filter((author) => !this.outerAuthors.includes(author));
+    const addedAuthors = authors.filter(
+      (author) => !this.outerAuthors.includes(author),
+    );
     const authorsKey = authors.join(",");
     if (authorsKey === this.outerAuthorsKey) return;
 
@@ -625,7 +697,7 @@ export class GroupManager {
               eventId: event.id,
             });
           });
-        }
+        },
       );
       this.startOuterBackfill(addedAuthors);
     } catch (error) {
@@ -642,7 +714,8 @@ export class GroupManager {
   }
 
   private startOuterBackfill(addedAuthors: string[]): void {
-    if ((!this.nostrSubscribe && !this.nostrFetch) || addedAuthors.length === 0) return;
+    if ((!this.nostrSubscribe && !this.nostrFetch) || addedAuthors.length === 0)
+      return;
     if (this.outerBackfillLookbackSeconds <= 0) return;
     if (!this.nostrFetch && this.outerBackfillDurationMs <= 0) return;
 
@@ -664,14 +737,19 @@ export class GroupManager {
     const authors = Array.from(
       new Set(
         candidateAuthors.filter(
-          (author) => author && this.senderEventToGroup.has(author) && this.outerAuthors.includes(author)
-        )
-      )
+          (author) =>
+            author &&
+            this.senderEventToGroup.has(author) &&
+            this.outerAuthors.includes(author),
+        ),
+      ),
     ).sort();
     return authors;
   }
 
-  private async runOuterBackfillAttempt(candidateAuthors: string[]): Promise<void> {
+  private async runOuterBackfillAttempt(
+    candidateAuthors: string[],
+  ): Promise<void> {
     const authors = this.currentBackfillAuthors(candidateAuthors);
     if (authors.length === 0) return;
 
@@ -686,7 +764,10 @@ export class GroupManager {
   private async fetchOuterBackfill(authors: string[]): Promise<void> {
     if (!this.nostrFetch) return;
 
-    const since = Math.max(0, Math.floor(Date.now() / 1000) - this.outerBackfillLookbackSeconds);
+    const since = Math.max(
+      0,
+      Math.floor(Date.now() / 1000) - this.outerBackfillLookbackSeconds,
+    );
 
     try {
       const events = await this.nostrFetch({
@@ -711,7 +792,10 @@ export class GroupManager {
   private openOuterBackfillSubscription(authors: string[]): void {
     if (!this.nostrSubscribe) return;
 
-    const since = Math.max(0, Math.floor(Date.now() / 1000) - this.outerBackfillLookbackSeconds);
+    const since = Math.max(
+      0,
+      Math.floor(Date.now() / 1000) - this.outerBackfillLookbackSeconds,
+    );
 
     try {
       const unsubscribe = this.nostrSubscribe(
@@ -728,7 +812,7 @@ export class GroupManager {
               eventId: event.id,
             });
           });
-        }
+        },
       );
 
       this.outerBackfillUnsubscribes.add(unsubscribe);
@@ -820,7 +904,9 @@ export class GroupManager {
 
       existing.setData(applyMetadataUpdate(existing.data, parsed));
     } else {
-      if (!validateMetadataCreation(parsed, fromOwnerPubkey, this.ourOwnerPubkey)) {
+      if (
+        !validateMetadataCreation(parsed, fromOwnerPubkey, this.ourOwnerPubkey)
+      ) {
         return [];
       }
 
@@ -881,7 +967,9 @@ export class GroupManager {
     };
   }
 
-  private async drainPendingSessionEvents(groupId: string): Promise<GroupDecryptedEvent[]> {
+  private async drainPendingSessionEvents(
+    groupId: string,
+  ): Promise<GroupDecryptedEvent[]> {
     const pending = this.pendingSessionByGroup.get(groupId);
     if (!pending || pending.length === 0) {
       return [];
@@ -900,16 +988,14 @@ export class GroupManager {
           ? parseSenderKeyDistribution(queued.event.content)
           : null;
       drained.push(
-        ...(
-          await this.handleIncomingSessionEventForKnownGroup(
-            groupId,
-            group,
-            queued.event,
-            queued.fromOwnerPubkey,
-            queued.fromSenderDevicePubkey,
-            distribution,
-          )
-        ),
+        ...(await this.handleIncomingSessionEventForKnownGroup(
+          groupId,
+          group,
+          queued.event,
+          queued.fromOwnerPubkey,
+          queued.fromSenderDevicePubkey,
+          distribution,
+        )),
       );
     }
 
@@ -931,7 +1017,10 @@ export class GroupManager {
     );
 
     const drainedFromManagerQueue: GroupDecryptedEvent[] = [];
-    if (distribution?.senderEventPubkey && isHex32(distribution.senderEventPubkey)) {
+    if (
+      distribution?.senderEventPubkey &&
+      isHex32(distribution.senderEventPubkey)
+    ) {
       this.bindSenderEventToGroup(groupId, distribution.senderEventPubkey);
       const drained = await this.drainPendingOuterForSenderEvent(
         distribution.senderEventPubkey,
@@ -946,7 +1035,10 @@ export class GroupManager {
     return [...drainedFromGroup, ...drainedFromManagerQueue];
   }
 
-  private bindSenderEventToGroup(groupId: string, senderEventPubkey: string): void {
+  private bindSenderEventToGroup(
+    groupId: string,
+    senderEventPubkey: string,
+  ): void {
     this.senderEventToGroup.set(senderEventPubkey, groupId);
     const current = this.groupToSenderEvents.get(groupId) || new Set<string>();
     current.add(senderEventPubkey);
@@ -984,7 +1076,10 @@ export class GroupManager {
     this.groupToSenderEvents.set(groupId, next);
   }
 
-  private queuePendingOuter(senderEventPubkey: string, outer: VerifiedEvent): void {
+  private queuePendingOuter(
+    senderEventPubkey: string,
+    outer: VerifiedEvent,
+  ): void {
     const pending = this.pendingOuterBySenderEvent.get(senderEventPubkey) || [];
     if (pending.length >= this.maxPendingPerSenderEvent) {
       pending.shift();
@@ -995,7 +1090,7 @@ export class GroupManager {
 
   private async drainPendingOuterForSenderEvent(
     senderEventPubkey: string,
-    group: Group
+    group: Group,
   ): Promise<GroupDecryptedEvent[]> {
     const pending = this.pendingOuterBySenderEvent.get(senderEventPubkey);
     if (!pending || pending.length === 0) return [];
@@ -1004,7 +1099,7 @@ export class GroupManager {
     const withMessageNumber = pending
       .map((outer) => {
         try {
-          const parsed = this.oneToMany.parseOuterContent(outer.content);
+          const parsed = this.oneToMany.parseOuterEvent(outer);
           return { outer, messageNumber: parsed.messageNumber };
         } catch {
           return { outer, messageNumber: 0 };
@@ -1028,7 +1123,9 @@ export class GroupManager {
     return this.suppressLocalDeviceEcho && event.origin === "local-device";
   }
 
-  private routeIncomingEvents(events: GroupDecryptedEvent[]): GroupDecryptedEvent[] {
+  private routeIncomingEvents(
+    events: GroupDecryptedEvent[],
+  ): GroupDecryptedEvent[] {
     if (!this.suppressLocalDeviceEcho) return events;
     return events.filter((event) => !this.shouldDropLocalEcho(event));
   }
@@ -1037,11 +1134,13 @@ export class GroupManager {
     const local = new Set<string>();
     await Promise.allSettled(
       Array.from(this.groups.values()).map(async (group) => {
-        const senderEventPubkey = await group.getSenderEventPubkeyForDevice(this.ourDevicePubkey);
+        const senderEventPubkey = await group.getSenderEventPubkeyForDevice(
+          this.ourDevicePubkey,
+        );
         if (senderEventPubkey) {
           local.add(senderEventPubkey);
         }
-      })
+      }),
     );
     return local;
   }
@@ -1051,8 +1150,8 @@ export class GroupManager {
       new Set(
         delays
           .filter((delay) => Number.isFinite(delay) && delay >= 0)
-          .map((delay) => Math.floor(delay))
-      )
+          .map((delay) => Math.floor(delay)),
+      ),
     ).sort((a, b) => a - b);
     return normalized.length > 0 ? normalized : [0];
   }
@@ -1083,14 +1182,14 @@ export class GroupManager {
       let aMessageNumber = 0;
       let bMessageNumber = 0;
       try {
-        const parsed = this.oneToMany.parseOuterContent(a.content);
+        const parsed = this.oneToMany.parseOuterEvent(a);
         aKeyId = parsed.keyId;
         aMessageNumber = parsed.messageNumber;
       } catch {
         // ignore malformed content in ordering
       }
       try {
-        const parsed = this.oneToMany.parseOuterContent(b.content);
+        const parsed = this.oneToMany.parseOuterEvent(b);
         bKeyId = parsed.keyId;
         bMessageNumber = parsed.messageNumber;
       } catch {
@@ -1098,7 +1197,8 @@ export class GroupManager {
       }
 
       if (aKeyId !== bKeyId) return aKeyId - bKeyId;
-      if (aMessageNumber !== bMessageNumber) return aMessageNumber - bMessageNumber;
+      if (aMessageNumber !== bMessageNumber)
+        return aMessageNumber - bMessageNumber;
       if (a.created_at !== b.created_at) return a.created_at - b.created_at;
       return a.id.localeCompare(b.id);
     });

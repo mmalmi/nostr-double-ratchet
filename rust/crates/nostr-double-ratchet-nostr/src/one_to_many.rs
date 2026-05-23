@@ -7,7 +7,8 @@ use crate::{
 /// A lightweight helper for "one-to-many" publishing:
 ///
 /// - Outer Nostr event is authored by a sender-controlled pubkey (eg per-group sender keypair).
-/// - Outer content is a compact base64 payload: `key_id_be || msg_num_be || nip44_ciphertext_bytes`.
+/// - New outer content is only `base64(nip44_ciphertext_bytes)`.
+/// - Legacy no-header outers with public `key_id_be || msg_num_be || ciphertext` still parse.
 /// - Ciphertext bytes are produced/consumed by [`SenderKeyState`].
 #[derive(Debug, Clone)]
 pub struct OneToManyChannel {
@@ -27,12 +28,19 @@ impl Default for OneToManyChannel {
 pub struct OneToManyMessage {
     pub key_id: u32,
     pub message_number: u32,
+    pub encrypted_header: Option<String>,
     pub ciphertext: Vec<u8>,
 }
 
 impl OneToManyMessage {
     pub fn decrypt(&self, state: &mut SenderKeyState) -> Result<String> {
-        let plaintext = state.decrypt_from_bytes(self.message_number, &self.ciphertext)?;
+        let plaintext = if self.encrypted_header.is_some() {
+            let plan = state.plan_decrypt_blind(&self.ciphertext)?;
+            state.clone_from(&plan.next_state);
+            plan.plaintext
+        } else {
+            state.decrypt_from_bytes(self.message_number, &self.ciphertext)?
+        };
         String::from_utf8(plaintext).map_err(|e| Error::Decryption(e.to_string()))
     }
 }
@@ -48,6 +56,19 @@ impl OneToManyChannel {
 
     pub fn build_outer_content(
         &self,
+        _key_id: u32,
+        _message_number: u32,
+        ciphertext_bytes: &[u8],
+    ) -> String {
+        self.build_hidden_outer_content(ciphertext_bytes)
+    }
+
+    pub fn build_hidden_outer_content(&self, ciphertext_bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(ciphertext_bytes)
+    }
+
+    pub fn build_legacy_outer_content(
+        &self,
         key_id: u32,
         message_number: u32,
         ciphertext_bytes: &[u8],
@@ -60,6 +81,18 @@ impl OneToManyChannel {
     }
 
     pub fn parse_outer_content(&self, content: &str) -> Result<OneToManyMessage> {
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(content)
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+        Ok(OneToManyMessage {
+            key_id: 0,
+            message_number: 0,
+            encrypted_header: Some(String::new()),
+            ciphertext,
+        })
+    }
+
+    pub fn parse_legacy_outer_content(&self, content: &str) -> Result<OneToManyMessage> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(content)
             .map_err(|e| Error::InvalidEvent(e.to_string()))?;
@@ -81,8 +114,29 @@ impl OneToManyChannel {
         Ok(OneToManyMessage {
             key_id,
             message_number,
+            encrypted_header: None,
             ciphertext: bytes[8..].to_vec(),
         })
+    }
+
+    pub fn parse_outer_event(&self, event: &nostr::Event) -> Result<OneToManyMessage> {
+        if event.kind != nostr::Kind::Custom(self.outer_kind as u16) {
+            return Err(Error::InvalidEvent(format!(
+                "unexpected kind {}, expected {}",
+                event.kind, self.outer_kind
+            )));
+        }
+        event
+            .verify()
+            .map_err(|e| Error::InvalidEvent(e.to_string()))?;
+
+        if let Some(encrypted_header) = first_tag_value(event, "header") {
+            let mut parsed = self.parse_outer_content(&event.content)?;
+            parsed.encrypted_header = Some(encrypted_header);
+            return Ok(parsed);
+        }
+
+        self.parse_legacy_outer_content(&event.content)
     }
 
     pub fn encrypt_to_outer_event(
@@ -104,4 +158,12 @@ impl OneToManyChannel {
         let signed = unsigned.sign_with_keys(sender_event_keys)?;
         Ok(signed)
     }
+}
+
+fn first_tag_value(event: &nostr::Event, key: &str) -> Option<String> {
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.as_slice().first().map(|value| value.as_str()) == Some(key))
+        .and_then(|tag| tag.as_slice().get(1).map(ToOwned::to_owned))
 }
