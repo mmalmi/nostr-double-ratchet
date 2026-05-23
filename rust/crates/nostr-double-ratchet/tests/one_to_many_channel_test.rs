@@ -31,7 +31,10 @@ fn one_to_many_outer_payload_roundtrip() {
 
     assert_eq!(outer.kind, nostr::Kind::Custom(MESSAGE_EVENT_KIND as u16));
     assert_eq!(outer.pubkey, sender_event_keys.public_key());
-    assert!(outer.tags.is_empty());
+    assert!(outer.tags.iter().any(|tag| tag
+        .as_slice()
+        .first()
+        .is_some_and(|value| value == "header")));
     assert!(outer.verify().is_ok());
 
     let parsed = channel.parse_outer_content(&outer.content).unwrap();

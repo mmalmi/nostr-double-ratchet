@@ -278,8 +278,10 @@ pub struct SenderKeyDistribution {
 pub struct SenderKeyRepairRequest {
     pub group_id: String,
     pub sender_event_pubkey: SenderEventPubkey,
-    pub key_id: u32,
-    pub message_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_revision: Option<u64>,
     pub created_at: UnixSeconds,
@@ -296,23 +298,26 @@ impl SenderKeyRepairRequest {
                 group_id,
                 sender_event_pubkey,
                 key_id,
+                message_number,
             } => Some(Self {
                 group_id: group_id.clone(),
                 sender_event_pubkey: *sender_event_pubkey,
                 key_id: *key_id,
-                message_number: message.message_number,
+                message_number: *message_number,
                 required_revision: None,
                 created_at,
             }),
             GroupSenderKeyHandleResult::PendingRevision {
                 group_id,
                 required_revision,
+                key_id,
+                message_number,
                 ..
             } => Some(Self {
                 group_id: group_id.clone(),
                 sender_event_pubkey: message.sender_event_pubkey,
-                key_id: message.key_id,
-                message_number: message.message_number,
+                key_id: Some(*key_id),
+                message_number: Some(*message_number),
                 required_revision: Some(*required_revision),
                 created_at,
             }),
@@ -358,6 +363,8 @@ pub struct GroupSenderKeyMessageEnvelope {
     pub signer_secret_key: [u8; 32],
     pub key_id: u32,
     pub message_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_header: Option<String>,
     pub created_at: UnixSeconds,
     pub ciphertext: Vec<u8>,
 }
@@ -368,6 +375,8 @@ pub struct GroupSenderKeyMessage {
     pub sender_event_pubkey: SenderEventPubkey,
     pub key_id: u32,
     pub message_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_header: Option<String>,
     pub created_at: UnixSeconds,
     pub ciphertext: Vec<u8>,
 }
@@ -378,12 +387,15 @@ pub enum GroupSenderKeyHandleResult {
     PendingDistribution {
         group_id: String,
         sender_event_pubkey: SenderEventPubkey,
-        key_id: u32,
+        key_id: Option<u32>,
+        message_number: Option<u32>,
     },
     PendingRevision {
         group_id: String,
         current_revision: u64,
         required_revision: u64,
+        key_id: u32,
+        message_number: u32,
     },
     Ignored,
 }
@@ -424,13 +436,15 @@ mod tests {
                 sender_event_pubkey: DevicePubkey::from_bytes([8; 32]),
                 key_id: 99,
                 message_number: 42,
+                encrypted_header: None,
                 created_at: UnixSeconds(100),
                 ciphertext: vec![1, 2, 3],
             },
             &GroupSenderKeyHandleResult::PendingDistribution {
                 group_id: "group-1".to_string(),
                 sender_event_pubkey,
-                key_id: 7,
+                key_id: Some(7),
+                message_number: Some(42),
             },
             UnixSeconds(200),
         )
@@ -438,8 +452,8 @@ mod tests {
 
         assert_eq!(request.group_id, "group-1");
         assert_eq!(request.sender_event_pubkey, sender_event_pubkey);
-        assert_eq!(request.key_id, 7);
-        assert_eq!(request.message_number, 42);
+        assert_eq!(request.key_id, Some(7));
+        assert_eq!(request.message_number, Some(42));
         assert_eq!(request.required_revision, None);
         assert_eq!(request.created_at, UnixSeconds(200));
     }
@@ -453,6 +467,7 @@ mod tests {
                 sender_event_pubkey,
                 key_id: 11,
                 message_number: 12,
+                encrypted_header: None,
                 created_at: UnixSeconds(100),
                 ciphertext: vec![1, 2, 3],
             },
@@ -460,6 +475,8 @@ mod tests {
                 group_id: "group-1".to_string(),
                 current_revision: 3,
                 required_revision: 4,
+                key_id: 11,
+                message_number: 12,
             },
             UnixSeconds(200),
         )
@@ -467,8 +484,8 @@ mod tests {
 
         assert_eq!(request.group_id, "group-1");
         assert_eq!(request.sender_event_pubkey, sender_event_pubkey);
-        assert_eq!(request.key_id, 11);
-        assert_eq!(request.message_number, 12);
+        assert_eq!(request.key_id, Some(11));
+        assert_eq!(request.message_number, Some(12));
         assert_eq!(request.required_revision, Some(4));
         assert_eq!(request.created_at, UnixSeconds(200));
     }
@@ -480,6 +497,7 @@ mod tests {
             sender_event_pubkey: DevicePubkey::from_bytes([9; 32]),
             key_id: 11,
             message_number: 12,
+            encrypted_header: None,
             created_at: UnixSeconds(100),
             ciphertext: vec![1, 2, 3],
         };

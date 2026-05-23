@@ -130,8 +130,10 @@ struct SenderKeyDistributionContent {
 struct SenderKeyRepairRequestContent {
     group_id: String,
     sender_event_pubkey: String,
-    key_id: u32,
-    message_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     required_revision: Option<u64>,
     created_at: UnixSeconds,
@@ -406,16 +408,22 @@ fn encode_sender_key_repair_request(
         created_at: request.created_at,
     })?;
     let millis = ctx.created_at.get().saturating_mul(1000).to_string();
-    let key_id = request.key_id.to_string();
-    let message_number = request.message_number.to_string();
     let sender_event_pubkey = request.sender_event_pubkey.to_string();
     let mut tags = vec![
         tag([GROUP_LABEL_TAG, request.group_id.as_str()])?,
-        tag([KEY_TAG, key_id.as_str()])?,
         tag([SENDER_TAG, sender_event_pubkey.as_str()])?,
-        tag([MESSAGE_TAG, message_number.as_str()])?,
         tag([MS_TAG, millis.as_str()])?,
     ];
+    let key_id;
+    if let Some(request_key_id) = request.key_id {
+        key_id = request_key_id.to_string();
+        tags.push(tag([KEY_TAG, key_id.as_str()])?);
+    }
+    let message_number;
+    if let Some(request_message_number) = request.message_number {
+        message_number = request_message_number.to_string();
+        tags.push(tag([MESSAGE_TAG, message_number.as_str()])?);
+    }
     let revision;
     if let Some(required_revision) = request.required_revision {
         revision = required_revision.to_string();
@@ -445,9 +453,23 @@ fn decode_sender_key_repair_request(payload: &[u8]) -> Result<Option<GroupPairwi
         return Ok(None);
     }
     require_tag_string(&event, GROUP_LABEL_TAG, &content.group_id)?;
-    require_tag_u32(&event, KEY_TAG, content.key_id)?;
     require_tag_string(&event, SENDER_TAG, &content.sender_event_pubkey)?;
-    require_tag_u32(&event, MESSAGE_TAG, content.message_number)?;
+    match content.key_id {
+        Some(key_id) => require_tag_u32(&event, KEY_TAG, key_id)?,
+        None => {
+            if first_tag_value(&event, KEY_TAG).is_some() {
+                return Err(Error::Parse("key tag mismatch".to_string()));
+            }
+        }
+    }
+    match content.message_number {
+        Some(message_number) => require_tag_u32(&event, MESSAGE_TAG, message_number)?,
+        None => {
+            if first_tag_value(&event, MESSAGE_TAG).is_some() {
+                return Err(Error::Parse("message tag mismatch".to_string()));
+            }
+        }
+    }
     match content.required_revision {
         Some(required_revision) => require_tag_u64(&event, REVISION_TAG, required_revision)?,
         None => {
@@ -931,8 +953,8 @@ mod tests {
         let request = nostr_double_ratchet::SenderKeyRepairRequest {
             group_id: "group-1".to_string(),
             sender_event_pubkey: device(3),
-            key_id: 7,
-            message_number: 42,
+            key_id: Some(7),
+            message_number: Some(42),
             required_revision: Some(9),
             created_at: UnixSeconds(13),
         };
@@ -989,8 +1011,10 @@ mod tests {
     struct SenderKeyRepairVectorRequest {
         group_id: String,
         sender_event_pubkey: String,
-        key_id: u32,
-        message_number: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_id: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_number: Option<u32>,
         #[serde(default)]
         required_revision: Option<u64>,
         created_at: u64,
@@ -1054,17 +1078,16 @@ mod tests {
             .unwrap()
             .join("test-vectors")
             .join("rust-sender-key-repair-vectors.json");
-        let should_regenerate =
-            std::env::var("REGENERATE_VECTORS").ok().as_deref() == Some("true")
-                || !vectors_path.exists();
+        let should_regenerate = std::env::var("REGENERATE_VECTORS").ok().as_deref() == Some("true")
+            || !vectors_path.exists();
 
         if should_regenerate {
             let ctx = encode_context();
             let request = nostr_double_ratchet::SenderKeyRepairRequest {
                 group_id: "group-1".to_string(),
                 sender_event_pubkey: device(3),
-                key_id: 7,
-                message_number: 42,
+                key_id: Some(7),
+                message_number: Some(42),
                 required_revision: Some(9),
                 created_at: UnixSeconds(13),
             };
@@ -1151,8 +1174,8 @@ mod tests {
         let request = nostr_double_ratchet::SenderKeyRepairRequest {
             group_id: "group-1".to_string(),
             sender_event_pubkey: device(3),
-            key_id: 7,
-            message_number: 42,
+            key_id: Some(7),
+            message_number: Some(42),
             required_revision: Some(9),
             created_at: UnixSeconds(13),
         };
@@ -1189,8 +1212,8 @@ mod tests {
         let request = nostr_double_ratchet::SenderKeyRepairRequest {
             group_id: "group-1".to_string(),
             sender_event_pubkey: device(3),
-            key_id: 7,
-            message_number: 42,
+            key_id: Some(7),
+            message_number: Some(42),
             required_revision: None,
             created_at: UnixSeconds(13),
         };
@@ -1215,8 +1238,8 @@ mod tests {
         let content = serde_json::to_string(&SenderKeyRepairRequestContent {
             group_id: "group-1".to_string(),
             sender_event_pubkey: device(3).to_string(),
-            key_id: 7,
-            message_number: 42,
+            key_id: Some(7),
+            message_number: Some(42),
             required_revision: Some(9),
             created_at: UnixSeconds(13),
         })

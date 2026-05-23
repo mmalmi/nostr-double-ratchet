@@ -1,8 +1,8 @@
 use nostr::{Event, Keys, PublicKey};
 use nostr_double_ratchet::OwnerPubkey;
 use nostr_double_ratchet_runtime::{
-    AppKeys, DeviceEntry, InMemoryStorage, NdrRuntime, SessionManagerEvent, StorageAdapter,
-    GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND,
+    nostr_codec, AppKeys, DeviceEntry, InMemoryStorage, NdrRuntime, SessionManagerEvent,
+    StorageAdapter, GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -64,11 +64,7 @@ fn first_event_of_kind(events: &[Event], kind: u32) -> Event {
 
 fn is_group_sender_key_outer_event(event: &Event) -> bool {
     event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND
-        && !event.tags.iter().any(|tag| {
-            tag.as_slice()
-                .first()
-                .is_some_and(|value| value == "header")
-        })
+        && nostr_codec::parse_group_sender_key_message_event_unchecked(event).is_ok()
 }
 
 fn owner(pubkey: PublicKey) -> OwnerPubkey {

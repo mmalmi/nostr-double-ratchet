@@ -405,21 +405,23 @@ where
         if sender_record.sender_event_secret_key.is_none() {
             return Ok(prepared);
         }
-        let Some(distribution) = sender_record.repair_distribution_for(
-            requester_owner,
-            request.key_id,
-            request.message_number,
-        ) else {
-            return Ok(prepared);
+        let distributions = match (request.key_id, request.message_number) {
+            (Some(key_id), Some(message_number)) => sender_record
+                .repair_distribution_for(requester_owner, key_id, message_number)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            _ => sender_record.repair_distributions_for_requester(requester_owner),
         };
-        let distribution = self.repair_payload_to_owner(
-            session_manager,
-            ctx,
-            requester_owner,
-            &GroupPairwiseCommand::SenderKeyDistribution { distribution },
-        )?;
-        merge_group_prepared_publish(&mut prepared.remote, distribution.remote);
-        merge_group_prepared_publish(&mut prepared.local_sibling, distribution.local_sibling);
+        for distribution in distributions {
+            let distribution = self.repair_payload_to_owner(
+                session_manager,
+                ctx,
+                requester_owner,
+                &GroupPairwiseCommand::SenderKeyDistribution { distribution },
+            )?;
+            merge_group_prepared_publish(&mut prepared.remote, distribution.remote);
+            merge_group_prepared_publish(&mut prepared.local_sibling, distribution.local_sibling);
+        }
         Ok(prepared)
     }
 
@@ -934,10 +936,10 @@ where
         &mut self,
         message: GroupSenderKeyMessage,
     ) -> Result<GroupSenderKeyHandleResult> {
-        let content = SenderKeyMessageContent {
-            key_id: message.key_id,
-            message_number: message.message_number,
-            ciphertext: message.ciphertext,
+        let known_position = if message.encrypted_header.is_some() {
+            None
+        } else {
+            Some((message.key_id, message.message_number))
         };
         let Some(id) = self
             .sender_event_index
@@ -947,7 +949,8 @@ where
             return Ok(GroupSenderKeyHandleResult::PendingDistribution {
                 group_id: message.group_id,
                 sender_event_pubkey: message.sender_event_pubkey,
-                key_id: message.key_id,
+                key_id: known_position.map(|(key_id, _)| key_id),
+                message_number: known_position.map(|(_, message_number)| message_number),
             });
         };
         if id.group_id != message.group_id {
@@ -959,15 +962,92 @@ where
             return Ok(GroupSenderKeyHandleResult::Ignored);
         }
 
+        if known_position.is_none() {
+            let key_ids = self
+                .sender_keys
+                .get(&id)
+                .ok_or_else(|| group_error("sender-key index points to missing state"))?
+                .states
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            for key_id in key_ids {
+                let plan = self
+                    .sender_keys
+                    .get(&id)
+                    .and_then(|record| record.states.get(&key_id))
+                    .ok_or_else(|| group_error("sender-key index points to missing state"))?
+                    .plan_decrypt_blind(&message.ciphertext);
+                let Ok(plan) = plan else {
+                    continue;
+                };
+                let Some(plaintext) = self.payload_codec.decode_sender_key_plaintext(
+                    GroupSenderKeyPlaintextDecodeContext {
+                        group_id: &group.group_id,
+                        current_revision: group.revision,
+                    },
+                    &plan.plaintext,
+                )?
+                else {
+                    return Ok(GroupSenderKeyHandleResult::Ignored);
+                };
+                if plaintext.group_id != group.group_id {
+                    return Ok(GroupSenderKeyHandleResult::Ignored);
+                }
+                if plaintext.revision > group.revision {
+                    return Ok(GroupSenderKeyHandleResult::PendingRevision {
+                        group_id: group.group_id,
+                        current_revision: group.revision,
+                        required_revision: plaintext.revision,
+                        key_id: plan.key_id,
+                        message_number: plan.message_number,
+                    });
+                }
+                if plaintext.revision < group.revision {
+                    return Ok(GroupSenderKeyHandleResult::Ignored);
+                }
+
+                let state = self
+                    .sender_keys
+                    .get_mut(&id)
+                    .and_then(|record| record.states.get_mut(&key_id))
+                    .ok_or_else(|| group_error("sender-key index points to missing state"))?;
+                state.clone_from(&plan.next_state);
+
+                return Ok(GroupSenderKeyHandleResult::Event(
+                    GroupIncomingEvent::Message(GroupReceivedMessage {
+                        group_id: plaintext.group_id,
+                        sender_owner: id.sender_owner,
+                        sender_device: Some(id.sender_device),
+                        body: plaintext.body,
+                        revision: plaintext.revision,
+                    }),
+                ));
+            }
+            return Ok(GroupSenderKeyHandleResult::PendingDistribution {
+                group_id: message.group_id,
+                sender_event_pubkey: message.sender_event_pubkey,
+                key_id: None,
+                message_number: None,
+            });
+        }
+
+        let (key_id, message_number) = known_position.expect("checked above");
+        let content = SenderKeyMessageContent {
+            key_id,
+            message_number,
+            ciphertext: message.ciphertext,
+        };
         let record = self
             .sender_keys
             .get_mut(&id)
             .ok_or_else(|| group_error("sender-key index points to missing state"))?;
-        let Some(state) = record.states.get_mut(&message.key_id) else {
+        let Some(state) = record.states.get_mut(&key_id) else {
             return Ok(GroupSenderKeyHandleResult::PendingDistribution {
                 group_id: message.group_id,
                 sender_event_pubkey: message.sender_event_pubkey,
-                key_id: message.key_id,
+                key_id: Some(key_id),
+                message_number: Some(message_number),
             });
         };
         let plan = state.plan_decrypt(&content)?;
@@ -991,6 +1071,8 @@ where
                 group_id: group.group_id,
                 current_revision: group.revision,
                 required_revision: plaintext.revision,
+                key_id,
+                message_number,
             });
         }
         if plaintext.revision < group.revision {
@@ -1228,6 +1310,7 @@ where
             signer_secret_key,
             key_id,
             message_number,
+            encrypted_header: None,
             created_at: ctx.now,
             ciphertext,
         };
@@ -2001,6 +2084,17 @@ impl SenderKeyRecord {
             .filter(|snapshot| snapshot.recipients.contains(&requester_owner))
             .max_by_key(|snapshot| snapshot.distribution.iteration)
             .map(|snapshot| snapshot.distribution.clone())
+    }
+
+    fn repair_distributions_for_requester(
+        &self,
+        requester_owner: OwnerPubkey,
+    ) -> Vec<SenderKeyDistribution> {
+        self.repair_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.recipients.contains(&requester_owner))
+            .map(|snapshot| snapshot.distribution.clone())
+            .collect()
     }
 
     fn snapshot(&self) -> GroupSenderKeyRecordSnapshot {

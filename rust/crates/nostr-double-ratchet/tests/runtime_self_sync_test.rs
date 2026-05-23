@@ -57,11 +57,7 @@ fn first_event_of_kind(events: &[Event], kind: u32) -> Event {
 
 fn is_group_sender_key_outer_event(event: &Event) -> bool {
     event.kind.as_u16() as u32 == GROUP_SENDER_KEY_MESSAGE_KIND
-        && !event.tags.iter().any(|tag| {
-            tag.as_slice()
-                .first()
-                .is_some_and(|value| value == "header")
-        })
+        && nostr_codec::parse_group_sender_key_message_event_unchecked(event).is_ok()
 }
 
 fn first_group_sender_key_outer_event(events: &[Event]) -> Event {
@@ -563,6 +559,7 @@ fn runtime_sender_key_distribution_gap_retries_after_invite_without_reencrypting
         .collect::<Vec<_>>();
     assert_eq!(initial_group_outers.len(), 1);
     assert_eq!(initial_group_outers[0].id.to_string(), event_ids[0]);
+    let sender_event_pubkey = initial_group_outers[0].pubkey;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -591,7 +588,8 @@ fn runtime_sender_key_distribution_gap_retries_after_invite_without_reencrypting
     assert!(
         !retried
             .iter()
-            .any(|event| is_group_sender_key_outer_event(event)),
+            .any(|event| event.kind.as_u16() as u32 == MESSAGE_EVENT_KIND
+                && event.pubkey == sender_event_pubkey),
         "retrying missing pairwise sender-key distribution must not re-encrypt the outer group message"
     );
 

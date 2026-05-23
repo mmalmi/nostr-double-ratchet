@@ -1101,7 +1101,26 @@ impl NdrRuntime {
     }
 
     pub fn group_handle_outer_event(&self, outer: &Event) -> Vec<GroupIncomingEvent> {
-        let Ok(parsed) = nostr_codec::parse_group_sender_key_message_event(outer) else {
+        let has_header = event_has_tag(outer, "header");
+        if has_header {
+            let sender_event_pubkey = DevicePubkey::from_bytes(outer.pubkey.to_bytes());
+            let known_sender_event_pubkey = self
+                .state
+                .lock()
+                .unwrap()
+                .group_manager
+                .group_id_for_sender_event_pubkey(sender_event_pubkey)
+                .is_some();
+            if !known_sender_event_pubkey {
+                return Vec::new();
+            }
+        }
+        let parsed = if has_header {
+            nostr_codec::parse_group_sender_key_message_event_unchecked(outer)
+        } else {
+            nostr_codec::parse_group_sender_key_message_event(outer)
+        };
+        let Ok(parsed) = parsed else {
             return Vec::new();
         };
         let Some(message) = self.group_sender_key_message_from_parsed(&parsed) else {
@@ -1202,6 +1221,7 @@ impl NdrRuntime {
                     sender_event_pubkey: parsed.sender_event_pubkey,
                     key_id: parsed.key_id,
                     message_number: parsed.message_number,
+                    encrypted_header: parsed.encrypted_header.clone(),
                     created_at: parsed.created_at,
                     ciphertext: parsed.ciphertext.clone(),
                 };
@@ -1240,6 +1260,7 @@ impl NdrRuntime {
             sender_event_pubkey: parsed.sender_event_pubkey,
             key_id: parsed.key_id,
             message_number: parsed.message_number,
+            encrypted_header: parsed.encrypted_header.clone(),
             created_at: parsed.created_at,
             ciphertext: parsed.ciphertext.clone(),
         })
@@ -2075,6 +2096,13 @@ fn public_owner(owner: OwnerPubkey) -> PublicKey {
 
 fn public_device(device: DevicePubkey) -> PublicKey {
     PublicKey::from_slice(&device.to_bytes()).expect("device pubkey bytes must be valid")
+}
+
+fn event_has_tag(event: &Event, name: &str) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(|value| value.as_str()) == Some(name))
 }
 
 fn should_queue_group_pairwise_payload(error: &Error) -> bool {

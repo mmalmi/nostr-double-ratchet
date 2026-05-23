@@ -20,7 +20,8 @@ pub use multi_device::{
 };
 pub use nostr_codec::{
     group_sender_key_message_event, invite_response_event, invite_unsigned_event, invite_url,
-    message_event, parse_group_sender_key_message_event, parse_invite_event,
+    message_event, parse_group_sender_key_message_event,
+    parse_group_sender_key_message_event_unchecked, parse_invite_event,
     parse_invite_response_event, parse_invite_url, parse_message_event, parse_roster_event,
     roster_unsigned_event, DecodedRosterEvent, GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND,
     INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND, ROSTER_EVENT_KIND,

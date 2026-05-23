@@ -4,7 +4,7 @@ use crate::{
     UnixSeconds,
 };
 use base64::Engine;
-use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
+use nostr::{nips::nip44, Event, EventBuilder, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 use thiserror::Error;
 
 pub const MESSAGE_EVENT_KIND: u32 = 1060;
@@ -27,6 +27,8 @@ pub struct ParsedGroupSenderKeyMessageEvent {
     pub sender_event_pubkey: DevicePubkey,
     pub key_id: u32,
     pub message_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_header: Option<String>,
     pub created_at: UnixSeconds,
     pub ciphertext: Vec<u8>,
 }
@@ -108,12 +110,13 @@ pub fn group_sender_key_message_event(envelope: &GroupSenderKeyMessageEnvelope) 
         ));
     }
 
-    let content = build_group_sender_key_content(
-        envelope.key_id,
-        envelope.message_number,
-        &envelope.ciphertext,
-    );
+    let content = build_group_sender_key_hidden_content(&envelope.ciphertext);
+    let encrypted_header = match envelope.encrypted_header.clone() {
+        Some(encrypted_header) => encrypted_header,
+        None => encrypted_cover_header(&author_keys)?,
+    };
     let unsigned = EventBuilder::new(Kind::from(GROUP_SENDER_KEY_MESSAGE_KIND as u16), content)
+        .tag(tag(["header", encrypted_header.as_str()])?)
         .custom_created_at(Timestamp::from(envelope.created_at.get()))
         .build(public_key(envelope.sender_event_pubkey)?);
 
@@ -127,22 +130,75 @@ pub fn parse_group_sender_key_message_event(
     event.verify()?;
     if optional_tag_value(event, "header").is_some() {
         return Err(Error::InvalidEvent(
-            "pairwise message event is not a group sender-key outer event".to_string(),
+            "camouflaged group sender-key event requires caller-side sender match".to_string(),
         ));
     }
 
-    let parsed = parse_group_sender_key_content(&event.content)?;
+    parsed_group_sender_key_message_event_from_content(event)
+}
+
+pub fn parse_group_sender_key_message_event_unchecked(
+    event: &Event,
+) -> Result<ParsedGroupSenderKeyMessageEvent> {
+    verify_event_kind(event, GROUP_SENDER_KEY_MESSAGE_KIND)?;
+    event.verify()?;
+    parsed_group_sender_key_message_event_from_content(event)
+}
+
+fn parsed_group_sender_key_message_event_from_content(
+    event: &Event,
+) -> Result<ParsedGroupSenderKeyMessageEvent> {
+    let encrypted_header = optional_tag_value(event, "header");
+    let parsed = if encrypted_header.is_some() {
+        (0, 0, parse_group_sender_key_hidden_content(&event.content)?)
+    } else {
+        parse_group_sender_key_legacy_content(&event.content)?
+    };
 
     Ok(ParsedGroupSenderKeyMessageEvent {
         sender_event_pubkey: DevicePubkey::from_bytes(event.pubkey.to_bytes()),
         key_id: parsed.0,
         message_number: parsed.1,
+        encrypted_header,
         created_at: UnixSeconds(event.created_at.as_secs()),
         ciphertext: parsed.2,
     })
 }
 
-fn build_group_sender_key_content(key_id: u32, message_number: u32, ciphertext: &[u8]) -> String {
+pub(crate) fn encrypted_cover_header_tag(keys: &Keys) -> Result<Tag> {
+    let encrypted = encrypted_cover_header(keys)?;
+    tag(["header", encrypted.as_str()])
+}
+
+fn encrypted_cover_header(keys: &Keys) -> Result<String> {
+    let cover = serde_json::json!({
+        "v": 1,
+        "type": "sender-key-cover",
+    });
+    Ok(nip44::encrypt(
+        keys.secret_key(),
+        &keys.public_key(),
+        serde_json::to_string(&cover)?,
+        nip44::Version::V2,
+    )?)
+}
+
+fn build_group_sender_key_hidden_content(ciphertext: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(ciphertext)
+}
+
+fn parse_group_sender_key_hidden_content(content: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(content)
+        .map_err(|e| Error::InvalidEvent(e.to_string()))
+}
+
+#[cfg(test)]
+fn build_group_sender_key_legacy_content(
+    key_id: u32,
+    message_number: u32,
+    ciphertext: &[u8],
+) -> String {
     let mut payload = Vec::with_capacity(8 + ciphertext.len());
     payload.extend_from_slice(&key_id.to_be_bytes());
     payload.extend_from_slice(&message_number.to_be_bytes());
@@ -150,7 +206,7 @@ fn build_group_sender_key_content(key_id: u32, message_number: u32, ciphertext: 
     base64::engine::general_purpose::STANDARD.encode(payload)
 }
 
-fn parse_group_sender_key_content(content: &str) -> Result<(u32, u32, Vec<u8>)> {
+fn parse_group_sender_key_legacy_content(content: &str) -> Result<(u32, u32, Vec<u8>)> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(content)
         .map_err(|e| Error::InvalidEvent(e.to_string()))?;
@@ -520,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn group_sender_key_message_event_roundtrip_uses_old_message_kind() {
+    fn group_sender_key_message_event_roundtrip_is_camouflaged_as_message_event() {
         let signer_secret = [22u8; 32];
         let sender_event_pubkey = DevicePubkey::from_bytes(
             Keys::new(secret_key_from_bytes(&signer_secret).unwrap())
@@ -533,6 +589,7 @@ mod tests {
             signer_secret_key: signer_secret,
             key_id: 7,
             message_number: 11,
+            encrypted_header: None,
             created_at: UnixSeconds(12),
             ciphertext: b"ciphertext".to_vec(),
         })
@@ -540,12 +597,41 @@ mod tests {
 
         assert_eq!(event.kind.as_u16() as u32, MESSAGE_EVENT_KIND);
         assert_eq!(GROUP_SENDER_KEY_MESSAGE_KIND, MESSAGE_EVENT_KIND);
-        assert!(event.tags.is_empty());
+        assert!(optional_tag_value(&event, "header").is_some());
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&event.content)
+                .unwrap(),
+            b"ciphertext"
+        );
+        assert!(parse_group_sender_key_message_event(&event).is_err());
+        let parsed = parse_group_sender_key_message_event_unchecked(&event).unwrap();
+        assert_eq!(parsed.sender_event_pubkey, sender_event_pubkey);
+        assert_eq!(parsed.key_id, 0);
+        assert_eq!(parsed.message_number, 0);
+        assert!(parsed.encrypted_header.is_some());
+        assert_eq!(parsed.ciphertext, b"ciphertext");
+    }
+
+    #[test]
+    fn legacy_group_sender_key_message_without_header_still_parses() {
+        let signer_secret = [23u8; 32];
+        let signer_keys = Keys::new(secret_key_from_bytes(&signer_secret).unwrap());
+        let sender_event_pubkey = DevicePubkey::from_bytes(signer_keys.public_key().to_bytes());
+        let content = build_group_sender_key_legacy_content(8, 12, b"legacy ciphertext");
+        let event = EventBuilder::new(Kind::from(GROUP_SENDER_KEY_MESSAGE_KIND as u16), content)
+            .custom_created_at(Timestamp::from(13))
+            .build(signer_keys.public_key())
+            .sign_with_keys(&signer_keys)
+            .unwrap();
+
+        assert!(optional_tag_value(&event, "header").is_none());
         let parsed = parse_group_sender_key_message_event(&event).unwrap();
         assert_eq!(parsed.sender_event_pubkey, sender_event_pubkey);
-        assert_eq!(parsed.key_id, 7);
-        assert_eq!(parsed.message_number, 11);
-        assert_eq!(parsed.ciphertext, b"ciphertext");
+        assert_eq!(parsed.key_id, 8);
+        assert_eq!(parsed.message_number, 12);
+        assert!(parsed.encrypted_header.is_none());
+        assert_eq!(parsed.ciphertext, b"legacy ciphertext");
     }
 
     #[test]

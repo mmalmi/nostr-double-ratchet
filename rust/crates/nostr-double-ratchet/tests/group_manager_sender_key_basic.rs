@@ -41,6 +41,7 @@ fn sender_key_message_from_envelope(
         sender_event_pubkey: envelope.sender_event_pubkey,
         key_id: envelope.key_id,
         message_number: envelope.message_number,
+        encrypted_header: envelope.encrypted_header.clone(),
         created_at: envelope.created_at,
         ciphertext: envelope.ciphertext.clone(),
     }
@@ -435,6 +436,7 @@ fn sender_key_group_create_distributes_key_and_shared_message_decrypts() -> Resu
         sender_event_pubkey: outer.sender_event_pubkey,
         key_id: outer.key_id,
         message_number: outer.message_number,
+        encrypted_header: outer.encrypted_header,
         created_at: outer.created_at,
         ciphertext: outer.ciphertext,
     })?;
@@ -658,8 +660,8 @@ fn sender_key_local_sibling_can_repair_missed_rotated_distribution() -> Result<(
     let request = SenderKeyRepairRequest {
         group_id: created.group.group_id.clone(),
         sender_event_pubkey: outer.sender_event_pubkey,
-        key_id: outer.key_id,
-        message_number: outer.message_number,
+        key_id: Some(outer.key_id),
+        message_number: Some(outer.message_number),
         required_revision: None,
         created_at: UnixSeconds(1_900_077_013),
     };
@@ -800,6 +802,7 @@ fn sender_key_outer_message_waits_for_distribution() -> Result<()> {
         sender_event_pubkey: outer.sender_event_pubkey,
         key_id: outer.key_id,
         message_number: outer.message_number,
+        encrypted_header: outer.encrypted_header,
         created_at: outer.created_at,
         ciphertext: outer.ciphertext,
     })?;
@@ -881,8 +884,8 @@ fn sender_key_repair_request_restores_original_distribution_after_sender_chain_a
     let request = SenderKeyRepairRequest {
         group_id: created.group.group_id.clone(),
         sender_event_pubkey: first_outer.sender_event_pubkey,
-        key_id: first_outer.key_id,
-        message_number: first_outer.message_number,
+        key_id: Some(first_outer.key_id),
+        message_number: Some(first_outer.message_number),
         required_revision: None,
         created_at: UnixSeconds(1_900_070_008),
     };
@@ -956,8 +959,8 @@ fn sender_key_repair_request_from_removed_member_does_not_leak_distribution() ->
     let request = SenderKeyRepairRequest {
         group_id: fixture.group_id.clone(),
         sender_event_pubkey: outer.sender_event_pubkey,
-        key_id: outer.key_id,
-        message_number: outer.message_number,
+        key_id: Some(outer.key_id),
+        message_number: Some(outer.message_number),
         required_revision: None,
         created_at: UnixSeconds(1_900_071_012),
     };
@@ -989,8 +992,8 @@ fn sender_key_late_member_repair_denies_pre_join_outer() -> Result<()> {
     let request = SenderKeyRepairRequest {
         group_id: fixture.group_id.clone(),
         sender_event_pubkey: fixture.pre_join_outer.sender_event_pubkey,
-        key_id: fixture.pre_join_outer.key_id,
-        message_number: fixture.pre_join_outer.message_number,
+        key_id: Some(fixture.pre_join_outer.key_id),
+        message_number: Some(fixture.pre_join_outer.message_number),
         required_revision: None,
         created_at: UnixSeconds(1_900_074_020),
     };
@@ -1024,8 +1027,8 @@ fn sender_key_late_member_repair_allows_post_join_missed_distribution() -> Resul
     let request = SenderKeyRepairRequest {
         group_id: fixture.group_id.clone(),
         sender_event_pubkey: fixture.post_join_outer.sender_event_pubkey,
-        key_id: fixture.post_join_outer.key_id,
-        message_number: fixture.post_join_outer.message_number,
+        key_id: Some(fixture.post_join_outer.key_id),
+        message_number: Some(fixture.post_join_outer.message_number),
         required_revision: None,
         created_at: UnixSeconds(1_900_075_020),
     };
@@ -1093,8 +1096,8 @@ fn sender_key_late_member_repair_snapshot_roundtrip_preserves_authorization() ->
     let request = SenderKeyRepairRequest {
         group_id: fixture.group_id.clone(),
         sender_event_pubkey: fixture.pre_join_outer.sender_event_pubkey,
-        key_id: fixture.pre_join_outer.key_id,
-        message_number: fixture.pre_join_outer.message_number,
+        key_id: Some(fixture.pre_join_outer.key_id),
+        message_number: Some(fixture.pre_join_outer.message_number),
         required_revision: None,
         created_at: UnixSeconds(1_900_076_020),
     };
@@ -1337,6 +1340,7 @@ fn sender_key_valid_ciphertext_with_invalid_group_plaintext_does_not_burn_messag
         sender_event_pubkey: sender_record.sender_event_pubkey,
         key_id,
         message_number,
+        encrypted_header: None,
         created_at: UnixSeconds(1_900_043_010),
         ciphertext,
     };

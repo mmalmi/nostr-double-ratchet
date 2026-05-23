@@ -1,6 +1,8 @@
 use base64::Engine;
 
-use crate::{Error, Result, SenderKeyState, MESSAGE_EVENT_KIND};
+use crate::{
+    nostr_codec::encrypted_cover_header_tag, Error, Result, SenderKeyState, MESSAGE_EVENT_KIND,
+};
 
 /// A lightweight helper for "one-to-many" publishing:
 ///
@@ -95,6 +97,7 @@ impl OneToManyChannel {
 
         let unsigned =
             nostr::EventBuilder::new(nostr::Kind::Custom(self.outer_kind as u16), &content)
+                .tag(encrypted_cover_header_tag(sender_event_keys)?)
                 .custom_created_at(created_at)
                 .build(sender_event_keys.public_key());
 
