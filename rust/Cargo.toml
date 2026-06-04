@@ -4,7 +4,6 @@ members = [
     "crates/nostr-double-ratchet",
     "crates/nostr-double-ratchet-nostr",
     "crates/nostr-double-ratchet-pairwise-codec",
-    "crates/nostr-double-ratchet-runtime",
 ]
 
 [workspace.package]
@@ -18,7 +17,6 @@ repository = "https://files.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e89599
 nostr-double-ratchet = { version = "0.0.147", path = "crates/nostr-double-ratchet" }
 nostr-double-ratchet-nostr = { version = "0.0.147", path = "crates/nostr-double-ratchet-nostr" }
 nostr-double-ratchet-pairwise-codec = { version = "0.0.147", path = "crates/nostr-double-ratchet-pairwise-codec" }
-nostr-double-ratchet-runtime = { version = "0.0.147", path = "crates/nostr-double-ratchet-runtime" }
 nostr = { version = "0.44.2", default-features = false, features = ["std", "nip44"] }
 nostr-sdk = "0.44.1"
 tracing = "0.1"

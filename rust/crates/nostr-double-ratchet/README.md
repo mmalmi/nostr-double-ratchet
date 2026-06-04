@@ -18,12 +18,12 @@ There are two practical layers:
 
 - `Session`: smallest 1:1 primitive when the caller already owns bootstrap, persistence, and
   transport.
-- `SessionManager` / `NdrRuntime`: recommended for real apps. These own multi-device routing,
-  invite handling, and group transport, but the caller still owns relay I/O.
+- `SessionManager`: deterministic multi-device routing and invite handling primitives for apps
+  that own relay I/O and runtime wiring.
 
-Current native consumers wrap `SessionManager` with an app-owned pubsub loop instead of using bare
-`Session`, for example
-[`iris-chat-flutter`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-flutter).
+Current native consumers can use the reusable protocol runtime and FFI in
+[`iris-chat-rs`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-rs),
+which builds on this crate.
 
 ## Security Properties
 
@@ -100,63 +100,12 @@ assert!(plaintext.is_some());
 # Ok::<(), nostr_double_ratchet::Error>(())
 ```
 
-## Minimal Runtime Loop
+## App Runtime Integration
 
-For app integration, `SessionManager` / `NdrRuntime` emit pubsub events and the host app executes
-them.
-
-```rust
-use nostr::{Event, Keys};
-use nostr_double_ratchet::{NdrRuntime, SessionManagerEvent};
-
-let keys = Keys::generate();
-let runtime = NdrRuntime::new(
-    keys.public_key(),
-    keys.secret_key().secret_bytes(),
-    keys.public_key().to_hex(),
-    keys.public_key(),
-    None,
-    None,
-);
-
-runtime.init()?;
-
-for event in runtime.drain_events() {
-    match event {
-        SessionManagerEvent::Publish(unsigned) => {
-            // Sign/publish to relays in the host app.
-        }
-        SessionManagerEvent::PublishSigned(signed) => {
-            // Publish to relays in the host app.
-        }
-        SessionManagerEvent::Subscribe { subid, filter_json } => {
-            // Open a relay subscription in the host app.
-        }
-        SessionManagerEvent::Unsubscribe(subid) => {
-            // Close the matching relay subscription in the host app.
-        }
-        SessionManagerEvent::DecryptedMessage { sender, content, .. } => {
-            // Deliver plaintext to the app.
-        }
-        SessionManagerEvent::ReceivedEvent(_) => {}
-    }
-}
-
-// Feed relay events back into the manager.
-runtime.process_received_event(relay_event);
-
-// Group outer events still need explicit handling.
-let maybe_group = runtime.group_handle_outer_event(&outer_event);
-# Ok::<(), nostr_double_ratchet::Error>(())
-```
-
-Two practical notes:
-
-- The host app still owns relay bootstrap and event transport, but protocol catch-up should be
-  driven from `NdrRuntime::protocol_backfill_filters(...)`. Fetch those filters from your relays
-  and feed the resulting events back through `process_received_event(...)`.
-- If you want the manager to advance immediately after your own publish, loop locally published
-  events back through `process_received_event(...)` instead of waiting for relay echo alone.
+This crate exposes deterministic protocol state machines. Host apps or higher-level protocol
+runtimes translate prepared sends into relay publishes, feed fetched relay events back into the
+state machines, and persist snapshots. For a ready app-facing Rust runtime and mobile FFI, use
+`iris-chat-rs`.
 
 ## Disappearing Messages
 
@@ -165,11 +114,11 @@ Use NIP-40-style `["expiration", "<unix seconds>"]` tags in inner rumors.
 
 ## Direct Message Catch-Up
 
-`NdrRuntime` owns the protocol filter set needed for session recovery. Call
-`protocol_backfill_filters(...)` on startup, reconnect, and after AppKeys/invite changes; fetch the
-returned filters from relays, then pass events into `process_received_event(...)`. The filter set
-includes AppKeys, device invites, current-device invite responses, and active 1:1/group message
-authors so linked-device sessions can be recovered after offline periods.
+Runtime integrations should fetch AppKeys, device invites, invite responses, and active message
+authors on startup, reconnect, and after AppKeys/invite changes. The
+`nostr-double-ratchet-nostr` crate provides `DirectMessageSubscriptionTracker` and
+`build_direct_message_backfill_filter(...)` for short direct-message replay when a new message
+author appears in a subscription.
 
 ## 1:1 Chat Settings Signaling
 

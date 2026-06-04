@@ -1,7 +1,7 @@
 use nostr::Keys;
-use nostr_double_ratchet_runtime::{
+use nostr_double_ratchet_nostr::{
     build_direct_message_backfill_filter, direct_message_subscription_authors,
-    DirectMessageSubscriptionTracker, SessionManagerEvent, MESSAGE_EVENT_KIND,
+    DirectMessageSubscriptionTracker, MESSAGE_EVENT_KIND,
 };
 
 #[test]
@@ -25,7 +25,7 @@ fn tracker_returns_only_new_direct_message_authors() {
     assert_eq!(tracker.tracked_authors(), expected_authors);
 
     let duplicate = tracker.register_subscription(
-        "ndr-runtime-messages-2",
+        "icp-messages-2",
         format!(r#"{{"kinds":[1060],"authors":["{}"]}}"#, bob.to_hex()),
     );
     assert!(duplicate.is_empty());
@@ -36,21 +36,24 @@ fn tracker_returns_only_new_direct_message_authors() {
 }
 
 #[test]
-fn tracker_can_apply_session_manager_events() {
+fn helper_accepts_runtime_protocol_and_session_subscription_ids() {
     let alice = Keys::generate().public_key();
-    let mut tracker = DirectMessageSubscriptionTracker::new();
+    let filter = format!(r#"{{"kinds":[1060],"authors":["{}"]}}"#, alice.to_hex());
 
-    let added = tracker.apply_session_event(&SessionManagerEvent::Subscribe {
-        subid: "ndr-runtime-messages-1".to_string(),
-        filter_json: format!(r#"{{"kinds":[1060],"authors":["{}"]}}"#, alice.to_hex()),
-    });
-    assert_eq!(added, vec![alice]);
-
-    let removed = tracker.apply_session_event(&SessionManagerEvent::Unsubscribe(
-        "ndr-runtime-messages-1".to_string(),
-    ));
-    assert!(removed.is_empty());
-    assert!(tracker.tracked_authors().is_empty());
+    for subid in [
+        "ndr-runtime-messages",
+        "ndr-runtime-messages-1",
+        "icp-messages",
+        "icp-messages-1",
+        "session-current-1",
+        "session-next-1",
+    ] {
+        assert_eq!(
+            direct_message_subscription_authors(subid, &filter),
+            vec![alice],
+            "subscription id {subid} should be treated as a direct-message feed"
+        );
+    }
 }
 
 #[test]
@@ -64,12 +67,6 @@ fn helper_ignores_non_session_or_invalid_filters() {
     assert!(direct_message_subscription_authors(
         "ndr-runtime-messages-1",
         r#"{"kinds":[1],"authors":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
-    )
-    .is_empty());
-
-    assert!(direct_message_subscription_authors(
-        "session-next-1",
-        r#"{"kinds":[1060],"authors":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
     )
     .is_empty());
 

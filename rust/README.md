@@ -7,7 +7,8 @@ Rust implementation and tooling for Double Ratchet messaging on Nostr.
 | Crate | Description |
 |-------|-------------|
 | [nostr-double-ratchet](./crates/nostr-double-ratchet) | Core library: sessions, invites, session manager, groups |
-| [ndr-ffi](./crates/ndr-ffi) | UniFFI bindings for mobile integration |
+| [nostr-double-ratchet-nostr](./crates/nostr-double-ratchet-nostr) | Nostr event codecs and integration helpers |
+| [nostr-double-ratchet-pairwise-codec](./crates/nostr-double-ratchet-pairwise-codec) | Pairwise group payload codec |
 
 ## Security Properties (Rust Stack)
 
@@ -49,30 +50,23 @@ should wait until relays reflect the updated AppKeys snapshot.
 
 ## Direct Message Catch-Up
 
-`SessionManager` and `NdrRuntime` emit subscribe/unsubscribe events, but they do not fetch relay
-history for you. If a new direct-message author gets added to a session subscription, consume that
-signal immediately:
+Apps and protocol runtimes still own relay history fetch. If a new direct-message author gets added
+to a session subscription, consume that signal immediately:
 
 ```rust
-use nostr_double_ratchet::{
-    build_direct_message_backfill_filter, DirectMessageSubscriptionTracker, SessionManagerEvent,
+use nostr_double_ratchet_nostr::{
+    build_direct_message_backfill_filter, DirectMessageSubscriptionTracker,
 };
 
 let mut tracker = DirectMessageSubscriptionTracker::new();
 
-for event in runtime.drain_events() {
-    match &event {
-        SessionManagerEvent::Subscribe { .. } | SessionManagerEvent::Unsubscribe(_) => {
-            let added_authors = tracker.apply_session_event(&event);
-            if !added_authors.is_empty() {
-                let filter =
-                    build_direct_message_backfill_filter(added_authors, now_seconds - 15, 200);
-                // Hand `filter` to your relay client for a short replay/backfill.
-            }
-        }
-        _ => {}
-    }
+let added_authors = tracker.register_subscription(subid, filter_json);
+if !added_authors.is_empty() {
+    let filter = build_direct_message_backfill_filter(added_authors, now_seconds - 15, 200);
+    // Hand `filter` to your relay client for a short replay/backfill.
 }
+
+tracker.unregister_subscription(subid);
 ```
 
 ## Group Model

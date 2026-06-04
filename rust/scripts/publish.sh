@@ -69,9 +69,6 @@ publish_crate "nostr-double-ratchet" "--no-verify"
 publish_crate "nostr-double-ratchet-pairwise-codec"
 publish_crate "nostr-double-ratchet-nostr"
 
-# Tier 3: runtime, depends on all of the above
-publish_crate "nostr-double-ratchet-runtime"
-
 if [[ "$FAILED" -ne 0 ]]; then
     echo ""
     echo "One or more crates failed to publish." >&2

@@ -20,7 +20,7 @@ use the `iris` CLI from the
 - Multi-device identity model (owner key + device keys) with AppKeys
 - Invite and link flows for session bootstrapping
 - Group messaging with sender keys and one-to-many outer events
-- High-level `NdrRuntime` path that owns both session and group transport
+- High-level TypeScript `NdrRuntime`; reusable Rust app protocol runtime lives in `iris-chat-rs`
 - Cross-language TS/Rust interoperability tests
 - Breaking changes are still possible while APIs settle
 
@@ -28,18 +28,19 @@ use the `iris` CLI from the
 
 | Mode | Use it when | What it owns |
 | --- | --- | --- |
-| `NdrRuntime` | You want the default production path with one app-facing surface for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager` in TypeScript. |
-| `SessionManager` | You want multi-device routing and storage, but your app still wants to own more of the runtime wiring. | Session orchestration, routing, storage-backed session state, and emitted pubsub/decrypted-message events. |
+| TypeScript `NdrRuntime` | You want the default TypeScript production path with one app-facing surface for direct messages, linked devices, and groups. | `AppKeysManager`, `DelegateManager`, `SessionManager`, and `GroupManager` in TypeScript. |
+| Rust protocol runtime | You want a reusable Rust app-facing surface or mobile FFI. | Use `iris-chat-rs` `chat-protocol` / `protocol-ffi`, which builds on these core crates. |
+| Rust `SessionManager` | You want deterministic multi-device routing and storage primitives, but your app owns relay/runtime wiring. | Session orchestration, routing decisions, storage-backed session state, and prepared sends/receives. |
 | `Session` | You want the simplest 1:1 primitive and you already own invite/bootstrap, persistence, and transport. Good for negotiated 1:1 channels or other app-specific direct links. | Only the ratchet session state itself. |
 
 Add-ons around those layers:
 
-- `SessionGroupRuntime`: attach the same group transport surface that `NdrRuntime` uses to an
-  existing `SessionManager`.
+- `SessionGroupRuntime`: in TypeScript, attach the same group transport surface that
+  `NdrRuntime` uses to an existing `SessionManager`.
 - `GroupManager`: direct group transport helper if you want to wire group state yourself.
 - `Invite`: handshake/bootstrap primitive when you build around plain `Session`.
 
-Use `NdrRuntime` when you want one concrete app-facing surface for:
+Use TypeScript `NdrRuntime` when you want one concrete app-facing surface for:
 
 - `setupUser(...)`
 - `sendEvent(...)`, `sendMessage(...)`
@@ -52,8 +53,8 @@ Use `NdrRuntime` when you want one concrete app-facing surface for:
 - `createGroup(...)`
 - `sendGroupEvent(...)`, `sendGroupMessage(...)`
 
-Use `SessionManager` when you want to keep your own app runtime, but you do not want to rebuild
-multi-device routing, device authorization, or session persistence yourself.
+Use Rust `SessionManager` when you want to keep your own app runtime, but you do not want to
+rebuild multi-device routing, device authorization, or session persistence yourself.
 
 Use plain `Session` when you want the smallest possible surface for 1:1 messaging and you do not
 need owner/device fanout, AppKeys-driven authorization, or runtime-managed group transport.
@@ -135,9 +136,9 @@ re-implementing policy ad hoc.
   `DirectMessageSubscriptionTracker`, `build_direct_message_backfill_filter`,
   `resolve_rumor_peer_pubkey`
 
-`NdrRuntime` and `SessionManager` own session state and emit pubsub/decrypted-message events, but
-they do not own relay history fetch. Consumers should treat new direct-message subscription authors
-as a transport catch-up signal and run a short replay/backfill with the shared helpers above.
+Runtime integrations own relay history fetch. Consumers should treat new direct-message
+subscription authors as a transport catch-up signal and run a short replay/backfill with the shared
+helpers above.
 
 ## Group Messaging Model
 
@@ -165,16 +166,16 @@ Groups use a hybrid model:
 
 ## Mobile FFI (optional)
 
-For iOS/Android integration (for example Flutter/native apps), use:
-
-- [rust/crates/ndr-ffi](./rust/crates/ndr-ffi) - UniFFI bindings crate
-- [scripts/mobile/build-ios.sh](./scripts/mobile/build-ios.sh)
-- [scripts/mobile/build-android.sh](./scripts/mobile/build-android.sh)
+For iOS/Android integration (for example Flutter/native apps), use the protocol-backed UniFFI
+crate in
+[`iris-chat-rs/protocol-ffi`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-rs).
 
 ## Repository Layout
 
 - `ts/`: TypeScript library
 - `rust/crates/nostr-double-ratchet/`: Rust core library
+- `rust/crates/nostr-double-ratchet-nostr/`: Nostr event codecs and integration helpers
+- `rust/crates/nostr-double-ratchet-pairwise-codec/`: group pairwise payload codec
 
 ## Development And Tests
 
@@ -189,8 +190,8 @@ pnpm -C ts bench:relay-churn
 cargo test -p nostr-double-ratchet --manifest-path rust/Cargo.toml
 ```
 
-For exact integration behavior, treat the README as onboarding and the runtime/invite tests
-as the behavioral source of truth.
+For exact integration behavior, treat the README as onboarding and the session-manager, invite,
+and group tests as the behavioral source of truth.
 
 ## Multi-Device Test Policy
 

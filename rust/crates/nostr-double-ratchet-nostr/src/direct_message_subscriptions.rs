@@ -1,12 +1,14 @@
-use crate::{
-    pubsub::build_filter, utils::pubkey_from_hex, SessionManagerEvent, MESSAGE_EVENT_KIND,
-};
-use nostr::{Filter, PublicKey};
+use crate::{utils::pubkey_from_hex, MESSAGE_EVENT_KIND};
+use nostr::{Filter, Kind, PublicKey, Timestamp};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 const DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_ID: &str = "ndr-runtime-messages";
 const DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX: &str = "ndr-runtime-messages-";
+const DIRECT_MESSAGE_PROTOCOL_SUBSCRIPTION_ID: &str = "icp-messages";
+const DIRECT_MESSAGE_PROTOCOL_SUBSCRIPTION_PREFIX: &str = "icp-messages-";
+const SESSION_CURRENT_SUBSCRIPTION_PREFIX: &str = "session-current-";
+const SESSION_NEXT_SUBSCRIPTION_PREFIX: &str = "session-next-";
 
 #[derive(Debug, Default, Clone)]
 pub struct DirectMessageSubscriptionTracker {
@@ -17,19 +19,6 @@ pub struct DirectMessageSubscriptionTracker {
 impl DirectMessageSubscriptionTracker {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn apply_session_event(&mut self, event: &SessionManagerEvent) -> Vec<PublicKey> {
-        match event {
-            SessionManagerEvent::Subscribe { subid, filter_json } => {
-                self.register_subscription(subid, filter_json)
-            }
-            SessionManagerEvent::Unsubscribe(subid) => {
-                self.unregister_subscription(subid);
-                Vec::new()
-            }
-            _ => Vec::new(),
-        }
     }
 
     pub fn register_subscription(
@@ -107,12 +96,11 @@ pub fn build_direct_message_backfill_filter(
         }
     }
 
-    build_filter()
-        .kinds(vec![MESSAGE_EVENT_KIND as u64])
+    Filter::new()
+        .kind(Kind::from(MESSAGE_EVENT_KIND as u16))
         .authors(unique_authors)
-        .since(since_seconds)
+        .since(Timestamp::from(since_seconds))
         .limit(limit)
-        .build()
 }
 
 pub fn direct_message_subscription_authors(
@@ -120,10 +108,7 @@ pub fn direct_message_subscription_authors(
     filter_json: impl AsRef<str>,
 ) -> Vec<PublicKey> {
     let subid = subid.as_ref().trim();
-    if subid.is_empty()
-        || (subid != DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_ID
-            && !subid.starts_with(DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX))
-    {
+    if !is_direct_message_subscription_id(subid) {
         return Vec::new();
     }
 
@@ -166,4 +151,14 @@ pub fn direct_message_subscription_authors(
         }
     }
     parsed
+}
+
+fn is_direct_message_subscription_id(subid: &str) -> bool {
+    !subid.is_empty()
+        && (subid == DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_ID
+            || subid.starts_with(DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_PREFIX)
+            || subid == DIRECT_MESSAGE_PROTOCOL_SUBSCRIPTION_ID
+            || subid.starts_with(DIRECT_MESSAGE_PROTOCOL_SUBSCRIPTION_PREFIX)
+            || subid.starts_with(SESSION_CURRENT_SUBSCRIPTION_PREFIX)
+            || subid.starts_with(SESSION_NEXT_SUBSCRIPTION_PREFIX))
 }

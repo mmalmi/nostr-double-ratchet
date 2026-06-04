@@ -1,4 +1,5 @@
 pub mod app_keys;
+pub mod direct_message_subscriptions;
 pub mod group_codec;
 pub mod message_builders;
 pub mod message_origin;
@@ -8,6 +9,10 @@ pub mod one_to_many;
 pub mod shared_channel;
 
 pub use app_keys::{is_app_keys_event, AppKeys, DeviceEntry, DeviceLabels};
+pub use direct_message_subscriptions::{
+    build_direct_message_backfill_filter, direct_message_subscription_authors,
+    DirectMessageSubscriptionTracker,
+};
 pub use group_codec::{JsonGroupPayloadCodecV1, NostrGroupManager};
 pub use message_builders::*;
 pub use message_origin::{classify_message_origin, MessageOrigin};
