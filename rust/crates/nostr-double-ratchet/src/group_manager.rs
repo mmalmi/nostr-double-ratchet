@@ -377,7 +377,7 @@ where
         let mut prepared = empty_group_prepared_send(request.group_id.clone());
         if request
             .required_revision
-            .is_some_and(|required| record.revision >= required)
+            .is_none_or(|required| record.revision >= required)
         {
             let metadata = self.repair_payload_to_owner(
                 session_manager,

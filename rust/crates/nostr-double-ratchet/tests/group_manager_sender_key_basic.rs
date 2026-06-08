@@ -924,7 +924,16 @@ fn sender_key_repair_request_restores_original_distribution_after_sender_chain_a
         1_900_070_012,
         1_900_070_012,
     )?;
-    assert_eq!(bob_events.len(), 1);
+    assert!(
+        bob_events.iter().any(|event| {
+            matches!(
+                event,
+                GroupIncomingEvent::MetadataUpdated(snapshot)
+                    if snapshot.group_id == created.group.group_id
+            )
+        }),
+        "repair responses should refresh group metadata alongside sender keys"
+    );
 
     let repaired =
         bob_groups.handle_sender_key_message(sender_key_message_from_envelope(&first_outer))?;
