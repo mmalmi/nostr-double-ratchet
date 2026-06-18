@@ -368,7 +368,7 @@ fn newer_public_invite_supersedes_older_one() -> Result<()> {
 }
 
 #[test]
-fn verified_owner_claim_migrates_session_to_claimed_owner() -> Result<()> {
+fn roster_proof_bound_invite_response_installs_session_under_owner() -> Result<()> {
     let alice = manager_device(19, 191);
     let bob = manager_device(20, 201);
 
@@ -392,17 +392,12 @@ fn verified_owner_claim_migrates_session_to_claimed_owner() -> Result<()> {
         &prepared.invite_responses[0],
     )?
     .expect("invite response should be processed");
-    assert_eq!(
-        observed.owner_pubkey,
-        provisional_owner_pubkey(bob.device_pubkey)
-    );
-
-    alice_manager.observe_peer_roster(bob.owner_pubkey, roster_for(&[&bob], 83));
+    assert_eq!(observed.owner_pubkey, bob.owner_pubkey);
+    assert!(!observed.owner_roster_proof.is_empty());
 
     let snapshot = alice_manager.snapshot();
     let verified_user = manager_user_snapshot(&snapshot, bob.owner_pubkey);
     let verified_device = manager_device_snapshot(verified_user, bob.device_pubkey);
-    assert_eq!(verified_device.claimed_owner_pubkey, None);
     assert!(verified_device.active_session.is_some());
     assert!(snapshot
         .users
@@ -412,7 +407,7 @@ fn verified_owner_claim_migrates_session_to_claimed_owner() -> Result<()> {
 }
 
 #[test]
-fn verified_roster_migrates_ownerless_provisional_invite_record() -> Result<()> {
+fn verified_roster_does_not_migrate_ownerless_provisional_invite_record() -> Result<()> {
     let alice = manager_device(21, 211);
     let bob = manager_device(22, 221);
 
@@ -441,11 +436,12 @@ fn verified_roster_migrates_ownerless_provisional_invite_record() -> Result<()> 
     let snapshot = alice_manager.snapshot();
     let verified_user = manager_user_snapshot(&snapshot, bob.owner_pubkey);
     let verified_device = manager_device_snapshot(verified_user, bob.device_pubkey);
-    assert!(verified_device.public_invite.is_some());
-    assert!(snapshot
-        .users
-        .iter()
-        .all(|user| user.owner_pubkey != provisional_owner_pubkey(bob.device_pubkey)));
+    assert!(verified_device.public_invite.is_none());
+
+    let provisional_user =
+        manager_user_snapshot(&snapshot, provisional_owner_pubkey(bob.device_pubkey));
+    let provisional_device = manager_device_snapshot(provisional_user, bob.device_pubkey);
+    assert!(provisional_device.public_invite.is_some());
     Ok(())
 }
 
@@ -473,8 +469,12 @@ fn snapshot_is_deterministic_for_users_devices_and_sessions() -> Result<()> {
         )?;
     }
 
-    let left_snapshot: SessionManagerSnapshot = left.snapshot();
-    let right_snapshot: SessionManagerSnapshot = right.snapshot();
+    let mut left_snapshot: SessionManagerSnapshot = left.snapshot();
+    let mut right_snapshot: SessionManagerSnapshot = right.snapshot();
+    assert!(left_snapshot.local_owner_roster_proof.is_some());
+    assert!(right_snapshot.local_owner_roster_proof.is_some());
+    left_snapshot.local_owner_roster_proof = None;
+    right_snapshot.local_owner_roster_proof = None;
     assert_eq!(
         serde_json::to_string(&left_snapshot)?,
         serde_json::to_string(&right_snapshot)?

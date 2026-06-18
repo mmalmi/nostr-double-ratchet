@@ -36,12 +36,6 @@ pub use shared_channel::SharedChannel;
 
 pub use nostr_double_ratchet::*;
 
-impl OwnerClaimVerifier for AppKeys {
-    fn has_device(&self, _device_pubkey: DevicePubkey, device_identity: nostr::PublicKey) -> bool {
-        self.get_device(&device_identity).is_some()
-    }
-}
-
 pub const APP_KEYS_EVENT_KIND: u32 = ROSTER_EVENT_KIND;
 pub const CHAT_MESSAGE_KIND: u32 = 14;
 pub const CHAT_SETTINGS_KIND: u32 = 10448;

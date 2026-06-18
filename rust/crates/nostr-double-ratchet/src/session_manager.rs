@@ -1,6 +1,6 @@
 use crate::{
-    AuthorizedDevice, DevicePubkey, DeviceRoster, DomainError, Error, Invite, InviteResponse,
-    InviteResponseEnvelope, MessageEnvelope, OwnerPubkey, ProtocolContext, Result,
+    DevicePubkey, DeviceRoster, DomainError, Error, Invite, InviteResponse, InviteResponseEnvelope,
+    MessageEnvelope, OwnerPubkey, OwnerRosterProof, ProtocolContext, Result,
     RosterSnapshotDecision, Session, SessionState, UnixSeconds,
 };
 use rand::{CryptoRng, RngCore};
@@ -14,6 +14,7 @@ pub struct SessionManager {
     local_device_pubkey: DevicePubkey,
     local_device_secret_key: [u8; 32],
     local_invite: Option<Invite>,
+    local_owner_roster_proof: Option<String>,
     users: BTreeMap<OwnerPubkey, UserRecord>,
 }
 
@@ -30,7 +31,6 @@ struct DeviceRecord {
     authorized: bool,
     is_stale: bool,
     stale_since: Option<UnixSeconds>,
-    claimed_owner_pubkey: Option<OwnerPubkey>,
     public_invite: Option<Invite>,
     invite_response_generated: bool,
     active_session: Option<Session>,
@@ -44,6 +44,8 @@ pub struct SessionManagerSnapshot {
     pub local_owner_pubkey: OwnerPubkey,
     pub local_device_pubkey: DevicePubkey,
     pub local_invite: Option<Invite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_owner_roster_proof: Option<String>,
     pub users: Vec<UserRecordSnapshot>,
 }
 
@@ -60,8 +62,6 @@ pub struct DeviceRecordSnapshot {
     pub authorized: bool,
     pub is_stale: bool,
     pub stale_since: Option<UnixSeconds>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_owner_pubkey: Option<OwnerPubkey>,
     pub public_invite: Option<Invite>,
     #[serde(default)]
     pub invite_response_generated: bool,
@@ -91,7 +91,7 @@ pub struct Delivery {
 pub struct ProcessedInviteResponse {
     pub owner_pubkey: OwnerPubkey,
     pub device_pubkey: DevicePubkey,
-    pub claimed_owner_pubkey: Option<OwnerPubkey>,
+    pub owner_roster_proof: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +140,7 @@ impl SessionManager {
             local_device_pubkey,
             local_device_secret_key,
             local_invite: None,
+            local_owner_roster_proof: None,
             users: BTreeMap::new(),
         }
     }
@@ -169,6 +170,7 @@ impl SessionManager {
             local_device_pubkey: snapshot.local_device_pubkey,
             local_device_secret_key,
             local_invite: snapshot.local_invite,
+            local_owner_roster_proof: snapshot.local_owner_roster_proof,
             users,
         })
     }
@@ -178,6 +180,7 @@ impl SessionManager {
             local_owner_pubkey: self.local_owner_pubkey,
             local_device_pubkey: self.local_device_pubkey,
             local_invite: self.local_invite.clone(),
+            local_owner_roster_proof: self.local_owner_roster_proof.clone(),
             users: self.users.values().map(UserRecord::snapshot).collect(),
         }
     }
@@ -188,6 +191,26 @@ impl SessionManager {
 
     pub fn replace_local_invite(&mut self, invite: Invite) {
         self.local_invite = Some(invite);
+    }
+
+    pub fn set_local_owner_roster_proof(&mut self, proof: OwnerRosterProof) -> Result<()> {
+        if proof.owner_pubkey != self.local_owner_pubkey {
+            return Err(DomainError::InvalidState(
+                "local owner roster proof belongs to a different owner".to_string(),
+            )
+            .into());
+        }
+        proof.ensure_authorizes_device(self.local_device_pubkey)?;
+        self.local_owner_roster_proof = Some(proof.raw_proof);
+        Ok(())
+    }
+
+    pub fn clear_local_owner_roster_proof(&mut self) {
+        self.local_owner_roster_proof = None;
+    }
+
+    pub fn local_owner_roster_proof(&self) -> Option<&str> {
+        self.local_owner_roster_proof.as_deref()
     }
 
     pub fn ensure_local_invite<R>(&mut self, ctx: &mut ProtocolContext<'_, R>) -> Result<&Invite>
@@ -240,6 +263,24 @@ impl SessionManager {
     where
         R: RngCore + CryptoRng,
     {
+        self.observe_invite_response_with_roster_proof_verifier(ctx, envelope, |_, _| {
+            Err(
+                DomainError::InvalidState("owner roster proof verifier required".to_string())
+                    .into(),
+            )
+        })
+    }
+
+    pub fn observe_invite_response_with_roster_proof_verifier<R, F>(
+        &mut self,
+        ctx: &mut ProtocolContext<'_, R>,
+        envelope: &InviteResponseEnvelope,
+        verify_owner_roster_proof: F,
+    ) -> Result<Option<ProcessedInviteResponse>>
+    where
+        R: RngCore + CryptoRng,
+        F: FnOnce(&str, DevicePubkey) -> Result<OwnerRosterProof>,
+    {
         let Some(invite) = self.local_invite.clone() else {
             return Ok(None);
         };
@@ -248,54 +289,32 @@ impl SessionManager {
         let InviteResponse {
             session,
             invitee_device_pubkey,
-            invitee_owner_pubkey,
+            owner_roster_proof,
             ..
         } = owned_invite.process_response(ctx, envelope, self.local_device_secret_key)?;
 
+        let owner_roster_proof = owner_roster_proof.ok_or_else(|| {
+            DomainError::InvalidState("invite response missing owner roster proof".to_string())
+        })?;
+        let proof = verify_owner_roster_proof(&owner_roster_proof, invitee_device_pubkey)?;
+        proof.ensure_authorizes_device(invitee_device_pubkey)?;
+
+        let owner_pubkey = proof.owner_pubkey;
+        self.apply_roster_for_owner(owner_pubkey, proof.roster);
         self.local_invite = Some(owned_invite);
 
-        let device_owner_pubkey = crate::owner_pubkey_from_device_pubkey(invitee_device_pubkey);
-        let invitee_owner_pubkey = invitee_owner_pubkey.ok_or_else(|| {
-            DomainError::InvalidState("invite response missing owner claim".to_string())
-        })?;
-        let claimed_owner_pubkey =
-            (invitee_owner_pubkey != device_owner_pubkey).then_some(invitee_owner_pubkey);
-        let owner_pubkey = claimed_owner_pubkey
-            .filter(|claimed_owner_pubkey| {
-                self.users
-                    .get(claimed_owner_pubkey)
-                    .and_then(|user| user.roster.as_ref())
-                    .and_then(|roster| roster.get_device(&invitee_device_pubkey))
-                    .is_some()
-            })
-            .unwrap_or(device_owner_pubkey);
-        let should_seed_single_device_roster = owner_pubkey == device_owner_pubkey
-            && self
-                .users
-                .get(&owner_pubkey)
-                .and_then(|user| user.roster.as_ref())
-                .is_none();
         let user = self.user_record_mut(owner_pubkey);
-        if should_seed_single_device_roster {
-            user.roster = Some(DeviceRoster::new(
-                ctx.now,
-                vec![AuthorizedDevice::new(invitee_device_pubkey, ctx.now)],
-            ));
-        }
         let record = user.device_record_mut(invitee_device_pubkey, ctx.now);
-        record.claimed_owner_pubkey = claimed_owner_pubkey
-            .filter(|claimed_owner_pubkey| *claimed_owner_pubkey != owner_pubkey);
-        if should_seed_single_device_roster {
-            record.authorized = true;
-            record.is_stale = false;
-        }
+        record.authorized = true;
+        record.is_stale = false;
+        record.stale_since = None;
         record.invite_response_generated = true;
         record.upsert_session(session, ctx.now);
 
         Ok(Some(ProcessedInviteResponse {
             owner_pubkey,
             device_pubkey: invitee_device_pubkey,
-            claimed_owner_pubkey: record.claimed_owner_pubkey,
+            owner_roster_proof,
         }))
     }
 
@@ -645,7 +664,7 @@ impl SessionManager {
     where
         R: RngCore + CryptoRng,
     {
-        let claimed_owner = Some(self.local_owner_pubkey);
+        let local_owner_roster_proof = self.local_owner_roster_proof.clone();
         let local_owner_pubkey = self.local_owner_pubkey;
         let local_device_pubkey = self.local_device_pubkey;
         let local_device_secret_key = self.local_device_secret_key;
@@ -671,11 +690,14 @@ impl SessionManager {
                 .public_invite
                 .clone()
                 .expect("checked public invite presence");
-            match public_invite.accept_with_owner_context(
+            let owner_roster_proof = local_owner_roster_proof
+                .clone()
+                .ok_or_else(|| DomainError::CannotSendYet)?;
+            match public_invite.accept_with_roster_proof_context(
                 ctx,
                 local_device_pubkey,
                 local_device_secret_key,
-                claimed_owner,
+                owner_roster_proof,
             ) {
                 Ok((mut session, invite_response)) => {
                     let envelope = session
@@ -744,11 +766,12 @@ impl SessionManager {
             return Ok(None);
         };
 
-        let (mut session, invite_response) = match public_invite.accept_with_owner_context(
+        let owner_roster_proof = local_owner_roster_proof.ok_or(DomainError::CannotSendYet)?;
+        let (mut session, invite_response) = match public_invite.accept_with_roster_proof_context(
             ctx,
             local_device_pubkey,
             local_device_secret_key,
-            claimed_owner,
+            owner_roster_proof,
         ) {
             Ok(result) => result,
             Err(Error::Domain(DomainError::InviteAlreadyUsed | DomainError::InviteExhausted)) => {
@@ -1055,98 +1078,7 @@ impl SessionManager {
             }
         }
 
-        self.reconcile_verified_claimed_devices(owner_pubkey, &next_roster, next_roster.created_at);
-
         decision
-    }
-
-    fn reconcile_verified_claimed_devices(
-        &mut self,
-        owner_pubkey: OwnerPubkey,
-        roster: &DeviceRoster,
-        now: UnixSeconds,
-    ) {
-        let roster_devices = authorized_device_set(roster);
-        if roster_devices.is_empty() {
-            return;
-        }
-
-        let source_owners: Vec<OwnerPubkey> = self
-            .users
-            .keys()
-            .copied()
-            .filter(|candidate_owner_pubkey| *candidate_owner_pubkey != owner_pubkey)
-            .collect();
-
-        let mut migrated = Vec::new();
-        let mut empty_sources = Vec::new();
-
-        for source_owner_pubkey in source_owners {
-            let matching_devices = self
-                .users
-                .get(&source_owner_pubkey)
-                .map(|user| {
-                    user.devices
-                        .values()
-                        .filter(|record| {
-                            if !roster_devices.contains(&record.device_pubkey) {
-                                return false;
-                            }
-                            if record.claimed_owner_pubkey == Some(owner_pubkey) {
-                                return true;
-                            }
-                            user.roster
-                                .as_ref()
-                                .and_then(|roster| roster.get_device(&record.device_pubkey))
-                                .is_none()
-                        })
-                        .map(|record| record.device_pubkey)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            if matching_devices.is_empty() {
-                continue;
-            }
-
-            if let Some(user) = self.users.get_mut(&source_owner_pubkey) {
-                let source_roster_is_provisional = user.roster.as_ref().is_some_and(|roster| {
-                    roster.devices().iter().all(|device| {
-                        matching_devices.contains(&device.device_pubkey)
-                            && crate::owner_pubkey_from_device_pubkey(device.device_pubkey)
-                                == source_owner_pubkey
-                    })
-                });
-
-                for device_pubkey in matching_devices {
-                    if let Some(mut record) = user.devices.remove(&device_pubkey) {
-                        record.claimed_owner_pubkey = None;
-                        migrated.push(record);
-                    }
-                }
-
-                if user.devices.is_empty()
-                    && (user.roster.is_none() || source_roster_is_provisional)
-                {
-                    empty_sources.push(source_owner_pubkey);
-                }
-            }
-        }
-
-        for source_owner_pubkey in empty_sources {
-            self.users.remove(&source_owner_pubkey);
-        }
-
-        if migrated.is_empty() {
-            return;
-        }
-
-        let user = self.user_record_mut(owner_pubkey);
-        for record in migrated {
-            let device_pubkey = record.device_pubkey;
-            user.device_record_mut(device_pubkey, record.created_at)
-                .absorb(record, now);
-        }
     }
 
     fn user_record_mut(&mut self, owner_pubkey: OwnerPubkey) -> &mut UserRecord {
@@ -1212,7 +1144,6 @@ impl DeviceRecord {
             authorized: false,
             is_stale: false,
             stale_since: None,
-            claimed_owner_pubkey: None,
             public_invite: None,
             invite_response_generated: false,
             active_session: None,
@@ -1228,7 +1159,6 @@ impl DeviceRecord {
             authorized: snapshot.authorized,
             is_stale: snapshot.is_stale,
             stale_since: snapshot.stale_since,
-            claimed_owner_pubkey: snapshot.claimed_owner_pubkey,
             public_invite: snapshot.public_invite,
             invite_response_generated: snapshot.invite_response_generated,
             active_session: snapshot.active_session.map(Session::from_state),
@@ -1248,7 +1178,6 @@ impl DeviceRecord {
             authorized: self.authorized,
             is_stale: self.is_stale,
             stale_since: self.stale_since,
-            claimed_owner_pubkey: self.claimed_owner_pubkey,
             public_invite: self.public_invite.clone(),
             invite_response_generated: self.invite_response_generated,
             active_session: self
@@ -1328,45 +1257,6 @@ impl DeviceRecord {
             self.inactive_sessions.truncate(MAX_INACTIVE_SESSIONS);
         }
         self.last_activity = Some(now);
-    }
-
-    fn absorb(&mut self, mut other: DeviceRecord, now: UnixSeconds) {
-        self.authorized |= other.authorized;
-        self.is_stale &= other.is_stale;
-        self.stale_since = match (self.stale_since, other.stale_since) {
-            (Some(existing), Some(incoming)) => Some(existing.min(incoming)),
-            (None, incoming) => incoming,
-            (existing, None) => existing,
-        };
-        self.claimed_owner_pubkey = self
-            .claimed_owner_pubkey
-            .or(other.claimed_owner_pubkey.take());
-        self.created_at = merge_created_at(self.created_at, other.created_at);
-
-        if let Some(public_invite) = other.public_invite.take() {
-            let should_replace_invite = self
-                .public_invite
-                .as_ref()
-                .is_none_or(|existing| public_invite.created_at >= existing.created_at);
-            if should_replace_invite {
-                self.public_invite = Some(public_invite);
-            }
-        }
-        self.invite_response_generated |= other.invite_response_generated;
-
-        if let Some(session) = other.active_session.take() {
-            self.upsert_session(session, now);
-        }
-
-        for session in other.inactive_sessions.drain(..) {
-            self.upsert_session(session, now);
-        }
-
-        self.last_activity = match (self.last_activity, other.last_activity) {
-            (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-            (None, incoming) => incoming,
-            (existing, None) => existing,
-        };
     }
 
     fn promote_inactive_session(&mut self, session: Session) {

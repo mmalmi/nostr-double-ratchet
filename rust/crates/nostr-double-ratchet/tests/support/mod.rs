@@ -5,9 +5,10 @@ use nostr::nips::nip44::{self, Version};
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, SecretKey, Tag, Timestamp};
 use nostr_double_ratchet::{
     AuthorizedDevice, Delivery, DevicePubkey, DeviceRecordSnapshot, DeviceRoster, Invite,
-    InviteResponse, InviteResponseEnvelope, MessageEnvelope, OwnerPubkey, PreparedSend,
-    ProcessedInviteResponse, ProtocolContext, ReceivedMessage, Result, RosterSnapshotDecision,
-    Session, SessionManager, SessionManagerSnapshot, SessionState, UnixSeconds, UserRecordSnapshot,
+    InviteResponse, InviteResponseEnvelope, MessageEnvelope, OwnerPubkey, OwnerRosterProof,
+    PreparedSend, ProcessedInviteResponse, ProtocolContext, ReceivedMessage, Result,
+    RosterSnapshotDecision, Session, SessionManager, SessionManagerSnapshot, SessionState,
+    UnixSeconds, UserRecordSnapshot,
 };
 use nostr_double_ratchet_nostr::nostr_codec as codec;
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
@@ -66,6 +67,12 @@ pub struct SentMessage {
     pub incoming: MessageEnvelope,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestOwnerRosterProofPayload {
+    owner_pubkey: OwnerPubkey,
+    roster: DeviceRoster,
+}
+
 pub fn context(seed: u64, now_secs: u64) -> ProtocolContext<'static, StdRng> {
     let mixed_seed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17)
         ^ now_secs.wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -119,7 +126,16 @@ pub fn manager_device(owner_fill: u8, device_fill: u8) -> ManagerDevice {
 }
 
 pub fn session_manager(device: &ManagerDevice) -> SessionManager {
-    SessionManager::new(device.owner_pubkey, device.secret_key)
+    let mut manager = SessionManager::new(device.owner_pubkey, device.secret_key);
+    let proof_payload =
+        manager_owner_roster_proof_payload(device, &[device], 1).expect("local roster proof");
+    let proof = verify_test_owner_roster_proof(&proof_payload, device.device_pubkey)
+        .expect("local roster proof must authorize device");
+    manager
+        .set_local_owner_roster_proof(proof)
+        .expect("local roster proof must authorize device");
+    manager.apply_local_roster(roster_for(&[device], 1));
+    manager
 }
 
 pub fn roster_for(devices: &[&ManagerDevice], created_at: u64) -> DeviceRoster {
@@ -130,6 +146,79 @@ pub fn roster_for(devices: &[&ManagerDevice], created_at: u64) -> DeviceRoster {
             .map(|device| AuthorizedDevice::new(device.device_pubkey, UnixSeconds(created_at)))
             .collect(),
     )
+}
+
+pub fn actor_app_keys_event_json(
+    owner: &Actor,
+    devices: &[&Actor],
+    created_at: u64,
+) -> Result<String> {
+    let roster = DeviceRoster::new(
+        UnixSeconds(created_at),
+        devices
+            .iter()
+            .map(|device| AuthorizedDevice::new(device.device_pubkey, UnixSeconds(created_at)))
+            .collect(),
+    );
+    let unsigned = codec::roster_unsigned_event(owner.owner_pubkey, &roster)?;
+    let signed = unsigned.sign_with_keys(&owner.keys).map_err(codec_error)?;
+    Ok(serde_json::to_string(&signed)?)
+}
+
+pub fn manager_app_keys_event_json(
+    owner: &ManagerDevice,
+    devices: &[&ManagerDevice],
+    created_at: u64,
+) -> Result<String> {
+    let roster = roster_for(devices, created_at);
+    let unsigned = codec::roster_unsigned_event(owner.owner_pubkey, &roster)?;
+    let signed = unsigned
+        .sign_with_keys(&owner.owner_keys)
+        .map_err(codec_error)?;
+    Ok(serde_json::to_string(&signed)?)
+}
+
+pub fn actor_owner_roster_proof_payload(
+    owner: &Actor,
+    devices: &[&Actor],
+    created_at: u64,
+) -> Result<String> {
+    let roster = DeviceRoster::new(
+        UnixSeconds(created_at),
+        devices
+            .iter()
+            .map(|device| AuthorizedDevice::new(device.device_pubkey, UnixSeconds(created_at)))
+            .collect(),
+    );
+    test_owner_roster_proof_payload(owner.owner_pubkey, roster)
+}
+
+pub fn manager_owner_roster_proof_payload(
+    owner: &ManagerDevice,
+    devices: &[&ManagerDevice],
+    created_at: u64,
+) -> Result<String> {
+    test_owner_roster_proof_payload(owner.owner_pubkey, roster_for(devices, created_at))
+}
+
+pub fn verify_test_owner_roster_proof(
+    raw_proof: &str,
+    device_pubkey: DevicePubkey,
+) -> Result<OwnerRosterProof> {
+    let payload: TestOwnerRosterProofPayload = serde_json::from_str(raw_proof)?;
+    let proof = OwnerRosterProof::new(payload.owner_pubkey, payload.roster, raw_proof.to_string());
+    proof.ensure_authorizes_device(device_pubkey)?;
+    Ok(proof)
+}
+
+fn test_owner_roster_proof_payload(
+    owner_pubkey: OwnerPubkey,
+    roster: DeviceRoster,
+) -> Result<String> {
+    Ok(serde_json::to_string(&TestOwnerRosterProofPayload {
+        owner_pubkey,
+        roster,
+    })?)
 }
 
 pub fn public_invite_via_url(invite: &Invite) -> Result<Invite> {
@@ -195,7 +284,11 @@ where
 {
     let event = codec::invite_response_event(envelope)?;
     let incoming = codec::parse_invite_response_event(&event)?;
-    manager.observe_invite_response(ctx, &incoming)
+    manager.observe_invite_response_with_roster_proof_verifier(
+        ctx,
+        &incoming,
+        verify_test_owner_roster_proof,
+    )
 }
 
 pub fn observe_device_invites(

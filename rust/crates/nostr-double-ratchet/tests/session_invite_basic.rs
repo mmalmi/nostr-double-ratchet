@@ -1,11 +1,11 @@
 mod support;
 
-use nostr_double_ratchet::{AuthorizedDevice, DeviceRoster, Invite, Result, UnixSeconds, MAX_SKIP};
+use nostr_double_ratchet::{Invite, Result, MAX_SKIP};
 use nostr_double_ratchet_nostr::nostr_codec as codec;
 use support::{
-    actor, assert_payload_eq, bootstrap_via_invite_event, bootstrap_via_invite_url, context,
-    direct_session_pair, payload_text, receive_event, restore_session, send_bytes, send_text,
-    snapshot, ROOT_URL,
+    actor, actor_owner_roster_proof_payload, assert_payload_eq, bootstrap_via_invite_event,
+    bootstrap_via_invite_url, context, direct_session_pair, payload_text, receive_event,
+    restore_session, send_bytes, send_text, snapshot, verify_test_owner_roster_proof, ROOT_URL,
 };
 
 #[test]
@@ -184,7 +184,7 @@ fn owned_invite_serde_roundtrip_preserves_bootstrap_capability() -> Result<()> {
 }
 
 #[test]
-fn invite_owner_claim_with_roster_verifies() -> Result<()> {
+fn invite_owner_roster_proof_payload_can_be_verified_by_caller() -> Result<()> {
     let alice = actor(15);
     let bob = actor(16);
     let claimed_owner = actor(17);
@@ -195,11 +195,11 @@ fn invite_owner_claim_with_roster_verifies() -> Result<()> {
     let public_invite = codec::parse_invite_url(&codec::invite_url(&owned_invite, ROOT_URL)?)?;
 
     let mut bob_accept_ctx = context(1101, 1_700_100_901);
-    let (_bob_session, response_envelope) = public_invite.accept_with_owner_context(
+    let (_bob_session, response_envelope) = public_invite.accept_with_roster_proof_context(
         &mut bob_accept_ctx,
         bob.device_pubkey,
         bob.secret_key,
-        Some(claimed_owner.owner_pubkey),
+        actor_owner_roster_proof_payload(&claimed_owner, &[&bob], 1)?,
     )?;
     let response_event = codec::invite_response_event(&response_envelope)?;
     let incoming_response = codec::parse_invite_response_event(&response_event)?;
@@ -211,20 +211,19 @@ fn invite_owner_claim_with_roster_verifies() -> Result<()> {
         alice.secret_key,
     )?;
 
-    assert_eq!(
-        response.claimed_owner_pubkey(),
-        Some(claimed_owner.owner_pubkey)
-    );
-    assert!(!response.has_verified_owner_claim(None));
-
-    let roster = DeviceRoster::new(
-        UnixSeconds(1),
-        vec![AuthorizedDevice::new(
-            response.invitee_device_pubkey,
-            UnixSeconds(1),
-        )],
-    );
-    assert!(response.has_verified_owner_claim(Some(&roster)));
+    assert_eq!(response.verified_owner_pubkey(), None);
+    let proof = verify_test_owner_roster_proof(
+        response
+            .owner_roster_proof
+            .as_deref()
+            .expect("owner roster proof"),
+        response.invitee_device_pubkey,
+    )?;
+    assert_eq!(proof.owner_pubkey, claimed_owner.owner_pubkey);
+    assert!(proof
+        .roster
+        .get_device(&response.invitee_device_pubkey)
+        .is_some());
     Ok(())
 }
 

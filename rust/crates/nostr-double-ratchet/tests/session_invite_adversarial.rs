@@ -1,13 +1,11 @@
 mod support;
 
-use nostr_double_ratchet::{
-    AuthorizedDevice, DeviceRoster, DomainError, Error, Invite, Result, UnixSeconds, MAX_SKIP,
-};
+use nostr_double_ratchet::{DomainError, Error, Invite, Result, UnixSeconds, MAX_SKIP};
 use nostr_double_ratchet_nostr::nostr_codec as codec;
 use support::{
-    actor, context, corrupt_invite_response_layer, header_tag, invite_response_fixture,
-    mutate_text, receive_event, receive_message, send_text, signed_event, snapshot,
-    InviteResponseCorruption, ROOT_URL,
+    actor, actor_owner_roster_proof_payload, context, corrupt_invite_response_layer, header_tag,
+    invite_response_fixture, mutate_text, receive_event, receive_message, send_text, signed_event,
+    snapshot, verify_test_owner_roster_proof, InviteResponseCorruption, ROOT_URL,
 };
 
 #[test]
@@ -305,7 +303,7 @@ fn invite_response_replay_is_rejected_without_duplicate_effects() -> Result<()> 
 }
 
 #[test]
-fn forged_owner_claim_without_roster_proof_stays_unverified() -> Result<()> {
+fn owner_roster_proof_that_omits_responder_device_is_rejected_by_verifier() -> Result<()> {
     let alice = actor(40);
     let bob = actor(41);
     let claimed_owner = actor(42);
@@ -317,11 +315,11 @@ fn forged_owner_claim_without_roster_proof_stays_unverified() -> Result<()> {
     let public_invite = codec::parse_invite_url(&codec::invite_url(&owned_invite, ROOT_URL)?)?;
 
     let mut accept_ctx = context(24, 1_700_200_901);
-    let (_bob_session, response_envelope) = public_invite.accept_with_owner_context(
+    let (_bob_session, response_envelope) = public_invite.accept_with_roster_proof_context(
         &mut accept_ctx,
         bob.device_pubkey,
         bob.secret_key,
-        Some(claimed_owner.owner_pubkey),
+        actor_owner_roster_proof_payload(&claimed_owner, &[&unrelated], 1)?,
     )?;
     let response_event = codec::invite_response_event(&response_envelope)?;
     let incoming_response = codec::parse_invite_response_event(&response_event)?;
@@ -329,20 +327,15 @@ fn forged_owner_claim_without_roster_proof_stays_unverified() -> Result<()> {
     let mut process_ctx = context(25, 1_700_200_902);
     let response =
         owned_invite.process_response(&mut process_ctx, &incoming_response, alice.secret_key)?;
-
-    let unrelated_roster = DeviceRoster::new(
-        UnixSeconds(1),
-        vec![AuthorizedDevice::new(
-            unrelated.device_pubkey,
-            UnixSeconds(1),
-        )],
+    let result = verify_test_owner_roster_proof(
+        response
+            .owner_roster_proof
+            .as_deref()
+            .expect("owner roster proof"),
+        response.invitee_device_pubkey,
     );
-
-    assert_eq!(
-        response.claimed_owner_pubkey(),
-        Some(claimed_owner.owner_pubkey)
+    assert!(
+        matches!(result, Err(Error::Domain(DomainError::InvalidState(message))) if message.contains("does not authorize"))
     );
-    assert!(!response.has_verified_owner_claim(None));
-    assert!(!response.has_verified_owner_claim(Some(&unrelated_roster)));
     Ok(())
 }

@@ -99,6 +99,37 @@ fn deliver_pairwise_group_events_for(
     Ok(events)
 }
 
+fn deliver_local_sibling_group_events_for(
+    manager: &mut nostr_double_ratchet::SessionManager,
+    groups: &mut GroupManager,
+    recipient_owner: nostr_double_ratchet::OwnerPubkey,
+    sender_owner: nostr_double_ratchet::OwnerPubkey,
+    prepared: &nostr_double_ratchet::GroupPreparedSend,
+    seed: u64,
+    now_secs: u64,
+) -> Result<Vec<GroupIncomingEvent>> {
+    let mut ctx = context(seed, now_secs);
+    let mut events = Vec::new();
+    for delivery in prepared
+        .local_sibling
+        .deliveries
+        .iter()
+        .filter(|delivery| delivery.owner_pubkey == recipient_owner)
+    {
+        if let Some(received) = manager_receive_delivery(manager, &mut ctx, sender_owner, delivery)?
+        {
+            if let Some(event) = groups.handle_pairwise_payload(
+                received.owner_pubkey,
+                received.device_pubkey,
+                &received.payload,
+            )? {
+                events.push(event);
+            }
+        }
+    }
+    Ok(events)
+}
+
 fn deliver_pairwise_group_events(
     manager: &mut nostr_double_ratchet::SessionManager,
     groups: &mut GroupManager,
@@ -713,25 +744,21 @@ fn sender_key_local_sibling_can_repair_missed_rotated_distribution() -> Result<(
         1_900_077_017,
         1_900_077_017,
     )?;
-    let response_delivery = repair_response
-        .local_sibling
-        .deliveries
-        .iter()
-        .find(|delivery| delivery.device_pubkey == alice2.device_pubkey)
-        .expect("repair response to local sibling");
-    let mut response_ctx = context(1_900_077_018, 1_900_077_018);
-    let received_response = manager_receive_delivery(
+    let events = deliver_local_sibling_group_events_for(
         &mut alice2_manager,
-        &mut response_ctx,
+        &mut alice2_groups,
+        alice2.owner_pubkey,
         alice1.owner_pubkey,
-        response_delivery,
-    )?
-    .expect("alice2 receives repair response");
-    alice2_groups.handle_pairwise_payload(
-        received_response.owner_pubkey,
-        received_response.device_pubkey,
-        &received_response.payload,
+        &repair_response,
+        1_900_077_018,
+        1_900_077_018,
     )?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GroupIncomingEvent::MetadataUpdated(_))),
+        "repair response should carry metadata or sender-key state to the local sibling"
+    );
 
     let repaired =
         alice2_groups.handle_sender_key_message(sender_key_message_from_envelope(&outer))?;
@@ -1013,10 +1040,37 @@ fn sender_key_late_member_repair_denies_pre_join_outer() -> Result<()> {
         &request,
     )?;
 
-    assert!(response.remote.deliveries.is_empty());
+    observe_matching_invite_responses(
+        &mut fixture.carol_manager,
+        &response.remote.invite_responses,
+        1_900_074_022,
+        1_900_074_022,
+    )?;
+    let events = deliver_pairwise_group_events_for(
+        &mut fixture.carol_manager,
+        &mut fixture.carol_groups,
+        fixture.carol.owner_pubkey,
+        fixture.bob.owner_pubkey,
+        &response,
+        1_900_074_023,
+        1_900_074_023,
+    )?;
+    assert!(
+        events
+            .iter()
+            .all(|event| matches!(event, GroupIncomingEvent::MetadataUpdated(_))),
+        "pre-join repair may send metadata but not a message"
+    );
     assert!(response.local_sibling.deliveries.is_empty());
     assert!(response.remote.sender_key_messages.is_empty());
     assert!(response.local_sibling.sender_key_messages.is_empty());
+    let pre_join_after_metadata = fixture
+        .carol_groups
+        .handle_sender_key_message(sender_key_message_from_envelope(&fixture.pre_join_outer))?;
+    assert!(matches!(
+        pre_join_after_metadata,
+        GroupSenderKeyHandleResult::PendingDistribution { .. }
+    ));
 
     Ok(())
 }
@@ -1071,7 +1125,12 @@ fn sender_key_late_member_repair_allows_post_join_missed_distribution() -> Resul
         1_900_075_023,
         1_900_075_023,
     )?;
-    assert_eq!(events.len(), 1);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GroupIncomingEvent::MetadataUpdated(_))),
+        "post-join repair should deliver metadata and/or sender-key state"
+    );
 
     let pre_join_result = fixture
         .carol_groups
@@ -1117,10 +1176,37 @@ fn sender_key_late_member_repair_snapshot_roundtrip_preserves_authorization() ->
         &request,
     )?;
 
-    assert!(response.remote.deliveries.is_empty());
+    observe_matching_invite_responses(
+        &mut fixture.carol_manager,
+        &response.remote.invite_responses,
+        1_900_076_022,
+        1_900_076_022,
+    )?;
+    let events = deliver_pairwise_group_events_for(
+        &mut fixture.carol_manager,
+        &mut fixture.carol_groups,
+        fixture.carol.owner_pubkey,
+        fixture.bob.owner_pubkey,
+        &response,
+        1_900_076_023,
+        1_900_076_023,
+    )?;
+    assert!(
+        events
+            .iter()
+            .all(|event| matches!(event, GroupIncomingEvent::MetadataUpdated(_))),
+        "pre-join repair after restore may send metadata but not a message"
+    );
     assert!(response.local_sibling.deliveries.is_empty());
     assert!(response.remote.sender_key_messages.is_empty());
     assert!(response.local_sibling.sender_key_messages.is_empty());
+    let pre_join_after_metadata = fixture
+        .carol_groups
+        .handle_sender_key_message(sender_key_message_from_envelope(&fixture.pre_join_outer))?;
+    assert!(matches!(
+        pre_join_after_metadata,
+        GroupSenderKeyHandleResult::PendingDistribution { .. }
+    ));
 
     Ok(())
 }

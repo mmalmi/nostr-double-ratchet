@@ -203,7 +203,6 @@ fn test_send_reaction_format() {
         .accept(
             bob_keys.public_key(),
             bob_keys.secret_key().to_secret_bytes(),
-            None,
         )
         .unwrap();
 
@@ -244,7 +243,6 @@ fn test_reaction_roundtrip() {
         .accept(
             bob_keys.public_key(),
             bob_keys.secret_key().to_secret_bytes(),
-            None,
         )
         .unwrap();
     let response = invite_response_event(&response_envelope).unwrap();

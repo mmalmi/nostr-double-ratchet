@@ -3,6 +3,7 @@ pub mod group;
 pub mod group_manager;
 pub mod ids;
 pub mod invite;
+pub mod owner_roster_proof;
 pub mod protocol_types;
 pub mod roster;
 pub mod roster_editor;
@@ -15,7 +16,8 @@ pub use error::{DomainError, Error, Result};
 pub use group::*;
 pub use group_manager::*;
 pub use ids::{DevicePubkey, OwnerPubkey, UnixSeconds};
-pub use invite::{Invite, InviteResponse, InviteResponseEnvelope, OwnerClaimVerifier};
+pub use invite::{Invite, InviteResponse, InviteResponseEnvelope};
+pub use owner_roster_proof::OwnerRosterProof;
 pub use protocol_types::{ProtocolContext, MAX_SKIP};
 pub use roster::{AuthorizedDevice, DeviceRoster, RosterSnapshotDecision};
 pub use roster_editor::RosterEditor;
@@ -29,7 +31,6 @@ pub use session_manager::{
     ReceivedMessage, RelayGap, SessionManager, SessionManagerSnapshot, UserRecordSnapshot,
 };
 
-pub(crate) use ids::owner_pubkey_from_device_pubkey;
 pub(crate) use utils::{
     device_pubkey_from_secret_bytes, kdf, random_secret_key_bytes, secret_key_from_bytes,
 };

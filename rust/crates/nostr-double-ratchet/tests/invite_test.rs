@@ -181,7 +181,7 @@ fn test_invite_accept_creates_session() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (session, envelope) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let (session, envelope) = invite.accept(bob_pk, bob_sk)?;
     let event = invite_response_event(&envelope)?;
 
     assert!(session.state.sending_chain_key.is_some());
@@ -232,7 +232,7 @@ fn test_accept_with_device_id() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (session, envelope) = invite.accept(bob_pk, bob_sk, Some("device-1".to_string()))?;
+    let (session, envelope) = invite.accept(bob_pk, bob_sk)?;
     let event = invite_response_event(&envelope)?;
 
     assert!(session.state.sending_chain_key.is_some());
@@ -252,7 +252,7 @@ fn test_accept_without_device_id() -> Result<()> {
     let bob_pk = bob_keys.public_key();
     let bob_sk = bob_keys.secret_key().to_secret_bytes();
 
-    let (session, _event) = invite.accept(bob_pk, bob_sk, None)?;
+    let (session, _event) = invite.accept(bob_pk, bob_sk)?;
 
     assert!(session.state.sending_chain_key.is_some());
 

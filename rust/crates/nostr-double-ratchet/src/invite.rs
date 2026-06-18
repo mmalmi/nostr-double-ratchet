@@ -1,6 +1,6 @@
 use crate::{
-    owner_pubkey_from_device_pubkey, random_secret_key_bytes, secret_key_from_bytes, DevicePubkey,
-    DeviceRoster, DomainError, OwnerPubkey, ProtocolContext, Result, Session, UnixSeconds,
+    random_secret_key_bytes, secret_key_from_bytes, DevicePubkey, DomainError, OwnerPubkey,
+    ProtocolContext, Result, Session, UnixSeconds,
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
@@ -40,10 +40,8 @@ pub struct Invite {
 pub struct InviteResponse {
     pub session: Session,
     pub invitee_device_pubkey: DevicePubkey,
-    pub invitee_owner_pubkey: Option<OwnerPubkey>,
     pub invitee_identity: PublicKey,
-    pub device_id: Option<String>,
-    pub owner_public_key: Option<PublicKey>,
+    pub owner_roster_proof: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,35 +55,11 @@ pub struct InviteResponseEnvelope {
 
 impl InviteResponse {
     pub fn resolved_owner_pubkey(&self) -> PublicKey {
-        self.owner_public_key.unwrap_or(self.invitee_identity)
+        self.invitee_identity
     }
 
-    pub fn claimed_owner_pubkey(&self) -> Option<OwnerPubkey> {
-        self.invitee_owner_pubkey
-    }
-
-    pub fn has_verified_owner_claim(&self, verifier: Option<&dyn OwnerClaimVerifier>) -> bool {
-        let owner_pubkey = self
-            .invitee_owner_pubkey
-            .unwrap_or_else(|| owner_pubkey_from_device_pubkey(self.invitee_device_pubkey));
-
-        if owner_pubkey == owner_pubkey_from_device_pubkey(self.invitee_device_pubkey) {
-            return true;
-        }
-
-        verifier.is_some_and(|verifier| {
-            verifier.has_device(self.invitee_device_pubkey, self.invitee_identity)
-        })
-    }
-}
-
-pub trait OwnerClaimVerifier {
-    fn has_device(&self, device_pubkey: DevicePubkey, device_identity: PublicKey) -> bool;
-}
-
-impl OwnerClaimVerifier for DeviceRoster {
-    fn has_device(&self, device_pubkey: DevicePubkey, _device_identity: PublicKey) -> bool {
-        self.get_device(&device_pubkey).is_some()
+    pub fn verified_owner_pubkey(&self) -> Option<OwnerPubkey> {
+        None
     }
 }
 
@@ -160,26 +134,29 @@ impl Invite {
         &self,
         invitee_public_key: PublicKey,
         invitee_private_key: [u8; 32],
-        device_id: Option<String>,
-    ) -> Result<(Session, InviteResponseEnvelope)> {
-        self.accept_with_owner(invitee_public_key, invitee_private_key, device_id, None)
-    }
-
-    pub fn accept_with_owner(
-        &self,
-        invitee_public_key: PublicKey,
-        invitee_private_key: [u8; 32],
-        device_id: Option<String>,
-        owner_public_key: Option<PublicKey>,
     ) -> Result<(Session, InviteResponseEnvelope)> {
         let mut rng = OsRng;
         let mut ctx = ProtocolContext::new(now_seconds(), &mut rng);
-        self.accept_with_owner_context_and_device(
+        self.accept_with_context(
             &mut ctx,
             DevicePubkey::from_bytes(invitee_public_key.to_bytes()),
             invitee_private_key,
-            owner_public_key.map(|owner| OwnerPubkey::from_bytes(owner.to_bytes())),
-            device_id,
+        )
+    }
+
+    pub fn accept_with_roster_proof(
+        &self,
+        invitee_public_key: PublicKey,
+        invitee_private_key: [u8; 32],
+        owner_roster_proof: String,
+    ) -> Result<(Session, InviteResponseEnvelope)> {
+        let mut rng = OsRng;
+        let mut ctx = ProtocolContext::new(now_seconds(), &mut rng);
+        self.accept_with_roster_proof_context(
+            &mut ctx,
+            DevicePubkey::from_bytes(invitee_public_key.to_bytes()),
+            invitee_private_key,
+            owner_roster_proof,
         )
     }
 
@@ -192,35 +169,38 @@ impl Invite {
     where
         R: RngCore + CryptoRng,
     {
-        self.accept_with_owner_context(ctx, invitee_public_key, invitee_private_key, None)
-    }
-
-    pub fn accept_with_owner_context<R>(
-        &self,
-        ctx: &mut ProtocolContext<'_, R>,
-        invitee_public_key: DevicePubkey,
-        invitee_private_key: [u8; 32],
-        invitee_owner_pubkey: Option<OwnerPubkey>,
-    ) -> Result<(Session, InviteResponseEnvelope)>
-    where
-        R: RngCore + CryptoRng,
-    {
-        self.accept_with_owner_context_and_device(
+        self.accept_with_roster_proof_context_inner(
             ctx,
             invitee_public_key,
             invitee_private_key,
-            invitee_owner_pubkey,
             None,
         )
     }
 
-    fn accept_with_owner_context_and_device<R>(
+    pub fn accept_with_roster_proof_context<R>(
         &self,
         ctx: &mut ProtocolContext<'_, R>,
         invitee_public_key: DevicePubkey,
         invitee_private_key: [u8; 32],
-        invitee_owner_pubkey: Option<OwnerPubkey>,
-        device_id: Option<String>,
+        owner_roster_proof: String,
+    ) -> Result<(Session, InviteResponseEnvelope)>
+    where
+        R: RngCore + CryptoRng,
+    {
+        self.accept_with_roster_proof_context_inner(
+            ctx,
+            invitee_public_key,
+            invitee_private_key,
+            Some(owner_roster_proof),
+        )
+    }
+
+    fn accept_with_roster_proof_context_inner<R>(
+        &self,
+        ctx: &mut ProtocolContext<'_, R>,
+        invitee_public_key: DevicePubkey,
+        invitee_private_key: [u8; 32],
+        owner_roster_proof: Option<String>,
     ) -> Result<(Session, InviteResponseEnvelope)>
     where
         R: RngCore + CryptoRng,
@@ -240,8 +220,7 @@ impl Invite {
 
         let payload = InviteResponsePayload {
             session_key: invitee_session_public_key,
-            owner_pubkey: invitee_owner_pubkey,
-            device_id,
+            owner_roster_proof,
         };
 
         let invitee_sk = secret_key_from_bytes(&invitee_private_key)?;
@@ -344,12 +323,8 @@ impl Invite {
         Ok(InviteResponse {
             session,
             invitee_device_pubkey: inner_event.pubkey,
-            invitee_owner_pubkey: payload.owner_pubkey,
             invitee_identity: inner_event.pubkey.to_nostr()?,
-            device_id: payload.device_id,
-            owner_public_key: payload.owner_pubkey.map(|owner| {
-                PublicKey::from_slice(&owner.to_bytes()).expect("owner pubkey bytes must be valid")
-            }),
+            owner_roster_proof: payload.owner_roster_proof,
         })
     }
 
@@ -394,10 +369,8 @@ struct InviteResponseInnerEvent {
 struct InviteResponsePayload {
     #[serde(rename = "sessionKey")]
     session_key: DevicePubkey,
-    #[serde(rename = "deviceId", skip_serializing_if = "Option::is_none")]
-    device_id: Option<String>,
-    #[serde(rename = "ownerPublicKey", skip_serializing_if = "Option::is_none")]
-    owner_pubkey: Option<OwnerPubkey>,
+    #[serde(rename = "ownerRosterProof", skip_serializing_if = "Option::is_none")]
+    owner_roster_proof: Option<String>,
 }
 
 fn now_seconds() -> UnixSeconds {
