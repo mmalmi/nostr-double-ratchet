@@ -20,6 +20,7 @@
     "test:integration": "DEBUG='ndk:*' vitest run tests/*.integration.test.ts",
     "bench:relay-churn": "tsx bench/relayChurn.ts",
     "build": "vite build && tsc",
+    "prepare": "pnpm run build",
     "lint": "eslint src --ext .ts --fix"
   },
   "repository": {
