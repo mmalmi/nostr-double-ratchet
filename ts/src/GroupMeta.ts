@@ -1,5 +1,10 @@
 import { bytesToHex } from "@noble/hashes/utils";
+import { Filter, UnsignedEvent, VerifiedEvent, verifyEvent } from "nostr-tools";
 
+export const GROUP_FACT_KIND = 7368;
+export const GROUP_ROSTER_FACT_KIND = GROUP_FACT_KIND;
+export const GROUP_ROSTER_FACT_TYPE = "group_roster";
+export const GROUP_ROSTER_FACT_SCHEMA = 1;
 export const GROUP_METADATA_KIND = 40;
 export const GROUP_INVITE_RUMOR_KIND = 10445;
 export const GROUP_SENDER_KEY_DISTRIBUTION_KIND = 10446;
@@ -30,6 +35,35 @@ export interface GroupMetadata {
   members: string[];
   admins: string[];
   secret?: string;
+}
+
+export interface GroupRosterFactFilterOptions {
+  groupIds?: string | string[];
+  authors?: string | string[];
+  since?: number;
+  until?: number;
+  limit?: number;
+}
+
+export interface BuildGroupRosterFactOptions {
+  signerPubkey: string;
+  revision: number;
+  createdBy?: string;
+  updatedAt?: number;
+  eventCreatedAt?: number;
+  protocol?: "pairwise_fanout_v1" | "sender_key_v1";
+}
+
+export interface GroupRosterFact {
+  eventId: string;
+  signerPubkey: string;
+  groupId: string;
+  revision: number;
+  createdBy: string;
+  updatedAt: number;
+  eventCreatedAt: number;
+  protocol?: "pairwise_fanout_v1" | "sender_key_v1";
+  group: GroupData;
 }
 
 export function isGroupAdmin(group: GroupData, pubkey: string): boolean {
@@ -194,4 +228,231 @@ export function removeGroupAdmin(
     ...group,
     admins: group.admins.filter((a) => a !== pubkey),
   };
+}
+
+export function buildGroupRosterFactFilter(
+  options: GroupRosterFactFilterOptions = {}
+): Filter {
+  const filter: Filter = {
+    kinds: [GROUP_ROSTER_FACT_KIND],
+  };
+  const groupIds = normalizeStringList(options.groupIds);
+  if (groupIds.length > 0) filter["#i"] = groupIds;
+  const authors = normalizeStringList(options.authors).map((author) =>
+    requireHexPubkey(author, "author")
+  );
+  if (authors.length > 0) filter.authors = authors;
+  if (options.since !== undefined) filter.since = options.since;
+  if (options.until !== undefined) filter.until = options.until;
+  if (options.limit !== undefined) filter.limit = options.limit;
+  return filter;
+}
+
+export function buildGroupRosterFactEvent(
+  group: GroupData,
+  options: BuildGroupRosterFactOptions
+): UnsignedEvent {
+  const groupId = requireNonEmpty(group.id, "group id");
+  const signerPubkey = requireHexPubkey(options.signerPubkey, "signer");
+  const eventCreatedAt = options.eventCreatedAt ?? Math.round(Date.now() / 1000);
+  const revision = requireNonNegativeInteger(options.revision, "revision");
+  const createdAt = requireNonNegativeInteger(group.createdAt, "created_at");
+  const updatedAt = requireNonNegativeInteger(
+    options.updatedAt ?? eventCreatedAt,
+    "updated_at"
+  );
+  const createdBy = requireHexPubkey(options.createdBy ?? signerPubkey, "created_by");
+  const members = canonicalPubkeys(group.members, "member");
+  const admins = canonicalPubkeys(group.admins, "admin");
+  requireAdminsAreMembers(admins, members);
+
+  const tags: string[][] = [
+    ["type", GROUP_ROSTER_FACT_TYPE],
+    ["schema", String(GROUP_ROSTER_FACT_SCHEMA)],
+    ["i", groupId, "group"],
+    ["group_id", groupId],
+    ["revision", String(revision)],
+    ["name", requireNonEmpty(group.name, "name")],
+    ["created_at", String(createdAt)],
+    ["updated_at", String(updatedAt)],
+    ["created_by", createdBy],
+  ];
+  if (options.protocol) tags.push(["protocol", options.protocol]);
+  if (group.description) tags.push(["about", group.description]);
+  if (group.picture) tags.push(["picture", group.picture]);
+  for (const member of members) tags.push(["member", member]);
+  for (const admin of admins) tags.push(["admin", admin]);
+
+  return {
+    kind: GROUP_ROSTER_FACT_KIND,
+    pubkey: signerPubkey,
+    created_at: eventCreatedAt,
+    tags,
+    content: "",
+  };
+}
+
+export function isGroupRosterFactEvent(
+  event: Pick<VerifiedEvent, "kind" | "tags">
+): boolean {
+  return event.kind === GROUP_ROSTER_FACT_KIND
+    && tagValues(event.tags, "type").includes(GROUP_ROSTER_FACT_TYPE);
+}
+
+export function parseGroupRosterFactEvent(event: VerifiedEvent): GroupRosterFact {
+  if (!verifyEvent(event)) {
+    throw new Error("GroupRoster fact signature is invalid");
+  }
+  if (!isGroupRosterFactEvent(event)) {
+    throw new Error("Event is not a GroupRoster fact");
+  }
+  if (event.content !== "") {
+    throw new Error("GroupRoster fact event content must be empty");
+  }
+  const schema = requireTagInteger(event.tags, "schema");
+  if (schema !== GROUP_ROSTER_FACT_SCHEMA) {
+    throw new Error(`Unsupported GroupRoster fact schema ${schema}`);
+  }
+  const groupId = groupIdFromTags(event.tags);
+  const taggedGroupId = firstTagValue(event.tags, "group_id");
+  if (taggedGroupId && taggedGroupId !== groupId) {
+    throw new Error("GroupRoster group_id/i tag mismatch");
+  }
+  const members = canonicalPubkeys(tagValues(event.tags, "member"), "member");
+  const admins = canonicalPubkeys(tagValues(event.tags, "admin"), "admin");
+  requireAdminsAreMembers(admins, members);
+  const signerPubkey = requireHexPubkey(event.pubkey, "signer");
+  if (!admins.includes(signerPubkey)) {
+    throw new Error("GroupRoster signer must be an admin");
+  }
+  const about = firstTagValue(event.tags, "about")
+    ?? firstTagValue(event.tags, "description");
+  const picture = firstTagValue(event.tags, "picture");
+  const protocol = parseGroupRosterProtocol(firstTagValue(event.tags, "protocol"));
+  const group: GroupData = {
+    id: groupId,
+    name: requireTagValue(event.tags, "name"),
+    members,
+    admins,
+    createdAt: requireTagInteger(event.tags, "created_at"),
+    ...(about && { description: about }),
+    ...(picture && { picture }),
+  };
+
+  return {
+    eventId: event.id,
+    signerPubkey,
+    groupId,
+    revision: requireTagInteger(event.tags, "revision"),
+    createdBy: requireHexPubkey(requireTagValue(event.tags, "created_by"), "created_by"),
+    updatedAt: requireTagInteger(event.tags, "updated_at"),
+    eventCreatedAt: event.created_at,
+    ...(protocol && { protocol }),
+    group,
+  };
+}
+
+export function projectGroupRosterFactEvents(events: VerifiedEvent[]): GroupRosterFact[] {
+  const byGroup = new Map<string, GroupRosterFact>();
+  for (const event of events) {
+    let fact: GroupRosterFact;
+    try {
+      fact = parseGroupRosterFactEvent(event);
+    } catch {
+      continue;
+    }
+    const existing = byGroup.get(fact.groupId);
+    if (!existing || compareGroupRosterFacts(fact, existing) > 0) {
+      byGroup.set(fact.groupId, fact);
+    }
+  }
+  return Array.from(byGroup.values()).sort((left, right) =>
+    left.groupId.localeCompare(right.groupId)
+  );
+}
+
+function compareGroupRosterFacts(left: GroupRosterFact, right: GroupRosterFact): number {
+  return left.revision - right.revision
+    || left.updatedAt - right.updatedAt
+    || left.eventCreatedAt - right.eventCreatedAt
+    || left.eventId.localeCompare(right.eventId);
+}
+
+function normalizeStringList(value: string | string[] | undefined): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => item.trim()).filter(Boolean);
+  }
+  return value?.trim() ? [value.trim()] : [];
+}
+
+function tagValues(tags: string[][], name: string): string[] {
+  return tags
+    .filter((tag) => tag[0] === name)
+    .map((tag) => tag[1]?.trim() ?? "")
+    .filter(Boolean);
+}
+
+function firstTagValue(tags: string[][], name: string): string | undefined {
+  return tagValues(tags, name)[0];
+}
+
+function requireTagValue(tags: string[][], name: string): string {
+  const value = firstTagValue(tags, name);
+  if (!value) throw new Error(`GroupRoster fact missing ${name}`);
+  return value;
+}
+
+function requireTagInteger(tags: string[][], name: string): number {
+  return requireNonNegativeInteger(requireTagValue(tags, name), name);
+}
+
+function requireNonEmpty(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`GroupRoster ${label} must not be empty`);
+  return trimmed;
+}
+
+function requireNonNegativeInteger(value: string | number, label: string): number {
+  const raw = typeof value === "number" ? String(value) : value.trim();
+  if (!/^\d+$/.test(raw)) throw new Error(`GroupRoster ${label} must be an integer`);
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) throw new Error(`GroupRoster ${label} is too large`);
+  return parsed;
+}
+
+function requireHexPubkey(value: string, label: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error(`GroupRoster ${label} pubkey must be 64-char hex`);
+  }
+  return normalized;
+}
+
+function canonicalPubkeys(values: string[], label: string): string[] {
+  return Array.from(new Set(values.map((value) => requireHexPubkey(value, label)))).sort();
+}
+
+function requireAdminsAreMembers(admins: string[], members: string[]): void {
+  if (admins.length === 0) throw new Error("GroupRoster admins must not be empty");
+  const memberSet = new Set(members);
+  if (admins.some((admin) => !memberSet.has(admin))) {
+    throw new Error("GroupRoster admins must also be members");
+  }
+}
+
+function groupIdFromTags(tags: string[][]): string {
+  const groupId = tags
+    .find((tag) => tag[0] === "i" && tag[2] === "group")
+    ?.at(1)
+    ?.trim();
+  if (!groupId) throw new Error("GroupRoster fact missing group subject");
+  return groupId;
+}
+
+function parseGroupRosterProtocol(
+  value: string | undefined
+): GroupRosterFact["protocol"] {
+  if (value === undefined) return undefined;
+  if (value === "pairwise_fanout_v1" || value === "sender_key_v1") return value;
+  throw new Error(`Unsupported GroupRoster protocol ${value}`);
 }

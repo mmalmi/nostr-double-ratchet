@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
 import {
   isGroupAdmin,
   generateGroupSecret,
@@ -15,6 +16,13 @@ import {
   removeGroupAdmin,
   GROUP_METADATA_KIND,
   GROUP_INVITE_RUMOR_KIND,
+  GROUP_FACT_KIND,
+  GROUP_ROSTER_FACT_KIND,
+  GROUP_ROSTER_FACT_TYPE,
+  buildGroupRosterFactEvent,
+  buildGroupRosterFactFilter,
+  parseGroupRosterFactEvent,
+  projectGroupRosterFactEvents,
   type GroupData,
   type GroupMetadata,
 } from '../src/Group'
@@ -44,6 +52,146 @@ describe('Group constants', () => {
 
   it('GROUP_INVITE_RUMOR_KIND is 10445', () => {
     expect(GROUP_INVITE_RUMOR_KIND).toBe(10445)
+  })
+
+  it('group roster facts use the shared fact event kind', () => {
+    expect(GROUP_FACT_KIND).toBe(7368)
+    expect(GROUP_ROSTER_FACT_KIND).toBe(GROUP_FACT_KIND)
+    expect(GROUP_ROSTER_FACT_TYPE).toBe('group_roster')
+  })
+})
+
+describe('Group roster fact helpers', () => {
+  it('builds and parses deterministic group roster facts around GroupData', () => {
+    const adminSecret = generateSecretKey()
+    const admin = getPublicKey(adminSecret)
+    const bobSecret = generateSecretKey()
+    const bob = getPublicKey(bobSecret)
+    const carolSecret = generateSecretKey()
+    const carol = getPublicKey(carolSecret)
+    const group = makeGroup({
+      id: 'group-facts',
+      name: 'Fact Friends',
+      description: 'tag-native roster',
+      picture: 'https://example.test/group.png',
+      members: [carol, admin, bob],
+      admins: [admin, bob],
+      createdAt: 1_700_000_000,
+      secret: 'not-on-the-wire',
+    })
+
+    const unsigned = buildGroupRosterFactEvent(group, {
+      signerPubkey: admin,
+      revision: 4,
+      createdBy: admin,
+      updatedAt: 1_700_000_123,
+      eventCreatedAt: 1_700_000_124,
+    })
+    expect(unsigned).toMatchObject({
+      kind: GROUP_ROSTER_FACT_KIND,
+      pubkey: admin,
+      content: '',
+      created_at: 1_700_000_124,
+    })
+    const expectedMembers = [admin, bob, carol].sort()
+    const expectedAdmins = [admin, bob].sort()
+    expect(unsigned.tags).toEqual([
+      ['type', GROUP_ROSTER_FACT_TYPE],
+      ['schema', '1'],
+      ['i', 'group-facts', 'group'],
+      ['group_id', 'group-facts'],
+      ['revision', '4'],
+      ['name', 'Fact Friends'],
+      ['created_at', '1700000000'],
+      ['updated_at', '1700000123'],
+      ['created_by', admin],
+      ['about', 'tag-native roster'],
+      ['picture', 'https://example.test/group.png'],
+      ...expectedMembers.map((member) => ['member', member]),
+      ...expectedAdmins.map((groupAdmin) => ['admin', groupAdmin]),
+    ])
+    expect(JSON.stringify(unsigned)).not.toContain('not-on-the-wire')
+
+    const signed = finalizeEvent(unsigned, adminSecret)
+    const parsed = parseGroupRosterFactEvent(signed)
+    expect(parsed).toMatchObject({
+      groupId: 'group-facts',
+      revision: 4,
+      signerPubkey: admin,
+      createdBy: admin,
+      updatedAt: 1_700_000_123,
+      group: {
+        id: 'group-facts',
+        name: 'Fact Friends',
+        description: 'tag-native roster',
+        picture: 'https://example.test/group.png',
+        members: expectedMembers,
+        admins: expectedAdmins,
+        createdAt: 1_700_000_000,
+      },
+    })
+  })
+
+  it('builds filters and projects the newest fact per group by revision', () => {
+    const adminSecret = generateSecretKey()
+    const admin = getPublicKey(adminSecret)
+    const bobSecret = generateSecretKey()
+    const bob = getPublicKey(bobSecret)
+    const base = makeGroup({
+      id: 'group-facts',
+      name: 'Old',
+      members: [admin],
+      admins: [admin],
+      createdAt: 10,
+    })
+    const newer = makeGroup({
+      id: 'group-facts',
+      name: 'New',
+      members: [admin, bob],
+      admins: [admin],
+      createdAt: 10,
+    })
+
+    expect(buildGroupRosterFactFilter({
+      groupIds: 'group-facts',
+      authors: admin,
+      since: 99,
+    })).toEqual({
+      kinds: [GROUP_ROSTER_FACT_KIND],
+      authors: [admin],
+      '#i': ['group-facts'],
+      since: 99,
+    })
+
+    const oldEvent = finalizeEvent(
+      buildGroupRosterFactEvent(base, {
+        signerPubkey: admin,
+        revision: 1,
+        updatedAt: 11,
+        eventCreatedAt: 11,
+      }),
+      adminSecret
+    )
+    const newEvent = finalizeEvent(
+      buildGroupRosterFactEvent(newer, {
+        signerPubkey: admin,
+        revision: 2,
+        updatedAt: 12,
+        eventCreatedAt: 12,
+      }),
+      adminSecret
+    )
+
+    expect(projectGroupRosterFactEvents([newEvent, oldEvent])).toEqual([
+      expect.objectContaining({
+        groupId: 'group-facts',
+        revision: 2,
+      group: expect.objectContaining({
+        name: 'New',
+        members: [admin, bob].sort(),
+      }),
+    }),
+  ])
   })
 })
 

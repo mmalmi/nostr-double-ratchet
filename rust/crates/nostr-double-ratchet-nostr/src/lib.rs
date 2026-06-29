@@ -8,12 +8,22 @@ pub mod nostr_codec;
 pub mod one_to_many;
 pub mod shared_channel;
 
-pub use app_keys::{is_app_keys_event, AppKeys, DeviceEntry, DeviceLabels};
+pub use app_keys::{
+    encrypted_device_label_payloads_from_nostr_identity_roster_op_event, is_app_keys_event,
+    is_nostr_identity_roster_op_event, AppKeys, DeviceEntry, DeviceLabels,
+    NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA,
+    NOSTR_IDENTITY_ROSTER_OP_KIND, NOSTR_IDENTITY_ROSTER_SCHEMA, NOSTR_IDENTITY_ROSTER_TYPE,
+};
 pub use direct_message_subscriptions::{
     build_direct_message_backfill_filter, direct_message_subscription_authors,
     DirectMessageSubscriptionTracker,
 };
-pub use group_codec::{JsonGroupPayloadCodecV1, NostrGroupManager};
+pub use group_codec::{
+    build_group_roster_fact_filter, group_roster_unsigned_event, is_group_roster_fact_event,
+    parse_group_roster_fact_event, project_group_roster_fact_events, GroupRosterFact,
+    JsonGroupPayloadCodecV1, NostrGroupManager, GROUP_FACT_KIND, GROUP_ROSTER_FACT_KIND,
+    GROUP_ROSTER_FACT_SCHEMA, GROUP_ROSTER_FACT_TYPE,
+};
 pub use message_builders::*;
 pub use message_origin::{classify_message_origin, MessageOrigin};
 pub use multi_device::{

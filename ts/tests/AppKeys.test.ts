@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
-import { AppKeys, buildAppKeysFilter, DeviceEntry } from '../src/AppKeys'
+import {
+  AppKeys,
+  NOSTR_IDENTITY_ROSTER_OP_KIND,
+  NOSTR_IDENTITY_ROSTER_TYPE,
+  buildNostrIdentityRosterFilter,
+  buildAppKeysFilter,
+  parseNostrIdentityRosterOpEvent,
+  projectNostrIdentityRosterEvents,
+  type DeviceEntry,
+} from '../src/AppKeys'
 import { APP_KEYS_EVENT_KIND } from '../src/types'
 import type { NostrSubscribe } from '../src/types'
 
@@ -15,6 +24,27 @@ describe('AppKeys', () => {
       createdAt: Math.floor(Date.now() / 1000),
     }
   }
+
+  const canonicalProfileId = '123e4567-e89b-42d3-a456-426614174000'
+
+  const canonicalRosterEvent = (
+    signerPrivateKey: Uint8Array,
+    tags: string[][],
+    createdAt: number
+  ) => finalizeEvent({
+    kind: NOSTR_IDENTITY_ROSTER_OP_KIND,
+    content: '',
+    created_at: createdAt,
+    tags: [
+      ['i', canonicalProfileId, 'subject'],
+      ['type', NOSTR_IDENTITY_ROSTER_TYPE],
+      ['schema', '1'],
+      ['actor_pubkey', getPublicKey(signerPrivateKey)],
+      ['client_nonce', `nonce-${createdAt}`],
+      ['created_at', String(createdAt)],
+      ...tags,
+    ],
+  }, signerPrivateKey)
 
   describe('constructor and basic properties', () => {
     it('should create an empty AppKeys', () => {
@@ -235,6 +265,103 @@ describe('AppKeys', () => {
         clientLabel: 'NDR Desktop',
         updatedAt: expect.any(Number),
       })
+    })
+
+    it('projects canonical NostrIdentity AppKey facets without public facet labels', () => {
+      const adminPrivateKey = generateSecretKey()
+      const adminPubkey = getPublicKey(adminPrivateKey)
+      const devicePrivateKey = generateSecretKey()
+      const devicePubkey = getPublicKey(devicePrivateKey)
+
+      const bootstrap = canonicalRosterEvent(adminPrivateKey, [
+        ['op', 'add_key'],
+        ['key_pubkey', adminPubkey],
+        ['key_purpose', 'app'],
+        ['key_capability', 'admin'],
+        ['key_capability', 'write'],
+        ['key_capability', 'receive_secret_wraps'],
+        ['key_capability', 'decrypt_secret_epochs'],
+        ['key_added_at', '10'],
+        ['key_label', 'Private laptop'],
+      ], 10)
+      const addDevice = canonicalRosterEvent(adminPrivateKey, [
+        ['op', 'add_key'],
+        ['key_pubkey', devicePubkey],
+        ['key_purpose', 'app'],
+        ['key_capability', 'write'],
+        ['key_capability', 'receive_secret_wraps'],
+        ['key_capability', 'decrypt_secret_epochs'],
+        ['key_added_at', '11'],
+        ['key_label', 'Phone'],
+      ], 11)
+
+      const projected = AppKeys.fromNostrIdentityRosterEvents(canonicalProfileId, [
+        addDevice,
+        bootstrap,
+      ])
+
+      expect(projected.getAllDevices()).toEqual([
+        { identityPubkey: adminPubkey, createdAt: 10 },
+        { identityPubkey: devicePubkey, createdAt: 11 },
+      ])
+      expect(projected.serialize()).not.toContain('Private laptop')
+      expect(projected.serialize()).not.toContain('Phone')
+    })
+
+    it('exposes NostrIdentity roster filters, parser, and DeviceEntry projection helpers', () => {
+      const adminPrivateKey = generateSecretKey()
+      const adminPubkey = getPublicKey(adminPrivateKey)
+      const devicePrivateKey = generateSecretKey()
+      const devicePubkey = getPublicKey(devicePrivateKey)
+
+      const filter = buildNostrIdentityRosterFilter({
+        profileIds: canonicalProfileId,
+        authors: adminPubkey,
+        limit: 20,
+      })
+      expect(filter).toEqual({
+        kinds: [NOSTR_IDENTITY_ROSTER_OP_KIND],
+        authors: [adminPubkey],
+        '#i': [canonicalProfileId],
+        limit: 20,
+      })
+
+      const bootstrap = canonicalRosterEvent(adminPrivateKey, [
+        ['op', 'add_key'],
+        ['key_pubkey', adminPubkey],
+        ['key_purpose', 'app'],
+        ['key_capability', 'admin'],
+        ['key_capability', 'write'],
+        ['key_added_at', '10'],
+      ], 10)
+      const addDevice = canonicalRosterEvent(adminPrivateKey, [
+        ['op', 'add_key'],
+        ['key_pubkey', devicePubkey],
+        ['key_purpose', 'app'],
+        ['key_capability', 'write'],
+        ['key_added_at', '11'],
+      ], 11)
+
+      const parsed = parseNostrIdentityRosterOpEvent(addDevice)
+      expect(parsed.profileId).toBe(canonicalProfileId)
+      expect(parsed.signerPubkey).toBe(adminPubkey)
+      expect(parsed.op).toEqual({
+        op: 'add_key',
+        key: {
+          pubkey: devicePubkey,
+          purposes: new Set(['app']),
+          capabilities: new Set(['write']),
+          addedAt: 11,
+        },
+      })
+
+      expect(projectNostrIdentityRosterEvents(canonicalProfileId, [
+        addDevice,
+        bootstrap,
+      ])).toEqual([
+        { identityPubkey: adminPubkey, createdAt: 10 },
+        { identityPubkey: devicePubkey, createdAt: 11 },
+      ])
     })
   })
 

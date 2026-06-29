@@ -5,6 +5,22 @@ import { APP_KEYS_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
 
 const now = () => Math.round(Date.now() / 1000)
 const APP_KEYS_D_TAG = "double-ratchet/app-keys"
+export const NOSTR_IDENTITY_ROSTER_OP_KIND = 7368
+export const NOSTR_IDENTITY_ROSTER_TYPE = "nostr_identity_roster_op"
+export const NOSTR_IDENTITY_ROSTER_SCHEMA = 1
+export const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT = "encrypted_device_labels"
+export const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA = 1
+const NOSTR_IDENTITY_APP_PURPOSE = "app"
+const NOSTR_IDENTITY_ADMIN_CAPABILITY = "admin"
+const NOSTR_IDENTITY_WRITE_CAPABILITY = "write"
+
+export interface NostrIdentityRosterFilterOptions {
+  profileIds?: string | string[]
+  authors?: string | string[]
+  since?: number
+  until?: number
+  limit?: number
+}
 
 // Simplified tag format: ["device", identityPubkey, createdAt]
 type DeviceTag = [
@@ -65,6 +81,35 @@ export interface DeviceLabels {
   updatedAt: number
 }
 
+export interface NostrIdentityEncryptedDeviceLabelsPayload {
+  schema: typeof NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA
+  profileId: string
+  secretEpoch: number
+  labels: Record<string, string>
+  updatedAt: number
+}
+
+export type NostrIdentityAppKeyFacet = {
+  pubkey: string
+  purposes: Set<string>
+  capabilities: Set<string>
+  addedAt: number
+}
+
+export type NostrIdentityRosterOp =
+  | { op: "add_key"; key: NostrIdentityAppKeyFacet }
+  | { op: "tombstone_key"; pubkey: string }
+  | { op: "set_key_capabilities"; pubkey: string; capabilities: Set<string> }
+  | { op: "ignore" }
+
+export type SignedNostrIdentityRosterOp = {
+  opId: string
+  profileId: string
+  signerPubkey: string
+  createdAt: number
+  op: NostrIdentityRosterOp
+}
+
 interface DeviceLabelsEntry extends DeviceLabels {
   identityPubkey: string
 }
@@ -117,6 +162,231 @@ const normalizeDeviceLabelsEntry = (value: unknown): DeviceLabelsEntry | null =>
     ...(deviceLabel !== undefined ? { deviceLabel } : {}),
     ...(clientLabel !== undefined ? { clientLabel } : {}),
   }
+}
+
+export function isNostrIdentityRosterOpEvent(
+  event: Pick<VerifiedEvent, "kind" | "tags">
+): boolean {
+  return event.kind === NOSTR_IDENTITY_ROSTER_OP_KIND
+    && tagValues(event.tags, "type").includes(NOSTR_IDENTITY_ROSTER_TYPE)
+}
+
+export function buildNostrIdentityRosterFilter(
+  options: NostrIdentityRosterFilterOptions = {}
+): Filter {
+  const filter: Filter = {
+    kinds: [NOSTR_IDENTITY_ROSTER_OP_KIND],
+  }
+  const profileIds = normalizeStringList(options.profileIds).map(canonicalProfileId)
+  if (profileIds.length > 0) filter["#i"] = profileIds
+  const authors = normalizeStringList(options.authors)
+    .map((author) => requireHexPubkey(author, "author"))
+  if (authors.length > 0) filter.authors = authors
+  if (options.since !== undefined) filter.since = options.since
+  if (options.until !== undefined) filter.until = options.until
+  if (options.limit !== undefined) filter.limit = options.limit
+  return filter
+}
+
+export function encryptedDeviceLabelPayloadsFromNostrIdentityRosterOpEvent(
+  event: Pick<VerifiedEvent, "tags">
+): string[] {
+  return tagValues(event.tags, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
+}
+
+function tagValues(tags: string[][], name: string): string[] {
+  return tags
+    .filter((tag) => tag[0] === name)
+    .map((tag) => tag[1]?.trim() ?? "")
+    .filter(Boolean)
+}
+
+function normalizeStringList(value: string | string[] | undefined): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => item.trim()).filter(Boolean)
+  }
+  return value?.trim() ? [value.trim()] : []
+}
+
+function firstTagValue(tags: string[][], name: string): string | undefined {
+  return tagValues(tags, name)[0]
+}
+
+function requireTagValue(tags: string[][], name: string): string {
+  const value = firstTagValue(tags, name)
+  if (!value) throw new Error(`NostrIdentity roster missing ${name}`)
+  return value
+}
+
+function normalizeHexPubkey(value: string): string | null {
+  const trimmed = value.trim().toLowerCase()
+  return /^[0-9a-f]{64}$/.test(trimmed) ? trimmed : null
+}
+
+function requireHexPubkey(value: string, label: string): string {
+  const normalized = normalizeHexPubkey(value)
+  if (!normalized) throw new Error(`NostrIdentity ${label} pubkey must be 64-char hex`)
+  return normalized
+}
+
+function requireInteger(value: string, label: string): number {
+  if (!/^\d+$/.test(value)) throw new Error(`NostrIdentity ${label} must be an integer`)
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed)) throw new Error(`NostrIdentity ${label} is too large`)
+  return parsed
+}
+
+function profileIdFromTags(tags: string[][]): string {
+  const profileId = tags
+    .find((tag) => tag[0] === "i" && tag[2] === "subject")
+    ?.at(1)
+    ?.trim()
+  if (
+    !profileId
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(profileId)
+  ) {
+    throw new Error("NostrIdentity roster missing profile subject")
+  }
+  return profileId.toLowerCase()
+}
+
+export function parseNostrIdentityRosterOpEvent(event: VerifiedEvent): SignedNostrIdentityRosterOp {
+  if (!verifyEvent(event)) {
+    throw new Error("NostrIdentity roster signature is invalid")
+  }
+  if (!isNostrIdentityRosterOpEvent(event)) {
+    throw new Error("Event is not an NostrIdentity roster op")
+  }
+  if (event.content !== "") {
+    throw new Error("NostrIdentity roster fact event content must be empty")
+  }
+  const schema = requireInteger(requireTagValue(event.tags, "schema"), "schema")
+  if (schema !== NOSTR_IDENTITY_ROSTER_SCHEMA) {
+    throw new Error(`Unsupported NostrIdentity roster schema ${schema}`)
+  }
+  const profileId = profileIdFromTags(event.tags)
+  const actorPubkey = requireHexPubkey(requireTagValue(event.tags, "actor_pubkey"), "actor")
+  const signerPubkey = requireHexPubkey(event.pubkey, "signer")
+  if (actorPubkey !== signerPubkey) {
+    throw new Error("NostrIdentity roster actor signer mismatch")
+  }
+  const createdAt = requireInteger(requireTagValue(event.tags, "created_at"), "created_at")
+  if (createdAt !== event.created_at) {
+    throw new Error("NostrIdentity roster created_at mismatch")
+  }
+  return {
+    opId: event.id,
+    profileId,
+    signerPubkey,
+    createdAt,
+    op: parseNostrIdentityRosterOp(event.tags),
+  }
+}
+
+function parseNostrIdentityRosterOp(tags: string[][]): NostrIdentityRosterOp {
+  const op = requireTagValue(tags, "op")
+  if (op === "add_key") {
+    return {
+      op,
+      key: {
+        pubkey: requireHexPubkey(requireTagValue(tags, "key_pubkey"), "key"),
+        purposes: new Set(tagValues(tags, "key_purpose")),
+        capabilities: new Set(tagValues(tags, "key_capability")),
+        addedAt: requireInteger(requireTagValue(tags, "key_added_at"), "key_added_at"),
+      },
+    }
+  }
+  if (op === "tombstone_key") {
+    return {
+      op,
+      pubkey: requireHexPubkey(requireTagValue(tags, "target_pubkey"), "target"),
+    }
+  }
+  if (op === "set_key_capabilities") {
+    return {
+      op,
+      pubkey: requireHexPubkey(requireTagValue(tags, "target_pubkey"), "target"),
+      capabilities: new Set(tagValues(tags, "capability")),
+    }
+  }
+  if (op === "rotate_secret_epoch" || op === "repair_secret_wraps") {
+    return { op: "ignore" }
+  }
+  throw new Error(`Unsupported NostrIdentity roster op ${op}`)
+}
+
+function canonicalProfileId(profileId: string): string {
+  const normalized = profileId.trim().toLowerCase()
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
+    throw new Error("NostrIdentity id must be a UUID")
+  }
+  return normalized
+}
+
+function isAppKeyFacet(facet: NostrIdentityAppKeyFacet): boolean {
+  return facet.purposes.has(NOSTR_IDENTITY_APP_PURPOSE)
+    && facet.capabilities.has(NOSTR_IDENTITY_WRITE_CAPABILITY)
+}
+
+export function projectNostrIdentityRosterEvents(
+  profileId: string,
+  events: VerifiedEvent[]
+): DeviceEntry[] {
+  const targetProfileId = canonicalProfileId(profileId)
+  const activeFacets = new Map<string, NostrIdentityAppKeyFacet>()
+  const sorted = events
+    .slice()
+    .sort((left, right) => (
+      left.created_at - right.created_at
+      || left.id.localeCompare(right.id)
+    ))
+
+  for (const event of sorted) {
+    let signed: SignedNostrIdentityRosterOp
+    try {
+      signed = parseNostrIdentityRosterOpEvent(event)
+    } catch {
+      continue
+    }
+    if (signed.profileId !== targetProfileId) continue
+
+    const op = signed.op
+    const signerFacet = activeFacets.get(signed.signerPubkey)
+    const isBootstrap = activeFacets.size === 0
+      && op.op === "add_key"
+      && op.key.pubkey === signed.signerPubkey
+      && op.key.capabilities.has(NOSTR_IDENTITY_ADMIN_CAPABILITY)
+    const canAdmin = isBootstrap
+      || Boolean(signerFacet?.capabilities.has(NOSTR_IDENTITY_ADMIN_CAPABILITY))
+    if (!canAdmin) continue
+
+    if (op.op === "add_key") {
+      activeFacets.set(op.key.pubkey, {
+        pubkey: op.key.pubkey,
+        purposes: new Set(op.key.purposes),
+        capabilities: new Set(op.key.capabilities),
+        addedAt: op.key.addedAt,
+      })
+    } else if (op.op === "tombstone_key") {
+      activeFacets.delete(op.pubkey)
+    } else if (op.op === "set_key_capabilities") {
+      const facet = activeFacets.get(op.pubkey)
+      if (facet) {
+        activeFacets.set(op.pubkey, {
+          ...facet,
+          capabilities: new Set(op.capabilities),
+        })
+      }
+    }
+  }
+
+  return Array.from(activeFacets.values())
+    .filter(isAppKeyFacet)
+    .sort((left, right) => left.addedAt - right.addedAt || left.pubkey.localeCompare(right.pubkey))
+    .map((facet) => ({
+      identityPubkey: facet.pubkey,
+      createdAt: facet.addedAt,
+    }))
 }
 
 /**
@@ -298,6 +568,10 @@ export class AppKeys {
     }
 
     return appKeys
+  }
+
+  static fromNostrIdentityRosterEvents(profileId: string, events: VerifiedEvent[]): AppKeys {
+    return new AppKeys(projectNostrIdentityRosterEvents(profileId, events))
   }
 
   serialize(): string {
