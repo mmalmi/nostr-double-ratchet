@@ -171,7 +171,6 @@ describe("direct message subscription helpers", () => {
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ],
-        1234,
         50
       )
     ).toEqual({
@@ -180,7 +179,6 @@ describe("direct message subscription helpers", () => {
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       ],
-      since: 1234,
       limit: 50,
     })
   })
@@ -262,7 +260,6 @@ describe("direct message subscription helpers", () => {
       {
         kinds: [37368],
         authors: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
-        since: 1234,
         limit: 50,
       },
       {

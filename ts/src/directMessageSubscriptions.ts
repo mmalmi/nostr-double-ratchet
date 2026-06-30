@@ -85,7 +85,6 @@ export function buildDirectMessageBackfillFilter(
 
 export function buildAppKeysBackfillFilter(
   authors: Iterable<string>,
-  since: number,
   limit: number = 200
 ): Filter {
   const normalizedAuthors: string[] = []
@@ -100,7 +99,6 @@ export function buildAppKeysBackfillFilter(
   return {
     kinds: [APP_KEYS_EVENT_KIND],
     authors: normalizedAuthors,
-    since,
     limit,
   }
 }
@@ -158,7 +156,7 @@ export function buildRuntimeBackfillFilters(
 ): Filter[] {
   const filters: Filter[] = []
   if (registered.addedAppKeysAuthors.length > 0) {
-    filters.push(buildAppKeysBackfillFilter(registered.addedAppKeysAuthors, since, limit))
+    filters.push(buildAppKeysBackfillFilter(registered.addedAppKeysAuthors, limit))
   }
   if (registered.addedMessageAuthors.length > 0) {
     filters.push(

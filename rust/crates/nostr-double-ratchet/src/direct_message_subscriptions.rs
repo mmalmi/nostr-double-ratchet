@@ -204,7 +204,6 @@ pub fn build_direct_message_backfill_filter(
 
 pub fn build_app_keys_backfill_filter(
     authors: impl IntoIterator<Item = PublicKey>,
-    since_seconds: u64,
     limit: usize,
 ) -> Filter {
     let mut unique_authors = Vec::new();
@@ -218,7 +217,6 @@ pub fn build_app_keys_backfill_filter(
     Filter::new()
         .kind(Kind::from(APP_KEYS_EVENT_KIND as u16))
         .authors(unique_authors)
-        .since(Timestamp::from(since_seconds))
         .limit(limit)
 }
 
@@ -251,7 +249,6 @@ pub fn build_runtime_backfill_filters(
     if !registration.added_app_keys_authors.is_empty() {
         filters.push(build_app_keys_backfill_filter(
             registration.added_app_keys_authors.iter().copied(),
-            since_seconds,
             limit,
         ));
     }
@@ -618,7 +615,6 @@ mod tests {
             app_keys["authors"],
             serde_json::json!(["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"])
         );
-        assert_eq!(app_keys["since"], serde_json::json!(1234));
         assert_eq!(app_keys["limit"], serde_json::json!(50));
 
         let direct = serde_json::to_value(&filters[1]).unwrap();
