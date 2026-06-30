@@ -208,8 +208,11 @@ describe("NdrRuntime", () => {
     const latestAppKeys = new AppKeys([
       { identityPubkey: "device-a", createdAt: 100 },
     ])
-    const latestEvent = latestAppKeys.getEvent()
-    latestEvent.created_at = 200
+    const latestEvent = latestAppKeys.getEvent({
+      ownerPrivateKey,
+      ownerPubkey,
+      createdAt: 200,
+    })
     relay.storeAndDeliver(finalizeEvent(latestEvent, ownerPrivateKey) as VerifiedEvent)
     await tick()
 
@@ -219,8 +222,11 @@ describe("NdrRuntime", () => {
     expect(runtime.getState().lastAppKeysCreatedAt).toBe(200)
 
     const staleAppKeys = new AppKeys([])
-    const staleEvent = staleAppKeys.getEvent()
-    staleEvent.created_at = 150
+    const staleEvent = staleAppKeys.getEvent({
+      ownerPrivateKey,
+      ownerPubkey,
+      createdAt: 150,
+    })
     relay.storeAndDeliver(finalizeEvent(staleEvent, ownerPrivateKey) as VerifiedEvent)
     await tick()
 
@@ -259,8 +265,10 @@ describe("NdrRuntime", () => {
     runtime.startAppKeysSubscription(ownerPubkey)
     const event = finalizeEvent(
       {
-        ...new AppKeys([{ identityPubkey: "device-a", createdAt: 100 }]).getEvent(),
-        pubkey: ownerPubkey,
+        ...new AppKeys([{ identityPubkey: "device-a", createdAt: 100 }]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey,
+        }),
         created_at: 200,
       },
       ownerPrivateKey,
@@ -294,8 +302,11 @@ describe("NdrRuntime", () => {
       deviceLabel: "Sirius MacBook",
       clientLabel: "NDR Desktop",
     })
-    const event = appKeys.getEvent(ownerPrivateKey)
-    event.created_at = 200
+    const event = appKeys.getEvent({
+      ownerPrivateKey,
+      ownerPubkey,
+      createdAt: 200,
+    })
     relay.storeAndDeliver(finalizeEvent(event, ownerPrivateKey) as VerifiedEvent)
     await tick()
 
@@ -378,8 +389,11 @@ describe("NdrRuntime", () => {
     const oldAppKeys = new AppKeys([
       { identityPubkey: "device-a", createdAt: 100 },
     ])
-    const oldEvent = oldAppKeys.getEvent()
-    oldEvent.created_at = 100
+    const oldEvent = oldAppKeys.getEvent({
+      ownerPrivateKey,
+      ownerPubkey,
+      createdAt: 100,
+    })
     relay.storeAndDeliver(finalizeEvent(oldEvent, ownerPrivateKey) as VerifiedEvent)
 
     await runtime.refreshOwnAppKeysFromRelay(ownerPubkey, 10)
@@ -395,8 +409,11 @@ describe("NdrRuntime", () => {
       { identityPubkey: "device-a", createdAt: 100 },
       { identityPubkey: "device-b", createdAt: 101 },
     ])
-    const newEvent = newAppKeys.getEvent()
-    newEvent.created_at = 101
+    const newEvent = newAppKeys.getEvent({
+      ownerPrivateKey,
+      ownerPubkey,
+      createdAt: 101,
+    })
     relay.storeAndDeliver(finalizeEvent(newEvent, ownerPrivateKey) as VerifiedEvent)
     await tick()
 
@@ -764,7 +781,10 @@ describe("NdrRuntime", () => {
     ownerRuntime.feedEvent(
       finalizeEvent(
         {
-          ...staleAppKeys.getEvent(ownerPrivateKey),
+          ...staleAppKeys.getEvent({
+            ownerPrivateKey,
+            ownerPubkey: getPublicKey(ownerPrivateKey),
+          }),
           created_at: Math.floor(Date.now() / 1000) + 10,
         },
         ownerPrivateKey,

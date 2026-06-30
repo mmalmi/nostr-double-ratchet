@@ -2,14 +2,10 @@ import { describe, it, expect } from 'vitest'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
 import {
   AppKeys,
+  type AppKeysEventOptions,
   NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
-  NOSTR_IDENTITY_ROSTER_OP_KIND,
   NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE,
-  NOSTR_IDENTITY_ROSTER_TYPE,
-  buildNostrIdentityRosterFilter,
   buildAppKeysFilter,
-  parseNostrIdentityRosterOpEvent,
-  projectNostrIdentityRosterEvents,
   type DeviceEntry,
 } from '../src/AppKeys'
 import { APP_KEYS_EVENT_KIND } from '../src/types'
@@ -27,26 +23,15 @@ describe('AppKeys', () => {
     }
   }
 
-  const canonicalProfileId = '123e4567-e89b-42d3-a456-426614174000'
-
-  const canonicalRosterEvent = (
-    signerPrivateKey: Uint8Array,
-    tags: string[][],
-    createdAt: number
-  ) => finalizeEvent({
-    kind: NOSTR_IDENTITY_ROSTER_OP_KIND,
-    content: '',
-    created_at: createdAt,
-    tags: [
-      ['i', canonicalProfileId, 'subject'],
-      ['type', NOSTR_IDENTITY_ROSTER_TYPE],
-      ['schema', '1'],
-      ['actor_pubkey', getPublicKey(signerPrivateKey)],
-      ['client_nonce', `nonce-${createdAt}`],
-      ['created_at', String(createdAt)],
-      ...tags,
-    ],
-  }, signerPrivateKey)
+  const getOwnedEvent = (
+    list: AppKeys,
+    ownerPrivateKey = generateSecretKey(),
+    options: Partial<AppKeysEventOptions> = {}
+  ) => list.getEvent({
+    ownerPrivateKey,
+    ownerPubkey: getPublicKey(ownerPrivateKey),
+    ...options,
+  })
 
   describe('constructor and basic properties', () => {
     it('should create an empty AppKeys', () => {
@@ -147,7 +132,7 @@ describe('AppKeys', () => {
       const device = createTestDevice()
       const list = new AppKeys([device])
 
-      const event = list.getEvent()
+      const event = getOwnedEvent(list)
 
       expect(event.kind).toBe(APP_KEYS_EVENT_KIND)
       expect(event.pubkey).toBe('') // Signer will set this
@@ -169,7 +154,7 @@ describe('AppKeys', () => {
       const list = new AppKeys([device])
 
       list.removeDevice(device.identityPubkey)
-      const event = list.getEvent()
+      const event = getOwnedEvent(list)
 
       // No "removed" tags - device is simply not in the list
       const removedTag = event.tags.find(t => t[0] === 'removed')
@@ -183,7 +168,10 @@ describe('AppKeys', () => {
       const device = createTestDevice()
       const list = new AppKeys([device])
 
-      const event = list.getEvent()
+      const event = list.getEvent({
+        ownerPrivateKey,
+        ownerPubkey: ownerPublicKey,
+      })
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
 
       const parsed = AppKeys.fromEvent(signedEvent)
@@ -200,7 +188,10 @@ describe('AppKeys', () => {
       const list = new AppKeys([device])
       list.removeDevice(device.identityPubkey)
 
-      const event = list.getEvent()
+      const event = list.getEvent({
+        ownerPrivateKey,
+        ownerPubkey: getPublicKey(ownerPrivateKey),
+      })
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
 
       const parsed = AppKeys.fromEvent(signedEvent)
@@ -211,7 +202,7 @@ describe('AppKeys', () => {
     it('should throw on unsigned event', () => {
       const list = new AppKeys()
 
-      const event = list.getEvent()
+      const event = getOwnedEvent(list)
       // Event without signature
       const unsignedEvent = { ...event, id: 'fake-id', sig: '' } as any
 
@@ -249,8 +240,10 @@ describe('AppKeys', () => {
         clientLabel: 'NDR Desktop',
       })
 
-      expect(() => list.getEvent()).not.toThrow()
-      expect(list.getEvent().content).toBe('')
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPubkey = getPublicKey(ownerPrivateKey)
+      expect(() => list.getEvent({ ownerPubkey })).not.toThrow()
+      expect(list.getEvent({ ownerPubkey }).content).toBe('')
     })
 
     it('roundtrips encrypted device labels for owner-key devices only', () => {
@@ -276,101 +269,24 @@ describe('AppKeys', () => {
       })
     })
 
-    it('projects canonical NostrIdentity AppKey facets without public facet labels', () => {
-      const adminPrivateKey = generateSecretKey()
-      const adminPubkey = getPublicKey(adminPrivateKey)
-      const devicePrivateKey = generateSecretKey()
-      const devicePubkey = getPublicKey(devicePrivateKey)
+    it('requires owner_pubkey on signed snapshots', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPubkey = getPublicKey(ownerPrivateKey)
+      const list = new AppKeys([createTestDevice()])
+      const event = getOwnedEvent(list, ownerPrivateKey)
 
-      const bootstrap = canonicalRosterEvent(adminPrivateKey, [
-        ['op', 'add_key'],
-        ['key_pubkey', adminPubkey],
-        ['key_purpose', 'app'],
-        ['key_capability', 'admin'],
-        ['key_capability', 'write'],
-        ['key_capability', 'receive_secret_wraps'],
-        ['key_capability', 'decrypt_secret_epochs'],
-        ['key_added_at', '10'],
-        ['key_label', 'Private laptop'],
-      ], 10)
-      const addDevice = canonicalRosterEvent(adminPrivateKey, [
-        ['op', 'add_key'],
-        ['key_pubkey', devicePubkey],
-        ['key_purpose', 'app'],
-        ['key_capability', 'write'],
-        ['key_capability', 'receive_secret_wraps'],
-        ['key_capability', 'decrypt_secret_epochs'],
-        ['key_added_at', '11'],
-        ['key_label', 'Phone'],
-      ], 11)
+      expect(event.tags).toContainEqual(['owner_pubkey', ownerPubkey])
+      const signedEvent = finalizeEvent(event, ownerPrivateKey)
+      expect(AppKeys.fromEvent(signedEvent).getAllDevices()).toEqual(list.getAllDevices())
 
-      const projected = AppKeys.fromNostrIdentityRosterEvents(canonicalProfileId, [
-        addDevice,
-        bootstrap,
-      ])
-
-      expect(projected.getAllDevices()).toEqual([
-        { identityPubkey: adminPubkey, createdAt: 10 },
-        { identityPubkey: devicePubkey, createdAt: 11 },
-      ])
-      expect(projected.serialize()).not.toContain('Private laptop')
-      expect(projected.serialize()).not.toContain('Phone')
-    })
-
-    it('exposes NostrIdentity roster filters, parser, and DeviceEntry projection helpers', () => {
-      const adminPrivateKey = generateSecretKey()
-      const adminPubkey = getPublicKey(adminPrivateKey)
-      const devicePrivateKey = generateSecretKey()
-      const devicePubkey = getPublicKey(devicePrivateKey)
-
-      const filter = buildNostrIdentityRosterFilter({
-        profileIds: canonicalProfileId,
-        authors: adminPubkey,
-        limit: 20,
-      })
-      expect(filter).toEqual({
-        kinds: [NOSTR_IDENTITY_ROSTER_OP_KIND],
-        authors: [adminPubkey],
-        '#i': [canonicalProfileId],
-        limit: 20,
-      })
-
-      const bootstrap = canonicalRosterEvent(adminPrivateKey, [
-        ['op', 'add_key'],
-        ['key_pubkey', adminPubkey],
-        ['key_purpose', 'app'],
-        ['key_capability', 'admin'],
-        ['key_capability', 'write'],
-        ['key_added_at', '10'],
-      ], 10)
-      const addDevice = canonicalRosterEvent(adminPrivateKey, [
-        ['op', 'add_key'],
-        ['key_pubkey', devicePubkey],
-        ['key_purpose', 'app'],
-        ['key_capability', 'write'],
-        ['key_added_at', '11'],
-      ], 11)
-
-      const parsed = parseNostrIdentityRosterOpEvent(addDevice)
-      expect(parsed.profileId).toBe(canonicalProfileId)
-      expect(parsed.signerPubkey).toBe(adminPubkey)
-      expect(parsed.op).toEqual({
-        op: 'add_key',
-        key: {
-          pubkey: devicePubkey,
-          purposes: new Set(['app']),
-          capabilities: new Set(['write']),
-          addedAt: 11,
+      const ownerless = finalizeEvent(
+        {
+          ...event,
+          tags: event.tags.filter((tag) => tag[0] !== 'owner_pubkey'),
         },
-      })
-
-      expect(projectNostrIdentityRosterEvents(canonicalProfileId, [
-        addDevice,
-        bootstrap,
-      ])).toEqual([
-        { identityPubkey: adminPubkey, createdAt: 10 },
-        { identityPubkey: devicePubkey, createdAt: 11 },
-      ])
+        ownerPrivateKey
+      )
+      expect(() => AppKeys.fromEvent(ownerless)).toThrow('NostrIdentity roster missing owner_pubkey')
     })
   })
 
@@ -660,7 +576,7 @@ describe('AppKeys', () => {
       const device = createTestDevice(delegatePublicKey)
 
       list.addDevice(device)
-      const event = list.getEvent()
+      const event = getOwnedEvent(list)
 
       // Simplified format: ["device", identityPubkey, createdAt]
       const deviceTag = event.tags.find(t => t[0] === 'device' && t[1] === device.identityPubkey)
@@ -677,7 +593,10 @@ describe('AppKeys', () => {
       const device = createTestDevice(delegatePublicKey)
 
       list.addDevice(device)
-      const event = list.getEvent()
+      const event = list.getEvent({
+        ownerPrivateKey,
+        ownerPubkey: getPublicKey(ownerPrivateKey),
+      })
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
 
       const parsed = AppKeys.fromEvent(signedEvent)
@@ -732,7 +651,10 @@ describe('AppKeys', () => {
       list.addDevice(mainDevice)
       list.addDevice(delegateDevice)
 
-      const event = list.getEvent()
+      const event = list.getEvent({
+        ownerPrivateKey,
+        ownerPubkey: ownerPublicKey,
+      })
       const signedEvent = finalizeEvent(event, ownerPrivateKey)
       const parsed = AppKeys.fromEvent(signedEvent)
 

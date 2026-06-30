@@ -24,6 +24,7 @@ export interface AppKeysManagerOptions {
   nostrPublish: NostrPublish
   storage?: StorageAdapter
   ownerIdentityKey?: Uint8Array
+  ownerPubkey?: string
 }
 
 /**
@@ -45,6 +46,7 @@ export class AppKeysManager {
   private readonly nostrPublish: NostrPublish
   private readonly storage: StorageAdapter
   private readonly ownerIdentityKey?: Uint8Array
+  private readonly ownerPubkey?: string
 
   private appKeys: AppKeys | null = null
   private appKeysProfileId: string | null = null
@@ -60,6 +62,11 @@ export class AppKeysManager {
     this.nostrPublish = options.nostrPublish
     this.storage = options.storage || new InMemoryStorageAdapter()
     this.ownerIdentityKey = options.ownerIdentityKey
+    const keyPubkey = options.ownerIdentityKey ? getPublicKey(options.ownerIdentityKey) : undefined
+    if (options.ownerPubkey && keyPubkey && options.ownerPubkey !== keyPubkey) {
+      throw new Error("AppKeysManager ownerPubkey does not match ownerIdentityKey")
+    }
+    this.ownerPubkey = options.ownerPubkey ?? keyPubkey
   }
 
   async init(): Promise<void> {
@@ -144,7 +151,10 @@ export class AppKeysManager {
       this.appKeys = new AppKeys()
     }
 
-    const ownerPubkey = this.ownerIdentityKey ? getPublicKey(this.ownerIdentityKey) : undefined
+    const ownerPubkey = this.ownerPubkey
+    if (!ownerPubkey) {
+      throw new Error("Owner pubkey is required to publish AppKeys")
+    }
     const createdAt = Math.max(
       Math.floor(Date.now() / 1000),
       this.lastPublishedAppKeysCreatedAt + 1

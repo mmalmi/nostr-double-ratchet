@@ -52,8 +52,10 @@ const publishAppKeys = (
       createdAt: i + 1,
     }))
   )
-  const event = appKeys.getEvent()
-  event.pubkey = ownerPublicKey
+  const event = appKeys.getEvent({
+    ownerPrivateKey: ownerSecretKey,
+    ownerPubkey: ownerPublicKey,
+  })
   const signed = finalizeEvent(event, ownerSecretKey)
   relay.storeAndDeliver(signed as unknown as VerifiedEvent)
 }

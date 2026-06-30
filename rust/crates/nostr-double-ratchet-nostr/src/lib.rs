@@ -9,13 +9,11 @@ pub mod one_to_many;
 pub mod shared_channel;
 
 pub use app_keys::{
-    encrypted_device_label_payloads_from_nostr_identity_roster_op_event, is_app_keys_event,
-    is_nostr_identity_roster_op_event, AppKeys, DeviceEntry, DeviceLabels,
-    LEGACY_APP_KEYS_EVENT_KIND, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
+    encrypted_device_label_payloads_from_nostr_identity_roster_snapshot_event, is_app_keys_event,
+    AppKeys, DeviceEntry, DeviceLabels, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
     NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA, NOSTR_IDENTITY_OWNER_PUBKEY_FACT,
-    NOSTR_IDENTITY_ROSTER_OP_KIND, NOSTR_IDENTITY_ROSTER_SCHEMA,
-    NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND, NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE,
-    NOSTR_IDENTITY_ROSTER_TYPE,
+    NOSTR_IDENTITY_ROSTER_SCHEMA, NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND,
+    NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE,
 };
 pub use direct_message_subscriptions::{
     build_direct_message_backfill_filter, direct_message_subscription_authors,

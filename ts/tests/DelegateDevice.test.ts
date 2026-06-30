@@ -35,6 +35,7 @@ describe('Delegate Device Architecture', () => {
     const appKeysManager = new AppKeysManager({
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
+      ownerIdentityKey: ownerPrivateKey,
     })
     await appKeysManager.init()
 
@@ -89,6 +90,7 @@ describe('Delegate Device Architecture', () => {
     const appKeysManager = new AppKeysManager({
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
+      ownerIdentityKey: ownerPrivateKey,
     })
     await appKeysManager.init()
 
@@ -138,6 +140,7 @@ describe('Delegate Device Architecture', () => {
     const appKeysManager = new AppKeysManager({
       nostrPublish: createPublish(ownerPrivateKey),
       storage: new InMemoryStorageAdapter(),
+      ownerIdentityKey: ownerPrivateKey,
     })
     await appKeysManager.init()
 

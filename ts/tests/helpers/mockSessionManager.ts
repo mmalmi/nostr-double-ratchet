@@ -42,6 +42,7 @@ export async function createMockSessionManager(
   const appKeysManager = new AppKeysManager({
     nostrPublish: publish,
     storage: new InMemoryStorageAdapter(),
+    ownerIdentityKey: secretKey,
   })
   await appKeysManager.init()
 

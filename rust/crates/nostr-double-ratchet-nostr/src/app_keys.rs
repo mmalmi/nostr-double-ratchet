@@ -6,18 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
-pub const LEGACY_APP_KEYS_EVENT_KIND: u32 = 30078;
-pub const NOSTR_IDENTITY_ROSTER_OP_KIND: u32 = 7368;
 pub const NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND: u32 = 37368;
 pub const NOSTR_IDENTITY_ROSTER_SCHEMA: u64 = 1;
-pub const NOSTR_IDENTITY_ROSTER_TYPE: &str = "nostr_identity_roster_op";
 pub const NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE: &str = "nostr_identity_roster_snapshot";
 pub const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT: &str = "encrypted_device_labels";
 pub const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA: u64 = 1;
 pub const NOSTR_IDENTITY_OWNER_PUBKEY_FACT: &str = "owner_pubkey";
-const NOSTR_IDENTITY_APP_PURPOSE: &str = "app";
-const NOSTR_IDENTITY_ADMIN_CAPABILITY: &str = "admin";
-const NOSTR_IDENTITY_WRITE_CAPABILITY: &str = "write";
 
 #[derive(Debug, Clone)]
 pub struct DeviceEntry {
@@ -70,32 +64,6 @@ struct EncryptedAppKeysContent {
     v: u8,
     #[serde(rename = "deviceLabels", alias = "device_labels")]
     device_labels: Vec<StoredDeviceLabels>,
-}
-
-#[derive(Debug, Clone)]
-struct NostrIdentityAppKeyFacet {
-    identity_pubkey: PublicKey,
-    purposes: Vec<String>,
-    capabilities: Vec<String>,
-    added_at: u64,
-}
-
-#[derive(Debug, Clone)]
-enum NostrIdentityRosterOp {
-    AddKey(NostrIdentityAppKeyFacet),
-    TombstoneKey(PublicKey),
-    SetKeyCapabilities {
-        pubkey: PublicKey,
-        capabilities: Vec<String>,
-    },
-    Ignore,
-}
-
-#[derive(Debug, Clone)]
-struct SignedNostrIdentityRosterOp {
-    profile_id: String,
-    signer_pubkey: PublicKey,
-    op: NostrIdentityRosterOp,
 }
 
 #[derive(Debug, Clone)]
@@ -339,81 +307,6 @@ impl AppKeys {
         Ok(AppKeys::new(devices))
     }
 
-    pub fn from_nostr_identity_roster_events<'a, I>(profile_id: &str, events: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = &'a Event>,
-    {
-        let target_profile_id = canonical_profile_id(profile_id)?;
-        let mut active_facets: HashMap<PublicKey, NostrIdentityAppKeyFacet> = HashMap::new();
-        let mut events: Vec<&Event> = events.into_iter().collect();
-        events.sort_by(|left, right| {
-            left.created_at
-                .as_secs()
-                .cmp(&right.created_at.as_secs())
-                .then_with(|| left.id.to_hex().cmp(&right.id.to_hex()))
-        });
-
-        for event in events {
-            let Ok(signed) = parse_nostr_identity_roster_op_event(event) else {
-                continue;
-            };
-            if signed.profile_id != target_profile_id {
-                continue;
-            }
-
-            let signer_facet = active_facets.get(&signed.signer_pubkey);
-            let is_bootstrap = active_facets.is_empty()
-                && matches!(
-                    &signed.op,
-                    NostrIdentityRosterOp::AddKey(facet)
-                        if facet.identity_pubkey == signed.signer_pubkey
-                            && has_capability(facet, NOSTR_IDENTITY_ADMIN_CAPABILITY)
-                );
-            let can_admin = is_bootstrap
-                || signer_facet
-                    .is_some_and(|facet| has_capability(facet, NOSTR_IDENTITY_ADMIN_CAPABILITY));
-            if !can_admin {
-                continue;
-            }
-
-            match signed.op {
-                NostrIdentityRosterOp::AddKey(facet) => {
-                    active_facets.insert(facet.identity_pubkey, facet);
-                }
-                NostrIdentityRosterOp::TombstoneKey(pubkey) => {
-                    active_facets.remove(&pubkey);
-                }
-                NostrIdentityRosterOp::SetKeyCapabilities {
-                    pubkey,
-                    capabilities,
-                } => {
-                    if let Some(facet) = active_facets.get_mut(&pubkey) {
-                        facet.capabilities = capabilities;
-                    }
-                }
-                NostrIdentityRosterOp::Ignore => {}
-            }
-        }
-
-        let mut facets: Vec<_> = active_facets
-            .into_values()
-            .filter(is_app_key_facet)
-            .collect();
-        facets.sort_by(|left, right| {
-            left.added_at.cmp(&right.added_at).then_with(|| {
-                left.identity_pubkey
-                    .to_hex()
-                    .cmp(&right.identity_pubkey.to_hex())
-            })
-        });
-        Ok(Self::new(
-            facets
-                .into_iter()
-                .map(|facet| DeviceEntry::new(facet.identity_pubkey, facet.added_at))
-                .collect(),
-        ))
-    }
-
     pub fn from_event_with_labels(event: &Event, owner_keys: &Keys) -> Result<Self> {
         let mut app_keys = Self::from_event(event)?;
         app_keys.load_encrypted_labels(event, owner_keys)?;
@@ -581,93 +474,10 @@ impl AppKeys {
     }
 }
 
-pub fn is_nostr_identity_roster_op_event(event: &Event) -> bool {
-    event.kind.as_u16() == NOSTR_IDENTITY_ROSTER_OP_KIND as u16
-        && tag_values(event, "type")
-            .iter()
-            .any(|value| value == NOSTR_IDENTITY_ROSTER_TYPE)
-}
-
-pub fn encrypted_device_label_payloads_from_nostr_identity_roster_op_event(
+pub fn encrypted_device_label_payloads_from_nostr_identity_roster_snapshot_event(
     event: &Event,
 ) -> Vec<String> {
     tag_values(event, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
-}
-
-fn parse_nostr_identity_roster_op_event(event: &Event) -> Result<SignedNostrIdentityRosterOp> {
-    if event.verify().is_err() {
-        return Err(Error::InvalidEvent(
-            "NostrIdentity roster signature is invalid".to_string(),
-        ));
-    }
-    if !is_nostr_identity_roster_op_event(event) {
-        return Err(Error::InvalidEvent(
-            "Event is not an NostrIdentity roster op".to_string(),
-        ));
-    }
-    if !event.content.is_empty() {
-        return Err(Error::InvalidEvent(
-            "NostrIdentity roster fact event content must be empty".to_string(),
-        ));
-    }
-    let schema = required_integer(event, "schema")?;
-    if schema != NOSTR_IDENTITY_ROSTER_SCHEMA {
-        return Err(Error::InvalidEvent(format!(
-            "Unsupported NostrIdentity roster schema {schema}"
-        )));
-    }
-    let actor_pubkey = pubkey_from_required_tag(event, "actor_pubkey")?;
-    if actor_pubkey != event.pubkey {
-        return Err(Error::InvalidEvent(
-            "NostrIdentity roster actor signer mismatch".to_string(),
-        ));
-    }
-    let created_at = required_integer(event, "created_at")?;
-    if created_at != event.created_at.as_secs() {
-        return Err(Error::InvalidEvent(
-            "NostrIdentity roster created_at mismatch".to_string(),
-        ));
-    }
-    Ok(SignedNostrIdentityRosterOp {
-        profile_id: nostr_identity_id_from_event(event)?,
-        signer_pubkey: event.pubkey,
-        op: parse_nostr_identity_roster_op(event)?,
-    })
-}
-
-fn parse_nostr_identity_roster_op(event: &Event) -> Result<NostrIdentityRosterOp> {
-    match required_tag_value(event, "op")?.as_str() {
-        "add_key" => Ok(NostrIdentityRosterOp::AddKey(NostrIdentityAppKeyFacet {
-            identity_pubkey: pubkey_from_required_tag(event, "key_pubkey")?,
-            purposes: tag_values(event, "key_purpose"),
-            capabilities: tag_values(event, "key_capability"),
-            added_at: required_integer(event, "key_added_at")?,
-        })),
-        "tombstone_key" => Ok(NostrIdentityRosterOp::TombstoneKey(
-            pubkey_from_required_tag(event, "target_pubkey")?,
-        )),
-        "set_key_capabilities" => Ok(NostrIdentityRosterOp::SetKeyCapabilities {
-            pubkey: pubkey_from_required_tag(event, "target_pubkey")?,
-            capabilities: tag_values(event, "capability"),
-        }),
-        "rotate_secret_epoch" | "repair_secret_wraps" => Ok(NostrIdentityRosterOp::Ignore),
-        other => Err(Error::InvalidEvent(format!(
-            "Unsupported NostrIdentity roster op {other}"
-        ))),
-    }
-}
-
-fn is_app_key_facet(facet: &NostrIdentityAppKeyFacet) -> bool {
-    has_purpose(facet, NOSTR_IDENTITY_APP_PURPOSE)
-        && has_capability(facet, NOSTR_IDENTITY_WRITE_CAPABILITY)
-}
-
-fn has_purpose(facet: &NostrIdentityAppKeyFacet, purpose: &str) -> bool {
-    facet.purposes.iter().any(|value| value == purpose)
-}
-
-fn has_capability(facet: &NostrIdentityAppKeyFacet, capability: &str) -> bool {
-    facet.capabilities.iter().any(|value| value == capability)
 }
 
 fn tag_values(event: &Event, name: &str) -> Vec<String> {

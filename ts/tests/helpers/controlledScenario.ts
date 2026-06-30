@@ -190,6 +190,7 @@ export async function runControlledScenario(config: ControlledScenarioConfig): P
               return signedEvent as unknown as VerifiedEvent
             }),
             storage: new InMemoryStorageAdapter(),
+            ownerIdentityKey: secretKey,
           })
           await appKeysManager.init()
 
@@ -246,6 +247,7 @@ export async function runControlledScenario(config: ControlledScenarioConfig): P
               return signedEvent as unknown as VerifiedEvent
             }),
             storage: new InMemoryStorageAdapter(),
+            ownerIdentityKey: secretKey,
           })
           await appKeysManager.init()
           toActor = { secretKey, publicKey, appKeysManager, devices: new Map() }

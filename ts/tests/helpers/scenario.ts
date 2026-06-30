@@ -178,6 +178,7 @@ export async function runScenario(config: ScenarioConfig): Promise<void> {
               return signedEvent as unknown as VerifiedEvent
             }),
             storage: new InMemoryStorageAdapter(),
+            ownerIdentityKey: secretKey,
           })
           await appKeysManager.init()
 

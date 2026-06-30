@@ -141,7 +141,13 @@ describe("SessionManager.acceptInvite", () => {
       createdAt: createdAt + 1,
     })
     relay.storeAndDeliver(
-      finalizeEvent(bobAppKeys.getEvent(), bob.secretKey) as VerifiedEvent
+      finalizeEvent(
+        bobAppKeys.getEvent({
+          ownerPrivateKey: bob.secretKey,
+          ownerPubkey: bob.publicKey,
+        }),
+        bob.secretKey
+      ) as VerifiedEvent
     )
 
     const bobSecondInvite = Invite.createNew(
@@ -206,7 +212,13 @@ describe("SessionManager.acceptInvite", () => {
       createdAt: Math.floor(Date.now() / 1000),
     })
     relay.storeAndDeliver(
-      finalizeEvent(ownerAppKeys.getEvent(), ownerSecretKey) as VerifiedEvent
+      finalizeEvent(
+        ownerAppKeys.getEvent({
+          ownerPrivateKey: ownerSecretKey,
+          ownerPubkey: ownerPublicKey,
+        }),
+        ownerSecretKey
+      ) as VerifiedEvent
     )
 
     const linkInvite = Invite.createNew(linkedDevicePublicKey, linkedDevicePublicKey, 1, {
@@ -293,7 +305,13 @@ describe("SessionManager.acceptInvite", () => {
     const ownerAppKeys = new AppKeys()
     ownerAppKeys.addDevice({ identityPubkey: ownerPublicKey, createdAt: Math.floor(Date.now() / 1000) })
     relay.storeAndDeliver(
-      finalizeEvent(ownerAppKeys.getEvent(), ownerSecretKey) as VerifiedEvent
+      finalizeEvent(
+        ownerAppKeys.getEvent({
+          ownerPrivateKey: ownerSecretKey,
+          ownerPubkey: ownerPublicKey,
+        }),
+        ownerSecretKey
+      ) as VerifiedEvent
     )
 
     const webDeviceSecretKey = generateSecretKey()
@@ -798,7 +816,13 @@ describe("SessionManager.acceptInvite", () => {
       createdAt: Math.floor(Date.now() / 1000),
     })
     relay.storeAndDeliver(
-      finalizeEvent(aliceAppKeys.getEvent(), ownerSecretKey) as VerifiedEvent
+      finalizeEvent(
+        aliceAppKeys.getEvent({
+          ownerPrivateKey: ownerSecretKey,
+          ownerPubkey: ownerPublicKey,
+        }),
+        ownerSecretKey
+      ) as VerifiedEvent
     )
 
     await vi.waitFor(() => {

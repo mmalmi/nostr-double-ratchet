@@ -370,9 +370,11 @@ describe("DelegateManager", () => {
 describe("AppKeysManager - Authority", () => {
   let nostrPublish: NostrPublish
   let publishedEvents: any[]
+  let ownerPubkey: string
 
   beforeEach(() => {
     publishedEvents = []
+    ownerPubkey = getPublicKey(generateSecretKey())
 
     nostrPublish = vi.fn(async (event) => {
       publishedEvents.push(event)
@@ -384,6 +386,7 @@ describe("AppKeysManager - Authority", () => {
     it("should create a AppKeysManager", () => {
       const manager = new AppKeysManager({
         nostrPublish,
+        ownerPubkey,
       })
 
       expect(manager).toBeInstanceOf(AppKeysManager)
@@ -394,6 +397,7 @@ describe("AppKeysManager - Authority", () => {
     it("should not auto-publish AppKeys on init", async () => {
       const manager = new AppKeysManager({
         nostrPublish,
+        ownerPubkey,
       })
 
       await manager.init()
@@ -412,6 +416,7 @@ describe("AppKeysManager - Authority", () => {
     it("should start with empty device list", async () => {
       const manager = new AppKeysManager({
         nostrPublish,
+        ownerPubkey,
       })
 
       await manager.init()
@@ -429,6 +434,7 @@ describe("AppKeysManager - Authority", () => {
     it("should add device to AppKeys (local only - publish separately)", async () => {
       const manager = new AppKeysManager({
         nostrPublish,
+        ownerPubkey,
       })
       await manager.init()
 
@@ -455,6 +461,7 @@ describe("AppKeysManager - Authority", () => {
     it("should use identityPubkey as device identifier", async () => {
       const manager = new AppKeysManager({
         nostrPublish,
+        ownerPubkey,
       })
       await manager.init()
 
@@ -508,6 +515,7 @@ describe("AppKeysManager - Authority", () => {
     it("should remove device from AppKeys by identityPubkey", async () => {
       const manager = new AppKeysManager({
         nostrPublish,
+        ownerPubkey,
       })
       await manager.init()
 
@@ -531,6 +539,7 @@ describe("AppKeysManager - Authority", () => {
     beforeEach(async () => {
       manager = new AppKeysManager({
         nostrPublish,
+        ownerPubkey,
       })
       await manager.init()
     })
@@ -653,6 +662,7 @@ describe("AppKeysManager Integration", () => {
     const deviceManager = new AppKeysManager({
       nostrPublish: signedPublish,
       storage: new InMemoryStorageAdapter(),
+      ownerIdentityKey: ownerPrivateKey,
     })
 
     await deviceManager.init()
@@ -693,6 +703,7 @@ describe("AppKeysManager Integration", () => {
     const deviceManager = new AppKeysManager({
       nostrPublish: signedPublish,
       storage: new InMemoryStorageAdapter(),
+      ownerIdentityKey: ownerPrivateKey,
     })
     await deviceManager.init()
 
@@ -756,6 +767,7 @@ describe("AppKeysManager Integration", () => {
     const deviceManager = new AppKeysManager({
       nostrPublish: signedPublish,
       storage: new InMemoryStorageAdapter(),
+      ownerIdentityKey: ownerPrivateKey,
     })
 
     await deviceManager.init()
@@ -819,6 +831,7 @@ describe("AppKeysManager Integration", () => {
 
     const deviceManager = new AppKeysManager({
       nostrPublish: signedPublish,
+      ownerIdentityKey: ownerPrivateKey,
     })
 
     await deviceManager.init()
