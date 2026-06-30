@@ -30,7 +30,7 @@ function makeGroup(
 }
 
 describe("GroupManager", () => {
-  it("createGroup fans out group metadata by default and returns group data", async () => {
+  it("createGroup fans out group roster facts by default and returns group data", async () => {
     const aliceOwnerPk = getPublicKey(generateSecretKey());
     const bobOwnerPk = getPublicKey(generateSecretKey());
     const carolOwnerPk = getPublicKey(generateSecretKey());
@@ -60,16 +60,16 @@ describe("GroupManager", () => {
       carolOwnerPk,
     ]);
     expect(created.fanout.enabled).toBe(true);
-    expect(created.fanout.attempted).toBe(2);
+    expect(created.fanout.attempted).toBe(3);
     expect(created.fanout.succeeded.sort()).toEqual(
-      [bobOwnerPk, carolOwnerPk].sort(),
+      [aliceOwnerPk, bobOwnerPk, carolOwnerPk].sort(),
     );
     expect(created.fanout.failed).toEqual([]);
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
 
     for (const entry of sent) {
       expect(entry.rumor.kind).toBe(GROUP_ROSTER_FACT_KIND);
-      expect(entry.rumor.pubkey).toBe(aliceDevicePk);
+      expect(entry.rumor.pubkey).toBe(aliceOwnerPk);
       expect(entry.rumor.content).toBe("");
       expect(entry.rumor.tags).toContainEqual(["type", GROUP_ROSTER_FACT_TYPE]);
       expect(entry.rumor.tags).toContainEqual(["d", created.group.id]);
@@ -238,8 +238,10 @@ describe("GroupManager", () => {
       "Remote Group",
       [bobOwnerPk],
       {
-        sendPairwise: async (_recipient, rumor) => {
-          metadataRumor = rumor;
+        sendPairwise: async (recipient, rumor) => {
+          if (recipient === bobOwnerPk) {
+            metadataRumor = rumor;
+          }
         },
       },
     );

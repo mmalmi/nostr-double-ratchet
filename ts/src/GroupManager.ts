@@ -364,7 +364,7 @@ export class GroupManager {
             createdAt: Math.floor(group.createdAt / 1000),
           },
           {
-            signerPubkey: this.ourDevicePubkey,
+            signerPubkey: this.ourOwnerPubkey,
             revision: 1,
             createdBy: this.ourOwnerPubkey,
             updatedAt: createdAt,
@@ -372,14 +372,12 @@ export class GroupManager {
             protocol: "sender_key_v1",
           },
         ),
-        pubkey: this.ourDevicePubkey,
+        pubkey: this.ourOwnerPubkey,
         id: "",
       };
       metadataRumor.id = getEventHash(metadataRumor);
 
-      const recipients = group.members.filter(
-        (pubkey) => pubkey !== this.ourOwnerPubkey,
-      );
+      const recipients = group.members;
       const deliveries = await Promise.allSettled(
         recipients.map(async (recipient) => {
           const rumorForRecipient: Rumor = {
