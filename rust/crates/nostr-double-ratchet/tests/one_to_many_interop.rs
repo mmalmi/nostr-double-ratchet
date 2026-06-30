@@ -1,8 +1,8 @@
 //! Interop tests for Signal-style sender keys + one-to-many outer payloads.
 
 use nostr::JsonUtil;
+use nostr_double_ratchet::{OneToManyChannel, MESSAGE_EVENT_KIND};
 use nostr_double_ratchet::{Result, SenderKeyState};
-use nostr_double_ratchet_nostr::{OneToManyChannel, MESSAGE_EVENT_KIND};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;

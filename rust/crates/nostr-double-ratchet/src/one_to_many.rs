@@ -1,8 +1,6 @@
 use base64::Engine;
 
-use crate::{
-    nostr_codec::encrypted_cover_header_tag, Error, Result, SenderKeyState, MESSAGE_EVENT_KIND,
-};
+use crate::{wire::encrypted_cover_header_tag, Error, Result, SenderKeyState, MESSAGE_EVENT_KIND};
 
 /// A lightweight helper for "one-to-many" publishing:
 ///

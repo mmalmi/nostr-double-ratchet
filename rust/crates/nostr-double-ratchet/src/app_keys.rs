@@ -433,10 +433,9 @@ impl AppKeys {
     }
 
     fn load_encrypted_labels(&mut self, event: &Event, owner_keys: &Keys) -> Result<()> {
-        let Some(encrypted_labels) =
-            tag_values(event, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
-                .into_iter()
-                .next()
+        let Some(encrypted_labels) = tag_values(event, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
+            .into_iter()
+            .next()
         else {
             return Ok(());
         };

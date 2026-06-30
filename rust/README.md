@@ -6,8 +6,7 @@ Rust implementation and tooling for Double Ratchet messaging on Nostr.
 
 | Crate | Description |
 |-------|-------------|
-| [nostr-double-ratchet](./crates/nostr-double-ratchet) | Core library: sessions, invites, session manager, groups |
-| [nostr-double-ratchet-nostr](./crates/nostr-double-ratchet-nostr) | Nostr event codecs and integration helpers |
+| [nostr-double-ratchet](./crates/nostr-double-ratchet) | Sessions, invites, groups, AppKeys fact events, and event wire helpers |
 | [nostr-double-ratchet-pairwise-codec](./crates/nostr-double-ratchet-pairwise-codec) | Pairwise group payload codec |
 
 ## Security Properties (Rust Stack)
@@ -54,7 +53,7 @@ Apps and protocol runtimes still own relay history fetch. If a new direct-messag
 to a session subscription, consume that signal immediately:
 
 ```rust
-use nostr_double_ratchet_nostr::{
+use nostr_double_ratchet::{
     build_direct_message_backfill_filter, DirectMessageSubscriptionTracker,
 };
 

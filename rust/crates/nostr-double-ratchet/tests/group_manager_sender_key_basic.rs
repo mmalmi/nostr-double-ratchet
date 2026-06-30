@@ -1,13 +1,13 @@
 mod support;
 
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
+use nostr_double_ratchet::{GroupEventManager as GroupManager, JsonGroupPayloadCodecV1};
 use nostr_double_ratchet::{
     GroupIncomingEvent, GroupManagerSnapshot, GroupPairwiseCommand, GroupPayloadCodec,
     GroupPayloadEncodeContext, GroupProtocol, GroupSenderKeyHandleResult, GroupSenderKeyMessage,
     GroupSenderKeyMessageEnvelope, Result, SenderKeyDistribution, SenderKeyRepairRequest,
     SessionManager, UnixSeconds,
 };
-use nostr_double_ratchet_nostr::{JsonGroupPayloadCodecV1, NostrGroupManager as GroupManager};
 use support::{
     context, manager_device, manager_observe_invite_response, manager_public_device_invite,
     manager_receive_delivery, roster_for, session_manager, snapshot,

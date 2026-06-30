@@ -67,7 +67,6 @@ publish_crate "nostr-double-ratchet" "--no-verify"
 
 # Tier 2: leaf crates that only depend on the core library
 publish_crate "nostr-double-ratchet-pairwise-codec"
-publish_crate "nostr-double-ratchet-nostr"
 
 if [[ "$FAILED" -ne 0 ]]; then
     echo ""

@@ -9,7 +9,7 @@ Rust library implementing Double Ratchet messaging for Nostr, including multi-de
 - `SessionManager` for multi-device owner/device routing
 - AppKeys-based device authorization and owner-claim validation
 - Sender-key + one-to-many group messaging primitives
-- Persistent storage adapters and message/discovery queues
+- Persistent storage interfaces and message/discovery queues
 - TypeScript/Rust interop test coverage
 
 ## Recommended Integration Paths
@@ -116,7 +116,7 @@ Use NIP-40-style `["expiration", "<unix seconds>"]` tags in inner rumors.
 
 Runtime integrations should fetch AppKeys, device invites, invite responses, and active message
 authors on startup, reconnect, and after AppKeys/invite changes. The
-`nostr-double-ratchet-nostr` crate provides `DirectMessageSubscriptionTracker` and
+`nostr-double-ratchet` provides `DirectMessageSubscriptionTracker` and
 `build_direct_message_backfill_filter(...)` for short direct-message replay when a new message
 author appears in a subscription.
 

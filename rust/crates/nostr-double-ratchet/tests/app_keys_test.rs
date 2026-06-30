@@ -1,8 +1,6 @@
 use nostr::Keys;
 use nostr_double_ratchet::Result;
-use nostr_double_ratchet_nostr::{
-    AppKeys, DeviceEntry, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
-};
+use nostr_double_ratchet::{AppKeys, DeviceEntry, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT};
 
 #[test]
 fn test_app_keys_roundtrip_and_merge() -> Result<()> {

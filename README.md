@@ -173,8 +173,7 @@ crate in
 ## Repository Layout
 
 - `ts/`: TypeScript library
-- `rust/crates/nostr-double-ratchet/`: Rust core library
-- `rust/crates/nostr-double-ratchet-nostr/`: Nostr event codecs and integration helpers
+- `rust/crates/nostr-double-ratchet/`: Rust library with sessions, groups, AppKeys fact events, and event wire helpers
 - `rust/crates/nostr-double-ratchet-pairwise-codec/`: group pairwise payload codec
 
 ## Development And Tests

@@ -1,7 +1,7 @@
 use nostr::JsonUtil;
 use nostr::{Keys, SecretKey};
 use nostr_double_ratchet::Result;
-use nostr_double_ratchet_nostr::{utils::pubkey_from_hex, AppKeys, DeviceEntry};
+use nostr_double_ratchet::{utils::pubkey_from_hex, AppKeys, DeviceEntry};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;

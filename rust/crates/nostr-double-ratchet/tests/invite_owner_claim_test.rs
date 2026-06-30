@@ -1,6 +1,6 @@
 use nostr::Keys;
+use nostr_double_ratchet::{invite_response_event, AppKeys, DeviceEntry, InviteNostrExt};
 use nostr_double_ratchet::{Invite, Result};
-use nostr_double_ratchet_nostr::{invite_response_event, AppKeys, DeviceEntry, InviteNostrExt};
 
 #[test]
 fn owner_claim_verification_requires_app_keys_for_multi_device() -> Result<()> {

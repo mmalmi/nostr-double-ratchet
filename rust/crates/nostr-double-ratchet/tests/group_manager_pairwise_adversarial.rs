@@ -1,11 +1,11 @@
 mod support;
 
 use nostr_double_ratchet::{
+    group_wire::JsonGroupPayloadCodecV1, GroupEventManager as GroupManager,
+};
+use nostr_double_ratchet::{
     DevicePubkey, DomainError, Error, GroupIncomingEvent, GroupPairwiseCommand, GroupPayloadCodec,
     GroupPayloadEncodeContext, GroupProtocol, GroupSnapshot, OwnerPubkey, Result, UnixSeconds,
-};
-use nostr_double_ratchet_nostr::{
-    group_codec::JsonGroupPayloadCodecV1, NostrGroupManager as GroupManager,
 };
 use support::{context, manager_device, roster_for, session_manager};
 

@@ -3,13 +3,13 @@
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, SecretKey, Tag, Timestamp};
+use nostr_double_ratchet::wire as codec;
 use nostr_double_ratchet::{
     AuthorizedDevice, Delivery, DevicePubkey, DeviceRecordSnapshot, DeviceRoster, Invite,
     InviteResponse, InviteResponseEnvelope, MessageEnvelope, OwnerPubkey, PreparedSend,
     ProcessedInviteResponse, ProtocolContext, ReceivedMessage, Result, RosterSnapshotDecision,
     Session, SessionManager, SessionManagerSnapshot, SessionState, UnixSeconds, UserRecordSnapshot,
 };
-use nostr_double_ratchet_nostr::nostr_codec as codec;
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 
@@ -525,7 +525,9 @@ fn decrypt_outer_response(
         &nostr_pubkey(response.sender),
         &response.content,
     )?;
-    Ok(serde_json::from_str(&decrypted)?)
+    Ok(serde_json::from_str::<TestInviteResponseInnerEvent>(
+        &decrypted,
+    )?)
 }
 
 fn reencrypt_outer_response(

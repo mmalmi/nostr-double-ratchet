@@ -1,8 +1,8 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Invite, Result};
-use nostr_double_ratchet_nostr::{
+use nostr_double_ratchet::{
     invite_response_event, InviteNostrExt, INVITE_EVENT_KIND, INVITE_RESPONSE_KIND,
 };
+use nostr_double_ratchet::{Invite, Result};
 
 #[test]
 fn test_create_new_invite() -> Result<()> {

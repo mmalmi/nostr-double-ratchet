@@ -1,6 +1,6 @@
 use base64::Engine;
 use nostr_double_ratchet::SenderKeyState;
-use nostr_double_ratchet_nostr::{OneToManyChannel, CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND};
+use nostr_double_ratchet::{OneToManyChannel, CHAT_MESSAGE_KIND, MESSAGE_EVENT_KIND};
 
 #[test]
 fn one_to_many_outer_payload_roundtrip() {

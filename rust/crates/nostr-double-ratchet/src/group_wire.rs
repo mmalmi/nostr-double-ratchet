@@ -1,11 +1,11 @@
-use nostr::{
-    Alphabet, Event, EventBuilder, EventId, Filter, Kind, PublicKey, SingleLetterTag, Tag, Tags,
-    Timestamp, UnsignedEvent,
-};
-use nostr_double_ratchet::{
+use crate::{
     DevicePubkey, Error, GroupPairwiseCommand, GroupPayloadCodec, GroupPayloadEncodeContext,
     GroupProtocol, GroupSenderKeyPlaintext, GroupSenderKeyPlaintextDecodeContext, GroupSnapshot,
     OwnerPubkey, Result, SenderKeyDistribution, SenderKeyRepairRequest, UnixSeconds,
+};
+use nostr::{
+    Alphabet, Event, EventBuilder, EventId, Filter, Kind, PublicKey, SingleLetterTag, Tag, Tags,
+    Timestamp, UnsignedEvent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,7 @@ const REVISION_TAG: &str = "revision";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonGroupPayloadCodecV1;
 
-pub type NostrGroupManager = nostr_double_ratchet::GroupManager<JsonGroupPayloadCodecV1>;
+pub type GroupEventManager = crate::GroupManager<JsonGroupPayloadCodecV1>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GroupWireEnvelopeV1 {
@@ -1007,8 +1007,8 @@ fn parse_owner_pubkey_hex(value: &str) -> Result<OwnerPubkey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DevicePubkey, GroupProtocol};
     use nostr::{EventId, Keys};
-    use nostr_double_ratchet::{DevicePubkey, GroupProtocol};
     use serde::{Deserialize, Serialize};
     use std::{env, fs, path::PathBuf};
 
@@ -1576,7 +1576,7 @@ mod tests {
     #[test]
     fn sender_key_repair_request_command_encodes_10447_rumor() {
         let codec = JsonGroupPayloadCodecV1;
-        let request = nostr_double_ratchet::SenderKeyRepairRequest {
+        let request = crate::SenderKeyRepairRequest {
             group_id: "group-1".to_string(),
             sender_event_pubkey: device(3),
             key_id: Some(7),
@@ -1709,7 +1709,7 @@ mod tests {
 
         if should_regenerate {
             let ctx = encode_context();
-            let request = nostr_double_ratchet::SenderKeyRepairRequest {
+            let request = crate::SenderKeyRepairRequest {
                 group_id: "group-1".to_string(),
                 sender_event_pubkey: device(3),
                 key_id: Some(7),
@@ -1797,7 +1797,7 @@ mod tests {
     #[test]
     fn sender_key_repair_request_rejects_mismatched_tags() {
         let codec = JsonGroupPayloadCodecV1;
-        let request = nostr_double_ratchet::SenderKeyRepairRequest {
+        let request = crate::SenderKeyRepairRequest {
             group_id: "group-1".to_string(),
             sender_event_pubkey: device(3),
             key_id: Some(7),
@@ -1835,7 +1835,7 @@ mod tests {
     #[test]
     fn sender_key_repair_request_without_revision_omits_revision_tag() {
         let codec = JsonGroupPayloadCodecV1;
-        let request = nostr_double_ratchet::SenderKeyRepairRequest {
+        let request = crate::SenderKeyRepairRequest {
             group_id: "group-1".to_string(),
             sender_event_pubkey: device(3),
             key_id: Some(7),

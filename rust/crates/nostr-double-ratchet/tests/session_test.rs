@@ -1,8 +1,8 @@
 use nostr::Keys;
-use nostr_double_ratchet::{Result, Session};
-use nostr_double_ratchet_nostr::{
+use nostr_double_ratchet::{
     build_reaction_rumor, build_text_rumor, invite_response_event, InviteNostrExt, SessionNostrExt,
 };
+use nostr_double_ratchet::{Result, Session};
 
 fn send_text(session: &mut Session, text: &str) -> Result<nostr::Event> {
     session.send_event(build_text_rumor(
