@@ -72,7 +72,8 @@ describe("GroupManager", () => {
       expect(entry.rumor.pubkey).toBe(aliceDevicePk);
       expect(entry.rumor.content).toBe("");
       expect(entry.rumor.tags).toContainEqual(["type", GROUP_ROSTER_FACT_TYPE]);
-      expect(entry.rumor.tags).toContainEqual(["i", created.group.id, "group"]);
+      expect(entry.rumor.tags).toContainEqual(["d", created.group.id]);
+      expect(entry.rumor.tags).toContainEqual(["i", created.group.id, "subject"]);
       expect(entry.rumor.tags).toContainEqual(["group_id", created.group.id]);
       expect(entry.rumor.tags).toContainEqual(["revision", "1"]);
       expect(entry.rumor.tags).toContainEqual(["created_by", aliceOwnerPk]);

@@ -90,6 +90,8 @@ function buildVector(): GroupRosterFactVector {
 function assertVector(vector: GroupRosterFactVector): void {
   expect(vector.event.kind).toBe(GROUP_ROSTER_FACT_KIND);
   expect(vector.event.content).toBe("");
+  expect(vector.event.tags).toContainEqual(["d", vector.expected.group_id]);
+  expect(vector.event.tags).toContainEqual(["i", vector.expected.group_id, "subject"]);
   expect(vector.event.tags).toContainEqual(["type", GROUP_ROSTER_FACT_TYPE]);
   const parsed = parseGroupRosterFactRumor(vector.event);
   expect(parsed.groupId).toBe(vector.expected.group_id);

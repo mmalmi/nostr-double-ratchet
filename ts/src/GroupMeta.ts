@@ -2,7 +2,8 @@ import { bytesToHex } from "@noble/hashes/utils";
 import { Filter, UnsignedEvent, VerifiedEvent, verifyEvent } from "nostr-tools";
 
 export const GROUP_FACT_KIND = 7368;
-export const GROUP_ROSTER_FACT_KIND = GROUP_FACT_KIND;
+export const GROUP_FACT_SNAPSHOT_KIND = 37368;
+export const GROUP_ROSTER_FACT_KIND = GROUP_FACT_SNAPSHOT_KIND;
 export const GROUP_ROSTER_FACT_TYPE = "group_roster";
 export const GROUP_ROSTER_FACT_SCHEMA = 1;
 export const GROUP_METADATA_KIND = 40;
@@ -246,7 +247,7 @@ export function buildGroupRosterFactFilter(
     kinds: [GROUP_ROSTER_FACT_KIND],
   };
   const groupIds = normalizeStringList(options.groupIds);
-  if (groupIds.length > 0) filter["#i"] = groupIds;
+  if (groupIds.length > 0) filter["#d"] = groupIds;
   const authors = normalizeStringList(options.authors).map((author) =>
     requireHexPubkey(author, "author")
   );
@@ -276,9 +277,10 @@ export function buildGroupRosterFactEvent(
   requireAdminsAreMembers(admins, members);
 
   const tags: string[][] = [
+    ["d", groupId],
+    ["i", groupId, "subject"],
     ["type", GROUP_ROSTER_FACT_TYPE],
     ["schema", String(GROUP_ROSTER_FACT_SCHEMA)],
-    ["i", groupId, "group"],
     ["group_id", groupId],
     ["revision", String(revision)],
     ["name", requireNonEmpty(group.name, "name")],
@@ -296,7 +298,7 @@ export function buildGroupRosterFactEvent(
     kind: GROUP_ROSTER_FACT_KIND,
     pubkey: signerPubkey,
     created_at: eventCreatedAt,
-    tags,
+    tags: canonicalizeTags(tags),
     content: "",
   };
 }
@@ -342,7 +344,7 @@ function parseGroupRosterFactWire(
   const groupId = groupIdFromTags(event.tags);
   const taggedGroupId = firstTagValue(event.tags, "group_id");
   if (taggedGroupId && taggedGroupId !== groupId) {
-    throw new Error("GroupRoster group_id/i tag mismatch");
+    throw new Error("GroupRoster group_id/subject tag mismatch");
   }
   const members = canonicalPubkeys(tagValues(event.tags, "member"), "member");
   const admins = canonicalPubkeys(tagValues(event.tags, "admin"), "admin");
@@ -415,6 +417,24 @@ function tagValues(tags: string[][], name: string): string[] {
     .filter(Boolean);
 }
 
+function canonicalizeTags(tags: string[][]): string[][] {
+  const unique = new Map(tags.map((tag) => [tagKey(tag), tag]));
+  return Array.from(unique.values()).sort(compareTags);
+}
+
+function compareTags(left: string[], right: string[]): number {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (left[index] ?? "").localeCompare(right[index] ?? "");
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function tagKey(tag: string[]): string {
+  return JSON.stringify(tag);
+}
+
 function firstTagValue(tags: string[][], name: string): string | undefined {
   return tagValues(tags, name)[0];
 }
@@ -469,11 +489,18 @@ function requireAdminsAreMembers(admins: string[], members: string[]): void {
 }
 
 function groupIdFromTags(tags: string[][]): string {
-  const groupId = tags
-    .find((tag) => tag[0] === "i" && tag[2] === "group")
-    ?.at(1)
-    ?.trim();
-  if (!groupId) throw new Error("GroupRoster fact missing group subject");
+  const subjects = tags
+    .filter((tag) => tag[0] === "i" && tag[2] === "subject")
+    .map((tag) => tag[1]?.trim() ?? "")
+    .filter(Boolean);
+  if (subjects.length !== 1) {
+    throw new Error("GroupRoster fact must have exactly one subject i tag");
+  }
+  const groupId = subjects[0];
+  const d = requireTagValue(tags, "d");
+  if (d !== groupId) {
+    throw new Error("GroupRoster d/subject tag mismatch");
+  }
   return groupId;
 }
 

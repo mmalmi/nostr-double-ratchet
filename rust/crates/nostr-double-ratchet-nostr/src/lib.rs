@@ -21,8 +21,8 @@ pub use direct_message_subscriptions::{
 pub use group_codec::{
     build_group_roster_fact_filter, group_roster_unsigned_event, is_group_roster_fact_event,
     parse_group_roster_fact_event, project_group_roster_fact_events, GroupRosterFact,
-    JsonGroupPayloadCodecV1, NostrGroupManager, GROUP_FACT_KIND, GROUP_ROSTER_FACT_KIND,
-    GROUP_ROSTER_FACT_SCHEMA, GROUP_ROSTER_FACT_TYPE,
+    JsonGroupPayloadCodecV1, NostrGroupManager, GROUP_FACT_KIND, GROUP_FACT_SNAPSHOT_KIND,
+    GROUP_ROSTER_FACT_KIND, GROUP_ROSTER_FACT_SCHEMA, GROUP_ROSTER_FACT_TYPE,
 };
 pub use message_builders::*;
 pub use message_origin::{classify_message_origin, MessageOrigin};

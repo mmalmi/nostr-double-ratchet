@@ -151,7 +151,7 @@ describe("Expiration / Disappearing Messages", () => {
 
     const rosterFact = await aliceManager.sendMessage(alicePubkey, "", {
       kind: GROUP_ROSTER_FACT_KIND,
-      tags: [["i", groupId, "group"]],
+      tags: [["d", groupId], ["i", groupId, "subject"]],
       ttlSeconds: 10,
     })
     expect(rosterFact.kind).toBe(GROUP_ROSTER_FACT_KIND)

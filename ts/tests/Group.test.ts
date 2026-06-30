@@ -17,6 +17,7 @@ import {
   GROUP_METADATA_KIND,
   GROUP_INVITE_RUMOR_KIND,
   GROUP_FACT_KIND,
+  GROUP_FACT_SNAPSHOT_KIND,
   GROUP_ROSTER_FACT_KIND,
   GROUP_ROSTER_FACT_TYPE,
   buildGroupRosterFactEvent,
@@ -32,6 +33,17 @@ const ALICE = 'aaaa'.repeat(16)
 const BOB = 'bbbb'.repeat(16)
 const CAROL = 'cccc'.repeat(16)
 const DAVE = 'dddd'.repeat(16)
+
+function sortTags(tags: string[][]): string[][] {
+  return [...tags].sort((left, right) => {
+    const length = Math.max(left.length, right.length)
+    for (let index = 0; index < length; index += 1) {
+      const diff = (left[index] ?? '').localeCompare(right[index] ?? '')
+      if (diff !== 0) return diff
+    }
+    return 0
+  })
+}
 
 function makeGroup(overrides?: Partial<GroupData>): GroupData {
   return {
@@ -55,9 +67,10 @@ describe('Group constants', () => {
     expect(GROUP_INVITE_RUMOR_KIND).toBe(10445)
   })
 
-  it('group roster facts use the shared fact event kind', () => {
+  it('group roster facts use the fact snapshot kind', () => {
     expect(GROUP_FACT_KIND).toBe(7368)
-    expect(GROUP_ROSTER_FACT_KIND).toBe(GROUP_FACT_KIND)
+    expect(GROUP_FACT_SNAPSHOT_KIND).toBe(37368)
+    expect(GROUP_ROSTER_FACT_KIND).toBe(GROUP_FACT_SNAPSHOT_KIND)
     expect(GROUP_ROSTER_FACT_TYPE).toBe('group_roster')
   })
 })
@@ -96,10 +109,11 @@ describe('Group roster fact helpers', () => {
     })
     const expectedMembers = [admin, bob, carol].sort()
     const expectedAdmins = [admin, bob].sort()
-    expect(unsigned.tags).toEqual([
+    expect(unsigned.tags).toEqual(sortTags([
+      ['d', 'group-facts'],
+      ['i', 'group-facts', 'subject'],
       ['type', GROUP_ROSTER_FACT_TYPE],
       ['schema', '1'],
-      ['i', 'group-facts', 'group'],
       ['group_id', 'group-facts'],
       ['revision', '4'],
       ['name', 'Fact Friends'],
@@ -110,7 +124,7 @@ describe('Group roster fact helpers', () => {
       ['picture', 'https://example.test/group.png'],
       ...expectedMembers.map((member) => ['member', member]),
       ...expectedAdmins.map((groupAdmin) => ['admin', groupAdmin]),
-    ])
+    ]))
     expect(JSON.stringify(unsigned)).not.toContain('not-on-the-wire')
 
     const signed = finalizeEvent(unsigned, adminSecret)
@@ -195,7 +209,7 @@ describe('Group roster fact helpers', () => {
     })).toEqual({
       kinds: [GROUP_ROSTER_FACT_KIND],
       authors: [admin],
-      '#i': ['group-facts'],
+      '#d': ['group-facts'],
       since: 99,
     })
 

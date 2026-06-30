@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 pub const GROUP_METADATA_KIND: u32 = 40;
 pub const GROUP_FACT_KIND: u32 = 7368;
-pub const GROUP_ROSTER_FACT_KIND: u32 = GROUP_FACT_KIND;
+pub const GROUP_FACT_SNAPSHOT_KIND: u32 = 37368;
+pub const GROUP_ROSTER_FACT_KIND: u32 = GROUP_FACT_SNAPSHOT_KIND;
 pub const GROUP_ROSTER_FACT_TYPE: &str = "group_roster";
 pub const GROUP_ROSTER_FACT_SCHEMA: u64 = 1;
 pub const GROUP_SENDER_KEY_DISTRIBUTION_KIND: u32 = 10446;
@@ -132,7 +133,7 @@ where
     let authors: Vec<PublicKey> = authors.into_iter().collect();
     let mut filter = Filter::new().kind(Kind::from(GROUP_ROSTER_FACT_KIND as u16));
     if !group_ids.is_empty() {
-        filter = filter.custom_tags(SingleLetterTag::lowercase(Alphabet::I), group_ids);
+        filter = filter.custom_tags(SingleLetterTag::lowercase(Alphabet::D), group_ids);
     }
     if !authors.is_empty() {
         filter = filter.authors(authors);
@@ -152,34 +153,41 @@ fn group_roster_fact_tags(snapshot: &GroupSnapshot) -> Result<Vec<Tag>> {
     let updated_at = snapshot.updated_at.get().to_string();
     let created_by = snapshot.created_by.to_hex();
     let mut tags = vec![
-        tag(["type", GROUP_ROSTER_FACT_TYPE])?,
-        tag(["schema", &GROUP_ROSTER_FACT_SCHEMA.to_string()])?,
-        tag(["i", group_id, "group"])?,
-        tag(["group_id", group_id])?,
-        tag(["revision", &revision])?,
-        tag(["name", name])?,
-        tag(["created_at", &created_at])?,
-        tag(["updated_at", &updated_at])?,
-        tag(["created_by", &created_by])?,
-        tag(["protocol", group_protocol_to_tag(snapshot.protocol)?])?,
+        vec!["d".to_string(), group_id.to_string()],
+        vec!["i".to_string(), group_id.to_string(), "subject".to_string()],
+        vec!["type".to_string(), GROUP_ROSTER_FACT_TYPE.to_string()],
+        vec!["schema".to_string(), GROUP_ROSTER_FACT_SCHEMA.to_string()],
+        vec!["group_id".to_string(), group_id.to_string()],
+        vec!["revision".to_string(), revision],
+        vec!["name".to_string(), name.to_string()],
+        vec!["created_at".to_string(), created_at],
+        vec!["updated_at".to_string(), updated_at],
+        vec!["created_by".to_string(), created_by],
+        vec![
+            "protocol".to_string(),
+            group_protocol_to_tag(snapshot.protocol)?.to_string(),
+        ],
     ];
     if let Some(about) = snapshot.about.as_ref().filter(|value| !value.is_empty()) {
-        tags.push(tag(["about", about])?);
+        tags.push(vec!["about".to_string(), about.to_string()]);
     }
     if let Some(picture) = snapshot.picture.as_ref().filter(|value| !value.is_empty()) {
-        tags.push(tag(["picture", picture])?);
+        tags.push(vec!["picture".to_string(), picture.to_string()]);
     }
-    let member_tags: Result<Vec<Tag>> = members
-        .iter()
-        .map(|member| tag(["member", &member.to_hex()]))
-        .collect();
-    tags.extend(member_tags?);
-    let admin_tags: Result<Vec<Tag>> = admins
-        .iter()
-        .map(|admin| tag(["admin", &admin.to_hex()]))
-        .collect();
-    tags.extend(admin_tags?);
-    Ok(tags)
+    tags.extend(
+        members
+            .iter()
+            .map(|member| vec!["member".to_string(), member.to_hex()]),
+    );
+    tags.extend(
+        admins
+            .iter()
+            .map(|admin| vec!["admin".to_string(), admin.to_hex()]),
+    );
+    canonicalize_raw_tags(&mut tags);
+    tags.into_iter()
+        .map(|parts| Tag::parse(parts).map_err(|error| Error::Parse(error.to_string())))
+        .collect()
 }
 
 pub fn group_roster_unsigned_event(
@@ -244,7 +252,7 @@ pub fn parse_group_roster_fact_event(event: &Event) -> Result<GroupRosterFact> {
     if let Some(tagged_group_id) = event_first_tag_value(event, "group_id") {
         if tagged_group_id != group_id {
             return Err(Error::InvalidEvent(
-                "GroupRoster group_id/i tag mismatch".to_string(),
+                "GroupRoster group_id/subject tag mismatch".to_string(),
             ));
         }
     }
@@ -328,7 +336,7 @@ fn group_roster_snapshot_from_unsigned_event(event: &UnsignedEvent) -> Result<Gr
     if let Some(tagged_group_id) = unsigned_event_first_tag_value(event, "group_id") {
         if tagged_group_id != group_id {
             return Err(Error::InvalidEvent(
-                "GroupRoster group_id/i tag mismatch".to_string(),
+                "GroupRoster group_id/subject tag mismatch".to_string(),
             ));
         }
     }
@@ -899,16 +907,38 @@ fn group_id_from_unsigned_event(event: &UnsignedEvent) -> Result<String> {
 }
 
 fn group_id_from_tags(tags: &Tags) -> Result<String> {
-    tags.iter()
-        .find_map(|tag| {
+    let subjects: Vec<String> = tags
+        .iter()
+        .filter_map(|tag| {
             let values = tag.as_slice();
             (values.first().map(|value| value.as_str()) == Some("i")
-                && values.get(2).map(|value| value.as_str()) == Some("group"))
+                && values.get(2).map(|value| value.as_str()) == Some("subject"))
             .then(|| values.get(1).map(|value| value.trim().to_string()))
             .flatten()
         })
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| Error::InvalidEvent("GroupRoster fact missing group subject".to_string()))
+        .collect();
+    if subjects.len() != 1 {
+        return Err(Error::InvalidEvent(
+            "GroupRoster fact must have exactly one subject i tag".to_string(),
+        ));
+    }
+    let group_id = subjects[0].clone();
+    let d = tag_values(tags, "d")
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidEvent("GroupRoster fact missing d tag".to_string()))?;
+    if d != group_id {
+        return Err(Error::InvalidEvent(
+            "GroupRoster d/subject tag mismatch".to_string(),
+        ));
+    }
+    Ok(group_id)
+}
+
+fn canonicalize_raw_tags(tags: &mut Vec<Vec<String>>) {
+    tags.sort();
+    tags.dedup();
 }
 
 fn first_tag_value(event: &UnsignedEvent, key: &str) -> Option<String> {
@@ -1112,6 +1142,16 @@ mod tests {
             first_tag_value(&event, "type").as_deref(),
             Some(GROUP_ROSTER_FACT_TYPE)
         );
+        assert_eq!(first_tag_value(&event, "d").as_deref(), Some("group-1"));
+        assert_eq!(
+            event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some("i")
+                    && values.get(1).map(String::as_str) == Some("group-1")
+                    && values.get(2).map(String::as_str) == Some("subject")
+            }),
+            true
+        );
         assert_eq!(
             first_tag_value(&event, "group_id").as_deref(),
             Some("group-1")
@@ -1211,15 +1251,30 @@ mod tests {
             filter_json["authors"],
             serde_json::json!([admin.public_key()])
         );
-        assert_eq!(filter_json["#i"], serde_json::json!(["group-facts"]));
+        assert_eq!(filter_json["#d"], serde_json::json!(["group-facts"]));
 
         let unsigned = group_roster_unsigned_event(admin.public_key(), &snapshot).unwrap();
         assert_eq!(unsigned.kind.as_u16() as u32, GROUP_ROSTER_FACT_KIND);
-        assert_eq!(GROUP_ROSTER_FACT_KIND, GROUP_FACT_KIND);
+        assert_eq!(GROUP_FACT_KIND, 7368);
+        assert_eq!(GROUP_FACT_SNAPSHOT_KIND, 37368);
+        assert_eq!(GROUP_ROSTER_FACT_KIND, GROUP_FACT_SNAPSHOT_KIND);
         assert_eq!(unsigned.content, "");
         assert_eq!(
             first_tag_value(&unsigned, "type").as_deref(),
             Some(GROUP_ROSTER_FACT_TYPE)
+        );
+        assert_eq!(
+            first_tag_value(&unsigned, "d").as_deref(),
+            Some("group-facts")
+        );
+        assert_eq!(
+            unsigned.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some("i")
+                    && values.get(1).map(String::as_str) == Some("group-facts")
+                    && values.get(2).map(String::as_str) == Some("subject")
+            }),
+            true
         );
         assert_eq!(
             first_tag_value(&unsigned, "group_id").as_deref(),
