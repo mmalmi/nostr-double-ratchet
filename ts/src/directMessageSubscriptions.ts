@@ -126,7 +126,6 @@ export function inviteResponseSubscriptionRecipients(filter: Filter): string[] {
 
 export function buildInviteResponseBackfillFilter(
   recipients: Iterable<string>,
-  since: number,
   limit: number = 200
 ): Filter {
   const normalizedRecipients: string[] = []
@@ -141,7 +140,6 @@ export function buildInviteResponseBackfillFilter(
   return {
     kinds: [INVITE_RESPONSE_KIND],
     "#p": normalizedRecipients,
-    since,
     limit,
   }
 }
@@ -167,7 +165,6 @@ export function buildRuntimeBackfillFilters(
     filters.push(
       buildInviteResponseBackfillFilter(
         registered.addedInviteResponseRecipients,
-        since,
         limit
       )
     )

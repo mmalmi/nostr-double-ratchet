@@ -222,7 +222,6 @@ pub fn build_app_keys_backfill_filter(
 
 pub fn build_invite_response_backfill_filter(
     recipients: impl IntoIterator<Item = PublicKey>,
-    since_seconds: u64,
     limit: usize,
 ) -> Filter {
     let mut unique_recipients = Vec::new();
@@ -236,7 +235,6 @@ pub fn build_invite_response_backfill_filter(
     Filter::new()
         .kind(Kind::from(INVITE_RESPONSE_KIND as u16))
         .custom_tags(SingleLetterTag::lowercase(Alphabet::P), unique_recipients)
-        .since(Timestamp::from(since_seconds))
         .limit(limit)
 }
 
@@ -265,7 +263,6 @@ pub fn build_runtime_backfill_filters(
                 .added_invite_response_recipients
                 .iter()
                 .copied(),
-            since_seconds,
             limit,
         ));
     }
@@ -632,7 +629,6 @@ mod tests {
             invite_response["#p"],
             serde_json::json!(["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
         );
-        assert_eq!(invite_response["since"], serde_json::json!(1234));
         assert_eq!(invite_response["limit"], serde_json::json!(50));
     }
 }
