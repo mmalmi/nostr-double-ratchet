@@ -952,7 +952,6 @@ export class GroupManager {
             : event.created_at * 1000,
           ...(parsed.description ? { description: parsed.description } : {}),
           ...(parsed.picture ? { picture: parsed.picture } : {}),
-          ...(parsed.secret ? { secret: parsed.secret } : {}),
           accepted: false,
         },
         ourOwnerPubkey: this.ourOwnerPubkey,

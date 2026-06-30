@@ -6,7 +6,6 @@ export const GROUP_FACT_SNAPSHOT_KIND = 37368;
 export const GROUP_ROSTER_FACT_KIND = GROUP_FACT_SNAPSHOT_KIND;
 export const GROUP_ROSTER_FACT_TYPE = "group_roster";
 export const GROUP_ROSTER_FACT_SCHEMA = 1;
-export const GROUP_METADATA_KIND = 40;
 export const GROUP_INVITE_RUMOR_KIND = 10445;
 export const GROUP_SENDER_KEY_DISTRIBUTION_KIND = 10446;
 export const GROUP_SENDER_KEY_REPAIR_REQUEST_KIND = 10447;
@@ -35,7 +34,6 @@ export interface GroupMetadata {
   picture?: string;
   members: string[];
   admins: string[];
-  secret?: string;
 }
 
 export interface GroupRosterFactFilterOptions {
@@ -108,34 +106,6 @@ export function createGroupData(
   };
 }
 
-export function buildGroupMetadataContent(
-  group: GroupData,
-  opts?: { excludeSecret?: boolean }
-): string {
-  const metadata: GroupMetadata = {
-    id: group.id,
-    name: group.name,
-    members: group.members,
-    admins: group.admins,
-    ...(group.description && { description: group.description }),
-    ...(group.picture && { picture: group.picture }),
-    ...(!opts?.excludeSecret && group.secret && { secret: group.secret }),
-  };
-  return JSON.stringify(metadata);
-}
-
-export function parseGroupMetadata(content: string): GroupMetadata | null {
-  try {
-    const metadata = JSON.parse(content) as Partial<GroupMetadata>;
-    const { id, name, members, admins } = metadata;
-    if (!id || !name || !Array.isArray(members) || !Array.isArray(admins)) return null;
-    if (admins.length === 0) return null;
-    return metadata as GroupMetadata;
-  } catch {
-    return null;
-  }
-}
-
 export function validateMetadataUpdate(
   existing: GroupData,
   metadata: GroupMetadata,
@@ -165,7 +135,6 @@ export function applyMetadataUpdate(existing: GroupData, metadata: GroupMetadata
     admins: metadata.admins,
     description: metadata.description,
     picture: metadata.picture,
-    secret: metadata.secret || existing.secret,
   };
 }
 

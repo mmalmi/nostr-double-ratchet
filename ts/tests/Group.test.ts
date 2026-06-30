@@ -4,8 +4,6 @@ import {
   isGroupAdmin,
   generateGroupSecret,
   createGroupData,
-  buildGroupMetadataContent,
-  parseGroupMetadata,
   validateMetadataUpdate,
   validateMetadataCreation,
   applyMetadataUpdate,
@@ -14,7 +12,6 @@ import {
   updateGroupData,
   addGroupAdmin,
   removeGroupAdmin,
-  GROUP_METADATA_KIND,
   GROUP_INVITE_RUMOR_KIND,
   GROUP_FACT_KIND,
   GROUP_FACT_SNAPSHOT_KIND,
@@ -59,10 +56,6 @@ function makeGroup(overrides?: Partial<GroupData>): GroupData {
 }
 
 describe('Group constants', () => {
-  it('GROUP_METADATA_KIND is 40', () => {
-    expect(GROUP_METADATA_KIND).toBe(40)
-  })
-
   it('GROUP_INVITE_RUMOR_KIND is 10445', () => {
     expect(GROUP_INVITE_RUMOR_KIND).toBe(10445)
   })
@@ -291,62 +284,6 @@ describe('createGroupData', () => {
   })
 })
 
-describe('buildGroupMetadataContent', () => {
-  it('serializes group metadata to JSON', () => {
-    const group = makeGroup({ description: 'desc', picture: 'pic.jpg' })
-    const json = buildGroupMetadataContent(group)
-    const parsed = JSON.parse(json)
-    expect(parsed.id).toBe(group.id)
-    expect(parsed.name).toBe(group.name)
-    expect(parsed.members).toEqual(group.members)
-    expect(parsed.admins).toEqual(group.admins)
-    expect(parsed.description).toBe('desc')
-    expect(parsed.picture).toBe('pic.jpg')
-    expect(parsed.secret).toBe(group.secret)
-  })
-
-  it('excludes secret when excludeSecret is true', () => {
-    const group = makeGroup()
-    const json = buildGroupMetadataContent(group, { excludeSecret: true })
-    const parsed = JSON.parse(json)
-    expect(parsed.secret).toBeUndefined()
-  })
-
-  it('omits empty description and picture', () => {
-    const group = makeGroup()
-    const json = buildGroupMetadataContent(group)
-    const parsed = JSON.parse(json)
-    expect(parsed.description).toBeUndefined()
-    expect(parsed.picture).toBeUndefined()
-  })
-})
-
-describe('parseGroupMetadata', () => {
-  it('parses valid metadata', () => {
-    const meta: GroupMetadata = {
-      id: 'g1', name: 'G', members: [ALICE], admins: [ALICE], secret: 'x'.repeat(64)
-    }
-    const result = parseGroupMetadata(JSON.stringify(meta))
-    expect(result).toEqual(meta)
-  })
-
-  it('returns null for missing id', () => {
-    expect(parseGroupMetadata(JSON.stringify({ name: 'G', members: [ALICE], admins: [ALICE] }))).toBeNull()
-  })
-
-  it('returns null for empty admins', () => {
-    expect(parseGroupMetadata(JSON.stringify({ id: 'g1', name: 'G', members: [ALICE], admins: [] }))).toBeNull()
-  })
-
-  it('returns null for invalid JSON', () => {
-    expect(parseGroupMetadata('not json')).toBeNull()
-  })
-
-  it('returns null for non-array members', () => {
-    expect(parseGroupMetadata(JSON.stringify({ id: 'g1', name: 'G', members: 'bad', admins: [ALICE] }))).toBeNull()
-  })
-})
-
 describe('validateMetadataUpdate', () => {
   it('accepts update from admin', () => {
     const group = makeGroup()
@@ -389,13 +326,13 @@ describe('applyMetadataUpdate', () => {
     const group = makeGroup({ accepted: true })
     const meta: GroupMetadata = {
       id: group.id, name: 'Updated', members: [ALICE, BOB, CAROL],
-      admins: [ALICE], description: 'new desc', secret: 'b'.repeat(64)
+      admins: [ALICE], description: 'new desc'
     }
     const updated = applyMetadataUpdate(group, meta)
     expect(updated.name).toBe('Updated')
     expect(updated.members).toEqual([ALICE, BOB, CAROL])
     expect(updated.description).toBe('new desc')
-    expect(updated.secret).toBe('b'.repeat(64))
+    expect(updated.secret).toBe(group.secret)
     expect(updated.accepted).toBe(true)
   })
 

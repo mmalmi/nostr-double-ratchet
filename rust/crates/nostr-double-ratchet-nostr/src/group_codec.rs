@@ -9,7 +9,6 @@ use nostr_double_ratchet::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const GROUP_METADATA_KIND: u32 = 40;
 pub const GROUP_FACT_KIND: u32 = 7368;
 pub const GROUP_FACT_SNAPSHOT_KIND: u32 = 37368;
 pub const GROUP_ROSTER_FACT_KIND: u32 = GROUP_FACT_SNAPSHOT_KIND;
