@@ -15,7 +15,7 @@ pub const ROSTER_EVENT_KIND: u32 = 30078;
 
 const ROSTER_D_TAG: &str = "double-ratchet/app-keys";
 const ROSTER_VERSION: &str = "1";
-const INVITE_LIST_LABEL: &str = "double-ratchet/invites";
+pub const INVITE_LIST_LABEL: &str = "double-ratchet/invites";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedRosterEvent {
     pub owner_pubkey: OwnerPubkey,

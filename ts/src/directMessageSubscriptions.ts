@@ -1,6 +1,12 @@
 import type { Filter } from "nostr-tools"
 
-import { APP_KEYS_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND } from "./types"
+import {
+  APP_KEYS_EVENT_KIND,
+  INVITE_EVENT_KIND,
+  INVITE_LIST_LABEL,
+  INVITE_RESPONSE_KIND,
+  MESSAGE_EVENT_KIND,
+} from "./types"
 
 export interface RegisteredDirectMessageSubscription {
   token: number
@@ -14,6 +20,11 @@ export interface RegisteredRuntimeSubscription {
   addedInviteResponseRecipients: string[]
 }
 
+export interface ProtocolDiscoveryFilterTargets {
+  appKeysAuthors?: Iterable<string>
+  inviteAuthors?: Iterable<string>
+}
+
 const normalizeAuthor = (value: unknown): string | null => {
   if (typeof value !== "string") return null
   const normalized = value.trim().toLowerCase()
@@ -22,7 +33,10 @@ const normalizeAuthor = (value: unknown): string | null => {
 }
 
 export function directMessageSubscriptionAuthors(filter: Filter): string[] {
-  if (!Array.isArray(filter.kinds) || !filter.kinds.includes(MESSAGE_EVENT_KIND)) {
+  if (
+    !Array.isArray(filter.kinds) ||
+    !filter.kinds.includes(MESSAGE_EVENT_KIND)
+  ) {
     return []
   }
 
@@ -42,7 +56,10 @@ export function directMessageSubscriptionAuthors(filter: Filter): string[] {
 }
 
 export function appKeysSubscriptionAuthors(filter: Filter): string[] {
-  if (!Array.isArray(filter.kinds) || !filter.kinds.includes(APP_KEYS_EVENT_KIND)) {
+  if (
+    !Array.isArray(filter.kinds) ||
+    !filter.kinds.includes(APP_KEYS_EVENT_KIND)
+  ) {
     return []
   }
 
@@ -63,7 +80,7 @@ export function appKeysSubscriptionAuthors(filter: Filter): string[] {
 
 export function buildDirectMessageBackfillFilter(
   authors: Iterable<string>,
-  limit: number = 200
+  limit: number = 200,
 ): Filter {
   const normalizedAuthors: string[] = []
   const seen = new Set<string>()
@@ -83,7 +100,7 @@ export function buildDirectMessageBackfillFilter(
 
 export function buildAppKeysBackfillFilter(
   authors: Iterable<string>,
-  limit: number = 200
+  limit: number = 200,
 ): Filter {
   const normalizedAuthors: string[] = []
   const seen = new Set<string>()
@@ -101,8 +118,32 @@ export function buildAppKeysBackfillFilter(
   }
 }
 
+export function buildInviteBackfillFilter(
+  authors: Iterable<string>,
+  limit: number = 200,
+): Filter {
+  const normalizedAuthors: string[] = []
+  const seen = new Set<string>()
+  for (const author of authors) {
+    const normalized = normalizeAuthor(author)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    normalizedAuthors.push(normalized)
+  }
+
+  return {
+    kinds: [INVITE_EVENT_KIND],
+    authors: normalizedAuthors,
+    "#l": [INVITE_LIST_LABEL],
+    limit,
+  }
+}
+
 export function inviteResponseSubscriptionRecipients(filter: Filter): string[] {
-  if (!Array.isArray(filter.kinds) || !filter.kinds.includes(INVITE_RESPONSE_KIND)) {
+  if (
+    !Array.isArray(filter.kinds) ||
+    !filter.kinds.includes(INVITE_RESPONSE_KIND)
+  ) {
     return []
   }
 
@@ -124,7 +165,7 @@ export function inviteResponseSubscriptionRecipients(filter: Filter): string[] {
 
 export function buildInviteResponseBackfillFilter(
   recipients: Iterable<string>,
-  limit: number = 200
+  limit: number = 200,
 ): Filter {
   const normalizedRecipients: string[] = []
   const seen = new Set<string>()
@@ -145,26 +186,46 @@ export function buildInviteResponseBackfillFilter(
 export function buildRuntimeBackfillFilters(
   registered: Pick<
     RegisteredRuntimeSubscription,
-    "addedAppKeysAuthors" | "addedMessageAuthors" | "addedInviteResponseRecipients"
+    | "addedAppKeysAuthors"
+    | "addedMessageAuthors"
+    | "addedInviteResponseRecipients"
   >,
-  limit: number = 200
+  limit: number = 200,
 ): Filter[] {
   const filters: Filter[] = []
   if (registered.addedAppKeysAuthors.length > 0) {
-    filters.push(buildAppKeysBackfillFilter(registered.addedAppKeysAuthors, limit))
+    filters.push(
+      buildAppKeysBackfillFilter(registered.addedAppKeysAuthors, limit),
+    )
   }
   if (registered.addedMessageAuthors.length > 0) {
     filters.push(
-      buildDirectMessageBackfillFilter(registered.addedMessageAuthors, limit)
+      buildDirectMessageBackfillFilter(registered.addedMessageAuthors, limit),
     )
   }
   if (registered.addedInviteResponseRecipients.length > 0) {
     filters.push(
       buildInviteResponseBackfillFilter(
         registered.addedInviteResponseRecipients,
-        limit
-      )
+        limit,
+      ),
     )
+  }
+  return filters
+}
+
+export function buildProtocolDiscoveryFilters(
+  targets: ProtocolDiscoveryFilterTargets,
+  limit: number = 256,
+): Filter[] {
+  const filters: Filter[] = []
+  const appKeysAuthors = Array.from(targets.appKeysAuthors ?? [])
+  const inviteAuthors = Array.from(targets.inviteAuthors ?? [])
+  if (appKeysAuthors.length > 0) {
+    filters.push(buildAppKeysBackfillFilter(appKeysAuthors, limit))
+  }
+  if (inviteAuthors.length > 0) {
+    filters.push(buildInviteBackfillFilter(inviteAuthors, limit))
   }
   return filters
 }
@@ -229,19 +290,19 @@ export class RuntimeSubscriptionTracker {
       appKeysSubscriptionAuthors(filter),
       this.appKeysAuthorsByToken,
       this.appKeysAuthorRefCounts,
-      token
+      token,
     )
     const addedMessageAuthors = registerValues(
       directMessageSubscriptionAuthors(filter),
       this.messageAuthorsByToken,
       this.messageAuthorRefCounts,
-      token
+      token,
     )
     const addedInviteResponseRecipients = registerValues(
       inviteResponseSubscriptionRecipients(filter),
       this.inviteResponseRecipientsByToken,
       this.inviteResponseRecipientRefCounts,
-      token
+      token,
     )
 
     return {
@@ -253,12 +314,20 @@ export class RuntimeSubscriptionTracker {
   }
 
   unregister(token: number): void {
-    unregisterValues(token, this.appKeysAuthorsByToken, this.appKeysAuthorRefCounts)
-    unregisterValues(token, this.messageAuthorsByToken, this.messageAuthorRefCounts)
+    unregisterValues(
+      token,
+      this.appKeysAuthorsByToken,
+      this.appKeysAuthorRefCounts,
+    )
+    unregisterValues(
+      token,
+      this.messageAuthorsByToken,
+      this.messageAuthorRefCounts,
+    )
     unregisterValues(
       token,
       this.inviteResponseRecipientsByToken,
-      this.inviteResponseRecipientRefCounts
+      this.inviteResponseRecipientRefCounts,
     )
   }
 
@@ -279,7 +348,7 @@ function registerValues(
   values: string[],
   valuesByToken: Map<number, string[]>,
   refCounts: Map<string, number>,
-  token: number
+  token: number,
 ): string[] {
   if (values.length === 0) {
     return []
@@ -300,7 +369,7 @@ function registerValues(
 function unregisterValues(
   token: number,
   valuesByToken: Map<number, string[]>,
-  refCounts: Map<string, number>
+  refCounts: Map<string, number>,
 ): void {
   const values = valuesByToken.get(token)
   if (!values) return

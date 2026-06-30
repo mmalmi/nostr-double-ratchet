@@ -29,7 +29,8 @@ pub use app_keys::{
 };
 pub use direct_message_subscriptions::{
     app_keys_subscription_authors, build_app_keys_backfill_filter,
-    build_direct_message_backfill_filter, build_invite_response_backfill_filter,
+    build_direct_message_backfill_filter, build_invite_backfill_filter,
+    build_invite_response_backfill_filter, build_protocol_discovery_filters,
     build_runtime_backfill_filters, direct_message_subscription_authors,
     invite_response_subscription_recipients, DirectMessageSubscriptionTracker,
     RuntimeSubscriptionRegistration, RuntimeSubscriptionTracker,
@@ -74,7 +75,7 @@ pub use wire::{
     parse_group_sender_key_message_event_unchecked, parse_invite_event,
     parse_invite_response_event, parse_invite_url, parse_message_event, parse_roster_event,
     roster_unsigned_event, DecodedRosterEvent, GROUP_SENDER_KEY_MESSAGE_KIND, INVITE_EVENT_KIND,
-    INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND, ROSTER_EVENT_KIND,
+    INVITE_LIST_LABEL, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND, ROSTER_EVENT_KIND,
 };
 
 pub(crate) use ids::owner_pubkey_from_device_pubkey;

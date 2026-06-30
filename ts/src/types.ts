@@ -99,6 +99,7 @@ export const MESSAGE_EVENT_KIND = 1060;
  * Invite event kind
  */
 export const INVITE_EVENT_KIND = 30078;
+export const INVITE_LIST_LABEL = "double-ratchet/invites";
 
 export const INVITE_RESPONSE_KIND = 1059;
 

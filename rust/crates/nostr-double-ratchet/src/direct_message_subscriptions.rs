@@ -1,5 +1,6 @@
 use crate::{
-    utils::pubkey_from_hex, APP_KEYS_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
+    utils::pubkey_from_hex, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND, INVITE_LIST_LABEL,
+    INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
 };
 use nostr::{Alphabet, Filter, Kind, PublicKey, SingleLetterTag};
 use serde_json::Value;
@@ -218,6 +219,25 @@ pub fn build_app_keys_backfill_filter(
         .limit(limit)
 }
 
+pub fn build_invite_backfill_filter(
+    authors: impl IntoIterator<Item = PublicKey>,
+    limit: usize,
+) -> Filter {
+    let mut unique_authors = Vec::new();
+    let mut seen_authors = HashSet::new();
+    for author in authors {
+        if seen_authors.insert(author) {
+            unique_authors.push(author);
+        }
+    }
+
+    Filter::new()
+        .kind(Kind::from(INVITE_EVENT_KIND as u16))
+        .authors(unique_authors)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), INVITE_LIST_LABEL)
+        .limit(limit)
+}
+
 pub fn build_invite_response_backfill_filter(
     recipients: impl IntoIterator<Item = PublicKey>,
     limit: usize,
@@ -261,6 +281,23 @@ pub fn build_runtime_backfill_filters(
                 .copied(),
             limit,
         ));
+    }
+    filters
+}
+
+pub fn build_protocol_discovery_filters(
+    app_keys_authors: impl IntoIterator<Item = PublicKey>,
+    invite_authors: impl IntoIterator<Item = PublicKey>,
+    limit: usize,
+) -> Vec<Filter> {
+    let app_keys_authors = app_keys_authors.into_iter().collect::<Vec<_>>();
+    let invite_authors = invite_authors.into_iter().collect::<Vec<_>>();
+    let mut filters = Vec::new();
+    if !app_keys_authors.is_empty() {
+        filters.push(build_app_keys_backfill_filter(app_keys_authors, limit));
+    }
+    if !invite_authors.is_empty() {
+        filters.push(build_invite_backfill_filter(invite_authors, limit));
     }
     filters
 }
@@ -625,5 +662,59 @@ mod tests {
             serde_json::json!(["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
         );
         assert_eq!(invite_response["limit"], serde_json::json!(50));
+    }
+
+    #[test]
+    fn builds_invite_backfill_filter() {
+        let filter = build_invite_backfill_filter(
+            [
+                pubkey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                pubkey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                pubkey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ],
+            50,
+        );
+        let json = serde_json::to_value(filter).unwrap();
+        assert_eq!(json["kinds"], serde_json::json!([30078]));
+        assert_eq!(
+            json["authors"],
+            serde_json::json!([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ])
+        );
+        assert_eq!(json["#l"], serde_json::json!(["double-ratchet/invites"]));
+        assert_eq!(json["limit"], serde_json::json!(50));
+    }
+
+    #[test]
+    fn builds_protocol_discovery_filters() {
+        let filters = build_protocol_discovery_filters(
+            [pubkey(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            )],
+            [pubkey(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )],
+            50,
+        );
+
+        assert_eq!(filters.len(), 2);
+        let app_keys = serde_json::to_value(&filters[0]).unwrap();
+        assert_eq!(app_keys["kinds"], serde_json::json!([37368]));
+        assert_eq!(
+            app_keys["authors"],
+            serde_json::json!(["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"])
+        );
+        assert_eq!(app_keys["limit"], serde_json::json!(50));
+
+        let invite = serde_json::to_value(&filters[1]).unwrap();
+        assert_eq!(invite["kinds"], serde_json::json!([30078]));
+        assert_eq!(
+            invite["authors"],
+            serde_json::json!(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
+        );
+        assert_eq!(invite["#l"], serde_json::json!(["double-ratchet/invites"]));
+        assert_eq!(invite["limit"], serde_json::json!(50));
     }
 }

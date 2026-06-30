@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest"
 import {
   appKeysSubscriptionAuthors,
   buildAppKeysBackfillFilter,
+  buildInviteBackfillFilter,
   buildInviteResponseBackfillFilter,
   buildDirectMessageBackfillFilter,
+  buildProtocolDiscoveryFilters,
   buildRuntimeBackfillFilters,
   directMessageSubscriptionAuthors,
   DirectMessageSubscriptionTracker,
@@ -23,7 +25,7 @@ describe("direct message subscription helpers", () => {
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "nope",
         ],
-      })
+      }),
     ).toEqual([
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -32,8 +34,10 @@ describe("direct message subscription helpers", () => {
     expect(
       directMessageSubscriptionAuthors({
         kinds: [1],
-        authors: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-      })
+        authors: [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+      }),
     ).toEqual([])
   })
 
@@ -54,7 +58,9 @@ describe("direct message subscription helpers", () => {
 
     const second = tracker.registerFilter({
       kinds: [1060],
-      authors: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      authors: [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ],
     })
     expect(second.addedAuthors).toEqual([])
     expect(tracker.trackedAuthors()).toEqual([
@@ -79,8 +85,8 @@ describe("direct message subscription helpers", () => {
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ],
-        50
-      )
+        50,
+      ),
     ).toEqual({
       kinds: [1060],
       authors: [
@@ -101,7 +107,7 @@ describe("direct message subscription helpers", () => {
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "nope",
         ],
-      })
+      }),
     ).toEqual([
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -110,8 +116,10 @@ describe("direct message subscription helpers", () => {
     expect(
       inviteResponseSubscriptionRecipients({
         kinds: [1060],
-        "#p": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-      })
+        "#p": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+      }),
     ).toEqual([])
   })
 
@@ -123,8 +131,8 @@ describe("direct message subscription helpers", () => {
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ],
-        50
-      )
+        50,
+      ),
     ).toEqual({
       kinds: [1059],
       "#p": [
@@ -145,7 +153,7 @@ describe("direct message subscription helpers", () => {
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "nope",
         ],
-      })
+      }),
     ).toEqual([
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -154,8 +162,10 @@ describe("direct message subscription helpers", () => {
     expect(
       appKeysSubscriptionAuthors({
         kinds: [7368],
-        authors: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-      })
+        authors: [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+      }),
     ).toEqual([])
   })
 
@@ -167,8 +177,8 @@ describe("direct message subscription helpers", () => {
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ],
-        50
-      )
+        50,
+      ),
     ).toEqual({
       kinds: [37368],
       authors: [
@@ -179,12 +189,67 @@ describe("direct message subscription helpers", () => {
     })
   })
 
+  it("builds a normalized invite backfill filter", () => {
+    expect(
+      buildInviteBackfillFilter(
+        [
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+        50,
+      ),
+    ).toEqual({
+      kinds: [30078],
+      authors: [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ],
+      "#l": ["double-ratchet/invites"],
+      limit: 50,
+    })
+  })
+
+  it("builds protocol discovery filters for app-keys and invites", () => {
+    expect(
+      buildProtocolDiscoveryFilters(
+        {
+          appKeysAuthors: [
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          ],
+          inviteAuthors: [
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          ],
+        },
+        50,
+      ),
+    ).toEqual([
+      {
+        kinds: [37368],
+        authors: [
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ],
+        limit: 50,
+      },
+      {
+        kinds: [30078],
+        authors: [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+        "#l": ["double-ratchet/invites"],
+        limit: 50,
+      },
+    ])
+  })
+
   it("tracks runtime app-keys authors, message authors, and invite response recipients", () => {
     const tracker = new RuntimeSubscriptionTracker()
 
     const first = tracker.registerFilter({
       kinds: [37368],
-      authors: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      authors: [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      ],
     })
     expect(first.addedAppKeysAuthors).toEqual([
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -194,7 +259,9 @@ describe("direct message subscription helpers", () => {
 
     const second = tracker.registerFilter({
       kinds: [1060],
-      authors: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      authors: [
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      ],
     })
     expect(second.addedAppKeysAuthors).toEqual([])
     expect(second.addedMessageAuthors).toEqual([
@@ -204,7 +271,9 @@ describe("direct message subscription helpers", () => {
 
     const third = tracker.registerFilter({
       kinds: [1059],
-      "#p": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "#p": [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ],
     })
     expect(third.addedAppKeysAuthors).toEqual([])
     expect(third.addedMessageAuthors).toEqual([])
@@ -223,7 +292,9 @@ describe("direct message subscription helpers", () => {
 
     const fourth = tracker.registerFilter({
       kinds: [1059],
-      "#p": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "#p": [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ],
     })
     expect(fourth.addedInviteResponseRecipients).toEqual([])
 
@@ -249,22 +320,28 @@ describe("direct message subscription helpers", () => {
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           ],
         },
-        50
-      )
+        50,
+      ),
     ).toEqual([
       {
         kinds: [37368],
-        authors: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+        authors: [
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ],
         limit: 50,
       },
       {
         kinds: [1060],
-        authors: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        authors: [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
         limit: 50,
       },
       {
         kinds: [1059],
-        "#p": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        "#p": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
         limit: 50,
       },
     ])
