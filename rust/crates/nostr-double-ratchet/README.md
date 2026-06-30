@@ -112,13 +112,13 @@ state machines, and persist snapshots. For a ready app-facing Rust runtime and m
 Use NIP-40-style `["expiration", "<unix seconds>"]` tags in inner rumors.  
 `SessionManager` helpers support global, per-peer, and per-group defaults through `SendOptions`.
 
-## Direct Message Catch-Up
+## Runtime Catch-Up
 
 Runtime integrations should fetch AppKeys, device invites, invite responses, and active message
 authors on startup, reconnect, and after AppKeys/invite changes. The
-`nostr-double-ratchet` provides `DirectMessageSubscriptionTracker` and
-`build_direct_message_backfill_filter(...)` for short direct-message replay when a new message
-author appears in a subscription.
+`nostr-double-ratchet` provides `RuntimeSubscriptionTracker` and
+`build_runtime_backfill_filters(...)` for bounded relay replay when new runtime subscription
+targets appear.
 
 ## 1:1 Chat Settings Signaling
 

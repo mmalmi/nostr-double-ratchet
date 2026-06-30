@@ -140,9 +140,9 @@ reaction, receipt, typing, reply, and expiring inner rumors before calling `sess
 Reference web integrations do this:
 
 1. Create one long-lived `NdrRuntime` per active identity with persistent storage.
-2. Wrap `nostrSubscribe` with `DirectMessageSubscriptionTracker` +
-   `buildDirectMessageBackfillFilter(...)` so newly added direct-message authors trigger a short
-   relay backfill immediately.
+2. Wrap `nostrSubscribe` with `RuntimeSubscriptionTracker` +
+   `buildRuntimeBackfillFilters(...)` so newly added AppKeys authors, invite-response recipients,
+   and direct-message authors trigger bounded relay backfill immediately.
 3. Call `initForOwner(ownerPubkey)`, then `ensureCurrentDeviceRegistered(ownerPubkey)` or
    `registerCurrentDevice(...)` when owner-key logins should participate in multi-device fanout.
 4. Attach `onSessionEvent(...)` / `onGroupEvent(...)` once for app lifetime.
@@ -211,8 +211,9 @@ code.
   candidates for self-sync and linked-device routing.
 - `resolveInviteOwnerRouting(...)`: preserve inviter owner/device attribution during invite
   acceptance, including the link-bootstrap exception and device-identity fallback.
-- `DirectMessageSubscriptionTracker` + `buildDirectMessageBackfillFilter(...)`: detect newly added
-  direct-message session authors and issue a short replay/backfill right away.
+- `RuntimeSubscriptionTracker` + `buildRuntimeBackfillFilters(...)`: detect newly added AppKeys
+  authors, invite-response recipients, and direct-message session authors and issue bounded
+  replay/backfill right away.
 - `resolveSessionPubkeyToOwner(...)` and `hasExistingSessionWithRecipient(...)`: normalize
   owner/device session bookkeeping instead of re-implementing user-record traversal.
 
@@ -233,34 +234,29 @@ and edge cases.
 - `tests/SessionManager.acceptInvite.test.ts`: invite acceptance and owner/device routing rules
 - `tests/directMessageSubscriptions.test.ts`: direct-message subscription/backfill helpers
 
-## Direct Message Catch-Up
+## Runtime Catch-Up
 
-The runtime/session manager decides which session authors should be live-subscribed, but your app
-still owns relay fetch/backfill. Wrap your `nostrSubscribe` implementation so newly added direct
-message authors trigger a short replay immediately:
+The runtime/session manager decides which AppKeys authors, invite-response recipients, and message
+authors should be live-subscribed. Wrap your `nostrSubscribe` implementation so newly discovered
+targets trigger bounded relay backfill immediately:
 
 ```typescript
 import {
-  buildDirectMessageBackfillFilter,
-  DirectMessageSubscriptionTracker,
+  buildRuntimeBackfillFilters,
+  RuntimeSubscriptionTracker,
 } from "nostr-double-ratchet";
 
-const tracker = new DirectMessageSubscriptionTracker();
+const tracker = new RuntimeSubscriptionTracker();
 
 const trackedSubscribe = (filter, onEvent) => {
-  const { token, addedAuthors } = tracker.registerFilter(filter);
-  if (addedAuthors.length) {
-    const backfill = buildDirectMessageBackfillFilter(
-      addedAuthors,
-      Math.floor(Date.now() / 1000) - 15,
-      200,
-    );
+  const registered = tracker.registerFilter(filter);
+  for (const backfill of buildRuntimeBackfillFilters(registered, 200)) {
     // Hand `backfill` to your relay fetch / short-lived subscription path.
   }
 
   const unsubscribe = nostrSubscribe(filter, onEvent);
   return () => {
-    tracker.unregister(token);
+    tracker.unregister(registered.token);
     unsubscribe();
   };
 };

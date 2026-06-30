@@ -1,7 +1,7 @@
 use crate::{
     utils::pubkey_from_hex, APP_KEYS_EVENT_KIND, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND,
 };
-use nostr::{Alphabet, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
+use nostr::{Alphabet, Filter, Kind, PublicKey, SingleLetterTag};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -184,7 +184,6 @@ impl RuntimeSubscriptionTracker {
 
 pub fn build_direct_message_backfill_filter(
     authors: impl IntoIterator<Item = PublicKey>,
-    since_seconds: u64,
     limit: usize,
 ) -> Filter {
     let mut unique_authors = Vec::new();
@@ -198,7 +197,6 @@ pub fn build_direct_message_backfill_filter(
     Filter::new()
         .kind(Kind::from(MESSAGE_EVENT_KIND as u16))
         .authors(unique_authors)
-        .since(Timestamp::from(since_seconds))
         .limit(limit)
 }
 
@@ -240,7 +238,6 @@ pub fn build_invite_response_backfill_filter(
 
 pub fn build_runtime_backfill_filters(
     registration: &RuntimeSubscriptionRegistration,
-    since_seconds: u64,
     limit: usize,
 ) -> Vec<Filter> {
     let mut filters = Vec::new();
@@ -253,7 +250,6 @@ pub fn build_runtime_backfill_filters(
     if !registration.added_message_authors.is_empty() {
         filters.push(build_direct_message_backfill_filter(
             registration.added_message_authors.iter().copied(),
-            since_seconds,
             limit,
         ));
     }
@@ -604,7 +600,7 @@ mod tests {
             )],
         };
 
-        let filters = build_runtime_backfill_filters(&registration, 1234, 50);
+        let filters = build_runtime_backfill_filters(&registration, 50);
         assert_eq!(filters.len(), 3);
         let app_keys = serde_json::to_value(&filters[0]).unwrap();
         assert_eq!(app_keys["kinds"], serde_json::json!([37368]));
@@ -620,7 +616,6 @@ mod tests {
             direct["authors"],
             serde_json::json!(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
         );
-        assert_eq!(direct["since"], serde_json::json!(1234));
         assert_eq!(direct["limit"], serde_json::json!(50));
 
         let invite_response = serde_json::to_value(&filters[2]).unwrap();

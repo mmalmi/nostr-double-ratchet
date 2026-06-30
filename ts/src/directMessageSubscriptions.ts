@@ -63,7 +63,6 @@ export function appKeysSubscriptionAuthors(filter: Filter): string[] {
 
 export function buildDirectMessageBackfillFilter(
   authors: Iterable<string>,
-  since: number,
   limit: number = 200
 ): Filter {
   const normalizedAuthors: string[] = []
@@ -78,7 +77,6 @@ export function buildDirectMessageBackfillFilter(
   return {
     kinds: [MESSAGE_EVENT_KIND],
     authors: normalizedAuthors,
-    since,
     limit,
   }
 }
@@ -149,7 +147,6 @@ export function buildRuntimeBackfillFilters(
     RegisteredRuntimeSubscription,
     "addedAppKeysAuthors" | "addedMessageAuthors" | "addedInviteResponseRecipients"
   >,
-  since: number,
   limit: number = 200
 ): Filter[] {
   const filters: Filter[] = []
@@ -158,7 +155,7 @@ export function buildRuntimeBackfillFilters(
   }
   if (registered.addedMessageAuthors.length > 0) {
     filters.push(
-      buildDirectMessageBackfillFilter(registered.addedMessageAuthors, since, limit)
+      buildDirectMessageBackfillFilter(registered.addedMessageAuthors, limit)
     )
   }
   if (registered.addedInviteResponseRecipients.length > 0) {

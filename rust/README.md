@@ -37,9 +37,9 @@ CLI commands, or FFI wrappers.
   conversation routing so clients do not fork the same rumor/owner/sender heuristic.
 - `resolve_rumor_peer_pubkey(...)`: resolves the immediate peer for a rumor when callers only need
   the normalized peer identity rather than the full ordered candidate list.
-- `DirectMessageSubscriptionTracker` + `build_direct_message_backfill_filter(...)`: detect newly
-  added `session-current-*` / `session-next-*` authors and issue a short relay replay immediately
-  instead of waiting for a periodic sweep.
+- `RuntimeSubscriptionTracker` + `build_runtime_backfill_filters(...)`: detect newly added AppKeys
+  authors, invite-response recipients, and message authors and issue bounded relay replay
+  immediately instead of waiting for a periodic sweep.
 
 AppKeys should be treated as an authorization timeline. Reduced AppKeys sets should only be
 published for explicit revocation or first-device bootstrap. Imported owner-key logins on a fresh
@@ -47,21 +47,21 @@ device should either register that device or remain explicitly single-device. Fi
 bootstrap can proceed from locally published AppKeys; public-invite fanout for additional devices
 should wait until relays reflect the updated AppKeys snapshot.
 
-## Direct Message Catch-Up
+## Runtime Catch-Up
 
-Apps and protocol runtimes still own relay history fetch. If a new direct-message author gets added
-to a session subscription, consume that signal immediately:
+Apps and protocol runtimes still own relay history fetch. If AppKeys authors, invite-response
+recipients, or message authors are newly added to runtime subscriptions, consume that signal
+immediately:
 
 ```rust
 use nostr_double_ratchet::{
-    build_direct_message_backfill_filter, DirectMessageSubscriptionTracker,
+    build_runtime_backfill_filters, RuntimeSubscriptionTracker,
 };
 
-let mut tracker = DirectMessageSubscriptionTracker::new();
+let mut tracker = RuntimeSubscriptionTracker::new();
 
-let added_authors = tracker.register_subscription(subid, filter_json);
-if !added_authors.is_empty() {
-    let filter = build_direct_message_backfill_filter(added_authors, now_seconds - 15, 200);
+let registration = tracker.register_subscription(subid, filter_json);
+for filter in build_runtime_backfill_filters(&registration, 200) {
     // Hand `filter` to your relay client for a short replay/backfill.
 }
 
