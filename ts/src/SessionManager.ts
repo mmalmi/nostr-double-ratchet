@@ -529,6 +529,7 @@ export class SessionManager {
     this.pendingInviteResponses.delete(response.eventId)
     this.processedInviteResponses.add(response.eventId)
     this.storeUserRecord(response.ownerPublicKey).catch(() => {})
+    this.notifyMessagePushAuthorsChanged()
     return true
   }
 

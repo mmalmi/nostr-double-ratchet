@@ -762,6 +762,10 @@ describe("SessionManager.acceptInvite", () => {
     const bobRecordBeforeRetry = bob.manager.getUserRecords().get(aliceOwner.publicKey)
     expect(bobRecordBeforeRetry?.devices.has(aliceLinkedIdentity!)).not.toBe(true)
 
+    const authorChanges = vi.fn()
+    const unsubscribeAuthorChanges = bob.manager.onMessagePushAuthorsChanged(authorChanges)
+    const initialAuthorChangeCalls = authorChanges.mock.calls.length
+
     await aliceLinked.appKeysManager.publish()
 
     await vi.waitFor(() => {
@@ -774,6 +778,11 @@ describe("SessionManager.acceptInvite", () => {
         (retriedDeviceRecord?.inactiveSessions.length ?? 0) > 0
       ).toBe(true)
     }, { timeout: 5_000 })
+
+    await vi.waitFor(() => {
+      expect(authorChanges.mock.calls.length).toBeGreaterThan(initialAuthorChangeCalls)
+    })
+    unsubscribeAuthorChanges()
   }, 15_000)
 
   it("installs a deferred owner-claimed invite response once the claimed owner AppKeys authorize the device", async () => {
