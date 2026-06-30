@@ -1,10 +1,16 @@
 import type { Filter } from "nostr-tools"
 
-import { MESSAGE_EVENT_KIND } from "./types"
+import { INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND } from "./types"
 
 export interface RegisteredDirectMessageSubscription {
   token: number
   addedAuthors: string[]
+}
+
+export interface RegisteredRuntimeSubscription {
+  token: number
+  addedMessageAuthors: string[]
+  addedInviteResponseRecipients: string[]
 }
 
 const normalizeAuthor = (value: unknown): string | null => {
@@ -56,6 +62,75 @@ export function buildDirectMessageBackfillFilter(
   }
 }
 
+export function inviteResponseSubscriptionRecipients(filter: Filter): string[] {
+  if (!Array.isArray(filter.kinds) || !filter.kinds.includes(INVITE_RESPONSE_KIND)) {
+    return []
+  }
+
+  const recipients = (filter as Record<string, unknown>)["#p"]
+  if (!Array.isArray(recipients)) {
+    return []
+  }
+
+  const normalizedRecipients: string[] = []
+  const seen = new Set<string>()
+  for (const recipient of recipients) {
+    const normalized = normalizeAuthor(recipient)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    normalizedRecipients.push(normalized)
+  }
+  return normalizedRecipients
+}
+
+export function buildInviteResponseBackfillFilter(
+  recipients: Iterable<string>,
+  since: number,
+  limit: number = 200
+): Filter {
+  const normalizedRecipients: string[] = []
+  const seen = new Set<string>()
+  for (const recipient of recipients) {
+    const normalized = normalizeAuthor(recipient)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    normalizedRecipients.push(normalized)
+  }
+
+  return {
+    kinds: [INVITE_RESPONSE_KIND],
+    "#p": normalizedRecipients,
+    since,
+    limit,
+  }
+}
+
+export function buildRuntimeBackfillFilters(
+  registered: Pick<
+    RegisteredRuntimeSubscription,
+    "addedMessageAuthors" | "addedInviteResponseRecipients"
+  >,
+  since: number,
+  limit: number = 200
+): Filter[] {
+  const filters: Filter[] = []
+  if (registered.addedMessageAuthors.length > 0) {
+    filters.push(
+      buildDirectMessageBackfillFilter(registered.addedMessageAuthors, since, limit)
+    )
+  }
+  if (registered.addedInviteResponseRecipients.length > 0) {
+    filters.push(
+      buildInviteResponseBackfillFilter(
+        registered.addedInviteResponseRecipients,
+        since,
+        limit
+      )
+    )
+  }
+  return filters
+}
+
 export class DirectMessageSubscriptionTracker {
   private nextToken = 1
   private authorsByToken = new Map<number, string[]>()
@@ -98,5 +173,93 @@ export class DirectMessageSubscriptionTracker {
 
   trackedAuthors(): string[] {
     return Array.from(this.authorRefCounts.keys()).sort()
+  }
+}
+
+export class RuntimeSubscriptionTracker {
+  private nextToken = 1
+  private messageAuthorsByToken = new Map<number, string[]>()
+  private inviteResponseRecipientsByToken = new Map<number, string[]>()
+  private messageAuthorRefCounts = new Map<string, number>()
+  private inviteResponseRecipientRefCounts = new Map<string, number>()
+
+  registerFilter(filter: Filter): RegisteredRuntimeSubscription {
+    const token = this.nextToken++
+    const addedMessageAuthors = registerValues(
+      directMessageSubscriptionAuthors(filter),
+      this.messageAuthorsByToken,
+      this.messageAuthorRefCounts,
+      token
+    )
+    const addedInviteResponseRecipients = registerValues(
+      inviteResponseSubscriptionRecipients(filter),
+      this.inviteResponseRecipientsByToken,
+      this.inviteResponseRecipientRefCounts,
+      token
+    )
+
+    return {
+      token,
+      addedMessageAuthors,
+      addedInviteResponseRecipients,
+    }
+  }
+
+  unregister(token: number): void {
+    unregisterValues(token, this.messageAuthorsByToken, this.messageAuthorRefCounts)
+    unregisterValues(
+      token,
+      this.inviteResponseRecipientsByToken,
+      this.inviteResponseRecipientRefCounts
+    )
+  }
+
+  trackedMessageAuthors(): string[] {
+    return Array.from(this.messageAuthorRefCounts.keys()).sort()
+  }
+
+  trackedInviteResponseRecipients(): string[] {
+    return Array.from(this.inviteResponseRecipientRefCounts.keys()).sort()
+  }
+}
+
+function registerValues(
+  values: string[],
+  valuesByToken: Map<number, string[]>,
+  refCounts: Map<string, number>,
+  token: number
+): string[] {
+  if (values.length === 0) {
+    return []
+  }
+
+  valuesByToken.set(token, values)
+  const addedValues: string[] = []
+  for (const value of values) {
+    const refCount = refCounts.get(value) || 0
+    if (refCount === 0) {
+      addedValues.push(value)
+    }
+    refCounts.set(value, refCount + 1)
+  }
+  return addedValues
+}
+
+function unregisterValues(
+  token: number,
+  valuesByToken: Map<number, string[]>,
+  refCounts: Map<string, number>
+): void {
+  const values = valuesByToken.get(token)
+  if (!values) return
+
+  valuesByToken.delete(token)
+  for (const value of values) {
+    const nextCount = Math.max((refCounts.get(value) || 1) - 1, 0)
+    if (nextCount === 0) {
+      refCounts.delete(value)
+    } else {
+      refCounts.set(value, nextCount)
+    }
   }
 }

@@ -28,8 +28,10 @@ pub use app_keys::{
     NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE,
 };
 pub use direct_message_subscriptions::{
-    build_direct_message_backfill_filter, direct_message_subscription_authors,
-    DirectMessageSubscriptionTracker,
+    build_direct_message_backfill_filter, build_invite_response_backfill_filter,
+    build_runtime_backfill_filters, direct_message_subscription_authors,
+    invite_response_subscription_recipients, DirectMessageSubscriptionTracker,
+    RuntimeSubscriptionRegistration, RuntimeSubscriptionTracker,
 };
 pub use error::{DomainError, Error, Result};
 pub use group::*;

@@ -1,5 +1,5 @@
-use crate::{utils::pubkey_from_hex, MESSAGE_EVENT_KIND};
-use nostr::{Filter, Kind, PublicKey, Timestamp};
+use crate::{utils::pubkey_from_hex, INVITE_RESPONSE_KIND, MESSAGE_EVENT_KIND};
+use nostr::{Alphabet, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -9,6 +9,7 @@ const DIRECT_MESSAGE_PROTOCOL_SUBSCRIPTION_ID: &str = "icp-messages";
 const DIRECT_MESSAGE_PROTOCOL_SUBSCRIPTION_PREFIX: &str = "icp-messages-";
 const SESSION_CURRENT_SUBSCRIPTION_PREFIX: &str = "session-current-";
 const SESSION_NEXT_SUBSCRIPTION_PREFIX: &str = "session-next-";
+const INVITE_RESPONSE_SUBSCRIPTION_PREFIX: &str = "invite-responses-";
 
 #[derive(Debug, Default, Clone)]
 pub struct DirectMessageSubscriptionTracker {
@@ -83,6 +84,83 @@ impl DirectMessageSubscriptionTracker {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RuntimeSubscriptionRegistration {
+    pub added_message_authors: Vec<PublicKey>,
+    pub added_invite_response_recipients: Vec<PublicKey>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RuntimeSubscriptionTracker {
+    message_authors_by_subid: HashMap<String, Vec<PublicKey>>,
+    message_author_ref_counts: HashMap<PublicKey, usize>,
+    invite_response_recipients_by_subid: HashMap<String, Vec<PublicKey>>,
+    invite_response_recipient_ref_counts: HashMap<PublicKey, usize>,
+}
+
+impl RuntimeSubscriptionTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_subscription(
+        &mut self,
+        subid: impl AsRef<str>,
+        filter_json: impl AsRef<str>,
+    ) -> RuntimeSubscriptionRegistration {
+        let subid = subid.as_ref().trim();
+        if subid.is_empty() {
+            return RuntimeSubscriptionRegistration::default();
+        }
+
+        self.unregister_subscription(subid);
+
+        let added_message_authors = register_pubkeys(
+            &mut self.message_authors_by_subid,
+            &mut self.message_author_ref_counts,
+            subid,
+            direct_message_subscription_authors(subid, filter_json.as_ref()),
+        );
+        let added_invite_response_recipients = register_pubkeys(
+            &mut self.invite_response_recipients_by_subid,
+            &mut self.invite_response_recipient_ref_counts,
+            subid,
+            invite_response_subscription_recipients(subid, filter_json.as_ref()),
+        );
+
+        RuntimeSubscriptionRegistration {
+            added_message_authors,
+            added_invite_response_recipients,
+        }
+    }
+
+    pub fn unregister_subscription(&mut self, subid: impl AsRef<str>) {
+        let subid = subid.as_ref().trim();
+        if subid.is_empty() {
+            return;
+        }
+
+        unregister_pubkeys(
+            &mut self.message_authors_by_subid,
+            &mut self.message_author_ref_counts,
+            subid,
+        );
+        unregister_pubkeys(
+            &mut self.invite_response_recipients_by_subid,
+            &mut self.invite_response_recipient_ref_counts,
+            subid,
+        );
+    }
+
+    pub fn tracked_message_authors(&self) -> Vec<PublicKey> {
+        sorted_pubkeys(&self.message_author_ref_counts)
+    }
+
+    pub fn tracked_invite_response_recipients(&self) -> Vec<PublicKey> {
+        sorted_pubkeys(&self.invite_response_recipient_ref_counts)
+    }
+}
+
 pub fn build_direct_message_backfill_filter(
     authors: impl IntoIterator<Item = PublicKey>,
     since_seconds: u64,
@@ -103,6 +181,52 @@ pub fn build_direct_message_backfill_filter(
         .limit(limit)
 }
 
+pub fn build_invite_response_backfill_filter(
+    recipients: impl IntoIterator<Item = PublicKey>,
+    since_seconds: u64,
+    limit: usize,
+) -> Filter {
+    let mut unique_recipients = Vec::new();
+    let mut seen_recipients = HashSet::new();
+    for recipient in recipients {
+        if seen_recipients.insert(recipient) {
+            unique_recipients.push(recipient.to_hex());
+        }
+    }
+
+    Filter::new()
+        .kind(Kind::from(INVITE_RESPONSE_KIND as u16))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::P), unique_recipients)
+        .since(Timestamp::from(since_seconds))
+        .limit(limit)
+}
+
+pub fn build_runtime_backfill_filters(
+    registration: &RuntimeSubscriptionRegistration,
+    since_seconds: u64,
+    limit: usize,
+) -> Vec<Filter> {
+    let mut filters = Vec::new();
+    if !registration.added_message_authors.is_empty() {
+        filters.push(build_direct_message_backfill_filter(
+            registration.added_message_authors.iter().copied(),
+            since_seconds,
+            limit,
+        ));
+    }
+    if !registration.added_invite_response_recipients.is_empty() {
+        filters.push(build_invite_response_backfill_filter(
+            registration
+                .added_invite_response_recipients
+                .iter()
+                .copied(),
+            since_seconds,
+            limit,
+        ));
+    }
+    filters
+}
+
 pub fn direct_message_subscription_authors(
     subid: impl AsRef<str>,
     filter_json: impl AsRef<str>,
@@ -119,27 +243,60 @@ pub fn direct_message_subscription_authors(
         return Vec::new();
     };
 
-    let Some(kinds) = decoded_filter.get("kinds").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    if !kinds
-        .iter()
-        .any(|kind| kind.as_u64() == Some(MESSAGE_EVENT_KIND as u64))
-    {
+    if !has_kind(decoded_filter, MESSAGE_EVENT_KIND) {
         return Vec::new();
     }
 
-    let Some(authors) = decoded_filter.get("authors").and_then(Value::as_array) else {
+    parse_pubkey_values(decoded_filter.get("authors"))
+}
+
+pub fn invite_response_subscription_recipients(
+    subid: impl AsRef<str>,
+    filter_json: impl AsRef<str>,
+) -> Vec<PublicKey> {
+    let subid = subid.as_ref().trim();
+    if !is_invite_response_subscription_id(subid) {
+        return Vec::new();
+    }
+
+    let Ok(decoded) = serde_json::from_str::<Value>(filter_json.as_ref()) else {
+        return Vec::new();
+    };
+    let Some(decoded_filter) = decoded.as_object() else {
+        return Vec::new();
+    };
+
+    if !has_kind(decoded_filter, INVITE_RESPONSE_KIND) {
+        return Vec::new();
+    }
+
+    parse_pubkey_values(decoded_filter.get("#p"))
+}
+
+fn has_kind(decoded_filter: &serde_json::Map<String, Value>, kind: u32) -> bool {
+    decoded_filter
+        .get("kinds")
+        .and_then(Value::as_array)
+        .map(|kinds| {
+            kinds
+                .iter()
+                .any(|value| value.as_u64() == Some(kind as u64))
+        })
+        .unwrap_or(false)
+}
+
+fn parse_pubkey_values(values: Option<&Value>) -> Vec<PublicKey> {
+    let Some(values) = values.and_then(Value::as_array) else {
         return Vec::new();
     };
 
     let mut parsed = Vec::new();
     let mut seen = HashSet::new();
-    for author in authors {
-        let Some(author_hex) = author.as_str() else {
+    for value in values {
+        let Some(pubkey_hex) = value.as_str() else {
             continue;
         };
-        let normalized = author_hex.trim().to_lowercase();
+        let normalized = pubkey_hex.trim().to_lowercase();
         if normalized.len() != 64 {
             continue;
         }
@@ -153,6 +310,58 @@ pub fn direct_message_subscription_authors(
     parsed
 }
 
+fn register_pubkeys(
+    pubkeys_by_subid: &mut HashMap<String, Vec<PublicKey>>,
+    pubkey_ref_counts: &mut HashMap<PublicKey, usize>,
+    subid: &str,
+    pubkeys: Vec<PublicKey>,
+) -> Vec<PublicKey> {
+    if pubkeys.is_empty() {
+        return Vec::new();
+    }
+
+    let mut added = Vec::new();
+    for pubkey in &pubkeys {
+        let ref_count = pubkey_ref_counts.entry(*pubkey).or_insert(0);
+        if *ref_count == 0 {
+            added.push(*pubkey);
+        }
+        *ref_count += 1;
+    }
+    pubkeys_by_subid.insert(subid.to_string(), pubkeys);
+    added.sort_by_key(|pubkey| pubkey.to_hex());
+    added
+}
+
+fn unregister_pubkeys(
+    pubkeys_by_subid: &mut HashMap<String, Vec<PublicKey>>,
+    pubkey_ref_counts: &mut HashMap<PublicKey, usize>,
+    subid: &str,
+) {
+    let Some(previous_pubkeys) = pubkeys_by_subid.remove(subid) else {
+        return;
+    };
+
+    for pubkey in previous_pubkeys {
+        let next_count = pubkey_ref_counts
+            .get(&pubkey)
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1);
+        if next_count == 0 {
+            pubkey_ref_counts.remove(&pubkey);
+        } else {
+            pubkey_ref_counts.insert(pubkey, next_count);
+        }
+    }
+}
+
+fn sorted_pubkeys(pubkey_ref_counts: &HashMap<PublicKey, usize>) -> Vec<PublicKey> {
+    let mut pubkeys: Vec<PublicKey> = pubkey_ref_counts.keys().copied().collect();
+    pubkeys.sort_by_key(|pubkey| pubkey.to_hex());
+    pubkeys
+}
+
 fn is_direct_message_subscription_id(subid: &str) -> bool {
     !subid.is_empty()
         && (subid == DIRECT_MESSAGE_RUNTIME_SUBSCRIPTION_ID
@@ -161,4 +370,135 @@ fn is_direct_message_subscription_id(subid: &str) -> bool {
             || subid.starts_with(DIRECT_MESSAGE_PROTOCOL_SUBSCRIPTION_PREFIX)
             || subid.starts_with(SESSION_CURRENT_SUBSCRIPTION_PREFIX)
             || subid.starts_with(SESSION_NEXT_SUBSCRIPTION_PREFIX))
+}
+
+fn is_invite_response_subscription_id(subid: &str) -> bool {
+    !subid.is_empty() && subid.starts_with(INVITE_RESPONSE_SUBSCRIPTION_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pubkey(hex: &str) -> PublicKey {
+        PublicKey::parse(hex).unwrap()
+    }
+
+    #[test]
+    fn parses_invite_response_subscription_recipients() {
+        let recipients = invite_response_subscription_recipients(
+            "invite-responses-a",
+            r##"{
+                "kinds":[1059],
+                "#p":[
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "nope"
+                ]
+            }"##,
+        );
+
+        assert_eq!(
+            recipients,
+            vec![
+                pubkey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                pubkey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ]
+        );
+        assert!(invite_response_subscription_recipients(
+            "ndr-runtime-messages",
+            r##"{"kinds":[1059],"#p":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"##,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn tracks_runtime_message_authors_and_invite_response_recipients() {
+        let mut tracker = RuntimeSubscriptionTracker::new();
+
+        let first = tracker.register_subscription(
+            "ndr-runtime-messages",
+            r#"{"kinds":[1060],"authors":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
+        );
+        assert_eq!(
+            first.added_message_authors,
+            vec![pubkey(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )]
+        );
+        assert!(first.added_invite_response_recipients.is_empty());
+
+        let second = tracker.register_subscription(
+            "invite-responses-b",
+            r##"{"kinds":[1059],"#p":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}"##,
+        );
+        assert!(second.added_message_authors.is_empty());
+        assert_eq!(
+            second.added_invite_response_recipients,
+            vec![pubkey(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )]
+        );
+        assert_eq!(
+            tracker.tracked_message_authors(),
+            vec![pubkey(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )]
+        );
+        assert_eq!(
+            tracker.tracked_invite_response_recipients(),
+            vec![pubkey(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )]
+        );
+
+        let third = tracker.register_subscription(
+            "invite-responses-c",
+            r##"{"kinds":[1059],"#p":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}"##,
+        );
+        assert!(third.added_invite_response_recipients.is_empty());
+
+        tracker.unregister_subscription("invite-responses-b");
+        assert_eq!(
+            tracker.tracked_invite_response_recipients(),
+            vec![pubkey(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )]
+        );
+        tracker.unregister_subscription("invite-responses-c");
+        assert!(tracker.tracked_invite_response_recipients().is_empty());
+    }
+
+    #[test]
+    fn builds_runtime_backfill_filters() {
+        let registration = RuntimeSubscriptionRegistration {
+            added_message_authors: vec![pubkey(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )],
+            added_invite_response_recipients: vec![pubkey(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )],
+        };
+
+        let filters = build_runtime_backfill_filters(&registration, 1234, 50);
+        assert_eq!(filters.len(), 2);
+        let direct = serde_json::to_value(&filters[0]).unwrap();
+        assert_eq!(direct["kinds"], serde_json::json!([1060]));
+        assert_eq!(
+            direct["authors"],
+            serde_json::json!(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
+        );
+        assert_eq!(direct["since"], serde_json::json!(1234));
+        assert_eq!(direct["limit"], serde_json::json!(50));
+
+        let invite_response = serde_json::to_value(&filters[1]).unwrap();
+        assert_eq!(invite_response["kinds"], serde_json::json!([1059]));
+        assert_eq!(
+            invite_response["#p"],
+            serde_json::json!(["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+        );
+        assert_eq!(invite_response["since"], serde_json::json!(1234));
+        assert_eq!(invite_response["limit"], serde_json::json!(50));
+    }
 }
