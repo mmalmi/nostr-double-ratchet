@@ -1,4 +1,9 @@
-import { AppKeys, buildAppKeysFilter, type DeviceEntry } from "./AppKeys";
+import {
+  AppKeys,
+  buildAppKeysFilter,
+  createNostrIdentityProfileId,
+  type DeviceEntry,
+} from "./AppKeys";
 import {
   AppKeysManager,
   DelegateManager,
@@ -85,6 +90,7 @@ export interface PrepareRegistrationForIdentityOptions extends PrepareRegistrati
 }
 
 export interface PreparedRegistration {
+  ownerPubkey: string;
   appKeys: AppKeys;
   devices: DeviceEntry[];
   baseDevices: DeviceEntry[];
@@ -103,6 +109,7 @@ export interface PrepareRevocationOptions {
 }
 
 export interface PreparedRevocation {
+  ownerPubkey: string;
   appKeys: AppKeys;
   devices: DeviceEntry[];
   revokedIdentity: string;
@@ -133,6 +140,7 @@ export class NdrRuntime {
   private readonly ownerIdentityKey?: Uint8Array;
   private readonly appKeysFetchTimeoutMs: number;
   private readonly appKeysFastTimeoutMs: number;
+  private readonly appKeysProfileIds = new Map<string, string>();
 
   private appKeysManager: AppKeysManager | null = null;
   private delegateManager: DelegateManager | null = null;
@@ -417,7 +425,7 @@ export class NdrRuntime {
     const activeOwnerPubkey = this.resolveActiveOwnerPubkey(ownerPubkey);
     const manager = await this.waitForSessionManager(activeOwnerPubkey);
     if (userPubkey === activeOwnerPubkey) {
-      this.feedLocalAppKeysSnapshotToSessionManager(activeOwnerPubkey);
+      await this.feedLocalAppKeysSnapshotToSessionManager(activeOwnerPubkey);
     }
     try {
       await manager.setupUser(userPubkey);
@@ -782,6 +790,7 @@ export class NdrRuntime {
     }
 
     return {
+      ownerPubkey: options.ownerPubkey,
       appKeys,
       devices: appKeys.getAllDevices(),
       baseDevices: baseKeys.getAllDevices(),
@@ -808,6 +817,7 @@ export class NdrRuntime {
     }
 
     return {
+      ownerPubkey: options.ownerPubkey,
       appKeys,
       devices: appKeys.getAllDevices(),
       baseDevices: baseKeys.getAllDevices(),
@@ -827,7 +837,7 @@ export class NdrRuntime {
         appKeysManagerReady: this.state.appKeysManagerReady,
         sessionManagerReady: this.state.sessionManagerReady,
       });
-    const publishedEvent = await this.publishAppKeys(prepared.appKeys);
+    const publishedEvent = await this.publishAppKeys(prepared.appKeys, prepared.ownerPubkey);
     await this.appKeysManager?.setAppKeys(prepared.appKeys);
     this.feedSessionManagerEvent(publishedEvent);
     this.syncState({
@@ -851,6 +861,7 @@ export class NdrRuntime {
     const appKeys = cloneAppKeys(baseKeys);
     appKeys.removeDevice(options.identityPubkey);
     return {
+      ownerPubkey: options.ownerPubkey,
       appKeys,
       devices: appKeys.getAllDevices(),
       revokedIdentity: options.identityPubkey,
@@ -861,7 +872,7 @@ export class NdrRuntime {
     prepared: PreparedRevocation,
   ): Promise<number> {
     await this.initAppKeysManager();
-    const publishedEvent = await this.publishAppKeys(prepared.appKeys);
+    const publishedEvent = await this.publishAppKeys(prepared.appKeys, prepared.ownerPubkey);
     await this.appKeysManager?.setAppKeys(prepared.appKeys);
     this.feedSessionManagerEvent(publishedEvent);
     this.syncState({
@@ -1139,7 +1150,7 @@ export class NdrRuntime {
     return handled;
   }
 
-  private feedLocalAppKeysSnapshotToSessionManager(ownerPubkey: string): boolean {
+  private async feedLocalAppKeysSnapshotToSessionManager(ownerPubkey: string): Promise<boolean> {
     if (!this.ownerIdentityKey) {
       return false;
     }
@@ -1149,8 +1160,13 @@ export class NdrRuntime {
       return false;
     }
 
+    const profileId = await this.ensureAppKeysProfileId(ownerPubkey);
     const signedEvent = finalizeEvent(
-      appKeys.getEvent(this.ownerIdentityKey),
+      appKeys.getEvent({
+        ownerPrivateKey: this.ownerIdentityKey,
+        ownerPubkey,
+        profileId,
+      }),
       this.ownerIdentityKey,
     ) as VerifiedEvent;
     if (signedEvent.pubkey !== ownerPubkey) {
@@ -1217,8 +1233,32 @@ export class NdrRuntime {
     return update.decision;
   }
 
-  private async publishAppKeys(appKeys: AppKeys) {
-    return this.nostrPublish(appKeys.getEvent(this.ownerIdentityKey));
+  private async ensureAppKeysProfileId(ownerPubkey: string): Promise<string> {
+    const cached = this.appKeysProfileIds.get(ownerPubkey);
+    if (cached) return cached;
+
+    const key = `v1/app-keys-profile-id/${ownerPubkey}`;
+    const stored = await this.storage.get<string>(key);
+    if (stored) {
+      this.appKeysProfileIds.set(ownerPubkey, stored);
+      return stored;
+    }
+
+    const profileId = createNostrIdentityProfileId();
+    await this.storage.put(key, profileId);
+    this.appKeysProfileIds.set(ownerPubkey, profileId);
+    return profileId;
+  }
+
+  private async publishAppKeys(appKeys: AppKeys, ownerPubkey: string) {
+    const profileId = await this.ensureAppKeysProfileId(ownerPubkey);
+    const createdAt = Math.max(now(), this.state.lastAppKeysCreatedAt + 1);
+    return this.nostrPublish(appKeys.getEvent({
+      ownerPrivateKey: this.ownerIdentityKey,
+      ownerPubkey,
+      profileId,
+      createdAt,
+    }));
   }
 
   private async waitForDeviceRegistrationOnRelay(

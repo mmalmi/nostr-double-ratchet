@@ -9,9 +9,26 @@ import { Invite } from "../src/Invite"
 import { decryptInviteResponse, generateEphemeralKeypair, generateSharedSecret } from "../src/inviteUtils"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
 import { SessionManager } from "../src/SessionManager"
-import { APP_KEYS_EVENT_KIND, MESSAGE_EVENT_KIND } from "../src/types"
+import { MESSAGE_EVENT_KIND } from "../src/types"
+import { AppKeys } from "../src/AppKeys"
 
 type DeviceRecordSnapshot = { inactiveSessions: unknown[] }
+
+const signedAppKeysEvent = (
+  ownerSecretKey: Uint8Array,
+  devicePubkeys: string[],
+  createdAt = Math.floor(Date.now() / 1000),
+): VerifiedEvent =>
+  finalizeEvent(
+    new AppKeys(
+      devicePubkeys.map((identityPubkey) => ({ identityPubkey, createdAt }))
+    ).getEvent({
+      ownerPrivateKey: ownerSecretKey,
+      ownerPubkey: getPublicKey(ownerSecretKey),
+      createdAt,
+    }),
+    ownerSecretKey
+  ) as VerifiedEvent
 
 const extractDeviceRecords = (manager: unknown): DeviceRecordSnapshot[] => {
   const internal = manager as {
@@ -222,19 +239,7 @@ describe("SessionManager", () => {
     )
     await linkedManager.init()
 
-    const ownerAppKeysEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    ) as VerifiedEvent
+    const ownerAppKeysEvent = signedAppKeysEvent(ownerSecretKey, [linkedDevicePublicKey])
     relay.storeAndDeliver(ownerAppKeysEvent)
 
     const text = `linked-to-single-device-${Date.now()}`
@@ -314,19 +319,7 @@ describe("SessionManager", () => {
     )
     await linkedManager.init()
 
-    const ownerAppKeysEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    ) as VerifiedEvent
+    const ownerAppKeysEvent = signedAppKeysEvent(ownerSecretKey, [linkedDevicePublicKey])
     relay.storeAndDeliver(ownerAppKeysEvent)
 
     const text = `linked-delayed-invite-${Date.now()}`
@@ -428,19 +421,7 @@ describe("SessionManager", () => {
     expect(decrypted.inviteeIdentity).toBe(linkedDevicePublicKey)
     expect(decrypted.ownerPublicKey).toBe(ownerPublicKey)
 
-    const ownerAppKeysEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    ) as VerifiedEvent
+    const ownerAppKeysEvent = signedAppKeysEvent(ownerSecretKey, [linkedDevicePublicKey])
     relay.storeAndDeliver(ownerAppKeysEvent)
 
     await peerReceived
@@ -505,19 +486,7 @@ describe("SessionManager", () => {
     )
     await linkedManager.init()
 
-    const ownerAppKeysEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", linkedDevicePublicKey, String(Math.floor(Date.now() / 1000))],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    ) as VerifiedEvent
+    const ownerAppKeysEvent = signedAppKeysEvent(ownerSecretKey, [linkedDevicePublicKey])
     relay.storeAndDeliver(ownerAppKeysEvent)
 
     const text = `linked-queued-until-bootstrap-${Date.now()}`
@@ -707,34 +676,9 @@ describe("SessionManager", () => {
     const linkedDevicePubkey = getPublicKey(linkedDeviceSecret)
     const createdAt = Math.floor(Date.now() / 1000)
 
-    const oldEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: createdAt,
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", baseDevicePubkey, String(createdAt)],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    )
+    const oldEvent = signedAppKeysEvent(ownerSecretKey, [baseDevicePubkey], createdAt)
 
-    const newEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: createdAt,
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", baseDevicePubkey, String(createdAt)],
-          ["device", linkedDevicePubkey, String(createdAt)],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    )
+    const newEvent = signedAppKeysEvent(ownerSecretKey, [baseDevicePubkey, linkedDevicePubkey], createdAt)
 
     const subscribe = (_filter: unknown, onEvent: (event: typeof oldEvent) => void) => {
       setTimeout(() => onEvent(newEvent), 0)
@@ -774,34 +718,9 @@ describe("SessionManager", () => {
     const linkedDevicePubkey = getPublicKey(linkedDeviceSecret)
     const createdAt = Math.floor(Date.now() / 1000)
 
-    const oldEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: createdAt,
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", baseDevicePubkey, String(createdAt)],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    )
+    const oldEvent = signedAppKeysEvent(ownerSecretKey, [baseDevicePubkey], createdAt)
 
-    const newEvent = finalizeEvent(
-      {
-        kind: APP_KEYS_EVENT_KIND,
-        created_at: createdAt + 1,
-        tags: [
-          ["d", "double-ratchet/app-keys"],
-          ["version", "1"],
-          ["device", baseDevicePubkey, String(createdAt)],
-          ["device", linkedDevicePubkey, String(createdAt + 1)],
-        ],
-        content: "",
-      },
-      ownerSecretKey
-    )
+    const newEvent = signedAppKeysEvent(ownerSecretKey, [baseDevicePubkey, linkedDevicePubkey], createdAt + 1)
 
     const subscribe = (_filter: unknown, onEvent: (event: typeof oldEvent) => void) => {
       setTimeout(() => onEvent(newEvent), 0)

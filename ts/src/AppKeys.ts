@@ -4,12 +4,15 @@ import { applyAppKeysSnapshot } from "./multiDevice"
 import { APP_KEYS_EVENT_KIND, NostrSubscribe, Unsubscribe } from "./types"
 
 const now = () => Math.round(Date.now() / 1000)
-const APP_KEYS_D_TAG = "double-ratchet/app-keys"
+export const LEGACY_APP_KEYS_EVENT_KIND = 30078
 export const NOSTR_IDENTITY_ROSTER_OP_KIND = 7368
+export const NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND = 37368
 export const NOSTR_IDENTITY_ROSTER_TYPE = "nostr_identity_roster_op"
+export const NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE = "nostr_identity_roster_snapshot"
 export const NOSTR_IDENTITY_ROSTER_SCHEMA = 1
 export const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT = "encrypted_device_labels"
 export const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA = 1
+export const NOSTR_IDENTITY_OWNER_PUBKEY_FACT = "owner_pubkey"
 const NOSTR_IDENTITY_APP_PURPOSE = "app"
 const NOSTR_IDENTITY_ADMIN_CAPABILITY = "admin"
 const NOSTR_IDENTITY_WRITE_CAPABILITY = "write"
@@ -20,6 +23,21 @@ export interface NostrIdentityRosterFilterOptions {
   since?: number
   until?: number
   limit?: number
+}
+
+export interface AppKeysEventOptions {
+  ownerPrivateKey?: Uint8Array
+  ownerPubkey?: string
+  profileId?: string
+  createdAt?: number
+  heads?: string[]
+}
+
+export interface ParsedAppKeysSnapshot {
+  profileId: string
+  ownerPubkey: string
+  appKeys: AppKeys
+  createdAt: number
 }
 
 // Simplified tag format: ["device", identityPubkey, createdAt]
@@ -40,8 +58,6 @@ export function buildAppKeysFilter(authors?: string | string[]): Filter {
     ? authors.filter(Boolean)
     : authors ? [authors] : undefined
 
-  // Some relays backfill stored parameterized replaceable events unreliably when
-  // queried via #d, so fetch by author+kind and validate the d-tag client-side.
   return normalizedAuthors && normalizedAuthors.length > 0
     ? {
         kinds: [APP_KEYS_EVENT_KIND],
@@ -55,12 +71,12 @@ export function buildAppKeysFilter(authors?: string | string[]): Filter {
 export function isAppKeysEvent(
   event: Pick<VerifiedEvent, "kind" | "tags">
 ): boolean {
-  if (event.kind !== APP_KEYS_EVENT_KIND) {
+  if (event.kind !== NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND) {
     return false
   }
 
   return event.tags.some(
-    (tag) => tag[0] === "d" && tag[1] === APP_KEYS_D_TAG
+    (tag) => tag[0] === "type" && tag[1] === NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE
   )
 }
 
@@ -188,6 +204,12 @@ export function buildNostrIdentityRosterFilter(
   return filter
 }
 
+export function buildNostrIdentityRosterSnapshotFilter(
+  authors?: string | string[]
+): Filter {
+  return buildAppKeysFilter(authors)
+}
+
 export function encryptedDeviceLabelPayloadsFromNostrIdentityRosterOpEvent(
   event: Pick<VerifiedEvent, "tags">
 ): string[] {
@@ -206,6 +228,13 @@ function normalizeStringList(value: string | string[] | undefined): string[] {
     return value.map((item) => item.trim()).filter(Boolean)
   }
   return value?.trim() ? [value.trim()] : []
+}
+
+function normalizeEventIds(value: string[] | undefined): string[] {
+  return (value ?? [])
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => /^[0-9a-f]{64}$/.test(item))
+    .sort()
 }
 
 function firstTagValue(tags: string[][], name: string): string | undefined {
@@ -321,6 +350,88 @@ function canonicalProfileId(profileId: string): string {
     throw new Error("NostrIdentity id must be a UUID")
   }
   return normalized
+}
+
+export function createNostrIdentityProfileId(): string {
+  if (typeof crypto === "undefined" || !crypto.getRandomValues) {
+    throw new Error("Secure random source is not available")
+  }
+  if (crypto.randomUUID) {
+    return crypto.randomUUID()
+  }
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+function normalizeAppKeysEventOptions(
+  input?: Uint8Array | AppKeysEventOptions
+): Required<Pick<AppKeysEventOptions, "createdAt" | "heads">>
+  & Omit<AppKeysEventOptions, "createdAt" | "heads"> {
+  if (input instanceof Uint8Array) {
+    return {
+      ownerPrivateKey: input,
+      ownerPubkey: getPublicKey(input),
+      profileId: undefined,
+      createdAt: now(),
+      heads: [],
+    }
+  }
+  const ownerPrivateKey = input?.ownerPrivateKey
+  return {
+    ownerPrivateKey,
+    ownerPubkey: input?.ownerPubkey ?? (ownerPrivateKey ? getPublicKey(ownerPrivateKey) : undefined),
+    profileId: input?.profileId,
+    createdAt: input?.createdAt ?? now(),
+    heads: input?.heads ?? [],
+  }
+}
+
+function factTag(predicate: string, ...values: string[]): string[] {
+  return [predicate, ...values]
+}
+
+function canonicalizeSnapshotTags(tags: string[][]): string[][] {
+  const unique = new Map(tags.map((tag) => [JSON.stringify(tag), tag]))
+  return [...unique.values()].sort((left, right) => {
+    const len = Math.max(left.length, right.length)
+    for (let index = 0; index < len; index += 1) {
+      const diff = (left[index] ?? "").localeCompare(right[index] ?? "")
+      if (diff !== 0) return diff
+    }
+    return 0
+  })
+}
+
+function buildAppKeysFactSnapshotTags(
+  profileId: string,
+  facts: string[][],
+  heads: string[] = [],
+): string[][] {
+  const pubkeys = new Set<string>()
+  for (const fact of facts) {
+    for (const value of fact.slice(1)) {
+      const pubkey = normalizeHexPubkey(value)
+      if (pubkey) pubkeys.add(pubkey)
+    }
+  }
+  return canonicalizeSnapshotTags([
+    ["d", profileId],
+    ["i", profileId, "subject"],
+    ...normalizeEventIds(heads).map((head) => ["e", head, "", "head"]),
+    ...[...pubkeys].sort().map((pubkey) => ["p", pubkey]),
+    ...facts,
+  ])
+}
+
+export function isNostrIdentityRosterSnapshotEvent(
+  event: Pick<VerifiedEvent, "kind" | "tags">
+): boolean {
+  return event.kind === NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND
+    && tagValues(event.tags, "type").includes(NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE)
 }
 
 function isAppKeyFacet(facet: NostrIdentityAppKeyFacet): boolean {
@@ -522,23 +633,39 @@ export class AppKeys {
     })
   }
 
-  getEvent(ownerPrivateKey?: Uint8Array): UnsignedEvent {
-    const deviceTags = this.getAllDevices().map((device) => [
-      "device",
-      device.identityPubkey,
-      String(device.createdAt),
-    ])
+  getEvent(options?: Uint8Array | AppKeysEventOptions): UnsignedEvent {
+    const normalized = normalizeAppKeysEventOptions(options)
+    const profileId = canonicalProfileId(normalized.profileId ?? createNostrIdentityProfileId())
+    const ownerPubkey = normalized.ownerPubkey
+      ? requireHexPubkey(normalized.ownerPubkey, "owner")
+      : undefined
+    const facts = [
+      factTag("type", NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE),
+      factTag("schema", String(NOSTR_IDENTITY_ROSTER_SCHEMA)),
+      ...(ownerPubkey ? [factTag(NOSTR_IDENTITY_OWNER_PUBKEY_FACT, ownerPubkey)] : []),
+      ...this.getAllDevices()
+        .slice()
+        .sort((left, right) => (
+          left.createdAt - right.createdAt
+          || left.identityPubkey.localeCompare(right.identityPubkey)
+        ))
+        .map((device) => factTag(
+          "device",
+          device.identityPubkey.trim().toLowerCase(),
+          String(device.createdAt),
+        )),
+    ]
+    const encryptedLabels = this.getEncryptedContent(normalized.ownerPrivateKey)
+    if (encryptedLabels) {
+      facts.push(factTag(NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT, encryptedLabels))
+    }
 
     return {
-      kind: APP_KEYS_EVENT_KIND,
+      kind: NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND,
       pubkey: "", // Signer will set this
-      content: this.getEncryptedContent(ownerPrivateKey),
-      created_at: now(),
-      tags: [
-        ["d", APP_KEYS_D_TAG],
-        ["version", "1"],
-        ...deviceTags,
-      ],
+      content: "",
+      created_at: normalized.createdAt,
+      tags: buildAppKeysFactSnapshotTags(profileId, facts, normalized.heads),
     }
   }
 
@@ -549,25 +676,51 @@ export class AppKeys {
     if (!verifyEvent(event)) {
       throw new Error("Event signature is invalid")
     }
-    if (!isAppKeysEvent(event)) {
-      throw new Error("Event is not an AppKeys snapshot")
+    if (!isNostrIdentityRosterSnapshotEvent(event)) {
+      throw new Error("Event is not a NostrIdentity roster snapshot")
     }
+    if (event.content !== "") {
+      throw new Error("NostrIdentity roster snapshot content must be empty")
+    }
+    const schema = requireInteger(requireTagValue(event.tags, "schema"), "schema")
+    if (schema !== NOSTR_IDENTITY_ROSTER_SCHEMA) {
+      throw new Error(`Unsupported NostrIdentity roster schema ${schema}`)
+    }
+    const ownerPubkey = firstTagValue(event.tags, NOSTR_IDENTITY_OWNER_PUBKEY_FACT)
+    if (ownerPubkey && requireHexPubkey(ownerPubkey, "owner") !== event.pubkey) {
+      throw new Error("NostrIdentity roster owner signer mismatch")
+    }
+    profileIdFromTags(event.tags)
 
-    // Simplified tag format: ["device", identityPubkey, createdAt]
-    // Note: "removed" tags are ignored for backwards compatibility with old events
     const devices = event.tags
       .filter(isDeviceTag)
       .map(([, identityPubkey, createdAt]) => ({
-        identityPubkey,
+        identityPubkey: identityPubkey.trim().toLowerCase(),
         createdAt: parseInt(createdAt, 10) || event.created_at,
       }))
 
     const appKeys = new AppKeys(devices)
-    if (ownerPrivateKey && event.content) {
-      appKeys.loadEncryptedContent(event.content, ownerPrivateKey)
+    const encryptedLabels = firstTagValue(event.tags, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
+    if (ownerPrivateKey && encryptedLabels) {
+      appKeys.loadEncryptedContent(encryptedLabels, ownerPrivateKey)
     }
 
     return appKeys
+  }
+
+  static fromNostrIdentityRosterSnapshotEvent(
+    event: VerifiedEvent,
+    ownerPrivateKey?: Uint8Array
+  ): ParsedAppKeysSnapshot {
+    const appKeys = AppKeys.fromEvent(event, ownerPrivateKey)
+    const ownerPubkey =
+      firstTagValue(event.tags, NOSTR_IDENTITY_OWNER_PUBKEY_FACT) ?? event.pubkey
+    return {
+      profileId: profileIdFromTags(event.tags),
+      ownerPubkey: requireHexPubkey(ownerPubkey, "owner"),
+      appKeys,
+      createdAt: event.created_at,
+    }
   }
 
   static fromNostrIdentityRosterEvents(profileId: string, events: VerifiedEvent[]): AppKeys {

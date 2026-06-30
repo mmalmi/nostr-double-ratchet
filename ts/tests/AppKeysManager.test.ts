@@ -3,7 +3,7 @@ import { AppKeysManager, DelegateManager, DelegatePayload } from "../src/AppKeys
 import { NostrSubscribe, NostrPublish, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND } from "../src/types"
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
-import { AppKeys } from "../src/AppKeys"
+import { AppKeys, isAppKeysEvent, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT } from "../src/AppKeys"
 
 describe("DelegateManager", () => {
   let nostrSubscribe: NostrSubscribe
@@ -87,7 +87,7 @@ describe("DelegateManager", () => {
 
       // Should NOT publish AppKeys (only AppKeysManager does that)
       const appKeysEvents = publishedEvents.filter(
-        (e) => e.kind === APP_KEYS_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/app-keys")
+        (e) => isAppKeysEvent(e)
       )
       expect(appKeysEvents.length).toBe(0)
 
@@ -212,22 +212,13 @@ describe("DelegateManager", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50))
 
-      // Simplified tag format: ["device", identityPubkey, createdAt]
+      const createdAt = Math.floor(Date.now() / 1000)
       const appKeysEvent = finalizeEvent(
-        {
-          kind: APP_KEYS_EVENT_KIND,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ["d", "double-ratchet/app-keys"],
-            ["version", "1"],
-            [
-              "device",
-              payload.identityPubkey,
-              String(Math.floor(Date.now() / 1000)),
-            ],
-          ],
-          content: "",
-        },
+        new AppKeys([{ identityPubkey: payload.identityPubkey, createdAt }]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey: ownerPublicKey,
+          createdAt,
+        }),
         ownerPrivateKey
       )
 
@@ -279,21 +270,13 @@ describe("DelegateManager", () => {
       const activationPromise = manager.waitForActivation(5000)
       await new Promise((resolve) => setTimeout(resolve, 50))
 
+      const createdAt = Math.floor(Date.now() / 1000)
       const appKeysEvent = finalizeEvent(
-        {
-          kind: APP_KEYS_EVENT_KIND,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ["d", "double-ratchet/app-keys"],
-            ["version", "1"],
-            [
-              "device",
-              payload.identityPubkey,
-              String(Math.floor(Date.now() / 1000)),
-            ],
-          ],
-          content: "",
-        },
+        new AppKeys([{ identityPubkey: payload.identityPubkey, createdAt }]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey: ownerPublicKey,
+          createdAt,
+        }),
         ownerPrivateKey
       )
 
@@ -337,21 +320,13 @@ describe("DelegateManager", () => {
       const activationPromise = manager.waitForActivation(5000)
       await new Promise((resolve) => setTimeout(resolve, 50))
 
+      const createdAt = Math.floor(Date.now() / 1000)
       const appKeysEvent = finalizeEvent(
-        {
-          kind: APP_KEYS_EVENT_KIND,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ["d", "double-ratchet/app-keys"],
-            ["version", "1"],
-            [
-              "device",
-              payload.identityPubkey,
-              String(Math.floor(Date.now() / 1000)),
-            ],
-          ],
-          content: "",
-        },
+        new AppKeys([{ identityPubkey: payload.identityPubkey, createdAt }]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey: ownerPublicKey,
+          createdAt,
+        }),
         ownerPrivateKey
       )
 
@@ -366,16 +341,11 @@ describe("DelegateManager", () => {
 
       // Device is revoked by simply not being in the list anymore
       const revokedAppKeysEvent = finalizeEvent(
-        {
-          kind: APP_KEYS_EVENT_KIND,
-          created_at: Math.floor(Date.now() / 1000) + 1,
-          tags: [
-            ["d", "double-ratchet/app-keys"],
-            ["version", "1"],
-            // No device tags - the device is simply not present
-          ],
-          content: "",
-        },
+        new AppKeys([]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey: ownerPublicKey,
+          createdAt: createdAt + 1,
+        }),
         ownerPrivateKey
       )
 
@@ -434,7 +404,7 @@ describe("AppKeysManager - Authority", () => {
       // Calling publish() will publish
       await manager.publish()
       const appKeysEvents = publishedEvents.filter(
-        (e) => e.kind === APP_KEYS_EVENT_KIND && e.tags?.some((t: string[]) => t[0] === "d" && t[1] === "double-ratchet/app-keys")
+        (e) => isAppKeysEvent(e)
       )
       expect(appKeysEvents.length).toBe(1)
     })
@@ -523,7 +493,12 @@ describe("AppKeysManager - Authority", () => {
       await manager.publish()
 
       expect(publishedEvents).toHaveLength(1)
-      expect(publishedEvents[0].content).toBeTruthy()
+      expect(publishedEvents[0].content).toBe("")
+      expect(
+        publishedEvents[0].tags.some(
+          (tag: string[]) => tag[0] === NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT && !!tag[1]
+        )
+      ).toBe(true)
       expect(publishedEvents[0].content).not.toContain("Sirius MacBook")
       expect(publishedEvents[0].content).not.toContain("NDR Desktop")
     })

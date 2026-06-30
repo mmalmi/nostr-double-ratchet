@@ -1,9 +1,9 @@
 import { vi } from "vitest"
 import { generateSecretKey, getPublicKey, finalizeEvent, UnsignedEvent, VerifiedEvent } from "nostr-tools"
 import { AppKeysManager, DelegateManager } from "../../src/AppKeysManager"
-import { AppKeys } from "../../src/AppKeys"
+import { AppKeys, isAppKeysEvent } from "../../src/AppKeys"
 import { InMemoryStorageAdapter, StorageAdapter } from "../../src/StorageAdapter"
-import { NostrPublish, NostrSubscribe, APP_KEYS_EVENT_KIND, Rumor } from "../../src/types"
+import { NostrPublish, NostrSubscribe, Rumor } from "../../src/types"
 import { SessionManager } from "../../src/SessionManager"
 import { MockRelay } from "./mockRelay"
 
@@ -184,15 +184,11 @@ export async function runScenario(config: ScenarioConfig): Promise<void> {
           // Check for existing AppKeys on relay
           const existingEvents = relay.getAllEvents()
           for (const event of existingEvents) {
-            if (event.kind === APP_KEYS_EVENT_KIND && event.pubkey === publicKey) {
-              const tags = event.tags || []
-              const dTag = tags.find((t) => t[0] === "d" && t[1] === "double-ratchet/app-keys")
-              if (dTag) {
-                try {
-                  const appKeys = AppKeys.fromEvent(event)
-                  await appKeysManager.setAppKeys(appKeys)
-                } catch { /* ignore */ }
-              }
+            if (event.pubkey === publicKey && isAppKeysEvent(event)) {
+              try {
+                const appKeys = AppKeys.fromEvent(event)
+                await appKeysManager.setAppKeys(appKeys)
+              } catch { /* ignore */ }
             }
           }
 

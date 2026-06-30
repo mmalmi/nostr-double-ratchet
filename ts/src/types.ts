@@ -102,7 +102,7 @@ export const INVITE_EVENT_KIND = 30078;
 
 export const INVITE_RESPONSE_KIND = 1059;
 
-export const APP_KEYS_EVENT_KIND = 30078;
+export const APP_KEYS_EVENT_KIND = 37368;
 
 export const CHAT_MESSAGE_KIND = 14;
 

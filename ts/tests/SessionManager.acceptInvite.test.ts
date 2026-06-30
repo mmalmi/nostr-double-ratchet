@@ -6,8 +6,7 @@ import {
   type UnsignedEvent,
   type VerifiedEvent,
 } from "nostr-tools"
-import { APP_KEYS_EVENT_KIND } from "../src/types"
-import { AppKeys } from "../src/AppKeys"
+import { AppKeys, isAppKeysEvent } from "../src/AppKeys"
 import { Invite } from "../src/Invite"
 import { generateEphemeralKeypair, generateSharedSecret, decryptInviteResponse } from "../src/inviteUtils"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
@@ -20,9 +19,7 @@ function extractInviteForOwner(relay: MockRelay, ownerPubkey: string): Invite {
 
   const appKeysEvent = events.find(
     (event) =>
-      event.kind === APP_KEYS_EVENT_KIND &&
-      event.pubkey === ownerPubkey &&
-      event.tags.some((tag) => tag[0] === "d" && tag[1] === "double-ratchet/app-keys")
+      event.pubkey === ownerPubkey && isAppKeysEvent(event as VerifiedEvent)
   ) as VerifiedEvent | undefined
   if (!appKeysEvent) {
     throw new Error("No AppKeys event found for owner")

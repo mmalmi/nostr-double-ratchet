@@ -17,4 +17,4 @@ thiserror.workspace = true
 base64.workspace = true
 urlencoding.workspace = true
 rand.workspace = true
-
+uuid.workspace = true

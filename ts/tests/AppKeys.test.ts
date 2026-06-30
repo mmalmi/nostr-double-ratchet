@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
 import {
   AppKeys,
+  NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
   NOSTR_IDENTITY_ROSTER_OP_KIND,
+  NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE,
   NOSTR_IDENTITY_ROSTER_TYPE,
   buildNostrIdentityRosterFilter,
   buildAppKeysFilter,
@@ -149,8 +151,10 @@ describe('AppKeys', () => {
 
       expect(event.kind).toBe(APP_KEYS_EVENT_KIND)
       expect(event.pubkey).toBe('') // Signer will set this
-      expect(event.tags).toContainEqual(['d', 'double-ratchet/app-keys'])
-      expect(event.tags).toContainEqual(['version', '1'])
+      expect(event.tags.some((tag) => tag[0] === 'd' && tag[1])).toBe(true)
+      expect(event.tags.some((tag) => tag[0] === 'i' && tag[2] === 'subject')).toBe(true)
+      expect(event.tags).toContainEqual(['type', NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE])
+      expect(event.tags).toContainEqual(['schema', '1'])
 
       // Simplified tag format: ["device", identityPubkey, createdAt]
       const deviceTag = event.tags.find(t => t[0] === 'device' && t[1] === device.identityPubkey)
@@ -226,7 +230,12 @@ describe('AppKeys', () => {
 
       const event = list.getEvent(ownerPrivateKey)
 
-      expect(event.content).toBeTruthy()
+      expect(event.content).toBe('')
+      expect(
+        event.tags.some(
+          (tag) => tag[0] === NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT && !!tag[1]
+        )
+      ).toBe(true)
       expect(event.content).not.toContain('Sirius MacBook')
       expect(event.content).not.toContain('NDR Desktop')
     })
@@ -504,39 +513,30 @@ describe('AppKeys', () => {
   })
 
   describe('waitFor', () => {
-    it('uses author-only backfill filters and validates the AppKeys d-tag client-side', async () => {
+    it('uses author-only backfill filters and validates the AppKeys snapshot type client-side', async () => {
       const ownerPrivateKey = generateSecretKey()
       const ownerPublicKey = getPublicKey(ownerPrivateKey)
       const device = createTestDevice()
+      const list = new AppKeys([device])
       const seenFilters: Record<string, unknown>[] = []
+      const unsignedValidEvent = list.getEvent({
+        ownerPrivateKey,
+        ownerPubkey: ownerPublicKey,
+        createdAt: 101,
+      })
 
       const wrongEvent = finalizeEvent(
         {
-          kind: APP_KEYS_EVENT_KIND,
+          ...unsignedValidEvent,
           created_at: 100,
-          tags: [
-            ['d', 'double-ratchet/not-app-keys'],
-            ['version', '1'],
-            ['device', device.identityPubkey, String(device.createdAt)],
-          ],
-          content: '',
+          tags: unsignedValidEvent.tags.map((tag) =>
+            tag[0] === 'type' ? ['type', 'not_app_keys'] : tag
+          ),
         },
         ownerPrivateKey
       )
 
-      const validEvent = finalizeEvent(
-        {
-          kind: APP_KEYS_EVENT_KIND,
-          created_at: 101,
-          tags: [
-            ['d', 'double-ratchet/app-keys'],
-            ['version', '1'],
-            ['device', device.identityPubkey, String(device.createdAt)],
-          ],
-          content: '',
-        },
-        ownerPrivateKey
-      )
+      const validEvent = finalizeEvent(unsignedValidEvent, ownerPrivateKey)
 
       const nostrSubscribe: NostrSubscribe = (filter, onEvent) => {
         seenFilters.push(filter as Record<string, unknown>)
@@ -591,31 +591,20 @@ describe('AppKeys', () => {
       const createdAt = Math.floor(Date.now() / 1000)
 
       const oldEvent = finalizeEvent(
-        {
-          kind: APP_KEYS_EVENT_KIND,
-          created_at: createdAt,
-          tags: [
-            ['d', 'double-ratchet/app-keys'],
-            ['version', '1'],
-            ['device', firstDevice.identityPubkey, String(firstDevice.createdAt)],
-          ],
-          content: '',
-        },
+        new AppKeys([firstDevice]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey: ownerPublicKey,
+          createdAt,
+        }),
         ownerPrivateKey
       )
 
       const newEvent = finalizeEvent(
-        {
-          kind: APP_KEYS_EVENT_KIND,
-          created_at: createdAt,
-          tags: [
-            ['d', 'double-ratchet/app-keys'],
-            ['version', '1'],
-            ['device', firstDevice.identityPubkey, String(firstDevice.createdAt)],
-            ['device', secondDevice.identityPubkey, String(secondDevice.createdAt)],
-          ],
-          content: '',
-        },
+        new AppKeys([firstDevice, secondDevice]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey: ownerPublicKey,
+          createdAt,
+        }),
         ownerPrivateKey
       )
 

@@ -1,7 +1,8 @@
 use nostr::Keys;
 use nostr_double_ratchet::Result;
 use nostr_double_ratchet_nostr::{
-    AppKeys, DeviceEntry, NOSTR_IDENTITY_ROSTER_OP_KIND, NOSTR_IDENTITY_ROSTER_TYPE,
+    AppKeys, DeviceEntry, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
+    NOSTR_IDENTITY_ROSTER_OP_KIND, NOSTR_IDENTITY_ROSTER_TYPE,
 };
 
 const PROFILE_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
@@ -51,7 +52,13 @@ fn test_app_keys_encrypts_labels_in_event_content() -> Result<()> {
 
     let event = app_keys.get_encrypted_event(&owner_keys)?;
 
-    assert!(!event.content.is_empty());
+    assert!(event.content.is_empty());
+    assert!(event.tags.iter().any(|tag| {
+        let values = tag.clone().to_vec();
+        values.first().map(|value| value.as_str())
+            == Some(NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
+            && values.get(1).is_some_and(|value| !value.is_empty())
+    }));
     assert!(!event.content.contains("Sirius MacBook"));
     assert!(!event.content.contains("NDR Desktop"));
 

@@ -1,5 +1,11 @@
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
-import { AppKeys, buildAppKeysFilter, DeviceEntry, DeviceLabels } from "./AppKeys"
+import {
+  AppKeys,
+  buildAppKeysFilter,
+  createNostrIdentityProfileId,
+  DeviceEntry,
+  DeviceLabels,
+} from "./AppKeys"
 import { Invite } from "./Invite"
 import { NostrSubscribe, NostrPublish, Unsubscribe } from "./types"
 import { StorageAdapter, InMemoryStorageAdapter } from "./StorageAdapter"
@@ -41,6 +47,8 @@ export class AppKeysManager {
   private readonly ownerIdentityKey?: Uint8Array
 
   private appKeys: AppKeys | null = null
+  private appKeysProfileId: string | null = null
+  private lastPublishedAppKeysCreatedAt = 0
   private initialized = false
 
   private readonly storageVersion = "3"
@@ -136,8 +144,19 @@ export class AppKeysManager {
       this.appKeys = new AppKeys()
     }
 
-    const event = this.appKeys.getEvent(this.ownerIdentityKey)
-    await this.nostrPublish(event)
+    const ownerPubkey = this.ownerIdentityKey ? getPublicKey(this.ownerIdentityKey) : undefined
+    const createdAt = Math.max(
+      Math.floor(Date.now() / 1000),
+      this.lastPublishedAppKeysCreatedAt + 1
+    )
+    const event = this.appKeys.getEvent({
+      ownerPrivateKey: this.ownerIdentityKey,
+      ownerPubkey,
+      ...(ownerPubkey ? { profileId: await this.ensureAppKeysProfileId(ownerPubkey) } : {}),
+      createdAt,
+    })
+    const published = await this.nostrPublish(event)
+    this.lastPublishedAppKeysCreatedAt = published.created_at ?? createdAt
   }
 
   /**
@@ -158,6 +177,24 @@ export class AppKeysManager {
 
   private appKeysKey(): string {
     return `${this.versionPrefix}/app-keys-manager/app-keys`
+  }
+
+  private appKeysProfileIdKey(ownerPubkey: string): string {
+    return `${this.versionPrefix}/app-keys-manager/profile-id/${ownerPubkey}`
+  }
+
+  private async ensureAppKeysProfileId(ownerPubkey: string): Promise<string> {
+    if (this.appKeysProfileId) return this.appKeysProfileId
+    const key = this.appKeysProfileIdKey(ownerPubkey)
+    const stored = await this.storage.get<string>(key)
+    if (stored) {
+      this.appKeysProfileId = stored
+      return stored
+    }
+    const profileId = createNostrIdentityProfileId()
+    await this.storage.put(key, profileId)
+    this.appKeysProfileId = profileId
+    return profileId
   }
 
   private async loadAppKeys(): Promise<AppKeys | null> {

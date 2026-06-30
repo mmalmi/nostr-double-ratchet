@@ -3,8 +3,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, VerifiedEvent } from "n
 import { MockRelay } from "./helpers/mockRelay"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { encryptInviteResponse } from "../src/inviteUtils"
-import { APP_KEYS_EVENT_KIND } from "../src/types"
-import { AppKeys } from "../src/AppKeys"
+import { AppKeys, isAppKeysEvent } from "../src/AppKeys"
 import { runScenario } from "./helpers/scenario"
 
 /**
@@ -17,9 +16,7 @@ function extractInviteParams(relay: MockRelay, ownerPubkey: string) {
   // Find the AppKeys event for this owner → get device identity pubkeys
   const appKeysEvent = events.find(
     (e) =>
-      e.kind === APP_KEYS_EVENT_KIND &&
-      e.pubkey === ownerPubkey &&
-      e.tags.some((t) => t[0] === "d" && t[1] === "double-ratchet/app-keys"),
+      e.pubkey === ownerPubkey && isAppKeysEvent(e as VerifiedEvent),
   )
   if (!appKeysEvent) throw new Error("No AppKeys event found")
 
