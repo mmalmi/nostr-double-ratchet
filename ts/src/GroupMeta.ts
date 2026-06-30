@@ -66,6 +66,15 @@ export interface GroupRosterFact {
   group: GroupData;
 }
 
+export interface GroupRosterFactRumor {
+  id: string;
+  pubkey: string;
+  kind: number;
+  created_at: number;
+  tags: string[][];
+  content: string;
+}
+
 export function isGroupAdmin(group: GroupData, pubkey: string): boolean {
   return group.admins.includes(pubkey);
 }
@@ -256,7 +265,7 @@ export function buildGroupRosterFactEvent(
   const signerPubkey = requireHexPubkey(options.signerPubkey, "signer");
   const eventCreatedAt = options.eventCreatedAt ?? Math.round(Date.now() / 1000);
   const revision = requireNonNegativeInteger(options.revision, "revision");
-  const createdAt = requireNonNegativeInteger(group.createdAt, "created_at");
+  const createdAt = unixSecondsFromTimestamp(group.createdAt, "created_at");
   const updatedAt = requireNonNegativeInteger(
     options.updatedAt ?? eventCreatedAt,
     "updated_at"
@@ -303,6 +312,23 @@ export function parseGroupRosterFactEvent(event: VerifiedEvent): GroupRosterFact
   if (!verifyEvent(event)) {
     throw new Error("GroupRoster fact signature is invalid");
   }
+  const fact = parseGroupRosterFactWire(event);
+  if (!fact.group.admins.includes(fact.signerPubkey)) {
+    throw new Error("GroupRoster signer must be an admin");
+  }
+  return fact;
+}
+
+export function parseGroupRosterFactRumor(event: GroupRosterFactRumor): GroupRosterFact {
+  return parseGroupRosterFactWire(event);
+}
+
+function parseGroupRosterFactWire(
+  event: Pick<
+    GroupRosterFactRumor,
+    "id" | "pubkey" | "kind" | "tags" | "content" | "created_at"
+  >
+): GroupRosterFact {
   if (!isGroupRosterFactEvent(event)) {
     throw new Error("Event is not a GroupRoster fact");
   }
@@ -322,9 +348,6 @@ export function parseGroupRosterFactEvent(event: VerifiedEvent): GroupRosterFact
   const admins = canonicalPubkeys(tagValues(event.tags, "admin"), "admin");
   requireAdminsAreMembers(admins, members);
   const signerPubkey = requireHexPubkey(event.pubkey, "signer");
-  if (!admins.includes(signerPubkey)) {
-    throw new Error("GroupRoster signer must be an admin");
-  }
   const about = firstTagValue(event.tags, "about")
     ?? firstTagValue(event.tags, "description");
   const picture = firstTagValue(event.tags, "picture");
@@ -418,6 +441,11 @@ function requireNonNegativeInteger(value: string | number, label: string): numbe
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed)) throw new Error(`GroupRoster ${label} is too large`);
   return parsed;
+}
+
+function unixSecondsFromTimestamp(value: number, label: string): number {
+  const parsed = requireNonNegativeInteger(value, label);
+  return parsed > 10_000_000_000 ? Math.floor(parsed / 1000) : parsed;
 }
 
 function requireHexPubkey(value: string, label: string): string {

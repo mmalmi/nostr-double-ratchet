@@ -375,43 +375,43 @@ where
         }
 
         let mut prepared = empty_group_prepared_send(request.group_id.clone());
-        if request
+        let include_required_revision_metadata = request
             .required_revision
-            .is_none_or(|required| record.revision >= required)
-        {
-            let metadata = self.repair_payload_to_owner(
-                session_manager,
-                ctx,
-                requester_owner,
-                &record.metadata_payload(),
-            )?;
-            merge_group_prepared_publish(&mut prepared.remote, metadata.remote);
-            merge_group_prepared_publish(&mut prepared.local_sibling, metadata.local_sibling);
-        }
+            .is_some_and(|required| record.revision >= required);
+        let mut include_context_metadata = false;
+        let mut distributions = Vec::new();
 
-        let Some(id) = self
+        if let Some(id) = self
             .sender_event_index
             .get(&request.sender_event_pubkey)
             .cloned()
-        else {
-            return Ok(prepared);
-        };
-        if id.group_id != request.group_id || id.sender_owner != self.local_owner_pubkey {
-            return Ok(prepared);
+            .filter(|id| {
+                id.group_id == request.group_id && id.sender_owner == self.local_owner_pubkey
+            })
+        {
+            if let Some(sender_record) = self
+                .sender_keys
+                .get(&id)
+                .filter(|record| record.sender_event_secret_key.is_some())
+            {
+                distributions = match (request.key_id, request.message_number) {
+                    (Some(key_id), Some(message_number)) => sender_record
+                        .repair_distribution_for(requester_owner, key_id, message_number)
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                    _ => sender_record.repair_distributions_for_requester(requester_owner),
+                };
+                include_context_metadata = request.required_revision.is_none()
+                    && requester_owner != self.local_owner_pubkey
+                    && distributions.iter().any(|distribution| {
+                        sender_record.requester_received_initial_repair_snapshot(
+                            requester_owner,
+                            distribution,
+                        )
+                    });
+            }
         }
-        let Some(sender_record) = self.sender_keys.get(&id) else {
-            return Ok(prepared);
-        };
-        if sender_record.sender_event_secret_key.is_none() {
-            return Ok(prepared);
-        }
-        let distributions = match (request.key_id, request.message_number) {
-            (Some(key_id), Some(message_number)) => sender_record
-                .repair_distribution_for(requester_owner, key_id, message_number)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            _ => sender_record.repair_distributions_for_requester(requester_owner),
-        };
+
         for distribution in distributions {
             let distribution = self.repair_payload_to_owner(
                 session_manager,
@@ -421,6 +421,16 @@ where
             )?;
             merge_group_prepared_publish(&mut prepared.remote, distribution.remote);
             merge_group_prepared_publish(&mut prepared.local_sibling, distribution.local_sibling);
+        }
+        if include_required_revision_metadata || include_context_metadata {
+            let metadata = self.repair_payload_to_owner(
+                session_manager,
+                ctx,
+                requester_owner,
+                &record.metadata_payload(),
+            )?;
+            merge_group_prepared_publish(&mut prepared.remote, metadata.remote);
+            merge_group_prepared_publish(&mut prepared.local_sibling, metadata.local_sibling);
         }
         Ok(prepared)
     }
@@ -2095,6 +2105,28 @@ impl SenderKeyRecord {
             .filter(|snapshot| snapshot.recipients.contains(&requester_owner))
             .map(|snapshot| snapshot.distribution.clone())
             .collect()
+    }
+
+    fn requester_received_initial_repair_snapshot(
+        &self,
+        requester_owner: OwnerPubkey,
+        distribution: &SenderKeyDistribution,
+    ) -> bool {
+        let Some(first_iteration) = self
+            .repair_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.key_id == distribution.key_id)
+            .map(|snapshot| snapshot.distribution.iteration)
+            .min()
+        else {
+            return false;
+        };
+        first_iteration == distribution.iteration
+            && self.repair_snapshots.iter().any(|snapshot| {
+                snapshot.key_id == distribution.key_id
+                    && snapshot.distribution.iteration == first_iteration
+                    && snapshot.recipients.contains(&requester_owner)
+            })
     }
 
     fn snapshot(&self) -> GroupSenderKeyRecordSnapshot {

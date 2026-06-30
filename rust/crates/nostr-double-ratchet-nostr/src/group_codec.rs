@@ -1,5 +1,5 @@
 use nostr::{
-    Alphabet, Event, EventBuilder, EventId, Filter, Kind, PublicKey, SingleLetterTag, Tag,
+    Alphabet, Event, EventBuilder, EventId, Filter, Kind, PublicKey, SingleLetterTag, Tag, Tags,
     Timestamp, UnsignedEvent,
 };
 use nostr_double_ratchet::{
@@ -85,43 +85,6 @@ enum GroupPairwisePayloadV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MasterGroupMetadataContent {
-    id: String,
-    name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    picture: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    about: Option<String>,
-    members: Vec<OwnerPubkey>,
-    admins: Vec<OwnerPubkey>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    protocol: Option<GroupProtocol>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    revision: Option<u64>,
-    #[serde(
-        rename = "createdBy",
-        alias = "created_by",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    created_by: Option<OwnerPubkey>,
-    #[serde(
-        rename = "createdAt",
-        alias = "created_at",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    created_at: Option<UnixSeconds>,
-    #[serde(
-        rename = "updatedAt",
-        alias = "updated_at",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    updated_at: Option<UnixSeconds>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SenderKeyDistributionContent {
     group_id: String,
@@ -177,21 +140,12 @@ where
     filter
 }
 
-pub fn group_roster_unsigned_event(
-    signer_pubkey: PublicKey,
-    snapshot: &GroupSnapshot,
-) -> Result<UnsignedEvent> {
+fn group_roster_fact_tags(snapshot: &GroupSnapshot) -> Result<Vec<Tag>> {
     let group_id = require_non_empty(&snapshot.group_id, "group id")?;
     let name = require_non_empty(&snapshot.name, "name")?;
-    let signer_owner = OwnerPubkey::from_bytes(signer_pubkey.to_bytes());
     let members = canonical_owner_pubkeys(&snapshot.members);
     let admins = canonical_owner_pubkeys(&snapshot.admins);
     require_admins_are_members(&admins, &members)?;
-    if !admins.contains(&signer_owner) {
-        return Err(Error::InvalidEvent(
-            "GroupRoster signer must be an admin".to_string(),
-        ));
-    }
 
     let revision = snapshot.revision.to_string();
     let created_at = snapshot.created_at.get().to_string();
@@ -225,6 +179,22 @@ pub fn group_roster_unsigned_event(
         .map(|admin| tag(["admin", &admin.to_hex()]))
         .collect();
     tags.extend(admin_tags?);
+    Ok(tags)
+}
+
+pub fn group_roster_unsigned_event(
+    signer_pubkey: PublicKey,
+    snapshot: &GroupSnapshot,
+) -> Result<UnsignedEvent> {
+    let signer_owner = OwnerPubkey::from_bytes(signer_pubkey.to_bytes());
+    let admins = canonical_owner_pubkeys(&snapshot.admins);
+    if !admins.contains(&signer_owner) {
+        return Err(Error::InvalidEvent(
+            "GroupRoster signer must be an admin".to_string(),
+        ));
+    }
+
+    let tags = group_roster_fact_tags(snapshot)?;
 
     Ok(
         EventBuilder::new(Kind::from(GROUP_ROSTER_FACT_KIND as u16), "")
@@ -237,6 +207,13 @@ pub fn group_roster_unsigned_event(
 pub fn is_group_roster_fact_event(event: &Event) -> bool {
     event.kind.as_u16() as u32 == GROUP_ROSTER_FACT_KIND
         && event_tag_values(event, "type")
+            .iter()
+            .any(|value| value == GROUP_ROSTER_FACT_TYPE)
+}
+
+fn unsigned_is_group_roster_fact_event(event: &UnsignedEvent) -> bool {
+    event.kind.as_u16() as u32 == GROUP_ROSTER_FACT_KIND
+        && unsigned_event_tag_values(event, "type")
             .iter()
             .any(|value| value == GROUP_ROSTER_FACT_TYPE)
 }
@@ -328,6 +305,54 @@ where
         }
     }
     by_group.into_values().map(|fact| fact.snapshot).collect()
+}
+
+fn group_roster_snapshot_from_unsigned_event(event: &UnsignedEvent) -> Result<GroupSnapshot> {
+    if !unsigned_is_group_roster_fact_event(event) {
+        return Err(Error::InvalidEvent(
+            "Event is not a GroupRoster fact".to_string(),
+        ));
+    }
+    if !event.content.is_empty() {
+        return Err(Error::InvalidEvent(
+            "GroupRoster fact event content must be empty".to_string(),
+        ));
+    }
+    let schema = unsigned_event_required_u64(event, "schema")?;
+    if schema != GROUP_ROSTER_FACT_SCHEMA {
+        return Err(Error::InvalidEvent(format!(
+            "Unsupported GroupRoster fact schema {schema}"
+        )));
+    }
+    let group_id = group_id_from_unsigned_event(event)?;
+    if let Some(tagged_group_id) = unsigned_event_first_tag_value(event, "group_id") {
+        if tagged_group_id != group_id {
+            return Err(Error::InvalidEvent(
+                "GroupRoster group_id/i tag mismatch".to_string(),
+            ));
+        }
+    }
+    let members = canonical_owner_pubkeys(&unsigned_event_owner_pubkeys(event, "member")?);
+    let admins = canonical_owner_pubkeys(&unsigned_event_owner_pubkeys(event, "admin")?);
+    require_admins_are_members(&admins, &members)?;
+    let protocol = unsigned_event_first_tag_value(event, "protocol")
+        .map(|value| group_protocol_from_tag(&value))
+        .transpose()?
+        .unwrap_or_else(GroupProtocol::sender_key_v1);
+    Ok(GroupSnapshot {
+        group_id,
+        protocol,
+        name: unsigned_event_required_value(event, "name")?,
+        picture: unsigned_event_first_tag_value(event, "picture"),
+        about: unsigned_event_first_tag_value(event, "about")
+            .or_else(|| unsigned_event_first_tag_value(event, "description")),
+        created_by: unsigned_event_owner_pubkey(event, "created_by")?,
+        members,
+        admins,
+        revision: unsigned_event_required_u64(event, "revision")?,
+        created_at: UnixSeconds(unsigned_event_required_u64(event, "created_at")?),
+        updated_at: UnixSeconds(unsigned_event_required_u64(event, "updated_at")?),
+    })
 }
 
 impl GroupPayloadCodec for JsonGroupPayloadCodecV1 {
@@ -436,25 +461,8 @@ fn encode_master_metadata_snapshot(
     ctx: GroupPayloadEncodeContext,
     snapshot: &GroupSnapshot,
 ) -> Result<Vec<u8>> {
-    let content = serde_json::to_string(&MasterGroupMetadataContent {
-        id: snapshot.group_id.clone(),
-        name: snapshot.name.clone(),
-        picture: snapshot.picture.clone(),
-        about: snapshot.about.clone(),
-        members: snapshot.members.clone(),
-        admins: snapshot.admins.clone(),
-        protocol: Some(snapshot.protocol),
-        revision: Some(snapshot.revision),
-        created_by: Some(snapshot.created_by),
-        created_at: Some(snapshot.created_at),
-        updated_at: Some(snapshot.updated_at),
-    })?;
-    let millis = ctx.created_at.get().saturating_mul(1000).to_string();
-    let event = EventBuilder::new(Kind::from(GROUP_METADATA_KIND as u16), content)
-        .tags(vec![
-            tag([GROUP_LABEL_TAG, snapshot.group_id.as_str()])?,
-            tag([MS_TAG, millis.as_str()])?,
-        ])
+    let event = EventBuilder::new(Kind::from(GROUP_ROSTER_FACT_KIND as u16), "")
+        .tags(group_roster_fact_tags(snapshot)?)
         .custom_created_at(Timestamp::from(ctx.created_at.get()))
         .build(ctx.local_device_pubkey.to_nostr()?);
     Ok(serde_json::to_vec(&event)?)
@@ -464,50 +472,14 @@ fn decode_master_metadata_snapshot(payload: &[u8]) -> Result<Option<GroupPairwis
     let Some(event) = decode_verified_unsigned_event(payload)? else {
         return Ok(None);
     };
-    if event.kind.as_u16() as u32 != GROUP_METADATA_KIND {
+    if event.kind.as_u16() as u32 != GROUP_ROSTER_FACT_KIND
+        || !unsigned_is_group_roster_fact_event(&event)
+    {
         return Ok(None);
     }
 
-    let content = serde_json::from_str::<MasterGroupMetadataContent>(&event.content)?;
-    let tagged_group_id = first_tag_value(&event, GROUP_LABEL_TAG);
-    let group_id = tagged_group_id.unwrap_or_else(|| content.id.clone());
-    if group_id != content.id {
-        return Err(Error::Parse("group metadata id/tag mismatch".to_string()));
-    }
-
-    let created_at = content
-        .created_at
-        .unwrap_or_else(|| UnixSeconds(event.created_at.as_secs()));
-    let updated_at = content
-        .updated_at
-        .unwrap_or_else(|| UnixSeconds(event.created_at.as_secs()));
-    let revision = content
-        .revision
-        .or_else(|| first_tag_value(&event, MS_TAG).and_then(|value| value.parse::<u64>().ok()))
-        .unwrap_or_else(|| event.created_at.as_secs())
-        .max(1);
-    let created_by = content
-        .created_by
-        .or_else(|| content.admins.first().copied())
-        .ok_or_else(|| Error::Parse("group metadata missing creator/admin".to_string()))?;
-
-    Ok(Some(GroupPairwiseCommand::MetadataSnapshot {
-        snapshot: GroupSnapshot {
-            group_id,
-            protocol: content
-                .protocol
-                .unwrap_or_else(GroupProtocol::sender_key_v1),
-            name: content.name,
-            picture: content.picture,
-            about: content.about,
-            created_by,
-            members: content.members,
-            admins: content.admins,
-            revision,
-            created_at,
-            updated_at,
-        },
-    }))
+    let snapshot = group_roster_snapshot_from_unsigned_event(&event)?;
+    Ok(Some(GroupPairwiseCommand::MetadataSnapshot { snapshot }))
 }
 
 fn encode_sender_key_distribution(
@@ -845,10 +817,8 @@ fn require_non_empty<'a>(value: &'a str, label: &str) -> Result<&'a str> {
     Ok(value)
 }
 
-fn event_tag_values(event: &Event, key: &str) -> Vec<String> {
-    event
-        .tags
-        .iter()
+fn tag_values(tags: &Tags, key: &str) -> Vec<String> {
+    tags.iter()
         .filter_map(|tag| {
             let values = tag.as_slice();
             if values.first().map(|value| value.as_str()) != Some(key) {
@@ -860,12 +830,29 @@ fn event_tag_values(event: &Event, key: &str) -> Vec<String> {
         .collect()
 }
 
+fn event_tag_values(event: &Event, key: &str) -> Vec<String> {
+    tag_values(&event.tags, key)
+}
+
+fn unsigned_event_tag_values(event: &UnsignedEvent, key: &str) -> Vec<String> {
+    tag_values(&event.tags, key)
+}
+
 fn event_first_tag_value(event: &Event, key: &str) -> Option<String> {
     event_tag_values(event, key).into_iter().next()
 }
 
+fn unsigned_event_first_tag_value(event: &UnsignedEvent, key: &str) -> Option<String> {
+    unsigned_event_tag_values(event, key).into_iter().next()
+}
+
 fn event_required_value(event: &Event, key: &str) -> Result<String> {
     event_first_tag_value(event, key)
+        .ok_or_else(|| Error::InvalidEvent(format!("GroupRoster fact missing {key}")))
+}
+
+fn unsigned_event_required_value(event: &UnsignedEvent, key: &str) -> Result<String> {
+    unsigned_event_first_tag_value(event, key)
         .ok_or_else(|| Error::InvalidEvent(format!("GroupRoster fact missing {key}")))
 }
 
@@ -875,8 +862,18 @@ fn event_required_u64(event: &Event, key: &str) -> Result<u64> {
         .map_err(|_| Error::InvalidEvent(format!("GroupRoster {key} must be an integer")))
 }
 
+fn unsigned_event_required_u64(event: &UnsignedEvent, key: &str) -> Result<u64> {
+    unsigned_event_required_value(event, key)?
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidEvent(format!("GroupRoster {key} must be an integer")))
+}
+
 fn event_owner_pubkey(event: &Event, key: &str) -> Result<OwnerPubkey> {
     parse_owner_pubkey_hex(&event_required_value(event, key)?)
+}
+
+fn unsigned_event_owner_pubkey(event: &UnsignedEvent, key: &str) -> Result<OwnerPubkey> {
+    parse_owner_pubkey_hex(&unsigned_event_required_value(event, key)?)
 }
 
 fn event_owner_pubkeys(event: &Event, key: &str) -> Result<Vec<OwnerPubkey>> {
@@ -886,10 +883,23 @@ fn event_owner_pubkeys(event: &Event, key: &str) -> Result<Vec<OwnerPubkey>> {
         .collect()
 }
 
-fn group_id_from_event(event: &Event) -> Result<String> {
-    event
-        .tags
+fn unsigned_event_owner_pubkeys(event: &UnsignedEvent, key: &str) -> Result<Vec<OwnerPubkey>> {
+    unsigned_event_tag_values(event, key)
         .iter()
+        .map(|value| parse_owner_pubkey_hex(value))
+        .collect()
+}
+
+fn group_id_from_event(event: &Event) -> Result<String> {
+    group_id_from_tags(&event.tags)
+}
+
+fn group_id_from_unsigned_event(event: &UnsignedEvent) -> Result<String> {
+    group_id_from_tags(&event.tags)
+}
+
+fn group_id_from_tags(tags: &Tags) -> Result<String> {
+    tags.iter()
         .find_map(|tag| {
             let values = tag.as_slice();
             (values.first().map(|value| value.as_str()) == Some("i")
@@ -970,6 +980,27 @@ mod tests {
     use super::*;
     use nostr::{EventId, Keys};
     use nostr_double_ratchet::{DevicePubkey, GroupProtocol};
+    use serde::{Deserialize, Serialize};
+    use std::{env, fs, path::PathBuf};
+
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    struct GroupRosterFactVector {
+        description: String,
+        event: serde_json::Value,
+        expected: GroupRosterFactExpected,
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    struct GroupRosterFactExpected {
+        group_id: String,
+        name: String,
+        created_by: String,
+        members: Vec<String>,
+        admins: Vec<String>,
+        revision: u64,
+        created_at: u64,
+        updated_at: u64,
+    }
 
     fn owner(byte: u8) -> OwnerPubkey {
         OwnerPubkey::from_bytes([byte; 32])
@@ -1006,8 +1037,63 @@ mod tests {
         OwnerPubkey::from_bytes(keys.public_key().to_bytes())
     }
 
+    fn test_vectors_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test-vectors")
+    }
+
+    fn expected_from_snapshot(snapshot: &GroupSnapshot) -> GroupRosterFactExpected {
+        let mut members: Vec<_> = snapshot
+            .members
+            .iter()
+            .map(|owner| owner.to_hex())
+            .collect();
+        let mut admins: Vec<_> = snapshot.admins.iter().map(|owner| owner.to_hex()).collect();
+        members.sort();
+        admins.sort();
+        GroupRosterFactExpected {
+            group_id: snapshot.group_id.clone(),
+            name: snapshot.name.clone(),
+            created_by: snapshot.created_by.to_hex(),
+            members,
+            admins,
+            revision: snapshot.revision,
+            created_at: snapshot.created_at.get(),
+            updated_at: snapshot.updated_at.get(),
+        }
+    }
+
+    fn assert_vector_decodes(vector: &GroupRosterFactVector) {
+        let codec = JsonGroupPayloadCodecV1;
+        let payload = serde_json::to_vec(&vector.event).unwrap();
+        let decoded = codec.decode_pairwise_command(&payload).unwrap();
+        let Some(GroupPairwiseCommand::MetadataSnapshot { snapshot }) = decoded else {
+            panic!("expected metadata snapshot");
+        };
+        assert_eq!(snapshot.group_id, vector.expected.group_id);
+        assert_eq!(snapshot.name, vector.expected.name);
+        assert_eq!(snapshot.created_by.to_hex(), vector.expected.created_by);
+        assert_eq!(
+            expected_from_snapshot(&snapshot).members,
+            vector.expected.members
+        );
+        assert_eq!(
+            expected_from_snapshot(&snapshot).admins,
+            vector.expected.admins
+        );
+        assert_eq!(snapshot.revision, vector.expected.revision);
+        assert_eq!(snapshot.created_at.get(), vector.expected.created_at);
+        assert_eq!(snapshot.updated_at.get(), vector.expected.updated_at);
+    }
+
     #[test]
-    fn metadata_snapshot_command_encodes_master_kind_40_rumor() {
+    fn metadata_snapshot_command_encodes_group_roster_fact_rumor() {
         let codec = JsonGroupPayloadCodecV1;
         let command = GroupPairwiseCommand::MetadataSnapshot {
             snapshot: snapshot(),
@@ -1019,24 +1105,78 @@ mod tests {
 
         assert!(codec.is_pairwise_payload(&encoded));
         let event = serde_json::from_slice::<UnsignedEvent>(&encoded).unwrap();
-        assert_eq!(event.kind.as_u16() as u32, GROUP_METADATA_KIND);
+        assert_eq!(event.kind.as_u16() as u32, GROUP_ROSTER_FACT_KIND);
         assert_eq!(event.pubkey, device(9).to_nostr().unwrap());
+        assert_eq!(event.content, "");
         assert_eq!(
-            first_tag_value(&event, GROUP_LABEL_TAG).as_deref(),
+            first_tag_value(&event, "type").as_deref(),
+            Some(GROUP_ROSTER_FACT_TYPE)
+        );
+        assert_eq!(
+            first_tag_value(&event, "group_id").as_deref(),
             Some("group-1")
         );
-
-        let content = serde_json::from_str::<serde_json::Value>(&event.content).unwrap();
-        assert_eq!(content["id"], "group-1");
-        assert_eq!(content["name"], "Team");
-        assert_eq!(content["members"].as_array().unwrap().len(), 2);
-        assert_eq!(content["admins"].as_array().unwrap().len(), 1);
-        assert_eq!(content["revision"], 3);
+        assert_eq!(first_tag_value(&event, "revision").as_deref(), Some("3"));
+        assert_eq!(
+            first_tag_value(&event, "created_by"),
+            Some(owner(1).to_hex())
+        );
 
         assert_eq!(
             codec.decode_pairwise_command(&encoded).unwrap(),
             Some(command)
         );
+    }
+
+    #[test]
+    fn metadata_snapshot_decodes_typescript_group_roster_fact_vector() {
+        let vectors_path = test_vectors_path().join("ts-group-roster-fact-vectors.json");
+        if !vectors_path.exists() {
+            println!(
+                "TypeScript group roster fact vectors not found at {:?}, skipping...",
+                vectors_path
+            );
+            return;
+        }
+
+        let content = fs::read_to_string(&vectors_path).unwrap();
+        let vector: GroupRosterFactVector = serde_json::from_str(&content).unwrap();
+        assert_vector_decodes(&vector);
+    }
+
+    #[test]
+    fn generate_rust_group_roster_fact_vector() {
+        let codec = JsonGroupPayloadCodecV1;
+        let snapshot = snapshot();
+        let encoded = codec
+            .encode_pairwise_command(
+                encode_context(),
+                &GroupPairwiseCommand::MetadataSnapshot {
+                    snapshot: snapshot.clone(),
+                },
+            )
+            .unwrap();
+        let event: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let vector = GroupRosterFactVector {
+            description: "Group roster fact vector generated by Rust".to_string(),
+            event,
+            expected: expected_from_snapshot(&snapshot),
+        };
+        let vectors_path = test_vectors_path().join("rust-group-roster-fact-vectors.json");
+        let should_regenerate = env::var("REGENERATE_VECTORS").ok().as_deref() == Some("true")
+            || !vectors_path.exists();
+        if should_regenerate {
+            fs::create_dir_all(vectors_path.parent().unwrap()).unwrap();
+            fs::write(
+                &vectors_path,
+                serde_json::to_string_pretty(&vector).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let content = fs::read_to_string(&vectors_path).unwrap();
+        let written: GroupRosterFactVector = serde_json::from_str(&content).unwrap();
+        assert_vector_decodes(&written);
     }
 
     #[test]

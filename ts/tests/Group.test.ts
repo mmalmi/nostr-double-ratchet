@@ -22,6 +22,7 @@ import {
   buildGroupRosterFactEvent,
   buildGroupRosterFactFilter,
   parseGroupRosterFactEvent,
+  parseGroupRosterFactRumor,
   projectGroupRosterFactEvents,
   type GroupData,
   type GroupMetadata,
@@ -129,6 +130,41 @@ describe('Group roster fact helpers', () => {
         admins: expectedAdmins,
         createdAt: 1_700_000_000,
       },
+    })
+  })
+
+  it('parses encrypted device-authored group roster fact rumors', () => {
+    const admin = getPublicKey(generateSecretKey())
+    const device = getPublicKey(generateSecretKey())
+    const bob = getPublicKey(generateSecretKey())
+    const group = makeGroup({
+      id: 'group-rumor-fact',
+      name: 'Device Fact',
+      members: [admin, bob],
+      admins: [admin],
+      createdAt: 1_700_000_000,
+    })
+
+    const rumor = {
+      ...buildGroupRosterFactEvent(group, {
+        signerPubkey: device,
+        revision: 7,
+        createdBy: admin,
+        updatedAt: 1_700_000_111,
+        eventCreatedAt: 1_700_000_112,
+      }),
+      id: 'f'.repeat(64),
+    }
+
+    const parsed = parseGroupRosterFactRumor(rumor)
+    expect(parsed.signerPubkey).toBe(device)
+    expect(parsed.createdBy).toBe(admin)
+    expect(parsed.group).toMatchObject({
+      id: 'group-rumor-fact',
+      name: 'Device Fact',
+      members: [admin, bob].sort(),
+      admins: [admin],
+      createdAt: 1_700_000_000,
     })
   })
 

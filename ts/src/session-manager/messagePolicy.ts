@@ -1,4 +1,4 @@
-import { GROUP_METADATA_KIND } from "../GroupMeta"
+import { GROUP_METADATA_KIND, GROUP_ROSTER_FACT_KIND } from "../GroupMeta"
 import {
   CHAT_SETTINGS_KIND,
   type ChatSettingsPayloadV1,
@@ -38,7 +38,11 @@ export function expirationOverrideFromSendOptions(options: {
 }
 
 export function applyExpirationPolicy(input: ExpirationPolicyInput): void {
-  if (input.kind === GROUP_METADATA_KIND || input.kind === CHAT_SETTINGS_KIND) {
+  if (
+    input.kind === GROUP_METADATA_KIND ||
+    input.kind === GROUP_ROSTER_FACT_KIND ||
+    input.kind === CHAT_SETTINGS_KIND
+  ) {
     return
   }
 

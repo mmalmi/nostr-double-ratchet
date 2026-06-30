@@ -4,6 +4,7 @@ import {
   type GroupData,
   type GroupDecryptedEvent,
   GROUP_METADATA_KIND,
+  GROUP_ROSTER_FACT_KIND,
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
 } from "./Group";
 import {
@@ -288,6 +289,7 @@ export class SessionGroupRuntime {
     }
     if (
       event.kind === GROUP_METADATA_KIND ||
+      event.kind === GROUP_ROSTER_FACT_KIND ||
       event.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND
     ) {
       return false;

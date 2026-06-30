@@ -5,7 +5,7 @@ import { buildTextRumor } from "../src/messageBuilders"
 import { EXPIRATION_TAG } from "../src/types"
 import { createMockSessionManager } from "./helpers/mockSessionManager"
 import { MockRelay } from "./helpers/mockRelay"
-import { GROUP_METADATA_KIND } from "../src/GroupMeta"
+import { GROUP_METADATA_KIND, GROUP_ROSTER_FACT_KIND } from "../src/GroupMeta"
 
 const FIXED_TIMESTAMP_MS = 1704067200000 // 2024-01-01 00:00:00 UTC
 
@@ -128,7 +128,7 @@ describe("Expiration / Disappearing Messages", () => {
     expect(tags).toContainEqual([EXPIRATION_TAG, String(expectedExpiresAt)])
   })
 
-  it("SessionManager should never add expiration to group metadata kind 40", async () => {
+  it("SessionManager should never add expiration to group membership control events", async () => {
     vi.spyOn(Date, "now").mockReturnValue(FIXED_TIMESTAMP_MS)
 
     const sharedRelay = new MockRelay()
@@ -148,6 +148,14 @@ describe("Expiration / Disappearing Messages", () => {
 
     expect(rumor.kind).toBe(GROUP_METADATA_KIND)
     expect(rumor.tags.some(([k]) => k === EXPIRATION_TAG)).toBe(false)
+
+    const rosterFact = await aliceManager.sendMessage(alicePubkey, "", {
+      kind: GROUP_ROSTER_FACT_KIND,
+      tags: [["i", groupId, "group"]],
+      ttlSeconds: 10,
+    })
+    expect(rosterFact.kind).toBe(GROUP_ROSTER_FACT_KIND)
+    expect(rosterFact.tags.some(([k]) => k === EXPIRATION_TAG)).toBe(false)
   })
 
   it("SessionManager should allow per-peer disabling of a global default expiration", async () => {

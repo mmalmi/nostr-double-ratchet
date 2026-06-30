@@ -5,7 +5,8 @@ import { generateSecretKey, getPublicKey } from "nostr-tools";
 import {
   Group,
   GroupManager,
-  GROUP_METADATA_KIND,
+  GROUP_ROSTER_FACT_KIND,
+  GROUP_ROSTER_FACT_TYPE,
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
   type GroupData,
 } from "../src/Group";
@@ -67,30 +68,26 @@ describe("GroupManager", () => {
     expect(sent).toHaveLength(2);
 
     for (const entry of sent) {
-      expect(entry.rumor.kind).toBe(GROUP_METADATA_KIND);
+      expect(entry.rumor.kind).toBe(GROUP_ROSTER_FACT_KIND);
       expect(entry.rumor.pubkey).toBe(aliceDevicePk);
-      expect(
-        entry.rumor.tags.some(
-          (tag) => tag[0] === "l" && tag[1] === created.group.id,
-        ),
-      ).toBe(true);
-      expect(entry.rumor.tags.some((tag) => tag[0] === "ms")).toBe(true);
+      expect(entry.rumor.content).toBe("");
+      expect(entry.rumor.tags).toContainEqual(["type", GROUP_ROSTER_FACT_TYPE]);
+      expect(entry.rumor.tags).toContainEqual(["i", created.group.id, "group"]);
+      expect(entry.rumor.tags).toContainEqual(["group_id", created.group.id]);
+      expect(entry.rumor.tags).toContainEqual(["revision", "1"]);
+      expect(entry.rumor.tags).toContainEqual(["created_by", aliceOwnerPk]);
+      expect(entry.rumor.tags).toContainEqual(["name", "Metadata Group"]);
+      expect(entry.rumor.tags).toContainEqual(["admin", aliceOwnerPk]);
       expect(
         entry.rumor.tags.some(
           (tag) => tag[0] === "p" && tag[1] === entry.recipient,
         ),
       ).toBe(true);
-
-      const parsed = JSON.parse(entry.rumor.content) as {
-        id: string;
-        name: string;
-        members: string[];
-        admins: string[];
-      };
-      expect(parsed.id).toBe(created.group.id);
-      expect(parsed.name).toBe("Metadata Group");
-      expect(parsed.members).toEqual([aliceOwnerPk, bobOwnerPk, carolOwnerPk]);
-      expect(parsed.admins).toEqual([aliceOwnerPk]);
+      expect(
+        [aliceOwnerPk, bobOwnerPk, carolOwnerPk].every((member) =>
+          entry.rumor.tags.some((tag) => tag[0] === "member" && tag[1] === member),
+        ),
+      ).toBe(true);
     }
   });
 
@@ -257,7 +254,7 @@ describe("GroupManager", () => {
       },
     });
 
-    expect(metadataRumor?.kind).toBe(GROUP_METADATA_KIND);
+    expect(metadataRumor?.kind).toBe(GROUP_ROSTER_FACT_KIND);
     expect(distributionRumor?.kind).toBe(GROUP_SENDER_KEY_DISTRIBUTION_KIND);
     expect(outer).not.toBeNull();
 
@@ -279,14 +276,14 @@ describe("GroupManager", () => {
 
     expect(bobManager.managedGroupIds()).toEqual([created.group.id]);
     expect(drained.map((event) => event.inner.kind)).toEqual([
-      GROUP_METADATA_KIND,
+      GROUP_ROSTER_FACT_KIND,
       CHAT_MESSAGE_KIND,
     ]);
     expect(drained[0]!.inner.content).toBe(metadataRumor!.content);
     expect(drained[1]!.inner.content).toBe("hello from alice");
     expect(received).toEqual([
       {
-        kind: GROUP_METADATA_KIND,
+        kind: GROUP_ROSTER_FACT_KIND,
         content: metadataRumor!.content,
       },
       {

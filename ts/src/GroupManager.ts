@@ -8,14 +8,16 @@ import {
 } from "./GroupChannel";
 import {
   applyMetadataUpdate,
-  buildGroupMetadataContent,
+  buildGroupRosterFactEvent,
   createGroupData,
-  GROUP_METADATA_KIND,
+  GROUP_ROSTER_FACT_KIND,
   GROUP_SENDER_KEY_DISTRIBUTION_KIND,
   GROUP_SENDER_KEY_REPAIR_REQUEST_KIND,
   type GroupData,
   type GroupMetadata,
-  parseGroupMetadata,
+  type GroupRosterFact,
+  isGroupRosterFactEvent,
+  parseGroupRosterFactRumor,
   validateMetadataCreation,
   validateMetadataUpdate,
 } from "./GroupMeta";
@@ -148,6 +150,17 @@ function parseSenderKeyDistribution(
   } catch {
     return null;
   }
+}
+
+function groupMetadataFromRosterFact(fact: GroupRosterFact): GroupMetadata {
+  return {
+    id: fact.group.id,
+    name: fact.group.name,
+    members: fact.group.members,
+    admins: fact.group.admins,
+    ...(fact.group.description && { description: fact.group.description }),
+    ...(fact.group.picture && { picture: fact.group.picture }),
+  };
 }
 
 interface PendingSessionEvent {
@@ -290,7 +303,7 @@ export class GroupManager {
   /**
    * High-level helper for app flows:
    * - Creates local group data and stores it in this manager.
-   * - By default, fans out group metadata (kind 40) to members over pairwise sessions.
+   * - By default, fans out group roster facts to members over pairwise sessions.
    *
    * Note: `createGroupData` remains pure/local-only. Use this method when you want
    * creation + delivery in one step.
@@ -343,14 +356,22 @@ export class GroupManager {
       }
 
       const nowMs = opts.nowMs ?? Date.now();
+      const createdAt = Math.floor(nowMs / 1000);
       const metadataRumor: Rumor = {
-        kind: GROUP_METADATA_KIND,
-        content: buildGroupMetadataContent(group),
-        created_at: Math.floor(nowMs / 1000),
-        tags: [
-          ["l", group.id],
-          ["ms", String(nowMs)],
-        ],
+        ...buildGroupRosterFactEvent(
+          {
+            ...group,
+            createdAt: Math.floor(group.createdAt / 1000),
+          },
+          {
+            signerPubkey: this.ourDevicePubkey,
+            revision: 1,
+            createdBy: this.ourOwnerPubkey,
+            updatedAt: createdAt,
+            eventCreatedAt: createdAt,
+            protocol: "sender_key_v1",
+          },
+        ),
         pubkey: this.ourDevicePubkey,
         id: "",
       };
@@ -543,6 +564,7 @@ export class GroupManager {
       let groupId = taggedGroupId;
       let distribution: SenderKeyDistribution | null = null;
       let metadata: GroupMetadata | null = null;
+      let rosterFact: GroupRosterFact | null = null;
 
       if (event.kind === GROUP_SENDER_KEY_DISTRIBUTION_KIND) {
         distribution = parseSenderKeyDistribution(event.content);
@@ -554,23 +576,31 @@ export class GroupManager {
         if (request?.groupId) {
           groupId = request.groupId;
         }
-      } else if (event.kind === GROUP_METADATA_KIND) {
-        metadata = parseGroupMetadata(event.content);
-        if (!groupId && metadata?.id) {
-          groupId = metadata.id;
+      } else if (event.kind === GROUP_ROSTER_FACT_KIND && isGroupRosterFactEvent(event)) {
+        try {
+          rosterFact = parseGroupRosterFactRumor(event);
+        } catch (error) {
+          this.reportError(error, {
+            operation: "handleIncomingSessionEvent",
+            eventId: event.id,
+          });
+          return [];
         }
+        groupId = rosterFact.groupId;
+        metadata = groupMetadataFromRosterFact(rosterFact);
       }
 
       if (!groupId) return [];
 
       try {
-        if (event.kind === GROUP_METADATA_KIND) {
+        if (rosterFact) {
           const handled = await this.handleIncomingMetadataEvent(
             groupId,
             event,
             fromOwnerPubkey,
             fromSenderDevicePubkey,
             metadata,
+            rosterFact,
           );
           const all = this.routeIncomingEvents(handled);
           this.emitDecryptedEvents(all);
@@ -875,8 +905,9 @@ export class GroupManager {
     fromOwnerPubkey: string,
     fromSenderDevicePubkey?: string,
     metadata?: GroupMetadata | null,
+    rosterFact?: GroupRosterFact | null,
   ): Promise<GroupDecryptedEvent[]> {
-    const parsed = metadata ?? parseGroupMetadata(event.content);
+    const parsed = metadata;
     if (!parsed) return [];
 
     const synthetic = this.buildMetadataEvent(
@@ -916,7 +947,9 @@ export class GroupManager {
           name: parsed.name,
           members: parsed.members,
           admins: parsed.admins,
-          createdAt: event.created_at * 1000,
+          createdAt: rosterFact
+            ? rosterFact.group.createdAt * 1000
+            : event.created_at * 1000,
           ...(parsed.description ? { description: parsed.description } : {}),
           ...(parsed.picture ? { picture: parsed.picture } : {}),
           ...(parsed.secret ? { secret: parsed.secret } : {}),

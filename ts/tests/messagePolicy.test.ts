@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { GROUP_METADATA_KIND } from "../src/GroupMeta"
+import { GROUP_METADATA_KIND, GROUP_ROSTER_FACT_KIND } from "../src/GroupMeta"
 import {
   CHAT_MESSAGE_KIND,
   CHAT_SETTINGS_KIND,
@@ -48,7 +48,7 @@ describe("session-manager messagePolicy", () => {
   })
 
   it("keeps excluded kinds and disabled policies unexpired", () => {
-    for (const kind of [GROUP_METADATA_KIND, CHAT_SETTINGS_KIND]) {
+    for (const kind of [GROUP_METADATA_KIND, GROUP_ROSTER_FACT_KIND, CHAT_SETTINGS_KIND]) {
       const tags: string[][] = []
       applyExpirationPolicy({
         kind,
