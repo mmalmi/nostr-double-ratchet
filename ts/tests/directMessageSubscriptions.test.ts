@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  appKeysSubscriptionAuthors,
+  buildAppKeysBackfillFilter,
   buildInviteResponseBackfillFilter,
   buildDirectMessageBackfillFilter,
   buildRuntimeBackfillFilters,
@@ -137,44 +139,105 @@ describe("direct message subscription helpers", () => {
     })
   })
 
-  it("tracks runtime message authors and invite response recipients", () => {
+  it("normalizes app-keys authors", () => {
+    expect(
+      appKeysSubscriptionAuthors({
+        kinds: [37368],
+        authors: [
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "nope",
+        ],
+      })
+    ).toEqual([
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ])
+
+    expect(
+      appKeysSubscriptionAuthors({
+        kinds: [7368],
+        authors: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      })
+    ).toEqual([])
+  })
+
+  it("builds a normalized app-keys backfill filter", () => {
+    expect(
+      buildAppKeysBackfillFilter(
+        [
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+        1234,
+        50
+      )
+    ).toEqual({
+      kinds: [37368],
+      authors: [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ],
+      since: 1234,
+      limit: 50,
+    })
+  })
+
+  it("tracks runtime app-keys authors, message authors, and invite response recipients", () => {
     const tracker = new RuntimeSubscriptionTracker()
 
     const first = tracker.registerFilter({
-      kinds: [1060],
+      kinds: [37368],
       authors: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
     })
-    expect(first.addedMessageAuthors).toEqual([
+    expect(first.addedAppKeysAuthors).toEqual([
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     ])
+    expect(first.addedMessageAuthors).toEqual([])
     expect(first.addedInviteResponseRecipients).toEqual([])
 
     const second = tracker.registerFilter({
-      kinds: [1059],
-      "#p": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      kinds: [1060],
+      authors: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
     })
-    expect(second.addedMessageAuthors).toEqual([])
-    expect(second.addedInviteResponseRecipients).toEqual([
-      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    expect(second.addedAppKeysAuthors).toEqual([])
+    expect(second.addedMessageAuthors).toEqual([
+      "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     ])
-    expect(tracker.trackedMessageAuthors()).toEqual([
-      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    ])
-    expect(tracker.trackedInviteResponseRecipients()).toEqual([
-      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    ])
+    expect(second.addedInviteResponseRecipients).toEqual([])
 
     const third = tracker.registerFilter({
       kinds: [1059],
       "#p": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
     })
-    expect(third.addedInviteResponseRecipients).toEqual([])
-
-    tracker.unregister(second.token)
+    expect(third.addedAppKeysAuthors).toEqual([])
+    expect(third.addedMessageAuthors).toEqual([])
+    expect(third.addedInviteResponseRecipients).toEqual([
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ])
+    expect(tracker.trackedAppKeysAuthors()).toEqual([
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ])
+    expect(tracker.trackedMessageAuthors()).toEqual([
+      "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    ])
     expect(tracker.trackedInviteResponseRecipients()).toEqual([
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     ])
+
+    const fourth = tracker.registerFilter({
+      kinds: [1059],
+      "#p": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    })
+    expect(fourth.addedInviteResponseRecipients).toEqual([])
+
     tracker.unregister(third.token)
+    expect(tracker.trackedInviteResponseRecipients()).toEqual([
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ])
+    tracker.unregister(fourth.token)
     expect(tracker.trackedInviteResponseRecipients()).toEqual([])
   })
 
@@ -182,6 +245,9 @@ describe("direct message subscription helpers", () => {
     expect(
       buildRuntimeBackfillFilters(
         {
+          addedAppKeysAuthors: [
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          ],
           addedMessageAuthors: [
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           ],
@@ -193,6 +259,12 @@ describe("direct message subscription helpers", () => {
         50
       )
     ).toEqual([
+      {
+        kinds: [37368],
+        authors: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+        since: 1234,
+        limit: 50,
+      },
       {
         kinds: [1060],
         authors: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
