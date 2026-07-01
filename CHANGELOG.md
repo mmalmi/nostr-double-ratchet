@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.161 - 2026-07-01
 
 - Remove the Rust `nostr-double-ratchet-runtime` crate and old `ndr-ffi` UniFFI crate; reusable app runtime and mobile FFI now live in `iris-chat-rs`.
 - Keep direct-message and invite-response subscription catch-up helpers in `nostr-double-ratchet` without depending on the removed runtime event layer.
