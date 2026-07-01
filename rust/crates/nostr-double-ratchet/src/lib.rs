@@ -56,7 +56,6 @@ mod architecture_tests {
             "crossbeam",
             "tokio",
             "EventBuilder",
-            "UnsignedEvent",
             "Filter",
             "nostr_codec",
             "pairwise_codec",
