@@ -1,6 +1,9 @@
 use nostr::Keys;
 use nostr_double_ratchet::Result;
-use nostr_double_ratchet::{AppKeys, DeviceEntry, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT};
+use nostr_double_ratchet::{
+    build_app_keys_device_authorization_filter, resolve_app_keys_owner_for_device, AppKeys,
+    DeviceEntry, APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT,
+};
 
 #[test]
 fn test_app_keys_roundtrip_and_merge() -> Result<()> {
@@ -50,8 +53,7 @@ fn test_app_keys_encrypts_labels_in_event_content() -> Result<()> {
     assert!(event.content.is_empty());
     assert!(event.tags.iter().any(|tag| {
         let values = tag.clone().to_vec();
-        values.first().map(|value| value.as_str())
-            == Some(NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
+        values.first().map(|value| value.as_str()) == Some(APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT)
             && values.get(1).is_some_and(|value| !value.is_empty())
     }));
     assert!(!event.content.contains("Sirius MacBook"));
@@ -89,6 +91,37 @@ fn test_app_keys_owner_can_decrypt_labels_but_public_parsing_cannot() -> Result<
     assert_eq!(labels.device_label.as_deref(), Some("Office Laptop"));
     assert_eq!(labels.client_label.as_deref(), Some("NDR Mobile"));
     assert_eq!(labels.updated_at, 200);
+
+    Ok(())
+}
+
+#[test]
+fn test_app_keys_device_authorization_filter_and_owner_resolution() -> Result<()> {
+    let owner_keys = Keys::generate();
+    let device = Keys::generate();
+    let other_device = Keys::generate();
+    let app_keys = AppKeys::new(vec![DeviceEntry::new(device.public_key(), 100)]);
+
+    let filter = build_app_keys_device_authorization_filter(device.public_key());
+    let filter_json = serde_json::to_value(&filter)?;
+    assert_eq!(filter_json["kinds"], serde_json::json!([37368]));
+    assert_eq!(
+        filter_json["#p"],
+        serde_json::json!([device.public_key().to_hex()])
+    );
+
+    let signed = app_keys
+        .get_event_at(owner_keys.public_key(), 1700000300)
+        .sign_with_keys(&owner_keys)?;
+
+    assert_eq!(
+        resolve_app_keys_owner_for_device(&signed, device.public_key())?,
+        Some(owner_keys.public_key())
+    );
+    assert_eq!(
+        resolve_app_keys_owner_for_device(&signed, other_device.public_key())?,
+        None
+    );
 
     Ok(())
 }

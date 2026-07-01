@@ -72,13 +72,16 @@ pub fn message_event(envelope: &MessageEnvelope) -> Result<Event> {
         ));
     }
 
-    let unsigned = EventBuilder::new(
+    let mut builder = EventBuilder::new(
         Kind::from(MESSAGE_EVENT_KIND as u16),
         envelope.ciphertext.clone(),
     )
     .tag(tag(["header", envelope.encrypted_header.as_str()])?)
-    .custom_created_at(Timestamp::from(envelope.created_at.get()))
-    .build(public_key(envelope.sender)?);
+    .custom_created_at(Timestamp::from(envelope.created_at.get()));
+    if let Some(recipient) = envelope.recipient {
+        builder = builder.tag(tag(["p", &recipient.to_string()])?);
+    }
+    let unsigned = builder.build(public_key(envelope.sender)?);
 
     Ok(unsigned.sign_with_keys(&author_keys)?)
 }
@@ -93,6 +96,10 @@ pub fn parse_message_event(event: &Event) -> Result<MessageEnvelope> {
 
     Ok(MessageEnvelope {
         sender: DevicePubkey::from_bytes(event.pubkey.to_bytes()),
+        recipient: optional_tag_value(event, "p")
+            .as_deref()
+            .map(parse_device_pubkey)
+            .transpose()?,
         signer_secret_key: [0u8; 32],
         created_at: UnixSeconds(event.created_at.as_secs()),
         encrypted_header,
@@ -562,6 +569,7 @@ mod tests {
         );
         let event = message_event(&MessageEnvelope {
             sender,
+            recipient: Some(DevicePubkey::from_bytes([7u8; 32])),
             signer_secret_key: signer_secret,
             created_at: UnixSeconds(10),
             encrypted_header: "header".to_string(),
@@ -571,6 +579,7 @@ mod tests {
 
         let parsed = parse_message_event(&event).unwrap();
         assert_eq!(parsed.sender, sender);
+        assert_eq!(parsed.recipient, Some(DevicePubkey::from_bytes([7u8; 32])));
         assert_eq!(parsed.encrypted_header, "header");
         assert_eq!(parsed.ciphertext, "ciphertext");
     }

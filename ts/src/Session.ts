@@ -97,7 +97,10 @@ export class Session {
    * @returns A verified Nostr event containing the encrypted message. You need to publish this event to the Nostr network.
    * @throws Error if we are not the initiator and trying to send the first message
    */
-  sendEvent(event: Partial<UnsignedEvent>): {event: VerifiedEvent, innerEvent: Rumor} {
+  sendEvent(
+    event: Partial<UnsignedEvent>,
+    outerTags: string[][] = [],
+  ): {event: VerifiedEvent, innerEvent: Rumor} {
     if (!this.state.theirNextNostrPublicKey || !this.state.ourCurrentNostrKey) {
       throw new Error("we are not the initiator, so we can't send the first message");
     }
@@ -130,7 +133,7 @@ export class Session {
     const nostrEvent = finalizeEvent({
       content: encryptedData,
       kind: MESSAGE_EVENT_KIND,
-      tags: [["header", encryptedHeader]],
+      tags: [["header", encryptedHeader], ...outerTags.map((tag) => [...tag])],
       created_at: Math.floor(now / 1000)
     }, this.state.ourCurrentNostrKey.privateKey);
 
@@ -257,7 +260,10 @@ export class Session {
 
   // 4. NOSTR EVENT HANDLING
   private decryptHeader(event: { tags: string[][]; pubkey: string }): [Header, boolean, boolean] {
-    const encryptedHeader = event.tags[0][1];
+    const encryptedHeader = event.tags.find(([key]) => key === "header")?.[1];
+    if (!encryptedHeader) {
+      throw new Error("Missing encrypted header");
+    }
     if (
       this.state.ourCurrentNostrKey &&
       (!this.state.theirCurrentNostrPublicKey ||

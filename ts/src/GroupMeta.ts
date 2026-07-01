@@ -1,9 +1,7 @@
 import { bytesToHex } from "@noble/hashes/utils";
 import { Filter, UnsignedEvent, VerifiedEvent, verifyEvent } from "nostr-tools";
 
-export const GROUP_FACT_KIND = 7368;
-export const GROUP_FACT_SNAPSHOT_KIND = 37368;
-export const GROUP_ROSTER_FACT_KIND = GROUP_FACT_SNAPSHOT_KIND;
+export const GROUP_ROSTER_FACT_KIND = 37368;
 export const GROUP_ROSTER_FACT_TYPE = "group_roster";
 export const GROUP_ROSTER_FACT_SCHEMA = 1;
 export const GROUP_INVITE_RUMOR_KIND = 10445;

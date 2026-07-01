@@ -1,4 +1,5 @@
 pub mod app_keys;
+pub mod device_link;
 pub mod direct_message_subscriptions;
 pub mod error;
 pub mod group;
@@ -21,11 +22,15 @@ pub mod utils;
 pub mod wire;
 
 pub use app_keys::{
-    encrypted_device_label_payloads_from_nostr_identity_roster_snapshot_event, is_app_keys_event,
-    AppKeys, DeviceEntry, DeviceLabels, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
-    NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA, NOSTR_IDENTITY_OWNER_PUBKEY_FACT,
-    NOSTR_IDENTITY_ROSTER_SCHEMA, NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND,
-    NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE,
+    build_app_keys_device_authorization_filter,
+    encrypted_device_label_payloads_from_app_keys_event, is_app_keys_event,
+    resolve_app_keys_owner_for_device, AppKeys, DeviceEntry, DeviceLabels,
+    APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT, APP_KEYS_ENCRYPTED_DEVICE_LABELS_SCHEMA,
+    APP_KEYS_FACT_TYPE, APP_KEYS_OWNER_PUBKEY_FACT, APP_KEYS_SCHEMA, APP_KEYS_SNAPSHOT_KIND,
+};
+pub use device_link::{
+    deterministic_link_invite_for_device, deterministic_link_invite_for_device_link_request,
+    encode_compact_device_link_request, parse_compact_device_link_request, DeviceLinkRequest,
 };
 pub use direct_message_subscriptions::{
     app_keys_subscription_authors, build_app_keys_backfill_filter,
@@ -41,8 +46,8 @@ pub use group_manager::*;
 pub use group_wire::{
     build_group_roster_fact_filter, group_roster_unsigned_event, is_group_roster_fact_event,
     parse_group_roster_fact_event, project_group_roster_fact_events, GroupEventManager,
-    GroupRosterFact, JsonGroupPayloadCodecV1, GROUP_FACT_KIND, GROUP_FACT_SNAPSHOT_KIND,
-    GROUP_ROSTER_FACT_KIND, GROUP_ROSTER_FACT_SCHEMA, GROUP_ROSTER_FACT_TYPE,
+    GroupRosterFact, JsonGroupPayloadCodecV1, GROUP_ROSTER_FACT_KIND, GROUP_ROSTER_FACT_SCHEMA,
+    GROUP_ROSTER_FACT_TYPE,
 };
 pub use ids::{DevicePubkey, OwnerPubkey, UnixSeconds};
 pub use invite::{Invite, InviteResponse, InviteResponseEnvelope, OwnerClaimVerifier};
@@ -89,7 +94,7 @@ impl OwnerClaimVerifier for AppKeys {
     }
 }
 
-pub const APP_KEYS_EVENT_KIND: u32 = NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND;
+pub const APP_KEYS_EVENT_KIND: u32 = APP_KEYS_SNAPSHOT_KIND;
 pub const CHAT_MESSAGE_KIND: u32 = 14;
 pub const CHAT_SETTINGS_KIND: u32 = 10448;
 pub const REACTION_KIND: u32 = 7;

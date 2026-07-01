@@ -12,11 +12,18 @@ import { buildTypingRumor } from "../messageBuilders"
 export const INVITE_BOOTSTRAP_EXPIRATION_SECONDS = 1
 export const INVITE_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1500] as const
 
-export function planInviteBootstrapEvents(session: Session): VerifiedEvent[] {
+export function planInviteBootstrapEvents(
+  session: Session,
+  recipientDevicePubkey?: string,
+): VerifiedEvent[] {
   const expiresAt = INVITE_BOOTSTRAP_EXPIRATION_SECONDS
+  const outerTags = recipientDevicePubkey ? [["p", recipientDevicePubkey]] : []
 
   return INVITE_BOOTSTRAP_RETRY_DELAYS_MS.map(
-    () => session.sendEvent(buildTypingRumor({ expiration: { expiresAt } })).event
+    () => session.sendEvent(
+      buildTypingRumor({ expiration: { expiresAt } }),
+      outerTags,
+    ).event
   )
 }
 

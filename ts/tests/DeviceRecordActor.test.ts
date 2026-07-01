@@ -356,6 +356,7 @@ describe("DeviceRecordActor", () => {
     )
 
     expect(event?.pubkey).toBe(activeAuthor)
+    expect(event?.tags).toContainEqual(["p", deviceKey])
     expect(actor.activeSession).toBe(active)
   })
 
@@ -405,6 +406,7 @@ describe("DeviceRecordActor", () => {
     )
 
     expect(event?.pubkey).toBe(newEpochAuthor)
+    expect(event?.tags).toContainEqual(["p", deviceKey])
     expect(actor.activeSession).toBe(newEpoch)
   })
 

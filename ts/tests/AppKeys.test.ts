@@ -3,9 +3,11 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
 import {
   AppKeys,
   type AppKeysEventOptions,
-  NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT,
-  NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE,
+  APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT,
+  APP_KEYS_FACT_TYPE,
+  buildAppKeysDeviceAuthorizationFilter,
   buildAppKeysFilter,
+  resolveAppKeysOwnerForDevice,
   type DeviceEntry,
 } from '../src/AppKeys'
 import { APP_KEYS_EVENT_KIND } from '../src/types'
@@ -138,7 +140,7 @@ describe('AppKeys', () => {
       expect(event.pubkey).toBe('') // Signer will set this
       expect(event.tags.some((tag) => tag[0] === 'd' && tag[1])).toBe(true)
       expect(event.tags.some((tag) => tag[0] === 'i' && tag[2] === 'subject')).toBe(true)
-      expect(event.tags).toContainEqual(['type', NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE])
+      expect(event.tags).toContainEqual(['type', APP_KEYS_FACT_TYPE])
       expect(event.tags).toContainEqual(['schema', '1'])
 
       // Simplified tag format: ["device", identityPubkey, createdAt]
@@ -224,7 +226,7 @@ describe('AppKeys', () => {
       expect(event.content).toBe('')
       expect(
         event.tags.some(
-          (tag) => tag[0] === NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT && !!tag[1]
+          (tag) => tag[0] === APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT && !!tag[1]
         )
       ).toBe(true)
       expect(event.content).not.toContain('Sirius MacBook')
@@ -286,7 +288,7 @@ describe('AppKeys', () => {
         },
         ownerPrivateKey
       )
-      expect(() => AppKeys.fromEvent(ownerless)).toThrow('NostrIdentity roster missing owner_pubkey')
+      expect(() => AppKeys.fromEvent(ownerless)).toThrow('AppKeys roster missing owner_pubkey')
     })
   })
 
@@ -425,6 +427,30 @@ describe('AppKeys', () => {
         clientLabel: 'New Client',
         updatedAt: 200,
       })
+    })
+  })
+
+  describe('device authorization discovery', () => {
+    it('builds a 37368 device-authorization filter and resolves the owner signer', () => {
+      const ownerPrivateKey = generateSecretKey()
+      const ownerPublicKey = getPublicKey(ownerPrivateKey)
+      const device = createTestDevice()
+      const otherDevice = createTestDevice()
+      const event = finalizeEvent(
+        new AppKeys([device]).getEvent({
+          ownerPrivateKey,
+          ownerPubkey: ownerPublicKey,
+          createdAt: 1700000300,
+        }),
+        ownerPrivateKey
+      )
+
+      expect(buildAppKeysDeviceAuthorizationFilter(device.identityPubkey)).toEqual({
+        kinds: [APP_KEYS_EVENT_KIND],
+        '#p': [device.identityPubkey],
+      })
+      expect(resolveAppKeysOwnerForDevice(event, device.identityPubkey)).toBe(ownerPublicKey)
+      expect(resolveAppKeysOwnerForDevice(event, otherDevice.identityPubkey)).toBeNull()
     })
   })
 

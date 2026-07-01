@@ -54,6 +54,8 @@ pub struct SessionState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageEnvelope {
     pub sender: DevicePubkey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<DevicePubkey>,
     pub signer_secret_key: [u8; 32],
     pub created_at: UnixSeconds,
     pub encrypted_header: String,
@@ -288,6 +290,7 @@ impl Session {
             next_state,
             envelope: MessageEnvelope {
                 sender: our_current.public_key,
+                recipient: None,
                 signer_secret_key: our_current.private_key,
                 created_at: now,
                 encrypted_header,
@@ -787,6 +790,7 @@ mod tests {
                 &mut recv_ctx,
                 &MessageEnvelope {
                     sender: device_pubkey_from_secret_bytes(&bob_secret).unwrap(),
+                    recipient: None,
                     signer_secret_key: bob_secret,
                     created_at: UnixSeconds(1),
                     encrypted_header: "bad".to_string(),

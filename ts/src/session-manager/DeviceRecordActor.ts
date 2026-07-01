@@ -192,6 +192,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
         buildTypingRumor({
           expiration: { expiresAt: Math.floor(Date.now() / 1000) },
         }),
+        [["p", this.deviceId]],
       )
       await this.deps.nostr.publish(event)
     } catch {
@@ -259,7 +260,7 @@ export class DeviceRecordActor implements DeviceRecordShape {
       this.inactiveSessions,
     )) {
       try {
-        const { event } = candidate.session.sendEvent(rumor)
+        const { event } = candidate.session.sendEvent(rumor, [["p", this.deviceId]])
         if (!candidate.active) {
           this.promoteToActive(candidate.session, { force: true })
         }

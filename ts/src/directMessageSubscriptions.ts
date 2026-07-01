@@ -17,6 +17,7 @@ export interface RegisteredRuntimeSubscription {
   token: number
   addedAppKeysAuthors: string[]
   addedMessageAuthors: string[]
+  addedMessageRecipients: string[]
   addedInviteResponseRecipients: string[]
 }
 
@@ -53,6 +54,30 @@ export function directMessageSubscriptionAuthors(filter: Filter): string[] {
     authors.push(normalized)
   }
   return authors
+}
+
+export function directMessageSubscriptionRecipients(filter: Filter): string[] {
+  if (
+    !Array.isArray(filter.kinds) ||
+    !filter.kinds.includes(MESSAGE_EVENT_KIND)
+  ) {
+    return []
+  }
+
+  const recipients = (filter as Record<string, unknown>)["#p"]
+  if (!Array.isArray(recipients)) {
+    return []
+  }
+
+  const normalizedRecipients: string[] = []
+  const seen = new Set<string>()
+  for (const recipient of recipients) {
+    const normalized = normalizeAuthor(recipient)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    normalizedRecipients.push(normalized)
+  }
+  return normalizedRecipients
 }
 
 export function appKeysSubscriptionAuthors(filter: Filter): string[] {
@@ -94,6 +119,26 @@ export function buildDirectMessageBackfillFilter(
   return {
     kinds: [MESSAGE_EVENT_KIND],
     authors: normalizedAuthors,
+    limit,
+  }
+}
+
+export function buildDirectMessageRecipientBackfillFilter(
+  recipients: Iterable<string>,
+  limit: number = 200,
+): Filter {
+  const normalizedRecipients: string[] = []
+  const seen = new Set<string>()
+  for (const recipient of recipients) {
+    const normalized = normalizeAuthor(recipient)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    normalizedRecipients.push(normalized)
+  }
+
+  return {
+    kinds: [MESSAGE_EVENT_KIND],
+    "#p": normalizedRecipients,
     limit,
   }
 }
@@ -188,6 +233,7 @@ export function buildRuntimeBackfillFilters(
     RegisteredRuntimeSubscription,
     | "addedAppKeysAuthors"
     | "addedMessageAuthors"
+    | "addedMessageRecipients"
     | "addedInviteResponseRecipients"
   >,
   limit: number = 200,
@@ -201,6 +247,14 @@ export function buildRuntimeBackfillFilters(
   if (registered.addedMessageAuthors.length > 0) {
     filters.push(
       buildDirectMessageBackfillFilter(registered.addedMessageAuthors, limit),
+    )
+  }
+  if (registered.addedMessageRecipients.length > 0) {
+    filters.push(
+      buildDirectMessageRecipientBackfillFilter(
+        registered.addedMessageRecipients,
+        limit,
+      ),
     )
   }
   if (registered.addedInviteResponseRecipients.length > 0) {
@@ -279,9 +333,11 @@ export class RuntimeSubscriptionTracker {
   private nextToken = 1
   private appKeysAuthorsByToken = new Map<number, string[]>()
   private messageAuthorsByToken = new Map<number, string[]>()
+  private messageRecipientsByToken = new Map<number, string[]>()
   private inviteResponseRecipientsByToken = new Map<number, string[]>()
   private appKeysAuthorRefCounts = new Map<string, number>()
   private messageAuthorRefCounts = new Map<string, number>()
+  private messageRecipientRefCounts = new Map<string, number>()
   private inviteResponseRecipientRefCounts = new Map<string, number>()
 
   registerFilter(filter: Filter): RegisteredRuntimeSubscription {
@@ -298,6 +354,12 @@ export class RuntimeSubscriptionTracker {
       this.messageAuthorRefCounts,
       token,
     )
+    const addedMessageRecipients = registerValues(
+      directMessageSubscriptionRecipients(filter),
+      this.messageRecipientsByToken,
+      this.messageRecipientRefCounts,
+      token,
+    )
     const addedInviteResponseRecipients = registerValues(
       inviteResponseSubscriptionRecipients(filter),
       this.inviteResponseRecipientsByToken,
@@ -309,6 +371,7 @@ export class RuntimeSubscriptionTracker {
       token,
       addedAppKeysAuthors,
       addedMessageAuthors,
+      addedMessageRecipients,
       addedInviteResponseRecipients,
     }
   }
@@ -326,6 +389,11 @@ export class RuntimeSubscriptionTracker {
     )
     unregisterValues(
       token,
+      this.messageRecipientsByToken,
+      this.messageRecipientRefCounts,
+    )
+    unregisterValues(
+      token,
       this.inviteResponseRecipientsByToken,
       this.inviteResponseRecipientRefCounts,
     )
@@ -333,6 +401,10 @@ export class RuntimeSubscriptionTracker {
 
   trackedMessageAuthors(): string[] {
     return Array.from(this.messageAuthorRefCounts.keys()).sort()
+  }
+
+  trackedMessageRecipients(): string[] {
+    return Array.from(this.messageRecipientRefCounts.keys()).sort()
   }
 
   trackedAppKeysAuthors(): string[] {

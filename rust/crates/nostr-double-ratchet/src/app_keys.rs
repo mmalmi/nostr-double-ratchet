@@ -1,17 +1,20 @@
 use crate::{Error, Result};
 use base64::Engine;
 use nostr::nips::nip44;
-use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use nostr::{
+    Alphabet, Event, EventBuilder, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag, Timestamp,
+    UnsignedEvent,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
-pub const NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND: u32 = 37368;
-pub const NOSTR_IDENTITY_ROSTER_SCHEMA: u64 = 1;
-pub const NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE: &str = "nostr_identity_roster_snapshot";
-pub const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT: &str = "encrypted_device_labels";
-pub const NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_SCHEMA: u64 = 1;
-pub const NOSTR_IDENTITY_OWNER_PUBKEY_FACT: &str = "owner_pubkey";
+pub const APP_KEYS_SNAPSHOT_KIND: u32 = 37368;
+pub const APP_KEYS_SCHEMA: u64 = 1;
+pub const APP_KEYS_FACT_TYPE: &str = "app_keys_roster_snapshot";
+pub const APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT: &str = "encrypted_device_labels";
+pub const APP_KEYS_ENCRYPTED_DEVICE_LABELS_SCHEMA: u64 = 1;
+pub const APP_KEYS_OWNER_PUBKEY_FACT: &str = "owner_pubkey";
 
 #[derive(Debug, Clone)]
 pub struct DeviceEntry {
@@ -137,16 +140,10 @@ impl AppKeys {
     ) -> UnsignedEvent {
         let profile_id = Uuid::new_v4().to_string();
         let mut fact_tags = vec![
+            vec!["type".to_string(), APP_KEYS_FACT_TYPE.to_string()],
+            vec!["schema".to_string(), APP_KEYS_SCHEMA.to_string()],
             vec![
-                "type".to_string(),
-                NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE.to_string(),
-            ],
-            vec![
-                "schema".to_string(),
-                NOSTR_IDENTITY_ROSTER_SCHEMA.to_string(),
-            ],
-            vec![
-                NOSTR_IDENTITY_OWNER_PUBKEY_FACT.to_string(),
+                APP_KEYS_OWNER_PUBKEY_FACT.to_string(),
                 owner_pubkey.to_hex(),
             ],
         ];
@@ -167,7 +164,7 @@ impl AppKeys {
         }
         if !encrypted_labels.is_empty() {
             fact_tags.push(vec![
-                NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT.to_string(),
+                APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT.to_string(),
                 encrypted_labels,
             ]);
         }
@@ -198,7 +195,7 @@ impl AppKeys {
             .map(|parts| Tag::parse(parts).expect("valid app-keys fact tag"))
             .collect::<Vec<_>>();
 
-        EventBuilder::new(Kind::from(NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND as u16), "")
+        EventBuilder::new(Kind::from(APP_KEYS_SNAPSHOT_KIND as u16), "")
             .tags(tags)
             .custom_created_at(Timestamp::from(created_at_secs))
             .build(owner_pubkey)
@@ -262,27 +259,27 @@ impl AppKeys {
 
         if !is_app_keys_event(event) {
             return Err(Error::InvalidEvent(
-                "Event is not a NostrIdentity roster snapshot".to_string(),
+                "Event is not an AppKeys roster snapshot".to_string(),
             ));
         }
         if !event.content.is_empty() {
             return Err(Error::InvalidEvent(
-                "NostrIdentity roster snapshot content must be empty".to_string(),
+                "AppKeys roster snapshot content must be empty".to_string(),
             ));
         }
         let schema = required_integer(event, "schema")?;
-        if schema != NOSTR_IDENTITY_ROSTER_SCHEMA {
+        if schema != APP_KEYS_SCHEMA {
             return Err(Error::InvalidEvent(format!(
-                "Unsupported NostrIdentity roster schema {schema}"
+                "Unsupported AppKeys roster schema {schema}"
             )));
         }
-        let owner_pubkey = pubkey_from_required_tag(event, NOSTR_IDENTITY_OWNER_PUBKEY_FACT)?;
+        let owner_pubkey = pubkey_from_required_tag(event, APP_KEYS_OWNER_PUBKEY_FACT)?;
         if owner_pubkey != event.pubkey {
             return Err(Error::InvalidEvent(
-                "NostrIdentity roster owner signer mismatch".to_string(),
+                "AppKeys roster owner signer mismatch".to_string(),
             ));
         }
-        let _profile_id = nostr_identity_id_from_event(event)?;
+        let _profile_id = app_keys_profile_id_from_event(event)?;
 
         let mut devices = Vec::new();
         for tag in event.tags.iter() {
@@ -433,7 +430,7 @@ impl AppKeys {
     }
 
     fn load_encrypted_labels(&mut self, event: &Event, owner_keys: &Keys) -> Result<()> {
-        let Some(encrypted_labels) = tag_values(event, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
+        let Some(encrypted_labels) = tag_values(event, APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT)
             .into_iter()
             .next()
         else {
@@ -473,10 +470,22 @@ impl AppKeys {
     }
 }
 
-pub fn encrypted_device_label_payloads_from_nostr_identity_roster_snapshot_event(
+pub fn encrypted_device_label_payloads_from_app_keys_event(event: &Event) -> Vec<String> {
+    tag_values(event, APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT)
+}
+
+pub fn build_app_keys_device_authorization_filter(device_pubkey: PublicKey) -> Filter {
+    Filter::new()
+        .kind(Kind::from(APP_KEYS_SNAPSHOT_KIND as u16))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::P), [device_pubkey])
+}
+
+pub fn resolve_app_keys_owner_for_device(
     event: &Event,
-) -> Vec<String> {
-    tag_values(event, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT)
+    device_pubkey: PublicKey,
+) -> Result<Option<PublicKey>> {
+    let app_keys = AppKeys::from_event(event)?;
+    Ok(app_keys.get_device(&device_pubkey).map(|_| event.pubkey))
 }
 
 fn tag_values(event: &Event, name: &str) -> Vec<String> {
@@ -497,20 +506,20 @@ fn required_tag_value(event: &Event, name: &str) -> Result<String> {
     tag_values(event, name)
         .into_iter()
         .next()
-        .ok_or_else(|| Error::InvalidEvent(format!("NostrIdentity roster missing {name}")))
+        .ok_or_else(|| Error::InvalidEvent(format!("AppKeys roster missing {name}")))
 }
 
 fn required_integer(event: &Event, name: &str) -> Result<u64> {
     required_tag_value(event, name)?
         .parse::<u64>()
-        .map_err(|_| Error::InvalidEvent(format!("NostrIdentity {name} must be an integer")))
+        .map_err(|_| Error::InvalidEvent(format!("AppKeys {name} must be an integer")))
 }
 
 fn pubkey_from_required_tag(event: &Event, name: &str) -> Result<PublicKey> {
     crate::utils::pubkey_from_hex(&required_tag_value(event, name)?)
 }
 
-fn nostr_identity_id_from_event(event: &Event) -> Result<String> {
+fn app_keys_profile_id_from_event(event: &Event) -> Result<String> {
     let profile_id = event
         .tags
         .iter()
@@ -522,9 +531,7 @@ fn nostr_identity_id_from_event(event: &Event) -> Result<String> {
             .flatten()
         })
         .next()
-        .ok_or_else(|| {
-            Error::InvalidEvent("NostrIdentity roster missing profile subject".to_string())
-        })?;
+        .ok_or_else(|| Error::InvalidEvent("AppKeys roster missing profile subject".to_string()))?;
     canonical_profile_id(&profile_id)
 }
 
@@ -532,7 +539,7 @@ fn canonical_profile_id(profile_id: &str) -> Result<String> {
     let normalized = profile_id.trim().to_lowercase();
     if !is_uuid_like(&normalized) {
         return Err(Error::InvalidEvent(
-            "NostrIdentity id must be a UUID".to_string(),
+            "AppKeys profile id must be a UUID".to_string(),
         ));
     }
     Ok(normalized)
@@ -560,11 +567,11 @@ fn current_unix_timestamp() -> u64 {
 }
 
 pub fn is_app_keys_event(event: &Event) -> bool {
-    if event.kind.as_u16() != NOSTR_IDENTITY_ROSTER_SNAPSHOT_KIND as u16 {
+    if event.kind.as_u16() != APP_KEYS_SNAPSHOT_KIND as u16 {
         return false;
     }
 
     tag_values(event, "type")
         .iter()
-        .any(|value| value == NOSTR_IDENTITY_ROSTER_SNAPSHOT_TYPE)
+        .any(|value| value == APP_KEYS_FACT_TYPE)
 }

@@ -6,9 +6,11 @@ import {
   buildInviteBackfillFilter,
   buildInviteResponseBackfillFilter,
   buildDirectMessageBackfillFilter,
+  buildDirectMessageRecipientBackfillFilter,
   buildProtocolDiscoveryFilters,
   buildRuntimeBackfillFilters,
   directMessageSubscriptionAuthors,
+  directMessageSubscriptionRecipients,
   DirectMessageSubscriptionTracker,
   inviteResponseSubscriptionRecipients,
   RuntimeSubscriptionTracker,
@@ -97,6 +99,52 @@ describe("direct message subscription helpers", () => {
     })
   })
 
+  it("normalizes direct message recipients", () => {
+    expect(
+      directMessageSubscriptionRecipients({
+        kinds: [1060],
+        "#p": [
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "nope",
+        ],
+      }),
+    ).toEqual([
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ])
+
+    expect(
+      directMessageSubscriptionRecipients({
+        kinds: [1059],
+        "#p": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+      }),
+    ).toEqual([])
+  })
+
+  it("builds a normalized direct message recipient backfill filter", () => {
+    expect(
+      buildDirectMessageRecipientBackfillFilter(
+        [
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+        50,
+      ),
+    ).toEqual({
+      kinds: [1060],
+      "#p": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ],
+      limit: 50,
+    })
+  })
+
   it("normalizes invite response recipients", () => {
     expect(
       inviteResponseSubscriptionRecipients({
@@ -161,7 +209,7 @@ describe("direct message subscription helpers", () => {
 
     expect(
       appKeysSubscriptionAuthors({
-        kinds: [7368],
+        kinds: [9999],
         authors: [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ],
@@ -242,7 +290,7 @@ describe("direct message subscription helpers", () => {
     ])
   })
 
-  it("tracks runtime app-keys authors, message authors, and invite response recipients", () => {
+  it("tracks runtime app-keys authors, message authors, message recipients, and invite response recipients", () => {
     const tracker = new RuntimeSubscriptionTracker()
 
     const first = tracker.registerFilter({
@@ -255,6 +303,7 @@ describe("direct message subscription helpers", () => {
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     ])
     expect(first.addedMessageAuthors).toEqual([])
+    expect(first.addedMessageRecipients).toEqual([])
     expect(first.addedInviteResponseRecipients).toEqual([])
 
     const second = tracker.registerFilter({
@@ -262,10 +311,16 @@ describe("direct message subscription helpers", () => {
       authors: [
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       ],
+      "#p": [
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      ],
     })
     expect(second.addedAppKeysAuthors).toEqual([])
     expect(second.addedMessageAuthors).toEqual([
       "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    ])
+    expect(second.addedMessageRecipients).toEqual([
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     ])
     expect(second.addedInviteResponseRecipients).toEqual([])
 
@@ -285,6 +340,9 @@ describe("direct message subscription helpers", () => {
     ])
     expect(tracker.trackedMessageAuthors()).toEqual([
       "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    ])
+    expect(tracker.trackedMessageRecipients()).toEqual([
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     ])
     expect(tracker.trackedInviteResponseRecipients()).toEqual([
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -316,6 +374,9 @@ describe("direct message subscription helpers", () => {
           addedMessageAuthors: [
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           ],
+          addedMessageRecipients: [
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          ],
           addedInviteResponseRecipients: [
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           ],
@@ -334,6 +395,13 @@ describe("direct message subscription helpers", () => {
         kinds: [1060],
         authors: [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+        limit: 50,
+      },
+      {
+        kinds: [1060],
+        "#p": [
+          "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         ],
         limit: 50,
       },

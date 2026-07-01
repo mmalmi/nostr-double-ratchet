@@ -13,8 +13,6 @@ import {
   addGroupAdmin,
   removeGroupAdmin,
   GROUP_INVITE_RUMOR_KIND,
-  GROUP_FACT_KIND,
-  GROUP_FACT_SNAPSHOT_KIND,
   GROUP_ROSTER_FACT_KIND,
   GROUP_ROSTER_FACT_TYPE,
   buildGroupRosterFactEvent,
@@ -61,9 +59,7 @@ describe('Group constants', () => {
   })
 
   it('group roster facts use the fact snapshot kind', () => {
-    expect(GROUP_FACT_KIND).toBe(7368)
-    expect(GROUP_FACT_SNAPSHOT_KIND).toBe(37368)
-    expect(GROUP_ROSTER_FACT_KIND).toBe(GROUP_FACT_SNAPSHOT_KIND)
+    expect(GROUP_ROSTER_FACT_KIND).toBe(37368)
     expect(GROUP_ROSTER_FACT_TYPE).toBe('group_roster')
   })
 })

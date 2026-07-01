@@ -1,7 +1,7 @@
 import {
   AppKeys,
   buildAppKeysFilter,
-  createNostrIdentityProfileId,
+  createAppKeysProfileId,
   type DeviceEntry,
 } from "./AppKeys";
 import {
@@ -154,6 +154,7 @@ export class NdrRuntime {
   private appKeysSubscriptionOwnerPubkey: string | null = null;
   private directMessageSubscriptionCleanup: Unsubscribe | null = null;
   private directMessageSubscriptionAuthors: string[] = [];
+  private directMessageSubscriptionRecipient: string | null = null;
   private directMessageSubscriptionLastChangeMs = 0;
   private directMessageSubscriptionThrottleTimer: ReturnType<typeof setTimeout> | null =
     null;
@@ -691,12 +692,14 @@ export class NdrRuntime {
     const nextAuthors = [
       ...new Set(this.sessionManager?.getAllMessagePushAuthorPubkeys() ?? []),
     ].sort();
+    const nextRecipient = this.delegateManager?.getIdentityPublicKey() ?? null;
 
     if (
       nextAuthors.length === this.directMessageSubscriptionAuthors.length &&
       nextAuthors.every(
         (author, index) => author === this.directMessageSubscriptionAuthors[index],
-      )
+      ) &&
+      nextRecipient === this.directMessageSubscriptionRecipient
     ) {
       return;
     }
@@ -725,21 +728,45 @@ export class NdrRuntime {
     this.directMessageSubscriptionCleanup?.();
     this.directMessageSubscriptionCleanup = null;
     this.directMessageSubscriptionAuthors = nextAuthors;
+    this.directMessageSubscriptionRecipient = nextRecipient;
     this.directMessageSubscriptionLastChangeMs = now;
 
-    if (nextAuthors.length === 0) {
+    if (nextAuthors.length === 0 && !nextRecipient) {
       return;
     }
 
-    this.directMessageSubscriptionCleanup = this.nostrSubscribe(
-      {
-        kinds: [MESSAGE_EVENT_KIND],
-        authors: nextAuthors,
-      },
-      (event) => {
-        this.processReceivedEvent(event);
-      },
-    );
+    const cleanups: Unsubscribe[] = [];
+    if (nextAuthors.length > 0) {
+      cleanups.push(
+        this.nostrSubscribe(
+          {
+            kinds: [MESSAGE_EVENT_KIND],
+            authors: nextAuthors,
+          },
+          (event) => {
+            this.processReceivedEvent(event);
+          },
+        ),
+      );
+    }
+    if (nextRecipient) {
+      cleanups.push(
+        this.nostrSubscribe(
+          {
+            kinds: [MESSAGE_EVENT_KIND],
+            "#p": [nextRecipient],
+          },
+          (event) => {
+            this.processReceivedEvent(event);
+          },
+        ),
+      );
+    }
+    this.directMessageSubscriptionCleanup = () => {
+      for (const cleanup of cleanups) {
+        cleanup();
+      }
+    };
   }
 
   async refreshOwnAppKeysFromRelay(
@@ -1244,7 +1271,7 @@ export class NdrRuntime {
       return stored;
     }
 
-    const profileId = createNostrIdentityProfileId();
+    const profileId = createAppKeysProfileId();
     await this.storage.put(key, profileId);
     this.appKeysProfileIds.set(ownerPubkey, profileId);
     return profileId;

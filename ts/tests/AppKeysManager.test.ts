@@ -3,7 +3,7 @@ import { AppKeysManager, DelegateManager, DelegatePayload } from "../src/AppKeys
 import { NostrSubscribe, NostrPublish, APP_KEYS_EVENT_KIND, INVITE_EVENT_KIND } from "../src/types"
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
 import { InMemoryStorageAdapter } from "../src/StorageAdapter"
-import { AppKeys, isAppKeysEvent, NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT } from "../src/AppKeys"
+import { AppKeys, isAppKeysEvent, APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT } from "../src/AppKeys"
 
 describe("DelegateManager", () => {
   let nostrSubscribe: NostrSubscribe
@@ -503,7 +503,7 @@ describe("AppKeysManager - Authority", () => {
       expect(publishedEvents[0].content).toBe("")
       expect(
         publishedEvents[0].tags.some(
-          (tag: string[]) => tag[0] === NOSTR_IDENTITY_ENCRYPTED_DEVICE_LABELS_FACT && !!tag[1]
+          (tag: string[]) => tag[0] === APP_KEYS_ENCRYPTED_DEVICE_LABELS_FACT && !!tag[1]
         )
       ).toBe(true)
       expect(publishedEvents[0].content).not.toContain("Sirius MacBook")

@@ -2,7 +2,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools"
 import {
   AppKeys,
   buildAppKeysFilter,
-  createNostrIdentityProfileId,
+  createAppKeysProfileId,
   DeviceEntry,
   DeviceLabels,
 } from "./AppKeys"
@@ -201,7 +201,7 @@ export class AppKeysManager {
       this.appKeysProfileId = stored
       return stored
     }
-    const profileId = createNostrIdentityProfileId()
+    const profileId = createAppKeysProfileId()
     await this.storage.put(key, profileId)
     this.appKeysProfileId = profileId
     return profileId
@@ -511,7 +511,3 @@ export class DelegateManager {
     return `${this.versionPrefix}/device-manager/identity-private-key`
   }
 }
-
-// Backwards compatibility aliases
-export { AppKeysManager as ApplicationManager }
-export type { AppKeysManagerOptions as ApplicationManagerOptions }

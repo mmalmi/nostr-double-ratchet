@@ -9,9 +9,7 @@ use nostr::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const GROUP_FACT_KIND: u32 = 7368;
-pub const GROUP_FACT_SNAPSHOT_KIND: u32 = 37368;
-pub const GROUP_ROSTER_FACT_KIND: u32 = GROUP_FACT_SNAPSHOT_KIND;
+pub const GROUP_ROSTER_FACT_KIND: u32 = 37368;
 pub const GROUP_ROSTER_FACT_TYPE: &str = "group_roster";
 pub const GROUP_ROSTER_FACT_SCHEMA: u64 = 1;
 pub const GROUP_SENDER_KEY_DISTRIBUTION_KIND: u32 = 10446;
@@ -1254,9 +1252,7 @@ mod tests {
 
         let unsigned = group_roster_unsigned_event(admin.public_key(), &snapshot).unwrap();
         assert_eq!(unsigned.kind.as_u16() as u32, GROUP_ROSTER_FACT_KIND);
-        assert_eq!(GROUP_FACT_KIND, 7368);
-        assert_eq!(GROUP_FACT_SNAPSHOT_KIND, 37368);
-        assert_eq!(GROUP_ROSTER_FACT_KIND, GROUP_FACT_SNAPSHOT_KIND);
+        assert_eq!(GROUP_ROSTER_FACT_KIND, 37368);
         assert_eq!(unsigned.content, "");
         assert_eq!(
             first_tag_value(&unsigned, "type").as_deref(),

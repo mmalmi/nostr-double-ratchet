@@ -105,6 +105,8 @@ type PendingInviteResponse = {
   sharedSecret: string
 }
 
+const MAX_PENDING_DIRECT_MESSAGES = 1000
+
 export class SessionManager {
   // Versioning
   private readonly storageVersion = "1"
@@ -133,6 +135,7 @@ export class SessionManager {
   // Track processed InviteResponse event IDs to prevent replay
   private processedInviteResponses: Set<string> = new Set()
   private pendingInviteResponses: Map<string, PendingInviteResponse> = new Map()
+  private pendingDirectMessages: Map<string, VerifiedEvent> = new Map()
   private inviteAcceptPromises: Map<string, Promise<AcceptInviteResult>> = new Map()
   private expirationSettings!: ExpirationSettings
   private userRecordStorage!: UserRecordStorage
@@ -497,6 +500,41 @@ export class SessionManager {
     this.pendingInviteResponses.set(response.eventId, response)
   }
 
+  private queuePendingDirectMessage(event: VerifiedEvent): void {
+    if (this.pendingDirectMessages.has(event.id)) {
+      return
+    }
+
+    if (this.pendingDirectMessages.size >= MAX_PENDING_DIRECT_MESSAGES) {
+      const oldest = this.pendingDirectMessages.keys().next().value
+      if (oldest) {
+        this.pendingDirectMessages.delete(oldest)
+      }
+    }
+
+    this.pendingDirectMessages.set(event.id, event)
+  }
+
+  private processDirectMessageEvent(event: VerifiedEvent): boolean {
+    for (const userRecord of this.userRecords.values()) {
+      for (const device of userRecord.devices.values()) {
+        if (device.processReceivedEvent(event)) {
+          this.syncLegacyDirectMessageSubscription()
+          this.pendingDirectMessages.delete(event.id)
+          return true
+        }
+      }
+    }
+
+    return false
+  }
+
+  private retryPendingDirectMessages(): void {
+    for (const event of Array.from(this.pendingDirectMessages.values())) {
+      this.processDirectMessageEvent(event)
+    }
+  }
+
   private installInviteResponseSession(
     response: PendingInviteResponse,
     appKeys?: AppKeys | null,
@@ -530,6 +568,7 @@ export class SessionManager {
     this.processedInviteResponses.add(response.eventId)
     this.storeUserRecord(response.ownerPublicKey).catch(() => {})
     this.notifyMessagePushAuthorsChanged()
+    this.retryPendingDirectMessages()
     return true
   }
 
@@ -694,12 +733,16 @@ export class SessionManager {
 
   processReceivedEvent(event: VerifiedEvent): boolean {
     if (isAppKeysEvent(event)) {
-      void this.processAppKeysEvent(event)
+      void this.processAppKeysEvent(event).then(() => {
+        this.retryPendingDirectMessages()
+      })
       return true
     }
 
     if (event.kind === INVITE_RESPONSE_KIND) {
-      void this.processInviteResponseEvent(event)
+      void this.processInviteResponseEvent(event).then(() => {
+        this.retryPendingDirectMessages()
+      })
       return true
     }
 
@@ -712,15 +755,11 @@ export class SessionManager {
       return false
     }
 
-    for (const userRecord of this.userRecords.values()) {
-      for (const device of userRecord.devices.values()) {
-        if (device.processReceivedEvent(event)) {
-          this.syncLegacyDirectMessageSubscription()
-          return true
-        }
-      }
+    if (this.processDirectMessageEvent(event)) {
+      return true
     }
 
+    this.queuePendingDirectMessage(event)
     return false
   }
 
@@ -845,6 +884,7 @@ export class SessionManager {
     this.legacyDirectMessageSubscription?.()
     this.legacyDirectMessageSubscription = null
     this.legacyDirectMessageAuthors = []
+    this.pendingDirectMessages.clear()
     for (const unsubscribe of this.legacyRuntimeSubscriptions.values()) {
       unsubscribe()
     }
@@ -923,7 +963,7 @@ export class SessionManager {
     }
 
     try {
-      const bootstrapEvents = planInviteBootstrapEvents(session)
+      const bootstrapEvents = planInviteBootstrapEvents(session, deviceId)
       const [initialBootstrap] = bootstrapEvents
       if (!initialBootstrap) {
         return
@@ -940,9 +980,12 @@ export class SessionManager {
     }
   }
 
-  private async sendInviteBootstrap(session: Session): Promise<void> {
+  private async sendInviteBootstrap(
+    session: Session,
+    recipientDevicePubkey: string,
+  ): Promise<void> {
     try {
-      const bootstrapEvents = planInviteBootstrapEvents(session)
+      const bootstrapEvents = planInviteBootstrapEvents(session, recipientDevicePubkey)
       const [initialBootstrap] = bootstrapEvents
       if (!initialBootstrap) {
         return
@@ -1121,7 +1164,7 @@ export class SessionManager {
     this.delegateToOwner.set(deviceId, ownerPublicKey)
     deviceRecord.installSession(session, false, { preferActive: true })
     await this.emitPublish(event)
-    await this.sendInviteBootstrap(session)
+    await this.sendInviteBootstrap(session, deviceId)
     if (invite.purpose === "link" && ownerPublicKey === this.ownerPublicKey) {
       await this.sendLinkBootstrap(ownerPublicKey, deviceId)
     }

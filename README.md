@@ -9,7 +9,7 @@ End-to-end encrypted messaging primitives for Nostr, implemented in TypeScript a
 Reference integrations:
 [`iris-client`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-client),
 [`iris-chat`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat),
-[`iris-chat-flutter`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-flutter).
+[`iris-chat-rs`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-rs).
 Used by [chat.iris.to](https://chat.iris.to). For command-line chat tooling,
 use the `iris` CLI from the
 [`iris-chat`](https://crates.io/crates/iris-chat) crate.
@@ -166,8 +166,7 @@ Groups use a hybrid model:
 
 ## Mobile FFI (optional)
 
-For iOS/Android integration (for example Flutter/native apps), use the protocol-backed UniFFI
-crate in
+For iOS/Android integration, use the protocol-backed UniFFI crate in
 [`iris-chat-rs/protocol-ffi`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-chat-rs).
 
 ## Repository Layout
@@ -198,7 +197,7 @@ and group tests as the behavioral source of truth.
 - Normal end-to-end and interop tests should avoid same-second AppKeys publishes unless the test
   is explicitly about that edge case.
 - Keep heterogeneous-client coverage in the matrix. `iris-chat`, `iris-client`, and
-  `iris-chat-flutter` should not each trust only their own same-client tests.
+  `iris-chat-rs` should not each trust only their own same-client tests.
 - When possible, assert both self-sync and peer fanout across owner and linked devices.
 
 ## Formal Models
