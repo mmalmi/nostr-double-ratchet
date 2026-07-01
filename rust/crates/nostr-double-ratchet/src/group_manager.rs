@@ -1706,7 +1706,7 @@ where
             return;
         };
 
-        let mut recipients: Vec<_> = recipients.iter().copied().collect();
+        let mut recipients = recipients.to_vec();
         recipients.sort_unstable();
         recipients.dedup();
         if record.repair_snapshots.iter().any(|snapshot| {

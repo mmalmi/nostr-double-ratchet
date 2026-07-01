@@ -16,7 +16,6 @@ fn create_remote_owned_group(
     let mut groups = GroupManager::new(local_owner);
     let payload = metadata_payload(metadata_snapshot(
         "group-1",
-        GroupProtocol::pairwise_fanout_v1(),
         "Remote",
         remote_owner,
         vec![remote_owner, local_owner],
@@ -34,7 +33,6 @@ fn create_remote_owned_group(
 
 fn metadata_snapshot(
     group_id: &str,
-    protocol: GroupProtocol,
     name: &str,
     created_by: OwnerPubkey,
     members: Vec<OwnerPubkey>,
@@ -44,7 +42,7 @@ fn metadata_snapshot(
 ) -> GroupSnapshot {
     GroupSnapshot {
         group_id: group_id.to_string(),
-        protocol,
+        protocol: GroupProtocol::pairwise_fanout_v1(),
         name: name.to_string(),
         picture: None,
         about: None,
@@ -187,7 +185,6 @@ fn incoming_control_from_non_admin_and_wrong_revision_message_are_rejected() -> 
 
     let unauthorized_rename = metadata_payload(metadata_snapshot(
         &group_id,
-        GroupProtocol::pairwise_fanout_v1(),
         "Hijack",
         bob.owner_pubkey,
         vec![bob.owner_pubkey, alice.owner_pubkey],
@@ -275,7 +272,6 @@ fn duplicate_rename_is_idempotent() -> Result<()> {
 
     let rename = metadata_payload(metadata_snapshot(
         &group_id,
-        GroupProtocol::pairwise_fanout_v1(),
         "Renamed",
         bob.owner_pubkey,
         vec![bob.owner_pubkey, alice.owner_pubkey],

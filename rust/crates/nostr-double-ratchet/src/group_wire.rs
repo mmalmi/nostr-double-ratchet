@@ -1140,15 +1140,12 @@ mod tests {
             Some(GROUP_ROSTER_FACT_TYPE)
         );
         assert_eq!(first_tag_value(&event, "d").as_deref(), Some("group-1"));
-        assert_eq!(
-            event.tags.iter().any(|tag| {
-                let values = tag.as_slice();
-                values.first().map(String::as_str) == Some("i")
-                    && values.get(1).map(String::as_str) == Some("group-1")
-                    && values.get(2).map(String::as_str) == Some("subject")
-            }),
-            true
-        );
+        assert!(event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("i")
+                && values.get(1).map(String::as_str) == Some("group-1")
+                && values.get(2).map(String::as_str) == Some("subject")
+        }));
         assert_eq!(
             first_tag_value(&event, "group_id").as_deref(),
             Some("group-1")
@@ -1262,15 +1259,12 @@ mod tests {
             first_tag_value(&unsigned, "d").as_deref(),
             Some("group-facts")
         );
-        assert_eq!(
-            unsigned.tags.iter().any(|tag| {
-                let values = tag.as_slice();
-                values.first().map(String::as_str) == Some("i")
-                    && values.get(1).map(String::as_str) == Some("group-facts")
-                    && values.get(2).map(String::as_str) == Some("subject")
-            }),
-            true
-        );
+        assert!(unsigned.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("i")
+                && values.get(1).map(String::as_str) == Some("group-facts")
+                && values.get(2).map(String::as_str) == Some("subject")
+        }));
         assert_eq!(
             first_tag_value(&unsigned, "group_id").as_deref(),
             Some("group-facts")

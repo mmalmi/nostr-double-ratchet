@@ -109,117 +109,113 @@ impl LocalRelay {
                         let msg_type = arr[0].as_str().unwrap_or("");
 
                         match msg_type {
-                            "REQ" => {
-                                if arr.len() >= 3 {
-                                    let sub_id = arr[1].as_str().unwrap_or("").to_string();
-                                    let filters = arr[2..].to_vec();
+                            "REQ" if arr.len() >= 3 => {
+                                let sub_id = arr[1].as_str().unwrap_or("").to_string();
+                                let filters = arr[2..].to_vec();
 
+                                eprintln!(
+                                    "📥 Local relay REQ {} filters: {:?}",
+                                    sub_id,
+                                    filters.len()
+                                );
+                                for filter in &filters {
                                     eprintln!(
-                                        "📥 Local relay REQ {} filters: {:?}",
-                                        sub_id,
-                                        filters.len()
+                                        "   Filter: {}",
+                                        serde_json::to_string(filter).unwrap()
                                     );
-                                    for filter in &filters {
+                                }
+
+                                client_subs.insert(sub_id.clone(), filters.clone());
+                                subscriptions
+                                    .lock()
+                                    .unwrap()
+                                    .insert(sub_id.clone(), filters.clone());
+
+                                // Send matching stored events
+                                let stored = events.lock().unwrap();
+                                for event in stored.iter() {
+                                    if Self::event_matches_filters(event, &filters) {
+                                        let kind = event["kind"].as_u64().unwrap_or(0);
+                                        let id = event["id"].as_str().unwrap_or("unknown");
                                         eprintln!(
-                                            "   Filter: {}",
-                                            serde_json::to_string(filter).unwrap()
+                                            "📨 Local relay: Sending stored kind {} id {}",
+                                            kind,
+                                            &id[..16]
                                         );
+
+                                        let event_msg = json!(["EVENT", sub_id, event]);
+                                        if let Some(tx) = clients.lock().unwrap().get(&addr) {
+                                            let _ = tx.send(Message::Text(event_msg.to_string()));
+                                        }
                                     }
+                                }
 
-                                    client_subs.insert(sub_id.clone(), filters.clone());
-                                    subscriptions
-                                        .lock()
-                                        .unwrap()
-                                        .insert(sub_id.clone(), filters.clone());
+                                // Send EOSE
+                                let eose_msg = json!(["EOSE", sub_id]);
+                                if let Some(tx) = clients.lock().unwrap().get(&addr) {
+                                    let _ = tx.send(Message::Text(eose_msg.to_string()));
+                                }
+                                eprintln!("✅ Local relay: EOSE sent for {}", sub_id);
+                            }
+                            "EVENT" if arr.len() >= 2 => {
+                                let event = &arr[1];
 
-                                    // Send matching stored events
-                                    let stored = events.lock().unwrap();
-                                    for event in stored.iter() {
-                                        if Self::event_matches_filters(event, &filters) {
-                                            let kind = event["kind"].as_u64().unwrap_or(0);
-                                            let id = event["id"].as_str().unwrap_or("unknown");
+                                let event_id = event["id"].as_str().unwrap_or("unknown");
+                                let kind = event["kind"].as_u64().unwrap_or(0);
+
+                                eprintln!(
+                                    "📤 Local relay: Received EVENT kind {} id {}",
+                                    kind,
+                                    &event_id[..16]
+                                );
+
+                                // Show current subscriptions
+                                let all_subs = subscriptions.lock().unwrap();
+                                eprintln!("   Current subscriptions: {}", all_subs.len());
+                                for (sub_id, filters) in all_subs.iter() {
+                                    for filter in filters {
+                                        if let Some(kinds) = filter["kinds"].as_array() {
                                             eprintln!(
-                                                "📨 Local relay: Sending stored kind {} id {}",
-                                                kind,
-                                                &id[..16]
+                                                "     {} -> kinds: {:?}",
+                                                &sub_id[..20],
+                                                kinds
                                             );
-
-                                            let event_msg = json!(["EVENT", sub_id, event]);
-                                            if let Some(tx) = clients.lock().unwrap().get(&addr) {
-                                                let _ =
-                                                    tx.send(Message::Text(event_msg.to_string()));
-                                            }
                                         }
                                     }
-
-                                    // Send EOSE
-                                    let eose_msg = json!(["EOSE", sub_id]);
-                                    if let Some(tx) = clients.lock().unwrap().get(&addr) {
-                                        let _ = tx.send(Message::Text(eose_msg.to_string()));
-                                    }
-                                    eprintln!("✅ Local relay: EOSE sent for {}", sub_id);
                                 }
-                            }
-                            "EVENT" => {
-                                if arr.len() >= 2 {
-                                    let event = &arr[1];
+                                drop(all_subs);
 
-                                    let event_id = event["id"].as_str().unwrap_or("unknown");
-                                    let kind = event["kind"].as_u64().unwrap_or(0);
+                                // Store event
+                                events.lock().unwrap().push(event.clone());
 
-                                    eprintln!(
-                                        "📤 Local relay: Received EVENT kind {} id {}",
-                                        kind,
-                                        &event_id[..16]
-                                    );
+                                // Send OK
+                                let ok_msg = json!(["OK", event_id, true, ""]);
+                                if let Some(tx) = clients.lock().unwrap().get(&addr) {
+                                    let _ = tx.send(Message::Text(ok_msg.to_string()));
+                                }
 
-                                    // Show current subscriptions
-                                    let all_subs = subscriptions.lock().unwrap();
-                                    eprintln!("   Current subscriptions: {}", all_subs.len());
+                                // Broadcast to all clients with matching subscriptions
+                                let all_subs = subscriptions.lock().unwrap();
+                                let all_clients = clients.lock().unwrap();
+
+                                for (client_addr, client_tx) in all_clients.iter() {
                                     for (sub_id, filters) in all_subs.iter() {
-                                        for filter in filters {
-                                            if let Some(kinds) = filter["kinds"].as_array() {
-                                                eprintln!(
-                                                    "     {} -> kinds: {:?}",
-                                                    &sub_id[..20],
-                                                    kinds
-                                                );
-                                            }
-                                        }
-                                    }
-                                    drop(all_subs);
-
-                                    // Store event
-                                    events.lock().unwrap().push(event.clone());
-
-                                    // Send OK
-                                    let ok_msg = json!(["OK", event_id, true, ""]);
-                                    if let Some(tx) = clients.lock().unwrap().get(&addr) {
-                                        let _ = tx.send(Message::Text(ok_msg.to_string()));
-                                    }
-
-                                    // Broadcast to all clients with matching subscriptions
-                                    let all_subs = subscriptions.lock().unwrap();
-                                    let all_clients = clients.lock().unwrap();
-
-                                    for (client_addr, client_tx) in all_clients.iter() {
-                                        for (sub_id, filters) in all_subs.iter() {
-                                            if Self::event_matches_filters(event, filters) {
-                                                eprintln!("📨 Local relay: Broadcasting kind {} to {} sub {}", kind, client_addr, sub_id);
-                                                let event_msg = json!(["EVENT", sub_id, event]);
-                                                let _ = client_tx
-                                                    .send(Message::Text(event_msg.to_string()));
-                                            }
+                                        if Self::event_matches_filters(event, filters) {
+                                            eprintln!(
+                                                "📨 Local relay: Broadcasting kind {} to {} sub {}",
+                                                kind, client_addr, sub_id
+                                            );
+                                            let event_msg = json!(["EVENT", sub_id, event]);
+                                            let _ = client_tx
+                                                .send(Message::Text(event_msg.to_string()));
                                         }
                                     }
                                 }
                             }
-                            "CLOSE" => {
-                                if arr.len() >= 2 {
-                                    let sub_id = arr[1].as_str().unwrap_or("");
-                                    client_subs.remove(sub_id);
-                                    eprintln!("🔴 Local relay: CLOSE {}", sub_id);
-                                }
+                            "CLOSE" if arr.len() >= 2 => {
+                                let sub_id = arr[1].as_str().unwrap_or("");
+                                client_subs.remove(sub_id);
+                                eprintln!("🔴 Local relay: CLOSE {}", sub_id);
                             }
                             _ => {}
                         }
