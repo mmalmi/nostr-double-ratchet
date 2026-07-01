@@ -4,7 +4,7 @@ use crate::{
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
-use nostr::{EventId, Kind, PublicKey, Tags, Timestamp};
+use nostr::{JsonUtil, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -234,18 +234,21 @@ impl Invite {
         let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
         let encrypted_bytes =
             nip44::v2::encrypt_to_bytes(&conversation_key, dh_encrypted.as_bytes())?;
-        let inner_event = InviteResponseInnerRumor::new(
+        let mut inner_event = UnsignedEvent::new(
             invitee_public_key.to_nostr()?,
             Timestamp::from(ctx.now.get()),
+            Kind::from(INVITE_RESPONSE_INNER_RUMOR_KIND as u16),
+            Vec::<Tag>::new(),
             base64::engine::general_purpose::STANDARD.encode(encrypted_bytes),
         );
+        inner_event.ensure_id();
 
         let random_sender_secret = random_secret_key_bytes(ctx.rng)?;
         let random_sender_pubkey = crate::device_pubkey_from_secret_bytes(&random_sender_secret)?;
         let envelope_content = nip44::encrypt(
             &secret_key_from_bytes(&random_sender_secret)?,
             &self.inviter_ephemeral_public_key.to_nostr()?,
-            serde_json::to_string(&inner_event)?,
+            inner_event.try_as_json()?,
             Version::V2,
         )?;
 
@@ -287,8 +290,8 @@ impl Invite {
             &envelope.sender.to_nostr()?,
             &envelope.content,
         )?;
-        let inner_event: InviteResponseInnerRumor = serde_json::from_str(&decrypted)?;
-        inner_event.verify()?;
+        let inner_event = UnsignedEvent::from_json(&decrypted)?;
+        validate_invite_response_inner_rumor(&inner_event)?;
 
         let ciphertext_bytes = base64::engine::general_purpose::STANDARD
             .decode(inner_event.content.as_bytes())
@@ -359,64 +362,24 @@ impl Invite {
 
 const INVITE_RESPONSE_INNER_RUMOR_KIND: u32 = 1060;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InviteResponseInnerRumor {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    id: Option<EventId>,
-    pubkey: PublicKey,
-    created_at: Timestamp,
-    kind: Kind,
-    tags: Tags,
-    content: String,
-}
-
-impl InviteResponseInnerRumor {
-    fn new(pubkey: PublicKey, created_at: Timestamp, content: String) -> Self {
-        let mut rumor = Self {
-            id: None,
-            pubkey,
-            created_at,
-            kind: Kind::from(INVITE_RESPONSE_INNER_RUMOR_KIND as u16),
-            tags: Tags::new(),
-            content,
-        };
-        rumor.id = Some(rumor.computed_id());
-        rumor
+fn validate_invite_response_inner_rumor(rumor: &UnsignedEvent) -> Result<()> {
+    if rumor.id.is_none() {
+        return Err(crate::Error::Parse(
+            "invite response rumor missing id".to_string(),
+        ));
     }
-
-    fn verify(&self) -> Result<()> {
-        let Some(id) = self.id else {
-            return Err(crate::Error::Parse(
-                "invite response rumor missing id".to_string(),
-            ));
-        };
-        if id != self.computed_id() {
-            return Err(crate::Error::Parse(
-                "invalid invite response rumor id".to_string(),
-            ));
-        }
-        if self.kind.as_u16() as u32 != INVITE_RESPONSE_INNER_RUMOR_KIND {
-            return Err(crate::Error::Parse(
-                "invalid invite response rumor kind".to_string(),
-            ));
-        }
-        if !self.tags.is_empty() {
-            return Err(crate::Error::Parse(
-                "invite response rumor tags must be empty".to_string(),
-            ));
-        }
-        Ok(())
+    rumor.verify_id()?;
+    if rumor.kind.as_u16() as u32 != INVITE_RESPONSE_INNER_RUMOR_KIND {
+        return Err(crate::Error::Parse(
+            "invalid invite response rumor kind".to_string(),
+        ));
     }
-
-    fn computed_id(&self) -> EventId {
-        EventId::new(
-            &self.pubkey,
-            &self.created_at,
-            &self.kind,
-            &self.tags,
-            &self.content,
-        )
+    if !rumor.tags.is_empty() {
+        return Err(crate::Error::Parse(
+            "invite response rumor tags must be empty".to_string(),
+        ));
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
