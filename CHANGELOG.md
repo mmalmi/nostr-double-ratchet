@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.162 - 2026-07-01
+
+- Encode compact linked-device requests as strict three-part codes carrying QR-safe metadata for requested device/client labels.
+- Keep deterministic link invite derivation independent of label metadata across TypeScript and Rust.
+
 ## 0.0.161 - 2026-07-01
 
 - Remove the Rust `nostr-double-ratchet-runtime` crate and old `ndr-ffi` UniFFI crate; reusable app runtime and mobile FFI now live in `iris-chat-rs`.
