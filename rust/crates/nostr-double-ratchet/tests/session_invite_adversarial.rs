@@ -216,6 +216,7 @@ fn malformed_invite_response_layers_fail_independently() -> Result<()> {
         InviteResponseCorruption::OuterEnvelope,
         InviteResponseCorruption::InnerBase64,
         InviteResponseCorruption::InnerJson,
+        InviteResponseCorruption::InnerInvalidId,
         InviteResponseCorruption::PayloadJson,
         InviteResponseCorruption::InvalidSessionKey,
     ]

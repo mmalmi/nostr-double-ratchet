@@ -4,7 +4,7 @@ use crate::{
 };
 use base64::Engine;
 use nostr::nips::nip44::{self, Version};
-use nostr::PublicKey;
+use nostr::{EventId, Kind, PublicKey, Tags, Timestamp};
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -234,11 +234,11 @@ impl Invite {
         let conversation_key = nip44::v2::ConversationKey::new(self.shared_secret);
         let encrypted_bytes =
             nip44::v2::encrypt_to_bytes(&conversation_key, dh_encrypted.as_bytes())?;
-        let inner_event = InviteResponseInnerEvent {
-            pubkey: invitee_public_key,
-            content: base64::engine::general_purpose::STANDARD.encode(encrypted_bytes),
-            created_at: ctx.now,
-        };
+        let inner_event = InviteResponseInnerRumor::new(
+            invitee_public_key.to_nostr()?,
+            Timestamp::from(ctx.now.get()),
+            base64::engine::general_purpose::STANDARD.encode(encrypted_bytes),
+        );
 
         let random_sender_secret = random_secret_key_bytes(ctx.rng)?;
         let random_sender_pubkey = crate::device_pubkey_from_secret_bytes(&random_sender_secret)?;
@@ -287,7 +287,8 @@ impl Invite {
             &envelope.sender.to_nostr()?,
             &envelope.content,
         )?;
-        let inner_event: InviteResponseInnerEvent = serde_json::from_str(&decrypted)?;
+        let inner_event: InviteResponseInnerRumor = serde_json::from_str(&decrypted)?;
+        inner_event.verify()?;
 
         let ciphertext_bytes = base64::engine::general_purpose::STANDARD
             .decode(inner_event.content.as_bytes())
@@ -300,30 +301,28 @@ impl Invite {
         .map_err(|e| crate::Error::Decryption(e.to_string()))?;
 
         let inviter_sk = secret_key_from_bytes(&inviter_private_key)?;
-        let dh_decrypted = nip44::decrypt(
-            &inviter_sk,
-            &inner_event.pubkey.to_nostr()?,
-            &dh_encrypted_ciphertext,
-        )?;
+        let dh_decrypted =
+            nip44::decrypt(&inviter_sk, &inner_event.pubkey, &dh_encrypted_ciphertext)?;
 
         let payload: InviteResponsePayload = serde_json::from_str(&dh_decrypted)?;
         if self.used_response_contents.contains(&envelope.content) {
             return Err(DomainError::InviteAlreadyUsed.into());
         }
-        self.ensure_accept_allowed(inner_event.pubkey)?;
+        let invitee_device_pubkey = DevicePubkey::from_bytes(inner_event.pubkey.to_bytes());
+        self.ensure_accept_allowed(invitee_device_pubkey)?;
         let session = Session::new_responder(
             ctx,
             payload.session_key,
             inviter_ephemeral_private_key,
             self.shared_secret,
         )?;
-        self.record_use(inner_event.pubkey);
+        self.record_use(invitee_device_pubkey);
         self.record_response_content(envelope.content.clone());
 
         Ok(InviteResponse {
             session,
-            invitee_device_pubkey: inner_event.pubkey,
-            invitee_identity: inner_event.pubkey.to_nostr()?,
+            invitee_device_pubkey,
+            invitee_identity: inner_event.pubkey,
             owner_roster_proof: payload.owner_roster_proof,
         })
     }
@@ -358,11 +357,66 @@ impl Invite {
     }
 }
 
+const INVITE_RESPONSE_INNER_RUMOR_KIND: u32 = 1060;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct InviteResponseInnerEvent {
-    pubkey: DevicePubkey,
+struct InviteResponseInnerRumor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<EventId>,
+    pubkey: PublicKey,
+    created_at: Timestamp,
+    kind: Kind,
+    tags: Tags,
     content: String,
-    created_at: UnixSeconds,
+}
+
+impl InviteResponseInnerRumor {
+    fn new(pubkey: PublicKey, created_at: Timestamp, content: String) -> Self {
+        let mut rumor = Self {
+            id: None,
+            pubkey,
+            created_at,
+            kind: Kind::from(INVITE_RESPONSE_INNER_RUMOR_KIND as u16),
+            tags: Tags::new(),
+            content,
+        };
+        rumor.id = Some(rumor.computed_id());
+        rumor
+    }
+
+    fn verify(&self) -> Result<()> {
+        let Some(id) = self.id else {
+            return Err(crate::Error::Parse(
+                "invite response rumor missing id".to_string(),
+            ));
+        };
+        if id != self.computed_id() {
+            return Err(crate::Error::Parse(
+                "invalid invite response rumor id".to_string(),
+            ));
+        }
+        if self.kind.as_u16() as u32 != INVITE_RESPONSE_INNER_RUMOR_KIND {
+            return Err(crate::Error::Parse(
+                "invalid invite response rumor kind".to_string(),
+            ));
+        }
+        if !self.tags.is_empty() {
+            return Err(crate::Error::Parse(
+                "invite response rumor tags must be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn computed_id(&self) -> EventId {
+        EventId::new(
+            &self.pubkey,
+            &self.created_at,
+            &self.kind,
+            &self.tags,
+            &self.content,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
